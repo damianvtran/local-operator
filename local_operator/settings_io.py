@@ -1259,6 +1259,19 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("right", "right", "sessions to the right of the conversation"),
         ),
     ),
+    Setting(
+        key="tui.sidebar_show_subagents",
+        path=("tui", "sidebar_show_subagents"),
+        section="appearance",
+        label="Sidebar subagent layer",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "List recent subagent runs below your own sessions. "
+            "Ctrl+A toggles the layer while the sidebar has focus."
+        ),
+        choices=_bool_choices("list recent subagent runs", "show only your own sessions"),
+    ),
     # -- hotkeys ------------------------------------------------------------
     # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the
     # id is simultaneously this key, the `Binding` id in `OperatorApp.BINDINGS`

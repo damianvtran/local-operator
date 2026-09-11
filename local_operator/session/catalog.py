@@ -7,6 +7,7 @@ The catalog has no acknowledgement path: listing a conversation is not reading i
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -35,10 +36,28 @@ class CatalogEntry:
     #: that build entries positionally, keep working unchanged.
     completion_token: str = ""
     anchor_id: str = ""
+    #: Set ONLY on rows from the hidden subagent population.
+    #:
+    #: Load-bearing for SECTIONING, not decoration: `active` is
+    #: `pending or unseen or live_state`, and 45% of subagent directories carry
+    #: an unseen attention receipt, so without this flag they sort into ACTIVE
+    #: SESSIONS above the user's own work.
+    subagent: bool = False
+    #: `origin.json`'s `agent` (role) and `label` (task label), read only for
+    #: the capped page. Empty for every main row.
+    agent: str = ""
+    label: str = ""
 
     @property
     def id(self) -> str:
         return self.row.id
+
+    @property
+    def sub_title(self) -> str:
+        """`label · role`, degrading to whichever half exists, else the name."""
+        if self.label and self.agent:
+            return f"{self.label} · {self.agent}"
+        return self.label or self.agent or self.row.name
 
     @property
     def rank(self) -> tuple[int, int, float, str]:
@@ -410,6 +429,11 @@ def decorate_rows(
 #: viewport keeps paging and ranking honest without materialising the tail.
 CATALOG_SCAN_LIMIT = 200
 
+#: Newest subagent runs the sidebar's ⌥ layer lists when it is switched on.
+#: One screenful of headroom past the ~38-row window, matching the reasoning
+#: behind CATALOG_SCAN_LIMIT. No paging: the layer answers "what just ran".
+SUBAGENT_LAYER_CAP = 40
+
 #: `session_id -> ((activity_mtime, transcript_size), SessionRow)`. A row's
 #: name and fork mark change only when its transcript does, and the scan
 #: already stats that file to rank the session, so the key is free. Only the
@@ -509,13 +533,58 @@ def cached_session_rows(
     return rows
 
 
-def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[CatalogEntry]:
+def _subagent_marker(session_dir: Path) -> tuple[str, str]:
+    """``(agent, label)`` from a subagent's ``origin.json``; ``("", "")`` if unreadable.
+
+    Best-effort by contract, like every other marker read on this path: a
+    missing, truncated or non-object marker costs the row its role and task
+    label, never the row itself.
+    """
+    try:
+        payload = json.loads((session_dir / "origin.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ("", "")
+    if not isinstance(payload, dict):
+        return ("", "")
+    values = []
+    for key in ("agent", "label"):
+        value = payload.get(key)
+        values.append(value if isinstance(value, str) and value else "")
+    return (values[0], values[1])
+
+
+def subagent_population(directory: Path) -> int:
+    """How many hidden subagent runs the store holds — the footer chip's count.
+
+    A full second scan of the store: ``_scan_sessions`` is not memoized, so
+    this costs about as much as ``load_catalog`` itself (+2.36 ms measured on a
+    156-visible/462-hidden store). Call it on a slow cadence — the sidebar
+    reads it on open and then every fifteenth poll — never once per poll.
+    """
+    from local_operator.resume import _scan_sessions
+
+    return len(_scan_sessions(directory)[1])
+
+
+def load_catalog(
+    directory: Path,
+    limit: int = CATALOG_SCAN_LIMIT,
+    *,
+    include_subagents: bool = False,
+    pinned_hidden_ids: Sequence[str] = (),
+) -> list[CatalogEntry]:
     """Rank a shared lightweight candidate snapshot before materializing a page.
 
     Discovery already stats the whole namespace. Applying a recency cap before
     attention lost old unread work; reading names for the entire store would
     undo the sidebar's bounded I/O. Rank cheap rows first, then hydrate only the
     requested prefix through the existing transcript-stat cache.
+
+    ``include_subagents`` adds a capped page of the hidden subagent population
+    as a SEPARATE layer, and ``pinned_hidden_ids`` keeps individually pinned
+    hidden sessions resolvable while that layer is off. Both are keyword-only
+    and default to the behaviour every existing caller already has: with the
+    layer off this function issues exactly the syscalls it did before.
     """
     from dataclasses import replace
 
@@ -532,6 +601,69 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
     # below for why a hidden directory cannot carry a desktop marker.
     candidates, hidden = _scan_sessions(directory)
     source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
+    # -- the opt-in subagent layer (PROPOSAL 5a) ----------------------------
+    #
+    # Every syscall this layer costs is inside this branch: with both keyword
+    # arguments at their defaults nothing below runs, and the poll is byte-for-
+    # byte the scan it was. `hidden` is already in hand from the scan above, so
+    # the OFF path does not even pay a directory read to learn it is off.
+    #
+    # THESE ROWS DELIBERATELY BYPASS `decorate_rows` AND THE ATTENTION LOOKUP
+    # BELOW. `CatalogEntry.active` is `pending or unseen or live_state`, and the
+    # attention store keys on conversation identity -- which answers for
+    # subagent ids too, 45% of them carrying an unseen receipt. A sub row placed
+    # in `rows` therefore comes out `active=True` and sections into Active
+    # Sessions, above the user's own work. No filter inside that path avoids it;
+    # the only fix is not to be on the path. So these are built by hand, in
+    # their own list, with the quiet fields left at their empty defaults, and
+    # they rejoin the main flow at exactly one point: the `rank_entries` call.
+    subagent_entries: list[CatalogEntry] = []
+    if include_subagents or pinned_hidden_ids:
+        pinned = [session_id for session_id in pinned_hidden_ids if session_id in hidden]
+        wanted = set(hidden) if include_subagents else set()
+        wanted.update(pinned)
+        stamped: list[tuple[float, str]] = []
+        for session_id in wanted:
+            transcript = directory / "sessions" / session_id / TRANSCRIPT_FILENAME
+            try:
+                stamped.append((transcript.stat().st_mtime, session_id))
+            except OSError:
+                # No readable transcript: nothing to hydrate a row from, and
+                # `_row_stat_key` would decline to cache it anyway.
+                continue
+        stamped.sort(key=lambda item: (-item[0], item[1]))
+        mtimes = {session_id: mtime for mtime, session_id in stamped}
+        # Pinned ids are exempt from the cap -- a pin to the 300th-oldest run
+        # must still resolve, or the pin renders as nothing at all.
+        selected = list(
+            dict.fromkeys(
+                [session_id for _, session_id in stamped[:SUBAGENT_LAYER_CAP]]
+                + [session_id for session_id in pinned if session_id in mtimes]
+            )
+        )
+        for session_id in selected:
+            session_dir = directory / "sessions" / session_id
+            agent, label = _subagent_marker(session_dir)
+            # Added to `source` ONLY -- never to `candidates`, never to `rows`.
+            # `source` is what the single `cached_session_rows` call below looks
+            # rows up in, so this alone is what buys these rows their real name.
+            source[session_id] = (session_id, mtimes[session_id], "subagent")
+            subagent_entries.append(
+                CatalogEntry(
+                    SessionRow(
+                        session_id,
+                        mtimes[session_id],
+                        "",
+                        # Stamped, never left at the 0.0 default: rows that all
+                        # tie there fall through to the id tie-break, which
+                        # silently reverses newest-first order.
+                        created_at=session_created_at(session_dir),
+                    ),
+                    subagent=True,
+                    agent=agent,
+                    label=label,
+                )
+            )
     # Creation time is the immutable ordering key (#800), so every construction
     # site must stamp it. Rows left at the 0.0 default all tie and fall through
     # to the session-id tie-break, which silently reverses newest-first order.
@@ -626,8 +758,23 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
                 )
                 for row in rows
             ]
+            # The ONE join point. Sub entries are concatenated here rather than
+            # being members of `rows`, so they never pass through the
+            # decoration and attention work above -- and this stays a single
+            # `rank_entries` call over a single list.
+            + subagent_entries
         )
     )[:limit]
+    # KNOWN LIMITATION, decided rather than missed. This slice applies to the
+    # COMBINED list, so a store with more than ~160 visible sessions cannot fit
+    # both populations in CATALOG_SCAN_LIMIT. Sub rows do not lose that race:
+    # their `session_category` inputs are all falsy by construction, giving them
+    # the same tier as a cold visible row, where the tie-break is `-created_at`
+    # and subagent runs are recent. So what is pushed past the slice is the
+    # user's OLDEST COLD sessions, never an active row. Raising the limit would
+    # restore the per-poll row-building cost the comment on CATALOG_SCAN_LIMIT
+    # exists to document removing, so it is deliberately not raised.
+    # Pinned by `test_the_layer_competes_for_the_page_on_a_full_store`.
     named = {
         row.id: row
         for row in cached_session_rows(
