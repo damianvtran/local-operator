@@ -888,3 +888,333 @@ def test_an_idle_exec_row_says_what_it_is_instead_of_ready(tmp_path) -> None:
     assert idle.status == "Running headless (exec)"
     assert busy.status == "Working"
     assert mine.status == "Ready"
+
+
+class TestTheSubagentLayerIsOptIn:
+    """The sidebar's ⌥ layer: hidden subagent runs, listed without becoming rows.
+
+    Two properties are load-bearing here and both were measured before this
+    layer was written.
+
+    SUB ROWS MUST NOT BE ORDINARY ROWS. ``CatalogEntry.active`` is
+    ``pending or unseen or live_state``, and the attention store keys on
+    conversation identity — which answers for subagent ids too, with 45% of real
+    subagent directories carrying an unseen receipt. A sub row routed through
+    ``decorate_rows`` and the attention comprehension therefore comes out
+    ``active=True`` and sections into Active Sessions, ABOVE the user's own
+    work. There is no filter inside that path that avoids it, so sub rows are
+    built by hand outside ``rows`` and rejoin at the single ``rank_entries``
+    call. ``test_a_sub_row_is_never_active`` is that guard.
+
+    MAINS AND SUBS HYDRATE IN ONE CALL. ``cached_session_rows`` ends
+    ``_ROW_CACHE.clear(); _ROW_CACHE.update(fresh)``, so a second call evicts
+    the first call's rows — a warm 2.0 ms poll becomes 12.2 ms, a 6x regression
+    on the hottest path the sidebar has.
+    ``test_the_hydration_cache_is_not_evicted_by_the_layer`` is that guard.
+
+    And the whole layer is opt-in: with the flag off this function must issue
+    exactly the syscalls it issued before it existed.
+    """
+
+    def test_the_flag_off_is_byte_identical_to_today(self, tmp_path: Path) -> None:
+        """The default path may not pay for a feature it is not using."""
+        for index in range(6):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(20):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+        load_catalog(tmp_path)  # warm every cache
+
+        with _counting() as implicit:
+            bare = [entry.id for entry in load_catalog(tmp_path)]
+        with _counting() as explicit:
+            flagged = [entry.id for entry in load_catalog(tmp_path, include_subagents=False)]
+
+        assert bare == flagged
+        assert explicit.total == implicit.total
+
+    def test_the_layer_appends_hidden_rows_when_it_is_on(self, tmp_path: Path) -> None:
+        for index in range(3):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(5):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        entries = load_catalog(tmp_path, include_subagents=True)
+        assert len(entries) == 8
+        assert sum(1 for entry in entries if entry.subagent) == 5
+        assert {entry.id for entry in entries if not entry.subagent} == {
+            f"user{index:08x}" for index in range(3)
+        }
+
+    def test_the_layer_is_capped(self, tmp_path: Path) -> None:
+        """The layer answers "what just ran", so it is capped rather than paged."""
+        from local_operator.session.catalog import SUBAGENT_LAYER_CAP
+
+        _session(tmp_path, "user00000000", stamp=1000.0)
+        for index in range(SUBAGENT_LAYER_CAP + 10):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        entries = load_catalog(tmp_path, include_subagents=True)
+        assert sum(1 for entry in entries if entry.subagent) == SUBAGENT_LAYER_CAP
+
+    def test_the_layer_is_newest_first(self, tmp_path: Path) -> None:
+        """``rank``'s third key is ``-created_at``, so every sub row must have
+        its creation time STAMPED. A row left at the 0.0 default ties with every
+        other one and falls through to the id tie-break, silently reversing the
+        order the user is promised."""
+        from local_operator.session.catalog import SUBAGENT_LAYER_CAP
+
+        for index in range(SUBAGENT_LAYER_CAP + 5):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        entries = [e for e in load_catalog(tmp_path, include_subagents=True) if e.subagent]
+        stamps = [entry.row.created_at for entry in entries]
+        assert stamps == sorted(stamps, reverse=True)
+        newest = f"sub{SUBAGENT_LAYER_CAP + 4:09x}"
+        assert newest in {entry.id for entry in entries}
+        assert f"sub{0:09x}" not in {entry.id for entry in entries}
+
+    def test_a_sub_row_is_never_active(self, tmp_path: Path) -> None:
+        """THE SECTIONING GUARD. This directory looks like 45% of the real
+        subagent population: it carries an unseen attention receipt. Routed
+        through the ordinary row path it would come out ``active=True`` and sort
+        above the user's own sessions, which is the blocker this layer is shaped
+        around."""
+        import uuid
+
+        from local_operator.session.attention import (
+            AttentionStore,
+            conversation_identity,
+        )
+
+        _session(tmp_path, "user00000000", stamp=1000.0)
+        directory = _session(tmp_path, "sub000000001", origin="subagent", stamp=900.0)
+        store = AttentionStore(tmp_path / "attention.db")
+        # A real token: the store parses it as a UUID.
+        store.publish(conversation_identity(directory), str(uuid.uuid4()), "anchor-1", "complete")
+        # The receipt really is unseen, or this test proves nothing.
+        assert store.state(conversation_identity(directory))["unseen"] is True
+
+        entry = next(
+            e for e in load_catalog(tmp_path, include_subagents=True) if e.id == "sub000000001"
+        )
+        assert entry.subagent is True
+        assert entry.active is False
+        assert entry.unseen is False
+        assert entry.completion_kind == ""
+        assert entry.completion_token == ""
+        assert entry.anchor_id == ""
+        assert entry.row.live_state == ""
+        assert entry.row.pending is None
+        assert entry.row.wakes == 0
+
+    def test_a_sub_row_carries_its_role_and_label(self, tmp_path: Path) -> None:
+        directory = tmp_path / "sessions" / "sub000000001"
+        _session(tmp_path, "sub000000001", origin="subagent", stamp=900.0)
+        (directory / "origin.json").write_text(
+            json.dumps({"origin": "subagent", "agent": "reviewer", "label": "round 2"}),
+            encoding="utf-8",
+        )
+
+        entry = next(e for e in load_catalog(tmp_path, include_subagents=True) if e.subagent)
+        assert entry.agent == "reviewer"
+        assert entry.label == "round 2"
+        assert entry.sub_title == "round 2 · reviewer"
+
+    def test_a_sub_row_keeps_its_marker_fields_through_hydration(self, tmp_path: Path) -> None:
+        """The hydration pass rebuilds ``entry.row``; it must not drop the
+        entry's own fields on the way."""
+        from local_operator.resume import write_session_title
+
+        directory = _session(tmp_path, "sub000000001", origin="subagent", stamp=900.0)
+        (directory / "origin.json").write_text(
+            json.dumps({"origin": "subagent", "agent": "qa", "label": "smoke"}),
+            encoding="utf-8",
+        )
+        # Through the real naming path, so the name resolves the way the picker
+        # and the sidebar resolve it rather than through a hand-written sidecar.
+        write_session_title(directory, "a real name", user_set=False, past_names=[])
+
+        entry = next(e for e in load_catalog(tmp_path, include_subagents=True) if e.subagent)
+        # A name proves it went through `cached_session_rows` rather than
+        # keeping the empty placeholder its hand-built row started with.
+        assert entry.row.name == "a real name"
+        assert entry.subagent is True
+        assert entry.agent == "qa"
+        assert entry.label == "smoke"
+
+    def test_a_corrupt_origin_marker_degrades_to_the_session_name(self, tmp_path: Path) -> None:
+        """A marker is best-effort: it may cost the row its role and label,
+        never the row."""
+        broken = _session(tmp_path, "sub000000001", origin="subagent", stamp=900.0)
+        (broken / "origin.json").write_text("{not json", encoding="utf-8")
+        empty = _session(tmp_path, "sub000000002", origin="subagent", stamp=800.0)
+        (empty / "origin.json").write_text("{}", encoding="utf-8")
+
+        entries = {entry.id: entry for entry in load_catalog(tmp_path, include_subagents=True)}
+        assert {"sub000000001", "sub000000002"} <= set(entries)
+        for session_id in ("sub000000001", "sub000000002"):
+            entry = entries[session_id]
+            assert entry.agent == ""
+            assert entry.label == ""
+            assert entry.sub_title == entry.row.name
+
+    def test_a_pinned_hidden_id_is_hydrated_with_the_layer_off(self, tmp_path: Path) -> None:
+        """A pin outranks the layer switch: pinning a subagent run and then
+        turning the layer off must not make the pin render as nothing."""
+        _session(tmp_path, "user00000000", stamp=1000.0)
+        for index in range(3):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        entries = load_catalog(tmp_path, pinned_hidden_ids=["sub000000001"])
+        by_id = {entry.id: entry for entry in entries}
+        assert by_id["sub000000001"].subagent is True
+        assert "sub000000000" not in by_id
+        assert "sub000000002" not in by_id
+
+    def test_a_pinned_hidden_id_beyond_the_cap_is_still_hydrated(self, tmp_path: Path) -> None:
+        """Pins are exempt from the cap, or a pin to an old run would resolve to
+        nothing the moment 40 newer runs existed."""
+        from local_operator.session.catalog import SUBAGENT_LAYER_CAP
+
+        for index in range(SUBAGENT_LAYER_CAP + 5):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+        oldest = f"sub{0:09x}"
+
+        entries = load_catalog(tmp_path, include_subagents=True, pinned_hidden_ids=[oldest])
+        subs = [entry for entry in entries if entry.subagent]
+        assert oldest in {entry.id for entry in subs}
+        assert len(subs) == SUBAGENT_LAYER_CAP + 1
+
+    def test_a_pinned_id_that_is_not_hidden_costs_nothing(self, tmp_path: Path) -> None:
+        """A visible session is already in the listing; pinning it must not add
+        a second copy through the hidden path."""
+        for index in range(3):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        load_catalog(tmp_path)
+
+        plain = [entry.id for entry in load_catalog(tmp_path)]
+        pinned = [entry.id for entry in load_catalog(tmp_path, pinned_hidden_ids=["user00000001"])]
+        assert pinned == plain
+        assert len(pinned) == len(set(pinned))
+
+    def test_the_hydration_cache_is_not_evicted_by_the_layer(self, tmp_path: Path) -> None:
+        """THE CACHE GUARD. ``cached_session_rows`` ends with
+        ``_ROW_CACHE.clear(); _ROW_CACHE.update(fresh)``, so hydrating mains and
+        subs in TWO calls leaves only the second call's rows cached and the
+        next poll rebuilds the rest from disk — measured 2.0 ms warm against
+        12.2 ms cache-wiped. Both populations must go through ONE call with a
+        concatenated candidate list.
+
+        Every fixture directory here carries a transcript deliberately, not
+        decoratively: ``_ROW_CACHE`` is written only when ``_row_stat_key``
+        succeeds, and the layer itself drops a hidden name whose transcript stat
+        raises. Bare directories would produce a cache of 10 and zero sub rows —
+        a fixture failure wearing the costume of the bug this guards. The sub
+        count is asserted alongside so the two are distinguishable at a glance.
+        """
+        from local_operator.session.catalog import _ROW_CACHE
+
+        for index in range(10):
+            _session(tmp_path, f"user{index:08x}", transcript="{}\n", stamp=1000.0 + index)
+        for index in range(10):
+            _session(
+                tmp_path,
+                f"sub{index:09x}",
+                transcript="{}\n",
+                origin="subagent",
+                stamp=500.0 + index,
+            )
+
+        entries = load_catalog(tmp_path, include_subagents=True)
+        assert sum(1 for entry in entries if entry.subagent) == 10, "fixture: no sub rows built"
+        assert len(_ROW_CACHE) == 20, "a second cached_session_rows call evicted the first's rows"
+
+        # And the warm poll agrees with the cold one.
+        assert [entry.id for entry in load_catalog(tmp_path, include_subagents=True)] == [
+            entry.id for entry in entries
+        ]
+
+    def test_the_layer_competes_for_the_page_on_a_full_store(self, tmp_path: Path) -> None:
+        """A KNOWN, ACCEPTED trade-off, pinned so the next reader can tell it was
+        decided rather than missed.
+
+        ``[:limit]`` applies to the COMBINED list, so a store with more than
+        ~160 visible sessions cannot fit both populations in
+        ``CATALOG_SCAN_LIMIT``. Sub rows do not lose that race: their
+        ``session_category`` inputs are all falsy by construction, so they share
+        a tier with a cold visible row and the tie-break is ``-created_at``,
+        where recent subagent runs win. What gets pushed past the slice is
+        therefore the user's OLDEST COLD sessions — never an active row, which
+        ranks above the whole contest.
+
+        Raising the limit would restore the per-poll row-building cost
+        ``CATALOG_SCAN_LIMIT``'s comment exists to document removing, so the
+        trade is taken deliberately: the layer is opt-in, the rows at stake are
+        past rank 160, and ``/resume`` — the surface for finding an old session
+        — does not go through ``load_catalog`` at all.
+        """
+        from local_operator.session.catalog import (
+            CATALOG_SCAN_LIMIT,
+            SUBAGENT_LAYER_CAP,
+        )
+
+        # Just under the cap, so the store fits ENTIRELY with the layer off and
+        # the rows that vanish can only be the ones the layer displaced.
+        visible = CATALOG_SCAN_LIMIT - 10
+        # Visible sessions carry the OLDER creation stamps; `created_at` is
+        # written explicitly rather than left to the filesystem birthtime, which
+        # macOS has and Linux does not — on CI every row would otherwise tie at
+        # 0.0 and rank by session id, testing the tie-break instead of the order.
+        for index in range(visible):
+            directory = _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+            (directory / "created_at.json").write_text(str(1000.0 + index), encoding="utf-8")
+        oldest_visible = "user00000000"
+        for index in range(SUBAGENT_LAYER_CAP):
+            directory = _session(
+                tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index
+            )
+            # Subagent runs are RECENT, which is what wins them the tie-break.
+            (directory / "created_at.json").write_text(str(9000.0 + index), encoding="utf-8")
+
+        # With the layer off the whole store fits and nothing is displaced.
+        assert oldest_visible in {entry.id for entry in load_catalog(tmp_path)}
+
+        entries = load_catalog(tmp_path, include_subagents=True)
+        assert len(entries) == CATALOG_SCAN_LIMIT
+        subs = [entry for entry in entries if entry.subagent]
+        assert len(subs) == SUBAGENT_LAYER_CAP, "sub rows must not be what falls off the end"
+        assert len(entries) - len(subs) == CATALOG_SCAN_LIMIT - SUBAGENT_LAYER_CAP
+        # The user's oldest sessions are precisely what the layer displaced.
+        surviving = {entry.id for entry in entries}
+        assert oldest_visible not in surviving
+        displaced = visible + SUBAGENT_LAYER_CAP - CATALOG_SCAN_LIMIT
+        for index in range(displaced):
+            assert f"user{index:08x}" not in surviving
+        assert f"user{displaced:08x}" in surviving
+
+    def test_subagent_population_counts_the_hidden_store(self, tmp_path: Path) -> None:
+        from local_operator.session.catalog import subagent_population
+
+        for index in range(4):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(7):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        assert subagent_population(tmp_path) == 7
+
+    def test_the_layer_does_not_reach_the_deletion_authority(self, tmp_path: Path) -> None:
+        """THE STRUCTURAL GUARANTEE. ``session.cleanup`` DELETES, and it decides
+        what to protect from ``recent_sessions(..., revalidate=True)`` rather
+        than from ``load_catalog``. It takes no layer flag and cannot be given
+        one, so sub rows are structurally unable to reach it — asserted here so
+        a future refactor that routes cleanup through the catalog fails loudly
+        instead of quietly counting subagent runs against the user's guard.
+        """
+        from local_operator.session.cleanup import _picker_rows
+
+        for index in range(2):
+            _session(tmp_path, f"user{index:08x}", stamp=1000.0 + index)
+        for index in range(5):
+            _session(tmp_path, f"sub{index:09x}", origin="subagent", stamp=500.0 + index)
+
+        assert set(_picker_rows(tmp_path)) == {"user00000000", "user00000001"}
