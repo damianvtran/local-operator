@@ -75,9 +75,28 @@ rasterised with `rasterise.py` (librsvg via `rsvg-convert -z 2`, with
 spaces collapses under `xml:space="default"`, which is exactly the spacing the
 frames prove).
 
+The two sides of a pair are one-variable comparisons, and that is enforced
+rather than hoped for:
+
+- The shot scripts call `scripts.visual_capture.settle_status_line` before
+  saving, so the status band has left its `connecting…` pending sentinel (QA
+  round 1 on PR #972, Q2 — the committed peer pair used to carry that
+  unrelated footer difference).
+- The BEFORE frames are the pre-fix builders run with the same harness and the
+  same process cwd as the AFTER frames: the base worktree's copy of the
+  scripts, invoked from this worktree, so the status bar's cwd segment reads
+  identically on both sides. Verified by pixel-diffing the rasterised pairs —
+  the only differing bands are the ledger rows themselves. For the collapsed
+  peer pair those are `y 278-305` and `y 415-441` (the two peer rows); the wake
+  pair `278-305` and `414-441`; the expanded pair `687-713` (the summary row,
+  since the peer receipt scrolled its collapsed summary off-frame).
+
 ```
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/peer_message_shot.py before.svg 100x30 collapsed
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/wake_shot.py before-wake.svg 100x30 collapsed
+# BEFORE: pre-fix code, identical harness and cwd
+cd ~/local-operator-worktrees/ledger-inset   # cwd only pins the status bar
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/lo-base972/scripts/peer_message_shot.py before.svg 100x30 collapsed
+# AFTER: this branch
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/peer_message_shot.py after.svg 100x30 collapsed
 python3 rasterise.py before.svg before.png 2
 python3 probe.py before.svg
 ```
