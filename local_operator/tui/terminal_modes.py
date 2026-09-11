@@ -78,8 +78,14 @@ DISABLE_IN_BAND_RESIZE = "\x1b[?2048l"
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE``
 #: (``terminal_title.py:54``). Wanted by anything capturing raw terminal output
-#: where an unexpected escape is noise, and by a user on a terminal that
-#: genuinely implements pixel coordinates and would rather keep them.
+#: where an unexpected escape is noise.
+#:
+#: It suppresses ONLY the reset, not the guard, so it is not the switch for a
+#: user on a terminal that genuinely implements pixel coordinates: with the
+#: guard still closing the negotiation, ``?1016h`` is never sent and pixel
+#: coordinates never arrive. That user wants ``TEXTUAL_SMOOTH_SCROLL=1``, which
+#: :func:`guard_pixel_mouse_latch` defers to as an explicit override; the driver
+#: then re-enables the mode on the ``;2`` reply and the divisor is correct.
 _ENV_DISABLE = "LOCAL_OPERATOR_NO_MODE_RESET"
 
 #: Textual reads this once, as a ``Final``, at ``constants.py`` import time.
@@ -107,7 +113,7 @@ def reset_in_band_resize(stream: TextIO | None = None) -> bool:
     """Write ``CSI ?2048l`` to the terminal; True when the bytes were written.
 
     Defaults to ``sys.__stderr__``, which is the same handle Textual's driver
-    writes its own escapes to (``linux_driver.py:57``), so the reset is
+    writes its own escapes to (``linux_driver.py:58``), so the reset is
     serialised onto the wire ahead of the driver's query rather than racing a
     different file object.
 
