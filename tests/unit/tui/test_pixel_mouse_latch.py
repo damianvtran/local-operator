@@ -17,10 +17,15 @@ on, so the environment guard is load-bearing too.
 ``parser.feed(...)`` is a GENERATOR. Every call here is drained with ``list()``;
 a test that forgets this feeds nothing to the parser and asserts nothing.
 
-Parser-side tests set ``constants.SMOOTH_SCROLL`` through ``monkeypatch``
-attribute patching, never by mutating the environment in-process — the constant
-is a ``Final`` read once at ``textual.constants`` import time, so an env write
-here would be read by nothing and would leak into sibling suites.
+Parser-side tests set ``constants.SMOOTH_SCROLL`` and ``IS_ITERM`` through
+``monkeypatch`` attribute patching, never by mutating the environment
+in-process: both freeze from the environment at ``textual`` import time —
+``SMOOTH_SCROLL`` is a ``Final`` read once in ``textual.constants``, and
+``IS_ITERM`` (``_xterm_parser.py:49-52``) is a module global read from
+``LC_TERMINAL``/``TERM_PROGRAM`` — so an env write here would be read by
+nothing and would leak into sibling suites. Every env-frozen term the gate
+under test reads has to be pinned, or the developer's terminal decides the
+result.
 
 OUT OF SCOPE, deliberately: nothing here asserts behaviour under a terminal that
 genuinely honours mode 1016 and sends true pixel coordinates. On such a terminal
@@ -33,12 +38,9 @@ All references pinned to textual 8.2.8.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import select
-import struct
 import sys
-import termios
 import time
 from pathlib import Path
 
@@ -100,7 +102,7 @@ def test_in_band_report_latches_pixel_mouse_coordinates() -> None:
 
 
 def test_env_guard_alone_does_not_stop_a_delivered_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Killed approach C: the guard does not defend against an UNSOLICITED report.
+    """The env-guard-alone approach does not defend against an UNSOLICITED report.
 
     With smooth scrolling off Textual never negotiates mode 2048 — but a
     Herdr-class terminal sends the report anyway, and the latch at
@@ -123,7 +125,17 @@ def test_guard_suppresses_in_band_negotiation(monkeypatch: pytest.MonkeyPatch) -
     The gate is ``_xterm_parser.py:321``. No token means the driver's
     re-enable branch never runs, which is the half of the fix the reset
     cannot provide.
+
+    The CONTROL arm asserts the gate is open when we do not close it, so every
+    other input to that gate has to be pinned or the developer's terminal
+    decides the result. The gate reads ``constants.SMOOTH_SCROLL`` AND
+    ``not IS_ITERM``, and ``IS_ITERM`` freezes from ``LC_TERMINAL``/
+    ``TERM_PROGRAM`` at import — iTerm2 exports ``LC_TERMINAL`` to everything
+    it spawns, so without this pin the control arm false-reds for any
+    contributor running the suite from iTerm2.
     """
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", False)
+
     monkeypatch.setattr(constants, "SMOOTH_SCROLL", False)
     guarded = list(XTermParser().feed(MODE_REPLY_SUPPORTED_BUT_RESET))
     assert [t for t in guarded if isinstance(t, messages.InBandWindowResize)] == []
@@ -139,7 +151,7 @@ def test_reply_two_would_re_enable_the_mode() -> None:
     """A bare reset produces exactly the reply that makes Textual undo it.
 
     ``supported=True, enabled=False`` is the combination
-    ``linux_driver.py:479-481`` answers with ``?2048h`` followed by ``?1016h``.
+    ``linux_driver.py:480-482`` answers with ``?2048h`` followed by ``?1016h``.
     """
     message = messages.InBandWindowResize.from_setting_parameter(2)
     assert (message.supported, message.enabled) == (True, False)
@@ -252,7 +264,16 @@ def _capture_boot_bytes(child_source: str, timeout: float = 30.0) -> bytes:
     terminal, and ``reset_in_band_resize`` deliberately writes nothing when it
     is not. Ordering between our write and Textual's query is a property of the
     wire, so it is asserted on captured bytes and nowhere else.
+
+    ``fcntl``/``termios`` are imported HERE rather than at module scope: they do
+    not exist on Windows, and a module-level import would fail collection before
+    this test's ``skipif`` could skip it, erroring the whole file. Repo
+    precedent for function-level POSIX imports: ``test_teams.py:1652``.
     """
+    import fcntl
+    import struct
+    import termios
+
     master_fd, slave_fd = os.openpty()
     fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 160, 0, 0))
 
@@ -333,6 +354,37 @@ def test_startup_writes_the_reset_before_the_in_band_query() -> None:
         "the terminal was asked before it was told"
     )
 
-    # The driver only emits 1016 from the re-enable branch; its absence is the
-    # evidence that the guard stopped the negotiation the reset would provoke.
+    # NOT a discriminating assertion: on a bare pty nothing answers the
+    # `?2048$p` query, so the re-enable branch (linux_driver.py:470-483) never
+    # runs and this holds with or without the guard. It is kept as a standing
+    # guard against a future Textual putting `?1016h` on the wire
+    # unconditionally at startup. The discriminating proof that the guard
+    # closes the negotiation is `test_guard_suppresses_in_band_negotiation`.
     assert b"\x1b[?1016h" not in data
+
+
+def test_importing_the_tui_package_does_not_pull_textual() -> None:
+    """The guard is inert unless it runs before ``textual.constants`` is imported.
+
+    ``SMOOTH_SCROLL`` is read once, at ``textual.constants`` import time, so a
+    module-scope Textual import ANYWHERE in the ``local_operator.tui`` import
+    graph would freeze the constant before ``run_tui`` ever calls the guard —
+    silently disarming the fix while this suite stayed green (test 10's child
+    is hermetic, and the guard's presence is indistinguishable on a bare pty).
+    A subprocess is required: this suite has already imported Textual, so the
+    question can only be asked in a fresh interpreter.
+
+    Mirrors ``test_cli_resume_guard.py::test_startup_import_weight_unchanged``,
+    which guards the same invariant for the ``cli`` half.
+    """
+    import subprocess
+
+    code = (
+        "import sys, local_operator.tui; "
+        "bad = [m for m in sys.modules if m.startswith('textual')]; "
+        "print('LEAKED:' + ','.join(bad) if bad else 'CLEAN')"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=_REPO_ROOT
+    )
+    assert out.stdout.strip() == "CLEAN", out.stdout
