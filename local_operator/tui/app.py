@@ -4748,10 +4748,14 @@ class OperatorApp(App[None]):
         guess cannot be told apart from a recorded fact.
 
         ``""`` is the last resort, and it is deliberately the SAME value the
-        dead probe used to return: the band then shows its own unrecorded
-        placeholder, which reads as a placeholder. What it must never be is
-        this terminal's directory, which reads as an answer about a
-        conversation that was never in it.
+        dead probe returned: the previewed session is then bound with no
+        recorded directory at all, so the runtime bound for it falls back to
+        the process default (``~`` — ``session/runtime/process.py``'s
+        child-cwd default) and the band renders that real bound directory,
+        exactly as the pre-PR tree did. There is no "unknown" rung to render,
+        which is why this is stated as "the same as before" rather than as an
+        absent value. What it must never be is THIS terminal's directory: that
+        reads as an answer about a conversation which was never in it.
 
         ``find_runtime_record`` (not ``registry.scan``) is the reader for the
         live half: it resolves the OWNER of this exact id, so a stale or
@@ -33149,11 +33153,14 @@ class OperatorApp(App[None]):
         no loop worker worth running — each iteration's prompt must cross the
         socket anyway) or double-drive the session. The stop and validation
         branches mirror ``_cmd_loop`` in SUBSTANCE but not word for word: this
-        path answers from the runtime's own published loop state, so it can
-        name what the loop is doing, while the local path may only speak for
-        its own terminal (see ``_cmd_loop``'s stop branch). Only the transport
-        of the receipt differs for the branches that DO agree — the launch and
-        validation notices.
+        handler runs on the AUTHORITATIVE host
+        (``OperatorApp.run_slash_authoritative``), so its ``_loop_running`` IS
+        the loop's own terminal-local state — nothing about it crosses a
+        process boundary, so the receipt may name what the loop is doing. The
+        local path cannot: there the flag belongs to whichever terminal asked
+        (see ``_cmd_loop``'s stop branch). Only the transport of the receipt
+        differs for the branches that DO agree — the launch and validation
+        notices.
         """
         session = self._session
         if arg.lower() in ("stop", "cancel", "abort"):
