@@ -995,13 +995,13 @@ async def generate_retitle(
 #: title these words". Several spellings because the command's own vocabulary
 #: does not tell a user which one it wants: ``/title --refresh`` is what the
 #: help row and the argument list advertise (the bare words all keep working,
-#: and must \u2014 a user who learned one before the flag spelling landed still has
-#: it), and someone who types ``update`` or
-#: ``retitle`` from another tool's habit has expressed the same intention
-#: exactly — answering that with a conversation literally renamed "update" would
-#: be a hostile reading of an unambiguous request. ``rename`` is deliberately
-#: NOT here: it is this command's other spelling, so ``/title rename`` is at
-#: least as likely to be a user starting to type a name as it is a verb.
+#: and must — a user who learned one before the flag spelling landed still has
+#: it), and someone who types ``update`` or ``retitle`` from another tool's
+#: habit has expressed the same intention exactly — answering that with a
+#: conversation literally renamed "update" would be a hostile reading of an
+#: unambiguous request. ``rename`` is deliberately NOT here: it is this
+#: command's other spelling, so ``/title rename`` is at least as likely to be a
+#: user starting to type a name as it is a verb.
 #:
 #: The collision is real but not close: a user who genuinely wants a title
 #: spelled "refresh" is asking for a one-word name that is also this command's
