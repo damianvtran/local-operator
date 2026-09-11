@@ -380,7 +380,7 @@ async def test_a_dropped_connection_still_says_reconnecting(tmp_path, monkeypatc
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
     )
-    assert remote._unavailable_reason() == "session owner is reconnecting"
+    assert remote._unavailable_reason() == "the runtime is reconnecting"
 
 
 @pytest.mark.asyncio

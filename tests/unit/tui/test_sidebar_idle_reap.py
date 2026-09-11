@@ -100,7 +100,7 @@ def _make_remote(app, session_id, clock, parked_for, *, history=4, poison=False)
     every assertion here vacuously true.
 
     ``poison`` makes ``frontend_state`` raise the way the real property does
-    before its store syncs (``remote.py``), which is the reachable way a probe
+    before its store syncs (``attached.py``), which is the reachable way a probe
     can throw — the predicate reads it through ``retained_for_auto_work``.
     Declared on the class rather than assigned afterwards so the raise is part
     of the type, as it is in production.

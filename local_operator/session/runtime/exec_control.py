@@ -170,9 +170,9 @@ async def start_exec_control(
     outranks a later ``tool_approval_mode`` edit, while an un-flagged run
     follows the file like every other runtime gate.
 
-    Imports are function-local by contract, not by habit: ``owned`` pulls the
+    Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
-    CLI startup path (see the module header and :mod:`.owned`).
+    CLI startup path (see the module header and :mod:`.serving`).
     """
     import asyncio
 

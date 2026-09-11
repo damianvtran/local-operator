@@ -81,15 +81,15 @@ self._end_turn_locally()          # ← synthesises AgentEndEvent(aborted=True, 
 self._recovery_task = asyncio.create_task(self._recover_owner())
 ```
 
-`_end_turn_locally` (`remote.py:1859-1918`) exists for three genuinely
+`_end_turn_locally` (`attached.py`) exists for three genuinely
 terminal outcomes (killed runtime, stopped runtime, going cold) but it is called
 *before* recovery has learned which of those — if any — applies. The
 synthesised end reaches `EventController._handle_agent_end` and the app's
 turn-end path, which calls `_retire_live_tool_cards` (`app.py:24152`, each
 live card → `⊘ interrupted`) and, when no card was live, appends
 `NoticeBlock("interrupted", "warning")` (`app.py:23732-23742`). Then
-`_recover_owner` (`remote.py:2037-2170`) finds the *same* record (same pid),
-re-dials within ~100 ms, and `_finish_sync` (`remote.py:1436-1468`) seeds a
+`_recover_owner` (`attached.py`) finds the *same* record (same pid),
+re-dials within ~100 ms, and `_finish_sync` (`attached.py`) seeds a
 fresh `AgentStartEvent` because `frontend_state.streaming` is still True.
 The band recovers; the ledger keeps the `⊘ interrupted` cards and the notice.
 That is exactly "interrupted painted mid-wait": the `wait` tool was still
@@ -104,7 +104,7 @@ Why the socket drops in the first place — every one of these is silent
    sends the **full capped projection to every client including TUI attach
    viewers**, ~20×/s while streaming (`_push_later` coalesces to 50 ms). The
    TUI's `AttachClient` was constructed with `lambda _projection: None`
-   (`remote.py:1257`) — it throws every one away. The projection is
+   (`attached.py`) — it throws every one away. The projection is
    100–900 KB on this host's resident runtimes. A TUI event-loop stall of
    >1 s (a large transcript reflow, a 60 MB parse on a sibling path, the
    compositor under load) leaves the kernel socket buffer full of projection
@@ -116,7 +116,7 @@ Why the socket drops in the first place — every one of these is silent
    updates pending before `frontend_ready` → drop.
 4. Reader EOF / reset (`:1010, :1017`) and shutdown (`:779-781`).
 
-Also `AttachedSession.abort` (`remote.py:2662-2664`) is
+Also `AttachedSession.abort` (`attached.py`) is
 `asyncio.create_task(self._client.abort())` with no done-callback; when the
 client is mid-recovery `_request_frame` raises `ConnectionError("not
 attached")` (`attach_client.py:461`) and the loop logs "Task exception was
@@ -163,8 +163,8 @@ the price of an idle exit (`process.py:57-66`).
 
 The operator says no, and the code agrees it need not: a viewer already
 survives runtime exit (`_recover_owner` → `_go_cold` after `COLD_FALLBACK_S`,
-`remote.py:2056-2066`) and a cold viewer already re-engages on the next
-prompt (`_ensure_bound`, `remote.py:1074-1144`). What is missing is only
+`attached.py`) and a cold viewer already re-engages on the next
+prompt (`_ensure_bound`, `attached.py`). What is missing is only
 (a) an announcement so the viewer does not spend 8 s chasing a record and
 then paint "runtime exited" for what was a planned refresh, and (b) that the
 announcement not be confused with `stopping` (which parks the viewer in the
@@ -200,7 +200,7 @@ So: **an attached viewer does not block retirement**; it receives a
 
 The deferral cannot hang the UI: every path out of `_recover_owner` already
 ends in `_go_cold` (which calls `_end_turn_locally(direct=True)`,
-`remote.py:1999`), `_notify_stopped` (§4 keeps the end there), or a
+`attached.py`), `_notify_stopped` (§4 keeps the end there), or a
 successful bind. The 8 s cold deadline bounds the wait.
 
 ## 3. PR A — self-refresh, busy-bit, notices
@@ -335,7 +335,7 @@ before `_clean_exit` on the same loop step, and `_clean_exit` →
 disconnect follows" signal and every viewer already reads it. Do **not**
 overload it: a viewer that reads `stopping` parks in the stopped state and
 tells the user `/resume` reopens it (`app.py:3162-3180`), and
-`_session_was_stopped` (`remote.py:1920-1947`) would then look for a
+`_session_was_stopped` (`attached.py`) would then look for a
 `stopped_at` marker that a refresh never writes. Add a new frame:
 
 ```python
@@ -355,7 +355,7 @@ by re-adopting on the next record).
 RETIRING_REASON` with `RETIRING_REASON = "owner retired for a newer build"`
 next to `STOPPED_REASON` (`:61`). `_ClientConn` needs nothing new.
 
-**Viewer.** `AttachedSession._on_disconnected` (`remote.py:1824`):
+**Viewer.** `AttachedSession._on_disconnected` (`attached.py`):
 
 ```python
 if _reason == RETIRING_REASON:
@@ -373,7 +373,7 @@ if _reason == RETIRING_REASON:
 (the runtime was idle by contract; `_streaming` is already False — assert
 that in the test) and calls a new `_refresh_callback` instead of
 `_went_cold_callback`. `set_refresh_callback` follows the
-`set_went_cold_callback` shape (`remote.py:2011-2017`).
+`set_went_cold_callback` shape (`attached.py`).
 
 `tui/app.py`: in `_adopt_session`'s viewer block (the `_is_viewer(session)`
 branch that installs the takeover/stopped callbacks) install
@@ -490,7 +490,7 @@ viewer never waits on a runtime that is "about to" leave.
 
 ### 4.1 Defer the synthesised abort
 
-`AttachedSession._on_disconnected` (`remote.py:1854-1857`) becomes:
+`AttachedSession._on_disconnected` (`attached.py`) becomes:
 
 ```python
 self._recovering = True
@@ -514,7 +514,7 @@ self._recovery_task = asyncio.create_task(self._recover_owner())
 | `retiring` (PR A) | n/a | never streaming by contract |
 
 `_streaming` stays True during recovery (it is what routes the next message
-to the steer branch, `remote.py:2608`); the app's band keeps `working` —
+to the steer branch, `attached.py`); the app's band keeps `working` —
 correct, since it is.
 
 `_apply_frontend_facades` (`:1631-1633`) already overwrites `_streaming` and
@@ -526,7 +526,7 @@ two-line check right after `_install_frontend` in `_recover_owner`
 
 `_push` (`server.py:2053-2067`) and `_push_to` send the projection to
 every client. A client that declared `events=True` **and**
-`frontend_state=True` is a full-TUI viewer (`remote.py:1259-1261`); it
+`frontend_state=True` is a full-TUI viewer (`attached.py`); it
 consumes `frontend_sync`/`frontend_update`/`event` and discards
 projections. The welcome projection (`_on_connection:954`) is still needed —
 `AttachClient.connect` (`attach_client.py:259-263`) reads it as the identity
@@ -546,7 +546,7 @@ events; nothing on the TUI side reads it (`_dial:1257`). Justification for
 `_SEND_TIMEOUT_S` drop and it is a pure subtraction.
 
 Desktop surface (`surface == "desktop"`) declares the same two flags
-(`remote.py` constructs the client identically with `surface=self._surface`)
+(`attached.py` constructs the client identically with `surface=self._surface`)
 and also reads nothing from projections — confirm with the desktop tests
 (`tests/e2e/test_desktop_*.py`) that nothing keys on `op == "projection"`
 after the welcome; the coder must grep `desktop` for `_on_projection` before
@@ -589,7 +589,7 @@ sequence. Watch it in rollout (§7).
 
 ### 4.5 `AttachedSession.abort` unretrieved exception
 
-`remote.py:2662-2664`:
+`attached.py`:
 
 ```python
 def abort(self, reason: str = "interrupted") -> None:
