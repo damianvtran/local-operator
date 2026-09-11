@@ -1837,6 +1837,267 @@ class TestPerAccountLastKnown:
         )
 
 
+class TestQwenCloudConsoleRoute:
+    """The console route for an account whose OAuth grant can never refresh.
+
+    This route failed SILENTLY in production before it existed, and the
+    symptom was an empty ``/usage`` table indistinguishable from "this
+    provider has no quota endpoint" — the failure mode usage.py:36-44 says
+    this module has already been bitten by four times. The cause is that the
+    two identity enumerators disagree for ``alibaba-token-plan``:
+    ``list_oauth_identities`` names the stored login while
+    ``list_oauth_accesses`` mints no bearer (the row's ``expires`` is in the
+    past and no ``ProviderDefinition`` declares a refresh token, so
+    ``_ensure_oauth_fresh`` can never revive it). ``expected`` is therefore
+    non-empty, ``_fetch_provider`` takes the ``if expected:`` branch, every
+    identity hits ``access is None``, and the API-key route below it is
+    unreachable.
+
+    These tests pin the MECHANISM, not just the outcome: reinstating a bare
+    ``continue`` at the ``access is None`` point must turn them red.
+    """
+
+    #: The console gateway's own host, so a test can assert it was — or was
+    #: never — contacted without matching on a path substring.
+    CONSOLE_HOST = "cs-data.qwencloud.com"
+
+    #: A placeholder session cookie. The real credential is a full-account
+    #: console ticket and never appears in this repository.
+    TICKET = "fake-console-ticket"
+
+    def _dead_grant(self, store) -> str:
+        """Store the real account's shape: a login that mints no bearer.
+
+        The row makes ``list_oauth_identities`` non-empty while
+        ``oauth_accounts`` stays unset, which is exactly the disagreement
+        that made the route unreachable.
+        """
+        email = "fake@example.test"
+        store.upsert_credential(
+            "alibaba-token-plan",
+            {
+                "type": "oauth",
+                "access": "fake-mgmt",
+                "email": email,
+                "expires": 1,
+                "account_id": "fake-acct",
+            },
+        )
+        return email
+
+    def _ticket(self, store) -> None:
+        store.upsert_credential(
+            "qwencloud-console",
+            {"ticket": self.TICKET, "project_id": "qwencloud-console:personal"},
+        )
+
+    @staticmethod
+    def _spy(monkeypatch, controller, report=None):
+        """Record every ``_fetch_one`` call, mirroring the double at :541."""
+        calls: list[dict[str, Any]] = []
+        original = type(controller)._fetch_one
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append({"provider": provider, "access": access, "extra_creds": extra_creds})
+            if report is not None:
+                return report
+            return await original(
+                controller, client, provider, access=access, extra_creds=extra_creds
+            )
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_a_stored_ticket_reaches_the_console_route(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The point of the slice: ``_fetch_one`` RUNS, carrying the ticket.
+
+        Asserting only on the returned report would still pass if the report
+        arrived by some other route, so this pins the call itself.
+        """
+        email = self._dead_grant(store)
+        self._ticket(store)
+        expected = UsageReport(provider="alibaba-token-plan", limits=[])
+        calls = self._spy(monkeypatch, controller, report=expected)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "a bare `continue` here is the defect under test"
+        assert calls[0]["provider"] == "alibaba-token-plan"
+        # The console credential is not an OAuth account: it arrives beside
+        # `access=None`, which is what makes the api-key early-return skip it.
+        assert calls[0]["access"] is None
+        assert calls[0]["extra_creds"] is not None
+        assert calls[0]["extra_creds"]["ticket"] == self.TICKET
+        # And the report reaches the panel under the stored identity.
+        assert [r.identity for r in reports] == [email]
+
+    @pytest.mark.asyncio
+    async def test_the_ticket_reaches_the_usage_dispatcher(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The other half of reachability: ``_fetch_one`` FORWARDS the ticket.
+
+        Patching ``_fetch_one`` proves it is called but says nothing about
+        what it does, so dropping ``extra_creds`` from the ``fetch_usage``
+        call would leave that test green while the fetcher goes unreachable
+        again — the dead-code defect this slice exists to avoid. This runs
+        the real ``_fetch_one`` and pins the dispatcher's arguments instead.
+        """
+        self._dead_grant(store)
+        self._ticket(store)
+        seen: list[dict[str, Any] | None] = []
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            seen.append(extra_creds)
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(seen) == 1, "the dispatcher must be reached exactly once"
+        assert seen[0] is not None, "dropping extra_creds here makes the fetcher dead code"
+        assert seen[0]["ticket"] == self.TICKET
+
+    @pytest.mark.asyncio
+    async def test_no_ticket_means_no_console_request(self, controller, store, monkeypatch) -> None:
+        """Without a stored ticket the route must not fire at all.
+
+        The guard against the opposite defect: an unconditional console
+        attempt would contact the gateway for every dead grant on the box.
+        """
+        self._dead_grant(store)
+        calls = self._spy(monkeypatch, controller)
+
+        def no_network(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError(f"no ticket stored, yet {request.url} was contacted")
+
+        # Bound before patching: the replacement builds a real client, so
+        # reading the name through the module would recurse into itself.
+        real_client = httpx.AsyncClient
+
+        def _mock_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            return real_client(transport=httpx.MockTransport(no_network))
+
+        monkeypatch.setattr("local_operator.providers.controller.httpx.AsyncClient", _mock_client)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert calls == [], "no credential to spend, so nothing to fetch"
+        # Unchanged from before the console route existed: the expected
+        # identity is still named, with no numbers behind it.
+        assert [r.identity for r in reports] == ["fake@example.test"]
+        assert reports[0].limits == []
+
+    @pytest.mark.asyncio
+    async def test_another_provider_never_queries_the_ticket_namespace(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """``_qwencloud_console_creds`` is guarded on the storage id.
+
+        Without the guard every provider's fetch would query the
+        ``qwencloud-console`` namespace on every cycle, and any provider with
+        a dead grant would try to spend a QwenCloud cookie on its own API.
+        """
+        self._ticket(store)
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "tok", "email": "other@example.test", "expires": 1},
+        )
+        asked: list[str | None] = []
+        real_list = store.list_credentials
+
+        def _watch(provider=None):
+            asked.append(provider)
+            return real_list(provider)
+
+        monkeypatch.setattr(store, "list_credentials", _watch)
+        calls = self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert "qwencloud-console" not in asked, "the ticket namespace is QwenCloud's alone"
+        assert calls == [], "anthropic's dead grant must not reach the console route"
+        assert [r.identity for r in reports] == ["other@example.test"]
+        assert controller._qwencloud_console_creds("anthropic") is None
+
+    @pytest.mark.asyncio
+    async def test_the_console_report_merges_into_one_credits_row(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Exactly ONE ``credits-7d`` survives at the panel's own grain.
+
+        ``usage_panel`` flattens ``[limit for report in reports for limit in
+        report.limits]`` with no dedup by id, and ``_merge_account_reports``
+        merges at ACCOUNT grain without concatenating limits. So a console
+        report landing under a DIFFERENT identity key than the stored login
+        renders the same window twice. Measured the way the panel measures it.
+        """
+        email = self._dead_grant(store)
+        self._ticket(store)
+        console_report = UsageReport(
+            provider="alibaba-token-plan",
+            limits=[
+                UsageLimit(
+                    id="credits-7d",
+                    label="Credits (7d)",
+                    amount=UsageAmount(used=24.05, limit=100.0, unit="percent"),
+                )
+            ],
+        )
+        self._spy(monkeypatch, controller, report=console_report)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        limit_ids = [limit.id for report in reports for limit in report.limits]
+        assert limit_ids == ["credits-7d"], "a second row means two identity keys"
+        assert [r.identity for r in reports] == [email]
+
+    @pytest.mark.asyncio
+    async def test_the_oauth_flavour_alias_reaches_the_route_too(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """``alibaba-token-plan-oauth`` stores under ``alibaba-token-plan``.
+
+        The guard compares the STORAGE id (``credential_provider_id``), not
+        the spelling the caller used, so both ids find the same ticket. The
+        alias resolution itself is covered at
+        ``test_credential_alias_resolves_storage_id``; this pins that the
+        console guard honours it rather than matching a literal string.
+        """
+        self._ticket(store)
+
+        assert controller._qwencloud_console_creds("alibaba-token-plan-oauth") is not None
+        assert controller._qwencloud_console_creds(
+            "alibaba-token-plan-oauth"
+        ) == controller._qwencloud_console_creds("alibaba-token-plan")
+
+    @pytest.mark.asyncio
+    async def test_a_ticketless_row_is_not_a_credential(self, controller, store) -> None:
+        """A row in the namespace with no ``ticket`` must not count.
+
+        The CLI writes the row before the capture completes, so an empty
+        ticket is a real state — and returning it would send a request with
+        no cookie, which reads as a generic auth failure rather than as
+        "no ticket stored yet".
+        """
+        store.upsert_credential("qwencloud-console", {"ticket": "", "project_id": "p"})
+
+        assert controller._qwencloud_console_creds("alibaba-token-plan") is None
+
+
 # ---------------------------------------------------------------------------
 # The picker's prices come from the same keyless chain as the status band
 # ---------------------------------------------------------------------------
