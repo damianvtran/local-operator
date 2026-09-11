@@ -3774,13 +3774,34 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         except TicketStoreError as exc:
             print(f"lop qwencloud-ticket set: {exc}", file=sys.stderr)
             return 1
-        record = read_ticket_record(store)
-        length = record["length"] if record else 0
+        # The length is read back as confirmation, but the write already
+        # succeeded -- so a store that cannot be re-read afterwards must not
+        # turn into "(0 characters)", which reads as "nothing was stored" on
+        # the one command whose job is handling the secret. Report the length
+        # written instead, and never a zero after a successful write.
+        try:
+            record = read_ticket_record(store)
+        except TicketStoreError:
+            record = None
+        length = record["length"] if record else len(value.strip())
         print(f"Stored QwenCloud console ticket ({length} characters).")
         return 0
 
     if command == "status":
-        record = read_ticket_record(store)
+        # Shares `rm`'s hazard in a quieter form: reporting "nothing stored"
+        # for an unreadable store would tell the user the cookie is already
+        # gone when it is on disk and readable by anything that can open the
+        # file.
+        try:
+            record = read_ticket_record(store)
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket status: {exc}\n"
+                "  Whether a ticket is stored is UNKNOWN; this is not the same "
+                "as none being stored.",
+                file=sys.stderr,
+            )
+            return 1
         if record is None:
             print("No QwenCloud console ticket stored.")
             print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
@@ -3821,9 +3842,24 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         return 0
 
     if command == "rm":
+        # A revoke that cannot PROVE it worked must not report success. This is
+        # the only mitigation the user has for a full-account cookie held in
+        # plaintext, so "probably gone" is the one answer this command may not
+        # give: it would remove the mitigation and say it had worked.
+        try:
+            removed = delete_ticket(store)
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED. Re-run once the store is "
+                "readable, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
         print(
             "Removed the stored QwenCloud console ticket."
-            if delete_ticket(store)
+            if removed
             else "No QwenCloud console ticket stored."
         )
         return 0

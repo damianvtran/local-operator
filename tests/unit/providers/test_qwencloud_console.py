@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,6 +26,7 @@ from local_operator.providers.qwencloud_console import (
     QWENCLOUD_CONSOLE_PROVIDER,
     QWENCLOUD_TICKET_STALE_MS,
     TicketStoreError,
+    TicketStoreUnreadable,
     delete_ticket,
     read_ticket_record,
     store_ticket,
@@ -46,7 +49,7 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AuthStore
         opened.close()
 
 
-def _persisted_data(store: AuthStore) -> dict:
+def _persisted_data(store: AuthStore) -> dict[str, Any]:
     rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
     assert len(rows) == 1
     return rows[0].data
@@ -118,9 +121,9 @@ def test_an_unresolvable_store_path_raises_rather_than_skipping() -> None:
 
     class PathlessStore:
         def __init__(self) -> None:
-            self.written: list[tuple[str, dict]] = []
+            self.written: list[tuple[str, dict[str, Any]]] = []
 
-        def upsert_credential(self, provider: str, credential: dict) -> None:
+        def upsert_credential(self, provider: str, credential: dict[str, Any]) -> None:
             self.written.append((provider, credential))
 
     pathless = PathlessStore()
@@ -128,6 +131,123 @@ def test_an_unresolvable_store_path_raises_rather_than_skipping() -> None:
         store_ticket(pathless, FAKE_TICKET)
     assert FAKE_TICKET not in str(excinfo.value)
     assert pathless.written == [], "the cookie must not be written when the path is unknown"
+
+
+class UnreadableStore:
+    """A store whose rows cannot be read: SQLITE_BUSY, locked, or corrupt.
+
+    `busy_timeout` is 5s (auth_store.py:407), so on a machine running many
+    concurrent `lop` processes this is an ordinary outcome, not a contrivance.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error or sqlite3.OperationalError("database is locked")
+        self.deleted: list[int] = []
+
+    def list_credentials(
+        self, provider: str | None = None, include_disabled: bool = False
+    ) -> list[Any]:
+        raise self.error
+
+    def delete_credential(self, credential_id: int) -> None:
+        self.deleted.append(credential_id)
+
+
+def test_an_unreadable_store_is_not_reported_as_an_empty_one() -> None:
+    """The false negative that made `rm` claim success over a live cookie.
+
+    "cannot read" and "nothing stored" must not collapse into one answer.
+    """
+    with pytest.raises(TicketStoreUnreadable):
+        read_ticket_record(UnreadableStore())
+
+    with pytest.raises(TicketStoreUnreadable):
+        delete_ticket(UnreadableStore())
+
+
+def test_a_caller_bug_still_propagates_rather_than_degrading() -> None:
+    """ProgrammingError is a BUG (connection across threads), not an environment fact.
+
+    The repo's rule at controller.py:268-278: a bug dressed as a plausible
+    degraded state is one nobody finds.
+    """
+    unreadable = UnreadableStore(sqlite3.ProgrammingError("closed database"))
+    with pytest.raises(sqlite3.ProgrammingError):
+        read_ticket_record(unreadable)
+
+
+def test_rm_exits_non_zero_when_it_cannot_prove_the_ticket_is_gone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A revoke it cannot confirm must fail loudly and say the ticket may remain."""
+    assert _qwencloud_ticket_action("rm", UnreadableStore()) == 1
+    captured = capsys.readouterr()
+    assert "MAY STILL BE STORED" in captured.err
+    assert "No QwenCloud console ticket stored." not in captured.out
+
+
+def test_status_reports_unknown_rather_than_absent_on_an_unreadable_store(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _qwencloud_ticket_action("status", UnreadableStore()) == 1
+    captured = capsys.readouterr()
+    assert "UNKNOWN" in captured.err
+    assert "No QwenCloud console ticket stored." not in captured.out
+
+
+def test_delete_ticket_confirms_the_row_is_actually_gone(store: AuthStore) -> None:
+    """`delete_credential` returns None either way, so deletion must be re-read."""
+    store_ticket(store, FAKE_TICKET)
+
+    # A store that accepts the delete but keeps the row: the exact shape of a
+    # silent failed revoke.
+    class PretendingStore:
+        def __init__(self, real: AuthStore) -> None:
+            self.real = real
+
+        def list_credentials(
+            self, provider: str | None = None, include_disabled: bool = False
+        ) -> list[Any]:
+            return self.real.list_credentials(provider, include_disabled)
+
+        def delete_credential(self, credential_id: int) -> None:
+            return None  # accepted, deleted nothing
+
+    with pytest.raises(TicketStoreError, match="still present"):
+        delete_ticket(PretendingStore(store))
+    # And the real row is genuinely still there, which is why it must raise.
+    assert len(store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)) == 1
+
+
+def test_set_never_reports_zero_characters_after_a_successful_write(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "(0 characters)" reads as "nothing stored" on the secret-handling command."""
+
+    class PipedStdin:
+        def isatty(self) -> bool:
+            return False
+
+        def read(self) -> str:
+            return FAKE_TICKET
+
+    monkeypatch.setattr("sys.stdin", PipedStdin())
+    # Write succeeds, then the confirming read-back fails.
+    real_list = store.list_credentials
+    calls = {"n": 0}
+
+    def flaky_list(*args: Any, **kwargs: Any) -> list[Any]:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_list(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_credentials", flaky_list)
+    assert _qwencloud_ticket_action("set", store) == 0
+    out = capsys.readouterr().out
+    assert f"({len(FAKE_TICKET)} characters)" in out
+    assert "(0 characters)" not in out
+    assert FAKE_TICKET not in out
 
 
 def test_an_empty_ticket_is_refused(store: AuthStore) -> None:
@@ -158,7 +278,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, store: AuthStore, command: str | None)
 
 
 def test_the_command_closes_the_store_it_opened(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A CLI verb must not leak the SQLite connection (or the usage cache's).
 
@@ -206,7 +326,7 @@ def test_the_store_is_closed_even_when_the_verb_raises(
 
 
 def test_status_never_prints_the_value(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store_ticket(store, FAKE_TICKET)
     assert _run(monkeypatch, store, "status") == 0
@@ -217,14 +337,14 @@ def test_status_never_prints_the_value(
 
 
 def test_status_reports_an_empty_store(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run(monkeypatch, store, "status") == 0
     assert "No QwenCloud console ticket stored." in capsys.readouterr().out
 
 
 def test_status_warns_when_the_ticket_is_stale(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     stale = int(time.time() * 1000) - QWENCLOUD_TICKET_STALE_MS - 86_400_000
     store_ticket(store, FAKE_TICKET, now_ms=stale)
@@ -235,7 +355,7 @@ def test_status_warns_when_the_ticket_is_stale(
 
 
 def test_status_does_not_warn_on_a_fresh_ticket(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store_ticket(store, FAKE_TICKET)
     assert _run(monkeypatch, store, "status") == 0
@@ -243,7 +363,7 @@ def test_status_does_not_warn_on_a_fresh_ticket(
 
 
 def test_set_refuses_a_tty(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class TtyStdin:
         def isatty(self) -> bool:
@@ -259,7 +379,7 @@ def test_set_refuses_a_tty(
 
 
 def test_set_reads_stdin_and_strips_one_trailing_newline(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class PipedStdin:
         def isatty(self) -> bool:
@@ -277,7 +397,7 @@ def test_set_reads_stdin_and_strips_one_trailing_newline(
 
 
 def test_rm_removes_the_row(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     store_ticket(store, FAKE_TICKET)
     assert _run(monkeypatch, store, "rm") == 0
@@ -286,7 +406,7 @@ def test_rm_removes_the_row(
 
 
 def test_rm_is_a_clear_no_op_when_nothing_is_stored(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run(monkeypatch, store, "rm") == 0
     assert "No QwenCloud console ticket stored." in capsys.readouterr().out
@@ -294,7 +414,7 @@ def test_rm_is_a_clear_no_op_when_nothing_is_stored(
 
 
 def test_no_subcommand_prints_usage_and_exits_two(
-    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run(monkeypatch, store, None) == 2
     assert "usage: lop qwencloud-ticket {set,status,rm}" in capsys.readouterr().err
