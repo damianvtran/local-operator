@@ -1452,6 +1452,56 @@ async def test_history_prepend_preserves_anchor_and_home_dedupes_requests(
 
 
 @pytest.mark.asyncio
+async def test_action_home_moves_the_offset_at_press_time(tmp_path) -> None:
+    """A Home press must move the offset NOW, not on a later frame.
+
+    This is the pin for the intermittent `assert (40 - 0.0) == 0` failure of
+    the test above (main `51b524c8` run 34549931882 job `test (3.13, 2)`; PR
+    #950's run 34553433194 job `test (3.12, 0)`). The mechanism, reproduced
+    deterministically: Textual's ``scroll_home(animate=False)`` does not move
+    anything — ``scroll_to`` with ``immediate=False`` defers the real call with
+    ``call_after_refresh``. The page a press requests is read, mounted and
+    anchor-corrected on a LAYOUT pass, which can beat that deferred callback on
+    a loaded box; when it does, the widget's own move lands inside the insert's
+    anchor transaction and is indistinguishable from reader travel, so
+    ``watch_scroll_y`` rewrites the held gap by the travel it thinks it saw and
+    the settle's restore faithfully pins the reader back at the top spot the
+    transaction began from — anchor block at y=40, ``scroll_y`` 0.
+
+    So the assertion is the invariant that closes that window: at the instant
+    ``action_home`` returns, the body is at 0 and the tail follower is already
+    released (the programmatic move suppresses the ``watch_scroll_y`` resync
+    that used to carry that decision a frame later, which is also the frame in
+    which an extent change could have dragged the reader back to the bottom).
+    No ``pause`` between the press and the readings: a deferred move is exactly
+    what this asserts against.
+    """
+    transcript = Transcript(tmp_path / "child")
+    for index in range(140):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with([], status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+        await _wait_geometry_settled(pilot, view._body)
+        # Opened on the tail and following it, so Home has something to do.
+        assert view._body.scroll_y > 1
+        assert view._body.is_following_tail is True
+
+        view.action_home()
+
+        assert view._body.scroll_y == 0
+        assert view._body.is_following_tail is False
+        await _wait_history(pilot, view)
+
+
+@pytest.mark.asyncio
 async def test_history_arriving_at_the_top_loads_one_page_then_stops(tmp_path) -> None:
     """Scrolling to the top loads history per ARRIVAL — never a cascade.
 

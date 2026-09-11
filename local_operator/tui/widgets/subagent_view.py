@@ -2169,12 +2169,38 @@ class SubagentView(Vertical):
         Repeated Home presses while the worker is active are intentionally a
         no-op: one edge crossing means one disk read, not a queue of duplicate
         requests that later prepend the same page several times.
+
+        The offset move is applied HERE and marked as this widget's own:
+        ``scroll_home(immediate=True)`` inside ``programmatic_scroll``, not
+        Textual's deferred default. ``scroll_home(animate=False)`` alone still
+        moves nothing now — ``scroll_to`` defaults to ``immediate=False`` and
+        defers the real call with ``call_after_refresh`` — and that deferral is
+        a window in which this page's own scroll stops being recognisable as its
+        own: the page the press requested can be read, mounted and
+        anchor-corrected on a LAYOUT pass before the deferred move lands, and
+        the landing then arrives as an unattributed offset change.
+        ``watch_scroll_y`` reads that as reader travel, rewrites the insert's
+        held gap by the travel it believes it saw, and the settle's restore
+        faithfully pins the reader back where the transaction began — anchor
+        block at y=40 against ``scroll_y`` 0, which is the intermittent
+        ``assert (40 - 0.0) == 0`` on CI (main ``51b524c8`` run 34549931882 job
+        ``test (3.13, 2)``; PR #950's run 34553433194 job ``test (3.12, 0)``).
+        This is the shape every other deliberate scroll on this widget already
+        uses (``_reanchor_insert``, ``_scroll_to_tail``,
+        ``_snap_landing_to_row_head``).
+
+        The follower is released explicitly because the programmatic guard
+        below suppresses the ``watch_scroll_y`` resync that used to carry that
+        decision a frame later — and that frame is one an extent change could
+        use to drag the reader back to the bottom.
         """
-        self._body.scroll_home(animate=False)
-        # ``scroll_home`` is applied on Textual's next refresh. Passing the
-        # intended offset explicitly prevents the disk worker from sampling the
-        # old tail first and restoring it after the prepend, which made a real
-        # keyboard Home press appear to load nothing.
+        body = self._body
+        body._tail_anchor.release()
+        with body._tail_anchor.programmatic_scroll():
+            body.scroll_home(animate=False, immediate=True)
+        # The intended offset is passed explicitly as well: it prevents the disk
+        # worker from sampling the old tail first and restoring it after the
+        # prepend, which made a real keyboard Home press appear to load nothing.
         self._maybe_load_history(anchor=0.0, retry=True)
 
     def action_end(self) -> None:
