@@ -52,12 +52,54 @@ UNKNOWN = "·"
 #: p95 46, max 64). Measured on this machine's store, not estimated.
 NAME_P75 = 39
 
-#: Below this terminal width A stacks vertically. DERIVED, not chosen: A's list
-#: pane measures a steady 38% of the terminal, so its usable text width is
-#: `0.38 * cols - 2`, and the fixed columns spend 12 of those cells on the
-#: cursor, gaps and age. The name column therefore reaches NAME_P75 at
-#: 0.38 * cols - 14 >= 39, i.e. cols >= 140.
-STACK_BELOW_COLS = 140
+#: Cells the name column is capped at: the longest of the 141 real names (max
+#: 64, p95 48, p99 53 — measured in CELLS, not chars). This cap is what makes
+#: the breakpoint SOUND, and it is not cosmetic.
+#:
+#: Round 2 set the breakpoint from "when does side-by-side fit the p75 name",
+#: which is the wrong question and produced D16 (BLOCKER): widening 139 -> 140
+#: CUT the name field. Measured, the uncapped fields are
+#: `stacked = W - 30` and `side-by-side = split * W - 30`, so stacked gains a
+#: full cell per terminal column and side-by-side gains only `split`. Their gap
+#: therefore DIVERGES without limit (measured at split 0.6: -64 cells at W=160,
+#: -128 at W=320) and NO breakpoint can satisfy "side-by-side is never narrower
+#: than stacked would be at the same width". Raising the breakpoint alone is
+#: unsatisfiable, not merely expensive.
+#:
+#: A cap makes both layouts SATURATE at the same value, so beyond the width
+#: where side-by-side reaches the cap the two are exactly equal and the
+#: invariant holds for every larger width. 64 is chosen because 0 of 141 real
+#: names exceed it: at the cap nothing truncates, so equal fields also means
+#: equally zero truncation rather than equally bad.
+#:
+#: The two `List every tool name you have available, as a plain comma-separ…`
+#: rows that still show an ellipsis at 160 and 180 are NOT truncated by this
+#: cap: their stored titles are 64 cells INCLUDING a literal `…`, written that
+#: way by whatever generated them. No width renders them in full, so round 2's
+#: "indistinguishable pair" is a session-titling defect upstream of the picker,
+#: not a layout one. Noted, out of scope for this prototype.
+NAME_MAX = 64
+
+#: Below this terminal width A stacks vertically. MEASURED, not derived on
+#: paper: the value is the smallest width at which the rendered side-by-side
+#: name field reaches NAME_MAX and so stops being narrower than the stacked
+#: field at that same width. `scripts/prototype_resume_d16.py` sweeps both
+#: layouts at every width and prints the crossover; re-run it after touching
+#: LIST_FR/PREVIEW_FR or the fixed columns, because all three move this number.
+#:
+#: 159, not the 154 the same arithmetic predicts: the rendered pane comes out
+#: 2-3 cells narrower than `split * cols` because the preview's `border-left`
+#: and both panes' `padding: 0 1` are taken before the text width, and
+#: Textual's `fr` resolution rounds. Deriving this on paper is exactly how
+#: round 2 produced D16; the sweep is the source of truth.
+STACK_BELOW_COLS = 159
+
+#: The side-by-side split, in the LIST's favour (60/40). Round 2 had this
+#: backwards at 2fr/3fr: the pane that truncates got the minority share while
+#: the preview showed visible slack (measured at 140: an 83-cell pane drawing a
+#: 76-cell rule beside a 56-cell list truncating 33% of its names).
+LIST_FR = 3
+PREVIEW_FR = 2
 
 #: Stacked-layout row split. A fraction with clamps, not a fixed count: a fixed
 #: preview height either starves the list on a 24-row terminal or wastes half a
@@ -249,8 +291,8 @@ class TelescopeScreen(_Filtering, Screen[None]):
     DEFAULT_CSS = """
     TelescopeScreen { layout: vertical; background: $surface; }
     TelescopeScreen #cols { height: 1fr; }
-    TelescopeScreen #results { width: 2fr; padding: 0 1; }
-    TelescopeScreen #preview { width: 3fr; padding: 0 1; border-left: solid $panel; }
+    TelescopeScreen #results { width: 3fr; padding: 0 1; }
+    TelescopeScreen #preview { width: 2fr; padding: 0 1; border-left: solid $panel; }
     TelescopeScreen #filter { height: 1; padding: 0 1; background: $panel; }
     """
 
@@ -378,8 +420,8 @@ class TelescopeScreen(_Filtering, Screen[None]):
             self._preview.styles.border_top = ("solid", panel)
         else:
             cols.styles.layout = "horizontal"
-            self._results.styles.width = "2fr"
-            self._preview.styles.width = "3fr"
+            self._results.styles.width = f"{LIST_FR}fr"
+            self._preview.styles.width = f"{PREVIEW_FR}fr"
             self._results.styles.height = "1fr"
             self._preview.styles.height = "1fr"
             self._preview.styles.border_top = ("none", panel)
@@ -445,6 +487,19 @@ class TelescopeScreen(_Filtering, Screen[None]):
             return []
         sid = self._rows[self._cursor].id
         turns = self._data.verbose(sid) if self._verbose else self._data.condensed(sid)
+        # D18: start at the session's first USER turn when it has one. The
+        # preview exists for recognition ("which session is this?"), and the
+        # user's own request states what the session is FOR; an assistant turn
+        # states where it had got to. Measured on the real store: 103 of 141
+        # transcripts open on a user turn, but 36 open on assistant narration
+        # mid-thought (`Fixing the stale import first…`) — and those 36 include
+        # the default cursor row, which is why no round-2 frame contained a
+        # single `▸ you`. Leading assistant turns are DROPPED rather than
+        # scrolled past: at 80x24 the pane shows one turn, so "somewhere below"
+        # is the same as absent.
+        first_user = next((i for i, (role, _t, _ts) in enumerate(turns) if role == "user"), None)
+        if first_user is not None:
+            turns = turns[first_user:]
         width = self._pane_width()
         out: list[tuple[str, str]] = []
         for role, text, _ts in turns:
@@ -476,7 +531,8 @@ class TelescopeScreen(_Filtering, Screen[None]):
         wrapped every row onto a second line at 80 cols. The `or` fallback
         matters on the first paint, before layout resolves.
         """
-        return max(12, (self._results.size.width or int(self.app.size.width * 0.4)) - 2)
+        fraction = 1.0 if self._stacked else LIST_FR / (LIST_FR + PREVIEW_FR)
+        return max(12, (self._results.size.width or int(self.app.size.width * fraction)) - 2)
 
     def _show_id(self, usable: int) -> bool:
         """Show the id only when it does not push the name below p75.
@@ -487,6 +543,27 @@ class TelescopeScreen(_Filtering, Screen[None]):
         has it on from 80, where the full width affords both.
         """
         return (usable - 2 - 2 - 8 - 2 - 12) >= NAME_P75
+
+    def _name_w(self) -> int:
+        """Cells the name column gets — the ONE definition, so D16 is measurable.
+
+        Inlined in `refresh_view` before, which meant the breakpoint could only
+        be argued on paper. The invariant the breakpoint has to satisfy is a
+        comparison between two layouts at the SAME width, so the quantity being
+        compared needs a name and a single source of truth.
+        """
+        usable = self._usable()
+        mark_w = 2 if self._query.strip() else 0
+        raw = usable - 2 - 2 - 8 - ((2 + 12) if self._show_id(usable) else 0) - mark_w
+        # The cap is what satisfies D16's invariant: both layouts saturate at
+        # NAME_MAX, so past the breakpoint the two fields are EQUAL rather than
+        # diverging. It also closes D24 — the 40-cell void between a short name
+        # and a right-aligned age at wide stacked geometries.
+        return max(8, min(NAME_MAX, raw))
+
+    def _context_w(self) -> int:
+        """Cells the context line gets: the 4-cell indent off the pane width."""
+        return max(10, self._usable() - 4)
 
     def _raw_context(self, row: SessionRow) -> str | None:
         """Whether an exact-hit context EXISTS for `row`, regardless of layout.
@@ -500,7 +577,14 @@ class TelescopeScreen(_Filtering, Screen[None]):
         query = self._query.strip()
         if not query or not self._body_matched(row):
             return None
-        return self._data.grep_context(row.id, query)
+        # D17: ask for a window the width we will actually DRAW at. The default
+        # `width=150` is centred on the match, but A then truncated it to the
+        # list pane (~55 cells side-by-side) from the LEFT end, which cut the
+        # match off the right: measured, the query sat at index 73 of a
+        # 152-char snippet rendered into 55 cells, so 0 of 9 context lines
+        # contained the query. C never hit this only because its line is
+        # near-terminal-width. Same `grep_context` path as C, correct window.
+        return self._data.grep_context(row.id, query, width=self._context_w())
 
     def _context_for(self, row: SessionRow) -> str | None:
         """The context line to DRAW for `row`, or None when it draws none.
@@ -559,8 +643,7 @@ class TelescopeScreen(_Filtering, Screen[None]):
         # 59-cell row + 3 = 62 in a 59-cell pane) and wrapped the mark onto its
         # own line, which breaks the one-row-per-session contract the cursor
         # arithmetic assumes.
-        mark_w = 2 if query else 0
-        name_w = max(8, usable - 2 - 2 - 8 - ((2 + 12) if show_id else 0) - mark_w)
+        name_w = self._name_w()
         lines: list[Text] = []
         for offset, row in enumerate(page):
             selected = self._top + offset == self._cursor
@@ -588,9 +671,13 @@ class TelescopeScreen(_Filtering, Screen[None]):
             lines.append(line)
             if context:
                 marked = Text("    ")
+                # `_demark` before highlighting (D19): the strip was applied to
+                # the preview and not to this excerpt, so literal `**` and
+                # backticks rode into the list pane. Stripping BEFORE the
+                # highlight also keeps the match offsets honest.
                 marked.append(
                     _highlight(
-                        truncate_cells(context, max(10, usable - 4)),
+                        truncate_cells(_demark(context), self._context_w()),
                         query,
                         ink["dim"],
                         ink["warning"],
