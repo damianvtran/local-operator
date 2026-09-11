@@ -384,12 +384,78 @@ def test_the_report_mode_prints_fired_stacks_and_labels_unfired_headers(tmp_path
 
     assert "fired" in report
     assert "line 12 in test_fast" in report
+    # A fired file names its test too: the stacks say what was parked, but the
+    # node id is what a reader of a cancelled run needs first.
+    assert "in flight when the timer fired: tests/unit/a.py::test_fast" in report
     assert "never fired" in report
     assert "3000 tests started" in report
     assert "in flight at cancel, not fired: tests/unit/a.py::test_2999" in report
     # The defect: no arm-time header may be presented as a fired timeout.
     assert "exceeded 240s" not in report
     assert report.count(watchdog.FIRED_MARKER) == 1
+
+
+def test_the_report_mode_does_not_read_a_marker_out_of_a_node_id(tmp_path) -> None:
+    """A header containing the literal marker must not read as a fired dump.
+
+    The filter matches the marker at the start of a line. Matching it anywhere
+    would classify an arm-time header as a snapshot whenever a node id contained
+    that text -- the one direction in which this filter can lie, and the report
+    is the surface a cancelled job is judged by.
+    """
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    nodeid = f"tests/unit/a.py::test_weird[{watchdog.FIRED_MARKER}0:04:00)]"
+    (dumps / "worker-7.log").write_text(
+        f"{watchdog.ARM_MARKER}{nodeid} exceeded 240s; every thread follows.\n",
+        encoding="utf-8",
+    )
+
+    report = watchdog.report_dumps(dumps)
+
+    assert "(fired," not in report, "an arm-time header was read as a snapshot"
+    assert "never fired" in report
+    assert f"in flight at cancel, not fired: {nodeid}" in report
+
+
+def test_a_bound_no_timer_can_hold_disables_the_instrument(monkeypatch) -> None:
+    """A parseable-but-oversized bound must disable, not kill the shard.
+
+    ``float()`` accepts ``inf`` and ``nan``, and every finite value at or above
+    ``2**63`` nanoseconds is beyond the ``time_t`` ``faulthandler`` converts to,
+    where the C timer raises ``OverflowError`` from inside the first test's hook
+    -- an ``INTERNALERROR`` that fails the shard with ``no tests ran``. That is
+    the failure class this module's safety argument is written about, so the
+    value has to be refused before it reaches the timer.
+    """
+    for raw in ("1e18", "1e10", "2e10", "inf", "1e400", "nan", "9223372036.854776"):
+        monkeypatch.setenv(watchdog.ENV_SECONDS, raw)
+        assert watchdog.enabled_seconds() is None, raw
+    # The largest value the timer actually accepts is still honoured.
+    monkeypatch.setenv(watchdog.ENV_SECONDS, "9223372035.854776")
+    assert watchdog.enabled_seconds() == 9223372035.854776
+
+
+def test_the_worker_survives_a_bound_the_timer_rejects(monkeypatch) -> None:
+    """``arm`` swallows ``OverflowError`` too, belt and braces.
+
+    ``enabled_seconds`` refuses the value at parse time, but a bound can reach
+    the timer from a direct construction -- and this is the one call whose
+    failure mode is the whole shard, so the guard names every exception the C
+    timer is known to raise rather than trusting the caller.
+    """
+
+    class _OverflowingFaulthandler(_FakeFaulthandler):
+        def dump_traceback_later(self, seconds, **kwargs):
+            raise OverflowError("timestamp out of range for platform time_t")
+
+    _install_worker(monkeypatch)
+    monkeypatch.setattr(watchdog, "faulthandler", _OverflowingFaulthandler())
+
+    watchdog.note_start("tests/unit/a.py::test_one")  # must not raise
+
+    worker = watchdog._WORKER
+    assert worker is not None and worker._disabled and not worker._armed
 
 
 def test_the_report_mode_is_quiet_on_a_missing_directory(tmp_path, capsys) -> None:
@@ -431,10 +497,23 @@ def test_no_ci_job_runs_both_watchdogs_in_one_process() -> None:
     worker, while the e2e stage runs ``-n0`` with no variable. Pin the invariant
     rather than leaving it to prose.
     """
+    import tomllib
+
     import yaml
 
     repo = Path(__file__).resolve().parents[2]
     jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    config = tomllib.loads((repo / "pyproject.toml").read_text())
+    addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
+
+    # Both halves of the invariant: the shard job is the one that arms a worker
+    # timer, and it must keep deselecting the e2e stage whose own C timer would
+    # displace ours. Without the second assertion, dropping `-m "not e2e"` from
+    # addopts would falsify the documented claim while this pin stayed green.
+    assert (jobs["test"].get("env") or {}).get(
+        watchdog.ENV_SECONDS
+    ), "the test job must arm the watchdog"
+    assert "not e2e" in addopts, "the shard job must keep deselecting the e2e stage"
     for name, job in jobs.items():
         if name == "test":
             continue
