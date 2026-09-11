@@ -237,8 +237,12 @@ def test_set_never_reports_zero_characters_after_a_successful_write(
     calls = {"n": 0}
 
     def flaky_list(*args: Any, **kwargs: Any) -> list[Any]:
+        # `>= 1`, not `> 1`: the `set` path makes exactly ONE
+        # `list_credentials` call (the confirming read-back), so a fault armed
+        # on the second call never fires and the test passes whether or not
+        # the production fix is present.
         calls["n"] += 1
-        if calls["n"] > 1:
+        if calls["n"] >= 1:
             raise sqlite3.OperationalError("database is locked")
         return real_list(*args, **kwargs)
 
@@ -248,6 +252,73 @@ def test_set_never_reports_zero_characters_after_a_successful_write(
     assert f"({len(FAKE_TICKET)} characters)" in out
     assert "(0 characters)" not in out
     assert FAKE_TICKET not in out
+
+
+def _disable_the_row(store: AuthStore) -> None:
+    """Soft-delete the ticket row the way `disable_credential` would."""
+    rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
+    assert len(rows) == 1
+    store.disable_credential(rows[0].id, "invalidated-token")
+
+
+def test_a_soft_deleted_row_is_still_visible_and_removable(store: AuthStore) -> None:
+    """A disabled row still holds the plaintext cookie, so it must not hide.
+
+    `list_credentials` filters `disabled_cause is None` by default
+    (auth_store.py:578), which made `rm` answer "No ... ticket stored." with
+    exit 0 while the credential was on disk.
+    """
+    store_ticket(store, FAKE_TICKET)
+    _disable_the_row(store)
+
+    record = read_ticket_record(store)
+    assert record is not None, "a disabled row still contains the cookie"
+    assert record["length"] == len(FAKE_TICKET)
+
+    assert delete_ticket(store) is True
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True) == []
+
+
+def test_rm_removes_a_soft_deleted_row_rather_than_reporting_none(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store_ticket(store, FAKE_TICKET)
+    _disable_the_row(store)
+
+    assert _qwencloud_ticket_action("rm", store) == 0
+    out = capsys.readouterr().out
+    assert "Removed the stored QwenCloud console ticket." in out
+    assert "No QwenCloud console ticket stored." not in out
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True) == []
+
+
+def test_rm_points_at_the_console_on_the_SUCCESS_path(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Success is when a user worried about exposure stops looking.
+
+    Deleting the row ends local use; the browser session stays valid until it
+    is signed out server-side.
+    """
+    store_ticket(store, FAKE_TICKET)
+    assert _qwencloud_ticket_action("rm", store) == 0
+    out = capsys.readouterr().out
+    assert "QwenCloud console" in out
+    assert "still valid" in out
+    assert FAKE_TICKET not in out
+
+
+def test_a_store_reporting_a_none_path_is_refused(store: AuthStore) -> None:
+    """A path that cannot be checked must not be treated as checked."""
+
+    class PathlessStore:
+        db_path = None
+
+        def upsert_credential(self, provider: str, credential: dict[str, Any]) -> None:
+            raise AssertionError("must not write when the path is unknown")
+
+    with pytest.raises(TicketStoreError):
+        store_ticket(PathlessStore(), FAKE_TICKET)
 
 
 def test_an_empty_ticket_is_refused(store: AuthStore) -> None:
