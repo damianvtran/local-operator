@@ -4,7 +4,15 @@ Only complete suffix rows are replayed. Prunes occur after their targets, so
 all prunes affecting these rows are in this same suffix. An incomplete final
 row, malformed row, or unresolved compaction cut makes the preview unavailable:
 we cannot prove that omitted bytes did not retract something we would display.
-No attachment is hydrated and this reader never starts an owner.
+
+Externalized attachments ARE hydrated, through the store that owned the journal
+(``store_for_transcript_dir``) rather than the reader's environment, because a
+preview that paints "image unavailable" for a picture the session actually has
+is the same false receipt this reader exists to avoid. The cost is bounded and
+paid off the loop: rows are still capped at ``PREVIEW_BYTES`` of journal, and
+each image reference is one file read whose size is that image (no decoding
+here — the widget decodes). What stays true from before: this reader never
+starts an owner.
 """
 
 from __future__ import annotations
@@ -13,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.history_window import DISPLAY_HISTORY_MESSAGES
 from local_operator.session.transcript import TranscriptEntry, replay_entries
 
@@ -66,7 +75,7 @@ def read_saved_preview(directory: Path) -> SavedPreview:
         (str(entry.payload.get("cwd", "")) for entry in entries if entry.type == "session"),
         "",
     )
-    messages = replay_entries(entries, None)
+    messages = replay_entries(entries, store_for_transcript_dir(directory))
     # The byte ceiling bounds disk/parse work; a separate row ceiling bounds
     # replay bookkeeping and Textual's preparation of many tiny messages. Apply
     # prunes/compaction BEFORE slicing, never truncate away their instructions.
