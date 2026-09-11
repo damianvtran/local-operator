@@ -33,6 +33,20 @@ The GRANULARITY is deliberate: the timer is armed around the specific step
 under test rather than around the whole test, so the dump names the operation
 that hung instead of "the test was slow".
 
+ONE PROCESS-GLOBAL TIMER, SHARED WITH THE SHARD WATCHDOG
+``faulthandler``'s timer is process-wide, so a ``bounded`` block displaces any
+other armed timer and its ``finally`` leaves nothing armed. ``tests.shard_stall_watchdog``
+arms the same timer around one xdist test item, so a test body that entered
+``bounded`` would take that worker's stacks away for the rest of the test (the
+controller would still name the test from xdist reports; only the stacks are
+lost). No CI configuration runs the two in one process -- the shard job sets
+``LOCAL_OPERATOR_SHARD_STALL_SECONDS`` with ``e2e`` deselected, and this stage
+runs ``-n0`` without it, so there are no xdist workers here -- and that
+invariant is pinned by
+``tests/unit/test_shard_stall_watchdog.py::test_no_ci_job_runs_both_watchdogs_in_one_process``.
+Nothing interlocks the timers, because nothing runs them together; if a future
+job did, the interlocks would have to be added deliberately.
+
 ``exit=True`` kills the whole process, so a fired watchdog takes down the
 pytest worker with it. That is the intended behaviour and not a rough edge: a
 deadlocked interpreter cannot report a test failure through any gentler
