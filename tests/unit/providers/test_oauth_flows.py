@@ -158,6 +158,19 @@ async def test_manual_input_only_pastes_code_without_server() -> None:
     assert flow.bound_port is None  # no server in manual mode
 
 
+#: Backstop for the squatter's read, in seconds. NOT a timing assertion and
+#: not a bound on the behaviour under test: the read is normally ended by the
+#: peer closing (the flow's ``GET /cancel`` probe closes its writer in its own
+#: ``finally`` after a 2s read timeout, so the peer is gone within ~4s). This
+#: exists so that a FUTURE peer that connects and never closes cannot turn the
+#: double back into the unbounded wait it was written to remove -- the same
+#: shape ``tests/e2e/watchdog.py`` describes, where the deadline is there "so a
+#: genuine hang fails the run instead of blocking forever. It is a backstop,
+#: not the assertion." 60s is ~15x the worst measured peer-close (3.85s single
+#: test call on 3.12), so a healthy run can never reach it.
+_PEER_CLOSE_BACKSTOP_S = 60.0
+
+
 class _PortSquatter:
     """A server that occupies a port and answers nothing — without hanging.
 
@@ -173,33 +186,58 @@ class _PortSquatter:
     ``StreamReaderProtocol.eof_received()`` returns True (a half-close is
     legal HTTP), so the transport stays open and the server never detaches it.
 
-    Measured, because the two interpreters disagree and that is why this went
-    unnoticed: with ``lambda r, w: None``,
-    ``test_pinned_port_fails_before_browser_when_busy`` hangs and is killed by
-    ``timeout 45`` on **3.12.13, 3 of 3 runs** (its coroutine parked on an idle
-    event loop, its stack a bare ``await blocker.wait_closed()``), while on
-    3.14 the identical code passes, because asyncio replaced the
-    ``_active_count`` gate with a ``_clients`` set for 3.14. On CI that
-    difference is a 20-minute ``timeout-minutes`` cancel with no failing
-    assertion and a ~6-minute silent tail -- the stall the shard watchdog
-    (``tests/shard_stall_watchdog.py``) named in run 34558244102, job
+    WHAT THE INTERPRETERS ACTUALLY DIFFER ON, because the version number is not
+    the property and naming the property is what makes this readable on the
+    next machine. ``Server`` tracks accepted connections with
+    ``self._active_count = 0`` on 3.12 -- a plain counter, decremented only by
+    ``Server._detach()``, which runs from the transport's ``connection_lost``.
+    A handler that never closes its writer leaves the transport open, so
+    ``connection_lost`` never arrives, the counter stays at 1 and
+    ``wait_closed()`` waits for the life of the loop. From **3.13** the same
+    field is ``self._clients = weakref.WeakSet()``, and the server holds its
+    accepted transports only WEAKLY, so a connection nothing else keeps alive
+    stops counting against the waiter -- which is why ``wait_closed()`` returns
+    there even though the socket was never released.
+
+    Verified against the interpreters' own sources, not recalled:
+    ``3.12.13 asyncio/base_events.py:281`` has ``_active_count`` while
+    ``3.13.12`` and ``3.14.3`` both have ``_clients`` at ``:283``, and the same
+    probe returns on 3.13.12 and 3.14.3 and does not on 3.12.13. So the
+    divergence is 3.12 versus 3.13-and-later, and it is the WEAK reference --
+    not the version -- that decides it.
+
+    Measured consequence, because this is the reason it went unnoticed: with
+    ``lambda r, w: None``, ``test_pinned_port_fails_before_browser_when_busy``
+    hangs and is killed by ``timeout 45`` on **3.12.13, 3 of 3 runs** (its
+    coroutine parked on an idle event loop, its stack a bare
+    ``await blocker.wait_closed()``), while the identical code passes on 3.13
+    and 3.14. On CI that difference is a 20-minute ``timeout-minutes`` cancel
+    with no failing assertion and a ~6-minute silent tail -- the stall the shard
+    watchdog (``tests/shard_stall_watchdog.py``) named in run 34558244102, job
     103135419093 -- so the double, not the product, is the defect here.
 
     Reading to EOF before closing keeps the double FAITHFUL as well as safe:
     it still answers nothing, so the probe still has to wait out its own read
     timeout, which is the behaviour under test. The read is bounded by the peer
-    closing, never by a clock.
+    closing first, with :data:`_PEER_CLOSE_BACKSTOP_S` as a backstop so the
+    double cannot itself become the unbounded wait it exists to prevent.
     """
 
     def __init__(self) -> None:
         self.accepted: list[asyncio.StreamWriter] = []
+        # Deliberately STICKY: it means "at least one handler finished", which
+        # is all the guard's fast-path assertion needs, because a leak of any
+        # ADDITIONAL connection is caught by that guard's ``wait_for`` bound
+        # rather than by this flag. A count would only sharpen the failure
+        # message in a case that cannot arise at either call site (each accepts
+        # exactly one connection, the flow's cancel probe).
         self.released = False
 
     async def __call__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.accepted.append(writer)
         try:
-            await reader.read(-1)
-        except Exception:  # a reset counts as the peer going away
+            await asyncio.wait_for(reader.read(-1), timeout=_PEER_CLOSE_BACKSTOP_S)
+        except Exception:  # a reset or the backstop: either way the peer is gone
             pass
         finally:
             writer.close()
