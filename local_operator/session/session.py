@@ -7376,6 +7376,25 @@ class Session:
         notice fired immediately after cannot overtake it: this method awaits a
         transcript write and :meth:`journal_mcp_recovery` awaits nothing, so
         without the lock the SECOND notice lands FIRST (review round 1, R1).
+
+        **The append does not advance ``retention.session_activity()``.** An
+        incident is bookkeeping ABOUT a session, never work done IN it: it is
+        journalled at BOOT, before the user has typed anything, so letting it
+        restamp the transcript tells the ``/resume`` picker the session was
+        just worked in. Measured before the fix
+        (``FINDING-resume-clock.md``), a boot with two expired MCP OAuth
+        grants moved session ``965426f4d60d``'s displayed age from its real
+        8.14 h to 3.06 h — a 5.1 h lie — and 19 of 509 rows in that store
+        displayed an age wrong by more than a minute, worst case 13.0 h. The
+        clock is shared with ``session.cleanup``, so the same write also
+        deferred retention on sessions nobody had touched.
+
+        The entry itself still lands in ``transcript.jsonl`` byte-for-byte:
+        :func:`_default_convert_to_llm` renders it as an injected user message
+        on the next live turn and on resume replay, the mobile daemon folds it
+        into a notice row, and compaction replays it inside the kept window.
+        Only the file's mtime is put back — see
+        :meth:`Transcript._write_entries` for the bound on that restore.
         """
         from local_operator.incidents import format_incident_message
 
@@ -7389,7 +7408,7 @@ class Session:
         )
         try:
             async with self._journal_lock:
-                await self._transcript.append_message(message)
+                await self._transcript.append_message(message, preserve_mtime=True)
                 self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
