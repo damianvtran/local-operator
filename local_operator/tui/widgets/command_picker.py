@@ -52,7 +52,7 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
-from local_operator.sigils import SlashContext, is_boundary
+from local_operator.sigils import SlashContext, at_token, is_boundary, split_token
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
     ArgumentChoice,
@@ -1206,69 +1206,6 @@ def argument_suggestions(
     lowered = query.lower()
     prefixed = [pair for pair in matches if pair[0].lower().startswith(lowered)]
     return prefixed or matches
-
-
-def _reference_grammar() -> tuple[
-    Callable[[str, int | None], "SlashContext | None"],
-    Callable[[str], tuple[str, str]],
-]:
-    """``(at_token, split_token)`` from the resolver — the ONE lazy seam.
-
-    SCAFFOLDING WITH A NAMED REMOVAL POINT. Read this before copying the idiom.
-
-    ``at_token`` and ``split_token`` are pure grammar: a parser over
-    :class:`SlashContext` and :func:`is_boundary`, both of which already live in
-    ``local_operator/sigils.py``. That is their correct final home, and this
-    module already imports from ``sigils`` at module scope — so when they move
-    there, this function DISAPPEARS and its three callers import them directly
-    beside ``SlashContext``. Nothing else about the ``@`` feature changes.
-
-    Until then they live in ``local_operator/references.py``, a SESSION-layer
-    module, and this is a Textual widget. A module-scope import of it here
-    would point a widget at the session layer and make this module's import
-    order depend on it — the same wrong direction that put the sigil grammar in
-    ``sigils.py`` in the first place. The lazy import follows the precedent in
-    ``harness/rows.py:103-108`` (``typed_line_of``) rather than inventing a
-    second idiom, and costs one ``sys.modules`` dict lookup per call after the
-    first, which is nothing beside the keystroke work around it.
-
-    ONE accessor rather than an inline import in each caller, deliberately: the
-    relocation above must be a single edit, and five copies of the same lazy
-    import is the thing that makes it five.
-
-    Failure is NOT swallowed, unlike ``typed_line_of``'s. A missing resolver is
-    a broken install, and this grammar has no meaningful degraded answer —
-    reporting "no token" would present as a picker that silently never opens,
-    which is far harder to diagnose than the ImportError.
-    """
-    from local_operator.references import at_token, split_token
-
-    return at_token, split_token
-
-
-def at_token(text: str, cursor: int | None = None) -> SlashContext | None:
-    """The active ``@path`` token at ``cursor``, or ``None``.
-
-    Forwards to the resolver's parser through :func:`_reference_grammar`, which
-    is the one definition of the ``@`` grammar and is shared with the
-    submit-side expander so the composer and the expander cannot disagree about
-    where a token starts and ends.
-    """
-    parse, _ = _reference_grammar()
-    return parse(text, cursor)
-
-
-def split_token(query: str) -> tuple[str, str]:
-    """``(dir_part, name_query)`` for an ``@`` token's query.
-
-    Forwards to the resolver through :func:`_reference_grammar`. The editor
-    needs this to key its directory re-arm (``@src/`` and ``@src/ap`` are the
-    same directory; ``@src/sub/`` is not), and it must be the SAME split the
-    resolver performs or the composer would list one directory while the
-    expander read another.
-    """
-    _, split = _reference_grammar()
-    return split(query)
 
 
 def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[str, ArgumentChoice]]:

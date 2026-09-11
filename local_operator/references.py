@@ -53,6 +53,12 @@ CONSTRAINT — this is a SESSION-layer leaf. It may import stdlib,
 :mod:`local_operator.harness.approval`, and nothing from
 ``local_operator.tui.*`` at module scope (see :func:`scan_directory`) or from
 ``local_operator.session.*`` (that direction is the cycle).
+
+The ``@`` GRAMMAR IS NOT HERE. :func:`~local_operator.sigils.at_token` and
+:func:`~local_operator.sigils.split_token` live in :mod:`local_operator.sigils`
+with the boundary rule they are built on, below both this module and the
+composer, so neither surface owns the parse. They are re-exported from here for
+their original callers; a NEW caller should import them from ``sigils``.
 """
 
 from __future__ import annotations
@@ -70,7 +76,15 @@ from local_operator.harness.approval import ApprovalGate, ask_approval
 # guards. Imported directly rather than through ``builtin``'s namespace because
 # a re-export that happens to exist is not a contract.
 from local_operator.media import sniff_image_file
-from local_operator.sigils import SlashContext, is_boundary
+
+# ``at_token``/``split_token`` are re-exported (see ``__all__``) because they
+# were this module's public surface before the grammar moved to its correct
+# home in ``sigils.py``, and a caller that imported them from here must keep
+# resolving to the very same object. ``_token_end`` is imported for
+# :func:`_reference_tokens`, which is resolver logic and stayed behind: the
+# submit side reads where a token ends from the leaf rather than reimplementing
+# it, which is precisely what ``sigils.py`` exists for.
+from local_operator.sigils import _token_end, at_token, is_boundary, split_token
 from local_operator.tools.builtin import (
     _GREP_PRUNE_DIRS,
     INTERNAL_READ_HEAD_CHARS,
@@ -161,165 +175,6 @@ def at_references_enabled() -> bool:
     caching this at import would be wrong.
     """
     return os.environ.get(AT_REFERENCES_ENV, "1").strip() not in ("0", "false", "no")
-
-
-def _line_of_cursor(text: str, cursor: int | None) -> tuple[str, int, int]:
-    """``(line, line_start, column)`` for ``cursor`` within ``text``.
-
-    RELOCATABLE, and it moves with :func:`at_token` — see that function's
-    docstring for where and why. Pure: stdlib string operations over its two
-    arguments, no module state, no other symbol in this module.
-
-    Deliberately NOT shared with ``command_picker._line_of_cursor``. That one is
-    a widget-module function (importing it would put Textual on the
-    ``session_factory`` path, which ``test_import_graph.py:163`` fails on), and
-    it carries concerns this caller does not have: CRLF stripping and caret
-    clamping for a LIVE caret in a draft buffer. Duplicating those concerns
-    into the session layer is worse than four lines that do only what a
-    submitted, finished string needs.
-    """
-    if cursor is None or cursor > len(text):
-        cursor = len(text)
-    if cursor < 0:
-        cursor = 0
-    line_start = text.rfind("\n", 0, cursor) + 1  # 0 when no newline precedes
-    line_end = text.find("\n", cursor)
-    if line_end == -1:
-        line_end = len(text)
-    return text[line_start:line_end], line_start, cursor - line_start
-
-
-def _token_end(line: str, at: int) -> tuple[int, str]:
-    """``(end, query)`` for the ``@`` token opening at ``line[at]``.
-
-    ``end`` indexes the first cell past the token, so a completion can rebuild
-    just that span.
-
-    RELOCATABLE, and it moves with :func:`at_token`. Pure: stdlib string
-    operations, no module state. NOTE for whoever performs that move — this is
-    the ONE helper in the cluster with a second caller that stays behind
-    (:func:`_reference_tokens`, which is resolver logic, not grammar). After
-    the move ``references.py`` imports it back from
-    :mod:`local_operator.sigils` alongside :func:`is_boundary`. That is the
-    correct direction and not a new edge: the submit-side resolver reading the
-    grammar from the leaf is exactly what ``sigils.py`` exists for.
-
-    Two forms. UNQUOTED terminates on whitespace only — never on ``/``, which
-    is the single most important difference from ``skill_token``: a path IS
-    slashes, and a token that ended at the first one could never name
-    ``src/app.py``. QUOTED (``@"my file.txt"``) runs to the closing quote and
-    yields the content between the quotes, which is the only way to reference a
-    name containing a space; an unterminated quote falls back to the whitespace
-    rule so a half-typed ``@"`` still parses instead of swallowing the line.
-    """
-    if at + 1 < len(line) and line[at + 1] == '"':
-        close = line.find('"', at + 2)
-        if close != -1:
-            return close + 1, line[at + 2 : close]
-    end = at + 1
-    while end < len(line) and not line[end].isspace():
-        end += 1
-    return end, line[at + 1 : end]
-
-
-def _active_at(line: str, column: int) -> int | None:
-    """Index of the boundary ``@`` the caret is editing, or ``None``.
-
-    RELOCATABLE, and it moves with :func:`at_token`. Pure, and its only
-    non-stdlib dependency is :func:`is_boundary`, which already lives in the
-    destination module.
-
-    The last boundary sigil at or before the caret is the one being edited
-    (``@a @sr|`` is ``@sr``), which is ``_active_sigil``'s rule in
-    ``command_picker.py:648-656`` — read from :mod:`local_operator.sigils`'s
-    :func:`is_boundary` so the composer and this module cannot disagree about
-    where a token starts.
-    """
-    candidate: int | None = None
-    for index, char in enumerate(line):
-        if char == "@" and is_boundary(line, index) and index <= column:
-            candidate = index
-    return candidate
-
-
-def at_token(text: str, cursor: int | None = None) -> SlashContext | None:
-    """The ``@`` token the caret sits in, or ``None``.
-
-    ITS PERMANENT HOME IS :mod:`local_operator.sigils`, NOT THIS MODULE. It is
-    pure grammar — a parser over ``SlashContext`` and :func:`is_boundary` with
-    no dependence on the resolver, the deny-list or the approval gate — and it
-    sits here only because the frozen interface contract placed it here. The
-    composer (``command_picker.py``, a Textual widget) needs it, and a widget
-    importing a SESSION-layer module is the cross-layer edge ``sigils.py`` was
-    created to prevent; until the move lands, that caller holds it with a lazy
-    import as deliberate scaffolding.
-
-    The move is mechanical BY CONSTRUCTION: this function and its three
-    helpers (:func:`_line_of_cursor`, :func:`_token_end`, :func:`_active_at`)
-    are pure and self-contained, with no closure state and no module-level
-    cache. Read ``_token_end``'s docstring for the single wrinkle — it has a
-    caller that stays behind.
-
-    A reader who cannot tell a temporary arrangement from an intended one
-    leaves it forever, which is why this paragraph is here and not in a ticket.
-
-    The ``@`` counterpart to ``skill_token``, with three deliberate
-    differences and no others:
-
-    - a BARE ``@`` returns ``query=""`` and opens the list on the cwd, rather
-      than being special-cased closed — ``@`` is how you ask "what is here";
-    - the token MAY contain ``/`` and terminates on whitespace only (see
-      :func:`_token_end`);
-    - there are no ``commands``/``prompt_commands``/``name_commands``
-      parameters and no claiming. ``$`` needs them because a terminated command
-      owns the rest of its line as an argument and the two sigils would fight
-      over one caret; ``@`` has no command-argument arbitration to do.
-
-    An email address is not a token and never was: ``user@host.com`` has a
-    non-space character before the ``@``, so :func:`is_boundary` is False and
-    the parse stops before any filesystem work.
-
-    Word-phase only, like every other parser here: the caret must be INSIDE the
-    token, so moving out into the request closes the list.
-
-    Hand-typed UNQUOTED spaces are unsupported, exactly as in a shell —
-    ``@my file.txt`` references ``my``. Use ``@"my file.txt"``.
-    """
-    line, line_start, column = _line_of_cursor(text, cursor)
-    at = _active_at(line, column)
-    if at is None:
-        return None
-    end, query = _token_end(line, at)
-    if column > end:
-        return None
-    return SlashContext(line_start + at, query, line_start + end)
-
-
-def split_token(query: str) -> tuple[str, str]:
-    """Split a token's ``query`` into ``(dir_part, name_query)`` at the LAST ``/``.
-
-    ITS PERMANENT HOME IS :mod:`local_operator.sigils`, for the reason spelled
-    out in :func:`at_token`'s docstring: it is pure grammar that the composer
-    needs, parked here only because the frozen contract placed it here. It is
-    self-contained — no helper, no module state, not one other symbol from
-    this module — so the move is a cut and a paste.
-
-    This is how a shell completes a path, which is the behaviour a terminal
-    user already has in their fingers, and it makes deepening lazy by
-    construction: one directory is scanned per segment typed, never the tree.
-
-    ::
-
-        ""             -> ("",             "")
-        "sr"           -> ("",             "sr")
-        "src/"         -> ("src/",         "")
-        "src/ap"       -> ("src/",         "ap")
-        "../sibling/x" -> ("../sibling/",  "x")
-    """
-    cut = query.rfind("/")
-    if cut == -1:
-        return "", query
-    return query[: cut + 1], query[cut + 1 :]
 
 
 def _is_sensitive(path: Path) -> bool:
