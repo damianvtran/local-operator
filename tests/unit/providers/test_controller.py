@@ -2066,6 +2066,104 @@ class TestQwenCloudConsoleRoute:
         assert [r.identity for r in reports] == [email]
 
     @pytest.mark.asyncio
+    async def test_two_dead_grants_spend_the_one_ticket_once(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """One console session for the account, not one per login.
+
+        The ticket is account-wide, so attempting the route per identity
+        would send a request each and land a report under each. The panel
+        flattens limits with no dedup by id (usage_panel.py:407), so the same
+        7-day window would render TWICE. This is the duplicate-row failure
+        the ``live[...]`` key mirroring prevents for ONE report, arriving
+        through a second door: mirroring cannot help when two identities each
+        produce their own console report.
+        """
+        emails = []
+        for name in ("one", "two"):
+            email = f"{name}@example.test"
+            store.upsert_credential(
+                "alibaba-token-plan",
+                {
+                    "type": "oauth",
+                    "access": "fake-mgmt",
+                    "email": email,
+                    "expires": 1,
+                    "account_id": f"acct-{name}",
+                },
+            )
+            emails.append(email)
+        self._ticket(store)
+        assert controller._expected_oauth_identities("alibaba-token-plan") == emails
+
+        def _report() -> UsageReport:
+            # A fresh object per call: one shared instance would collapse the
+            # duplicate by identity rather than by the fix under test.
+            return UsageReport(
+                provider="alibaba-token-plan",
+                limits=[
+                    UsageLimit(
+                        id="credits-7d",
+                        label="Credits (7d)",
+                        amount=UsageAmount(used=24.05, limit=100.0, unit="percent"),
+                    )
+                ],
+            )
+
+        calls: list[dict[str, Any] | None] = []
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append(extra_creds)
+            return _report()
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "one account-wide ticket, so one request per cycle"
+        limit_ids = [limit.id for report in reports for limit in report.limits]
+        assert limit_ids == ["credits-7d"], "the same window must not render twice"
+        # The second login keeps its row on the panel; it simply carries no
+        # numbers, which is what it did before the console route existed.
+        assert [r.identity for r in reports] == emails
+
+    @pytest.mark.asyncio
+    async def test_a_failing_ticket_is_not_retried_per_identity(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The attempt is counted, not the success.
+
+        A ticket that answers ``None`` (expired -- the gateway returns 200
+        with an errorCode) is a property of the TICKET, not of the identity
+        that happened to reach it. Counting only successes would retry the
+        same dead cookie once per expected login, turning one useless
+        request into N on every refresh of a multi-login account.
+        """
+        for name in ("one", "two"):
+            store.upsert_credential(
+                "alibaba-token-plan",
+                {
+                    "type": "oauth",
+                    "access": "fake-mgmt",
+                    "email": f"{name}@example.test",
+                    "expires": 1,
+                    "account_id": f"acct-{name}",
+                },
+            )
+        self._ticket(store)
+        calls: list[str] = []
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append(provider)
+            return None
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "a dead ticket costs one request, not one per login"
+
+    @pytest.mark.asyncio
     async def test_the_oauth_flavour_alias_reaches_the_route_too(
         self, controller, store, monkeypatch
     ) -> None:
