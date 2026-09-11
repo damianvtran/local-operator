@@ -740,42 +740,42 @@ Warnings that still hold, each of which has already cost a release:
   block an `--admin` merge, because `main`'s ruleset configures no required
   status checks and admins hold a bypass. The pre-tag check is the backstop.
 - **A shard failure on your branch alone is not evidence your diff caused it.**
-  CI shards the unit suite by `sorted(glob('tests/unit/**/test_*.py'))` and
-  `i % 5` (`.github/workflows/ci.yml`), so **adding a single test file
-  re-shards every file after it in sort order**. Derive the index against the
-  ref CI actually runs rather than a stale local checkout — figures written
-  into prose go out of date within days, so run it, do not read it:
+  CI shards the unit suite with `scripts/shard_tests.py` — a
+  longest-processing-time-first (LPT) partition of
+  `sorted(glob('tests/unit/**/test_*.py'))` by the measured per-file weights in
+  `tests/durations.json` (`.github/workflows/ci.yml`). The positional
+  `i % 5` split this replaced balanced file *counts*, ignored what files cost,
+  and so shuffled the slow cluster between shards as unrelated files were
+  added. LPT **still moves files between shards** — it assigns by remaining
+  capacity, so one new weight cascades; measured when the split landed, one
+  inserted file moved 326 of 458 files. What it fixes is the consequence:
+  balance is invariant under insertion, so there is no saturated shard for the
+  slow cluster to migrate *into*, and a shard's runtime stops being evidence
+  about who added what. Derive the shard against the ref CI actually runs
+  rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  git ls-tree -r --name-only origin/main \
-    | grep -E '^tests/unit/.*test_.*\.py$' | LC_ALL=C sort | nl \
-    | grep <the-test-file-that-failed>   # line N -> index N-1, shard (N-1) % 5
+  python scripts/shard_tests.py --shard <I> --total 5 --out /tmp/shard_<I>.txt
   ```
 
-  `LC_ALL=C` is load-bearing, and it is a property of **your** command, not of
-  CI. CI is locale-independent: `sorted()` compares Python strings by code
-  point. Shell `sort` does not — it honours `LC_COLLATE`, so on an
-  `en_*.UTF-8` locale it produces a different order from the one CI computed.
-  Since no displacement happens to be a multiple of 5, **every divergent file
-  then lands in a different shard** — measured at the time of writing, an
-  `en_*.UTF-8` shell sort misplaced 51 files where `LC_ALL=C` misplaced none.
-  So the flag does not make CI deterministic; it makes your
-  reproduction agree with a partitioner that was already deterministic.
-  Without it you are told a file moved shards when it did not, which is the
-  same misattribution this warning exists to prevent.
+  Run it once at `origin/main` and once at your branch (a worktree each, or
+  `git stash` between); it partitions the tree it is run in, and it sorts with
+  Python's `sorted()`, so it is locale-independent by construction. The
+  hand-rolled `git ls-tree | LC_ALL=C sort | nl` recipe this replaces computed
+  the retired positional index and is no longer valid — which also retires the
+  `LC_ALL=C` trap that recipe carried.
 
-  Run it once against `origin/main` and once against your branch. If the shard
-  differs, the failing test ran in a different group than it does on `main`, so
-  a failure appearing only on your branch may have nothing to do with your
-  diff. **A differing index is a reason to check attribution, not by itself an
-  explanation** — confirm either way by reproducing on clean `origin/main`
-  under the conditions CI uses (the shard job runs `pytest --cov`, and some
-  failures do not reproduce bare). The one case where the grouping genuinely
-  *is* the cause is cross-test pollution: if the test fails reproducibly in its
-  new shard and passes in its old one, the neighbours it now runs beside are
-  leaking or withholding state, and you have a test-isolation bug to fix rather
-  than a false alarm. Attributing one of these to a diff that touched no
-  related file has already cost a review round.
+  If the shard differs, the failing test ran in a different group than it does
+  on `main`, so a failure appearing only on your branch may have nothing to do
+  with your diff. **A differing shard is a reason to check attribution, not by
+  itself an explanation** — confirm either way by reproducing on clean
+  `origin/main` under the conditions CI uses (the shard job runs `pytest --cov`,
+  and some failures do not reproduce bare). The one case where the grouping
+  genuinely *is* the cause is cross-test pollution: if the test fails
+  reproducibly in its new shard and passes in its old one, the neighbours it now
+  runs beside are leaking or withholding state, and you have a test-isolation
+  bug to fix rather than a false alarm. Attributing one of these to a diff that
+  touched no related file has already cost a review round.
 - **Several PRs going red at once is a shared cause, not several bugs.**
   `cli-sanity` and `server-sanity` call a live model (both are marked
   "Live-LLM job" and take `OPENROUTER_API_KEY`), so a third-party outage or
