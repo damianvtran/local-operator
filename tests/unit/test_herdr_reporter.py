@@ -138,6 +138,17 @@ class FakeHerdrRow:
                 pytest.fail(f"row never reached {state}: {self.state} at seq {self.seq}")
             return self.seq
 
+    def wait_for_calls(self, count: int) -> None:
+        """Block until ``count`` calls have arrived, whatever the row now holds.
+
+        Needed where the assertion is about the state the row SETTLES at: a
+        `release-agent` clears `state`, so the check has to happen once the
+        reports have landed and before the release, not after a `join`.
+        """
+        with self._changed:
+            if not self._changed.wait_for(lambda: len(self.calls) >= count, timeout=WAIT_S):
+                pytest.fail(f"expected {count} calls, saw {[sub for sub, _ in self.calls]}")
+
     def seqs(self) -> list[int]:
         return [int(_flag(argv, "--seq")) for _, argv in self.calls]
 
@@ -996,6 +1007,172 @@ def test_the_heartbeat_survives_a_provider_that_raises() -> None:
     reporter.join(timeout=WAIT_S)
 
 
+def test_a_transition_racing_the_heartbeats_read_still_wins_the_row() -> None:
+    """A heartbeat that read a state a transition has since replaced DEFERS.
+
+    The M2 defect: the heartbeat sampled `working`, the session went `idle`
+    before the seq was minted, and the heartbeat's stale value took the
+    HIGHER seq — so Herdr's high-water mark, which exists to discard stale
+    reports, kept this one and the row disagreed with the session.
+
+    The guard is the mint counter, not a lock around the provider (which would
+    let a slow provider stall `release`; see the next test). The provider
+    below models the window exactly: it mutates the true state, releases the
+    transition thread, waits long enough that the transition mints first, and
+    returns the value it read BEFORE the change. It raises on every later tick
+    so a second heartbeat cannot self-correct the row and hide the bug.
+    """
+    row = FakeHerdrRow()
+    counter = itertools.count(1)
+    truth: list[HerdrState] = ["working"]
+    sampled = threading.Event()
+    deferred = threading.Event()
+    settled = threading.Event()
+    ticks = itertools.count(1)
+
+    def provider() -> HerdrState:
+        if next(ticks) > 1:
+            # Reaching a SECOND tick proves the first one finished deciding,
+            # which is what makes the assertions below deterministic rather
+            # than a race against the heartbeat's enqueue. It raises so no
+            # later tick can self-correct the row and hide a stale one.
+            settled.set()
+            raise RuntimeError("one tick only: a second would mask a stale row")
+        stale = truth[0]
+        truth[0] = "idle"
+        sampled.set()
+        # Held open until the transition below has actually minted, so the
+        # race the guard exists for is forced rather than hoped for.
+        assert deferred.wait(WAIT_S), "the transition never minted"
+        return stale
+
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=row,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.report("working")
+    reporter.set_state_provider(provider)
+    assert sampled.wait(WAIT_S), "the heartbeat never read the provider"
+    reporter.report("idle")  # mints while the provider is still parked
+    deferred.set()
+    row.wait_for_state("idle")
+    assert settled.wait(WAIT_S), "the heartbeat never finished its tick"
+
+    # The heartbeat's stale `working` was DROPPED, not minted behind the
+    # transition: two reports, and the row holds the true state. Asserted
+    # before the release, which clears the row the way Herdr does.
+    assert row.state == truth[0] == "idle", (row.state, row.seq, row.calls)
+    states = [_flag(argv, "--state") for sub, argv in row.calls if sub == "report-agent"]
+    assert states == ["working", "idle"], states
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+    seqs = row.seqs()
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+
+
+def test_a_blocking_provider_cannot_delay_release() -> None:
+    """The provider runs outside `_lock`, so it cannot stall the reporter.
+
+    This is the bound the mint-counter guard buys. Closing M2 by holding
+    `_lock` across the provider call would put caller-supplied code inside the
+    section `release` needs: measured at a 29.9 s `release()` against a
+    provider that slept 30 s, which also breaks the documented
+    EXIT_DRAIN_TIMEOUT_S bound. A contract saying "must be cheap" is not a
+    bound; not calling user code under the lock is.
+
+    The provider here violates that contract on purpose. `release` and `join`
+    must still return promptly, and the row must still be released.
+    """
+    recorder = Recorder()
+    counter = itertools.count(1)
+    entered = threading.Event()
+    unblock = threading.Event()
+
+    def blocking_provider() -> HerdrState:
+        entered.set()
+        unblock.wait(WAIT_S)  # violates "cheap and must not block"
+        return "working"
+
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.set_state_provider(blocking_provider)
+    assert entered.wait(WAIT_S), "the heartbeat never entered the provider"
+    try:
+        started = time.monotonic()
+        reporter.report("idle")
+        reporter.release()
+        reporter.join(timeout=reporter_mod.EXIT_DRAIN_TIMEOUT_S)
+        elapsed = time.monotonic() - started
+        # The resync thread is still parked in the provider, so `join` pays its
+        # bound once — never the provider's 10 s, and never 2x the bound.
+        assert elapsed < reporter_mod.EXIT_DRAIN_TIMEOUT_S + 0.5, elapsed
+        assert [sub for sub, _ in recorder.calls] == ["report-agent", "release-agent"]
+    finally:
+        unblock.set()
+
+
+def test_join_bounds_the_total_wait_not_each_thread() -> None:
+    """`join(timeout=T)` waits T in total, with BOTH of its threads blocked.
+
+    The M1 defect: `timeout` was passed to each `Thread.join` in turn, so a
+    reporter with a blocked worker AND a blocked resync thread paid 2T —
+    `join(timeout=1.0)` measured at 2.02 s. That let one reporter overrun the
+    shared `remaining` that `_drain_at_exit` computes from
+    EXIT_DRAIN_TIMEOUT_S, making the documented worst-case exit delay the
+    bound times the number of threads.
+
+    Both threads have to be blocked for the doubling to appear, which is why
+    this is pinned here rather than in the subprocess exit test: with a cheap
+    provider the resync thread exits the instant `release` latches, so it
+    never consumes its share of the budget.
+    """
+    counter = itertools.count(1)
+    wedged = threading.Event()
+    entered = threading.Event()
+
+    def wedged_invoker(subcommand: str, argv: Sequence[str]) -> None:
+        wedged.wait(WAIT_S)  # a herdr that never answers
+
+    def blocking_provider() -> HerdrState:
+        entered.set()
+        wedged.wait(WAIT_S)
+        return "working"
+
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=wedged_invoker,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.set_state_provider(blocking_provider)
+    reporter.report("idle")
+    assert entered.wait(WAIT_S), "the heartbeat never entered the provider"
+    try:
+        budget = 1.0
+        started = time.monotonic()
+        reporter.join(timeout=budget)
+        elapsed = time.monotonic() - started
+        assert reporter._thread is not None and reporter._thread.is_alive()
+        assert reporter._resync_thread is not None and reporter._resync_thread.is_alive()
+        # One budget, not one per thread. The margin absorbs scheduling on a
+        # loaded runner while staying far below the 2x a per-thread timeout
+        # costs.
+        assert elapsed < budget + 0.4, elapsed
+    finally:
+        wedged.set()
+        reporter.release()
+        reporter.join(timeout=WAIT_S)
+
+
 def test_the_heartbeat_does_not_break_mint_order_under_contention() -> None:
     """The module's central claim, with a heartbeat minting concurrently.
 
@@ -1103,18 +1280,41 @@ def test_the_release_lands_before_interpreter_exit(tmp_path: Path) -> None:
 
 
 def test_a_wedged_binary_bounds_the_exit_delay(tmp_path: Path) -> None:
-    """A `herdr` that never answers delays quit by at most the drain bound."""
+    """A `herdr` that never answers delays quit by at most the drain bound.
+
+    The child runs a LIVE HEARTBEAT against the wedged binary, which is what
+    makes the bound worth asserting: `join` has two threads to wait for, and
+    giving each of them the full timeout (the M1 defect) spent 2x the drain.
+    The provider is cheap, as its contract asks — a provider that blocks is
+    bounded by `test_a_blocking_provider_cannot_delay_release` in-process,
+    where the measurement is not competing with interpreter start-up.
+
+    MARGIN. The bound is EXIT_DRAIN_TIMEOUT_S (2 s) plus 2.5 s for CPython
+    start-up, the import of the reporter module and scheduling noise on a
+    loaded CI runner — a ceiling of 4.5 s. That leaves roughly 2 s of head
+    room over the ~2.4 s a correct drain measures here, while still failing
+    on a doubled deadline, whose floor is 2x2 s = 4 s of drain alone before
+    any start-up is added. A test that tolerated the doubling is what let M1
+    through: the old bound was 15 s, 7.5x the documented figure.
+    """
     import time
 
     shim = tmp_path / "herdr"
     shim.write_text("#!/bin/sh\nsleep 30\n")
     shim.chmod(0o755)
     child = textwrap.dedent("""
-        import sys
+        import sys, time
         sys.path.insert(0, {repo!r})
         from local_operator.herdr.reporter import HerdrReporter
-        reporter = HerdrReporter(pane_id="w1:p1", binary={shim!r})
+        reporter = HerdrReporter(
+            pane_id="w1:p1", binary={shim!r}, resync_interval_s=0.05
+        )
+        # Cheap, per the provider contract. The heartbeat still queues calls
+        # the wedged shim never answers, so the worker is blocked at exit and
+        # the resync thread is the second thread `join` has to bound.
+        reporter.set_state_provider(lambda: "working")
         reporter.report("idle")
+        time.sleep(0.3)  # several intervals, so the heartbeat has ticked
         reporter.release()
         """.format(repo=str(Path(__file__).resolve().parents[2]), shim=str(shim)))
     started = time.monotonic()
@@ -1123,7 +1323,6 @@ def test_a_wedged_binary_bounds_the_exit_delay(tmp_path: Path) -> None:
     )
     elapsed = time.monotonic() - started
     assert completed.returncode == 0, completed.stderr[-2000:]
-    # Generous against the 2s drain (interpreter start-up is inside the
-    # measurement) and far under the 30s + 5s timeout a synchronous join
-    # would have paid.
-    assert elapsed < 15.0, elapsed
+    # See MARGIN above. Far under the 30s + 5s timeout a synchronous join
+    # would have paid, and under 2x the drain a per-thread timeout costs.
+    assert elapsed < 4.5, elapsed

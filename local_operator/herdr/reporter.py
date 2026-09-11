@@ -85,6 +85,20 @@ dropped and logged at WARNING, not DEBUG: a row that has stopped tracking a
 live session is a user-visible defect, and DEBUG is where the original one
 hid for a whole release.
 
+That WARNING covers the MID-LIFE case — a pane still running when its retries
+run out, which is the one where a stale row persists while somebody is there
+to notice it. It is NOT reachable for a ``release-agent`` exhausting at exit,
+and the prose used to promise otherwise (review round 2, M5). The arithmetic:
+attempts land at ~0 s, ~0.5 s, ~2.5 s and ~10.5 s, so exhaustion is ~10.5 s
+out — but the exit drain gives up after :data:`EXIT_DRAIN_TIMEOUT_S` (2 s),
+and the interpreter then kills the daemon worker where it sits, mid-backoff,
+before even the third attempt. Nothing survives to log the WARNING.
+
+Loss on the exit path is therefore BOUNDED rather than reported: the drain
+caps what it costs the user, and a row left behind falls to Herdr's own
+reconciliation once the pane process disappears — the same fallback a hard
+crash relies on (see :func:`_register_exit_drain`).
+
 A report abandons its backoff the moment ``release`` latches — the release
 queued behind it is the delivery that matters, and the row is about to be
 gone. The ``release-agent`` itself does NOT abandon its backoff: nothing is
@@ -110,12 +124,22 @@ it asks the injected state provider (the band, through
 which keeps the single-derivation property this module is built on. 30 s is
 chosen against what the row is for: a sidebar a human glances at, where
 half a minute of staleness after an event as rare as a server restart is
-invisible, while the cost is one subprocess per pane per 30 s — two orders
-of magnitude below the 12.5 Hz tick that already reaches ``report``.
+invisible.
+
+The cost is one subprocess per pane per 30 s, and it is NEW work rather than
+a rounding error on existing work: comparing it against the 12.5 Hz tick
+(review round 2, M3) was wrong, because that tick is de-duped and spawns
+NOTHING for the whole of a turn. In spawns, which is the unit that costs
+anything: an idle pane goes from 0 to 2 per minute — 2880 a day, per pane —
+and a busy pane adds those same 2 a minute on top of its transitions. That
+is the price of a row that comes back after a server restart, paid whether
+or not one ever happens.
 
 It cannot break ordering: the heartbeat mints its seq and enqueues in the
 same ``_lock`` critical section every other caller uses (:meth:`_enqueue_report`
-is that section, factored out so there is exactly one of it). It cannot
+is that section, factored out so there is exactly one of it), so mint order is
+still delivery order. Nor can it outrank a newer transition, which takes a
+guard rather than the lock alone — see "THE STALE-READ RACE" below. It cannot
 resurrect a released row for the same reason ``report`` cannot: it re-tests
 the released latch INSIDE the lock, so a heartbeat racing a ``release`` is
 dropped rather than delivered behind it with a higher seq. And it stops
@@ -125,6 +149,37 @@ promptly rather than up to an interval late, because the sleep is
 The heartbeat deliberately does NOT de-dupe. Same state plus a new seq is
 exactly the message that recreates a lost row, and suppressing it as a
 duplicate would reintroduce the bug the retry above exists to fix.
+
+THE STALE-READ RACE, AND WHY THE PROVIDER IS NOT CALLED UNDER THE LOCK
+----------------------------------------------------------------------
+The provider is read OUTSIDE ``_lock``, so the read and the mint are not one
+atomic step, and a transition can land between them. Left alone that is a
+real defect: the heartbeat samples ``working``, the turn ends, ``report``
+mints ``idle`` at seq N, the heartbeat then mints its already-stale
+``working`` at N+1 — and Herdr's high-water mark, which exists to discard
+lower seqs, keeps the HIGHER stale one. Reproduced as a row reading
+``working`` against a session that was ``idle`` (review round 2, M2).
+
+The obvious fix — hold ``_lock`` across the provider call — is worse than the
+bug. It puts caller-supplied code inside the one critical section ``report``
+and ``release`` both need, so a provider that blocks stalls the whole
+reporter: measured at a 29.9 s ``release()`` against a provider that slept,
+which also blows the :data:`EXIT_DRAIN_TIMEOUT_S` bound the exit drain
+promises. A contract saying "must be cheap" is not a bound; not calling user
+code under the lock is.
+
+So the heartbeat instead detects the race rather than preventing it. Every
+mint increments ``_mints`` inside the critical section that mints seqs. The
+heartbeat snapshots that counter BEFORE reading the provider and passes the
+snapshot to :meth:`_enqueue_report`, which re-checks it under the lock and
+drops the tick if it moved. Why that is sufficient: a stale read is harmful
+only if a transition landed between the snapshot and the enqueue; every such
+transition mints, so it bumps the counter, so the guard sees it and the
+heartbeat defers to it — and deferring loses nothing, because that newer
+transition carries the truth the heartbeat was trying to assert. A transition
+landing AFTER the heartbeat's mint needs no guard at all: it takes a higher
+seq and wins at Herdr on its own. Either way the newest word wins, with the
+provider still outside the lock.
 """
 
 from __future__ import annotations
@@ -202,8 +257,12 @@ Invoker = Callable[[str, Sequence[str]], None]
 Clock = Callable[[], int]
 
 #: Reads the CURRENT state, for the heartbeat to re-assert. Called off the
-#: event loop, so it must be cheap and must not block; the band's
-#: implementation is two attribute reads.
+#: event loop and NEVER with ``_lock`` held, so a slow or wedged
+#: implementation delays only its own heartbeat tick — not ``report``, not
+#: ``release``, not the exit drain. It should still be cheap and not block
+#: (the band's implementation is two attribute reads), but the module no
+#: longer depends on that for its bounds. See "WHY A HEARTBEAT" for the
+#: mint counter that makes a stale read harmless without the lock.
 StateProvider = Callable[[], HerdrState]
 
 
@@ -337,6 +396,11 @@ class HerdrReporter:
         self._lock = threading.Lock()
         self._last: HerdrState | None = None
         self._seq = 0
+        #: How many seqs have been minted, under `_lock`. Not a sequence
+        #: number and never sent: purely the generation counter the heartbeat
+        #: compares against to tell whether a transition overtook the state it
+        #: just read (review round 2, M2).
+        self._mints = 0
         #: Every call ever enqueued, in seq order. `None` is the worker's
         #: stop sentinel and is enqueued exactly once, by `release`.
         self._queue: queue.SimpleQueue[tuple[str, tuple[str, ...]] | None] = queue.SimpleQueue()
@@ -438,9 +502,17 @@ class HerdrReporter:
         that does is logged and the tick skipped, because a heartbeat that
         killed its own thread would silently take the resync with it.
         """
-        self._state_provider = provider
-        if provider is None or self._released.is_set():
+        # Detaching always takes effect; attaching to a RELEASED reporter does
+        # not store anything. The heartbeat is over at that point, so the only
+        # thing keeping the provider would be this attribute — and its closure
+        # holds the StatusLine, which would then outlive the row it described
+        # for the rest of the process.
+        if provider is None:
+            self._state_provider = None
             return
+        if self._released.is_set():
+            return
+        self._state_provider = provider
         with self._lock:
             if self._resync_thread is not None or self._released.is_set():
                 return
@@ -476,23 +548,45 @@ class HerdrReporter:
         self._start_worker()
 
     def join(self, timeout: float = EXIT_DRAIN_TIMEOUT_S) -> None:
-        """Wait for the worker to drain, bounded. Tests and the exit drain only.
+        """Wait for this reporter's threads to finish, bounded by ``timeout`` TOTAL.
 
         Never called from the event loop: a call parked in a subprocess
         timeout would stall the TUI for exactly as long as this waits.
+
+        ``timeout`` is the budget for the WHOLE call, not per thread. Passing
+        it to each :meth:`threading.Thread.join` in turn is the obvious
+        version and it is wrong: with both the worker and the resync thread
+        blocked, one reporter consumed 2x the figure — ``join(timeout=1.0)``
+        measured at 2.02 s — which let a single reporter overrun the shared
+        ``remaining`` that :func:`_drain_at_exit` computes against
+        :data:`EXIT_DRAIN_TIMEOUT_S`, so the documented worst-case exit delay
+        was the bound times the number of threads (review round 2, M1).
         """
+        deadline = time.monotonic() + timeout
         for thread in (self._thread, self._resync_thread):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=timeout)
+            if thread is None or thread is threading.current_thread():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(timeout=remaining)
 
     # -- internals -----------------------------------------------------------
 
     def _next_seq_locked(self) -> int:
         # See the module docstring for why this is not `+= 1` alone.
         self._seq = max(self._seq + 1, self._clock())
+        # Every mint bumps this, which is what lets the heartbeat notice that a
+        # transition landed while it was reading the provider (M2). Counted
+        # rather than compared against `_last`, because a transition that
+        # returns to the state the heartbeat sampled still means the sample is
+        # no longer the newest word on it.
+        self._mints += 1
         return self._seq
 
-    def _enqueue_report(self, state: HerdrState, *, dedupe: bool) -> None:
+    def _enqueue_report(
+        self, state: HerdrState, *, dedupe: bool, only_if_mints: int | None = None
+    ) -> None:
         """Mint a seq for ``state`` and queue its ``report-agent``. Lock NOT held.
 
         The ONE mint-and-enqueue critical section, shared by :meth:`report`
@@ -500,6 +594,14 @@ class HerdrReporter:
         ``dedupe`` is the only difference between the two callers: the
         spinner tick must be suppressed, the heartbeat must not be (see the
         module docstring).
+
+        ``only_if_mints`` is the heartbeat's staleness guard: the value of
+        :attr:`_mints` the caller observed BEFORE it read the state it is now
+        enqueueing. If another mint has happened since, that state was read
+        before a transition this reporter has already queued, so enqueueing it
+        would re-assert a value the session has moved off — the call is
+        dropped instead (review round 2, M2). ``None`` means "no guard", which
+        is every caller that already knows its own state.
         """
         # Re-tested INSIDE the lock below, not only here. This early exit is a
         # cheap filter for the common post-release case; it is not the
@@ -512,6 +614,8 @@ class HerdrReporter:
             return
         with self._lock:
             if self._released.is_set():
+                return
+            if only_if_mints is not None and self._mints != only_if_mints:
                 return
             if dedupe and state == self._last:
                 return
@@ -547,12 +651,16 @@ class HerdrReporter:
             provider = self._state_provider
             if provider is None:
                 continue
+            # Snapshot BEFORE the read, so any transition that mints while the
+            # provider runs is visible to the guard in `_enqueue_report` (M2).
+            mints = self._mints
             try:
                 state = provider()
             except Exception:  # noqa: BLE001 — a bad provider must not kill the thread
                 logger.debug("herdr state provider failed", exc_info=True)
                 continue
-            self._enqueue_report(state, dedupe=False)
+            # Called OUTSIDE `_lock` on purpose: see the module docstring.
+            self._enqueue_report(state, dedupe=False, only_if_mints=mints)
 
     def _argv(self, subcommand: str, *rest: str) -> tuple[str, ...]:
         return (
@@ -622,7 +730,9 @@ class HerdrReporter:
         the head of the queue and nothing behind it can overtake it.
         """
         released_aborts = subcommand != "release-agent"
-        last_error: BaseException | None = None
+        # `Exception`, not `BaseException`: the `except` below catches exactly
+        # that, so this is the widest thing that can ever land here.
+        last_error: Exception | None = None
         for attempt in range(len(self._retry_backoff_s) + 1):
             try:
                 self._invoker(subcommand, argv)
@@ -648,7 +758,11 @@ class HerdrReporter:
                 if self._released.wait(delay):
                     return
             elif delay > 0:
-                time.sleep(delay)
+                # Clamped because `time.sleep` RAISES on a negative, which on
+                # this thread would kill the worker and take every queued
+                # call with it; `retry_backoff_s` is injectable, so a test
+                # (or a future caller) can hand in a negative.
+                time.sleep(max(0.0, delay))
         # WARNING, not DEBUG: the de-dupe means this state will not be sent
         # again by a transition, so the row is now stale until the heartbeat
         # or the next real change catches it. That is user-visible.
@@ -692,6 +806,12 @@ def start_reporter(
             logger.debug("inside Herdr but no herdr binary is resolvable; not reporting")
             return None
         pane_id = (source.get(HERDR_PANE_ENV) or "").strip()
+        # `resync_interval_s` and `retry_backoff_s` are deliberately NOT
+        # forwarded: they are test-only knobs for making the heartbeat and the
+        # backoff affordable in a suite, and production takes the module
+        # defaults (RESYNC_INTERVAL_S, RETRY_BACKOFF_S) so the timings a user
+        # experiences are the ones the module docstring argues for. Adding them
+        # here would make those figures a per-call-site choice.
         reporter = HerdrReporter(
             pane_id=pane_id,
             binary=binary,
