@@ -49,6 +49,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import (
@@ -74,6 +75,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+from local_operator.incidents import format_model_switch_message
 from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.session.shell_record import shell_record_messages
@@ -125,6 +127,30 @@ def _hub_steer(body: str) -> CustomMessage:
             "steer": True,
             "text": _envelope(body),
         },
+    )
+
+
+def _switch_notice() -> str:
+    """The failover notice ``journal_model_switch`` renders, verbatim.
+
+    Built by the real producer rather than hand-written: the display rule is
+    about the STAMP, so a test that keyed on remembered wording would pass
+    while a reworded notice leaked.
+    """
+    return format_model_switch_message(
+        "zai/glm-5.3",
+        "anthropic/claude-opus-5",
+        reason="anthropic quota exhausted (0% remaining)",
+        transient=True,
+    )
+
+
+def _injected_notice(text: str | None = None) -> Message:
+    """Exactly what ``_injected_user_message`` mints: a stamped user row."""
+    return Message(
+        role="user",
+        content=[TextContent(text=_switch_notice() if text is None else text)],
+        provider_payload={RENDERED_INJECTION_KEY: True},
     )
 
 
@@ -181,6 +207,7 @@ CORPUS: dict[str, Sequence[AgentMessage]] = {
         "ls -la",
         ToolResult(tool_call_id="sh1", content=[TextContent(text="total 0")], is_error=False),
     ),
+    "D12 harness injection": [Message.user("why did the model change?"), _injected_notice()],
     "settled conversation": [
         Message.user("edit it"),
         _assistant("editing", calls=[ToolCall(id="e1", name="edit", arguments={"path": "/x"})]),
@@ -389,6 +416,33 @@ def test_ordinary_prose_mentioning_a_skill_is_left_alone() -> None:
     rows = _page_rows([Message.user("what does the $research skill do?")])
 
     assert rows[0].text == "what does the $research skill do?"
+
+
+def test_a_harness_injected_row_is_never_painted_as_the_users_words() -> None:
+    """A row the harness minted from a ``CustomMessage`` is not the user's words.
+
+    The transient failover notice is the reported case: a compaction pass baked
+    it into the rebuilt context as a plain user row (the root-cause fix is in
+    ``Session._render_for_compaction``), and it is still on disk in every
+    session an older build wrote — so the DISPLAY decision has to hold for
+    rows already in a transcript, not only for new ones. Both folds, because
+    the phone's own bare ``role == "user"`` test is exactly how the two
+    surfaces drift apart.
+    """
+    notice = _switch_notice()
+    history = [Message.user("why did the model change?"), _injected_notice(notice)]
+
+    for rows in (_page_rows(history), _attach_rows(history)):
+        assert [row.kind for row in rows] == ["user"]
+        assert rows[0].text == "why did the model change?"
+        assert notice not in " ".join(row.text for row in rows)
+
+    # Negative control: the same WORDING without the stamp is the user's own
+    # words — pasting a notice to ask about it is a realistic thing to do — so
+    # the decision must key on the stamp and never on the text.
+    quoted = [Message(role="user", content=[TextContent(text=notice)])]
+    assert [row.text for row in _page_rows(quoted)] == [notice]
+    assert [row.text for row in _attach_rows(quoted)] == [notice]
 
 
 def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
