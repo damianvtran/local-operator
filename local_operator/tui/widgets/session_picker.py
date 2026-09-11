@@ -62,6 +62,7 @@ footer (which is the only place the card says how to get out).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 
@@ -131,6 +132,21 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: than a popup; ten is enough to scan. A CEILING, not the page size — see
 #: :meth:`SessionPickerScreen._page_rows`.
 PAGE_ROWS_MAX = 10
+
+#: How stale a live marker may be while the picker is open. The spinner keeps
+#: advancing at ``SPINNER_INTERVAL_S`` (motion), but the DATA behind the markers
+#: — `registry.scan()` plus `read_index()` — is re-read at this cadence instead
+#: of on every frame.
+#:
+#: Sized against what the markers can actually say, not against taste: the
+#: states they report come from heartbeat recency, whose own resolution is
+#: 45 s (``HEARTBEAT_TIMEOUT_S``), so a 1 s refresh is two orders of magnitude
+#: finer than the signal and no transition can be shown late at a scale a
+#: reader could notice. It still bounds the cost — 12.5 scans/s became 1 — and
+#: it keeps the repaint-on-change guard (`_tick`) working, which is what makes
+#: a row that REORDERS (a session parking on a gate, with nothing animating)
+#: reach the screen.
+LIVE_REFRESH_INTERVAL_S = 1.0
 
 #: Name/id matches at which the picker stops consulting the bounded soft tier
 #: (see ``SessionPickerScreen._soft_tier_wanted``). Three, not one: a single
@@ -929,6 +945,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body: Static
         #: Spinner phase for the running marker, advanced by ``_tick``.
         self._frame = 0
+        #: ``time.monotonic()`` of the last liveness refresh, or ``-inf`` so the
+        #: first tick always refreshes. The picker's data freshness is a stated
+        #: bound (``LIVE_REFRESH_INTERVAL_S``) rather than a side effect of the
+        #: frame rate; see ``_tick``.
+        self._live_refreshed_at = float("-inf")
         #: Has this picker EVER shown an exec row? Latched, never cleared while
         #: the screen lives — see :meth:`_exec_column_latched` for why the
         #: column may widen but must not narrow.
@@ -1371,21 +1392,38 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
 
     def _tick(self) -> None:
-        """Advance the spinner and re-read what it is claiming.
+        """Advance the spinner, and re-read what the live markers claim.
 
-        Cheap by construction: the refresh is the same one `registry.scan()` +
-        `read_index()` pair the picker already budgets for as a per-open cost,
-        and the repaint is one `Static.update`. It runs only while the picker
-        is on screen — the timer dies with the screen.
+        TWO RATES, deliberately, because they answer different questions.
 
-        Skipped entirely when no row is animating, so a store of cold sessions
-        costs nothing: without a running session there is no motion to drive,
-        and re-scanning the registry ten times a second to discover that would
-        be the picker's own idle cost.
+        The FRAME advances at ``SPINNER_INTERVAL_S`` (12.5 Hz) while a row is
+        busy: that is motion, and motion is what makes the running marker read
+        as running rather than as a static bullet.
+
+        The DATA is re-read at ``LIVE_REFRESH_INTERVAL_S`` — the refresh is
+        `registry.scan()` (a glob, a JSON parse per record, a `ps` per
+        quiet-heartbeat record) plus `read_index()`, and `_tick` used to run it
+        unconditionally on every frame, so an idle picker re-scanned the whole
+        store 12.5 times a second. That is not a per-open cost and the previous
+        docstring's claim that it was "skipped entirely when no row is
+        animating" described a guard that did not exist.
+
+        The refresh is NOT skipped outright, because two things it feeds are
+        real while nothing spins: the repaint-on-visible-change guard below and
+        the rows themselves, which REORDER when a session parks on a
+        gate — this release's headline event, and one that arrives with no row
+        animating. So it is BOUNDED rather than dropped, and the bound is what
+        keeps a frozen marker from claiming to be live: the picker's own
+        freshness is now a stated number instead of an accident of the frame
+        rate, and at 1 s it is two orders of magnitude finer than the 45 s
+        heartbeat the live states are derived from, which is the resolution
+        they actually change at.
         """
         before = self._marker_signature()
         refresh = self._refresh_live_state
-        if refresh is not None:
+        now = time.monotonic()
+        if refresh is not None and now - self._live_refreshed_at >= LIVE_REFRESH_INTERVAL_S:
+            self._live_refreshed_at = now
             try:
                 self._all = list(refresh(self._all))
                 # The filter cache is keyed on the query, which has not
