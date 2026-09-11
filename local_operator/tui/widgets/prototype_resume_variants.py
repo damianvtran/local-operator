@@ -18,6 +18,8 @@ production change.
 
 from __future__ import annotations
 
+import re
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,51 @@ GUTTER = {"user": "▸ you", "assistant": "▪ lop"}
 #: length why a column that appears and disappears — moving names sideways — is
 #: worse than an empty one. ~19% of rows have no checkpoint.
 UNKNOWN = "·"
+
+#: Longest name the list pane must show uncut before a side-by-side split is
+#: allowed: the p75 of the 141 real session names (median 33, p75 39, p90 43,
+#: p95 46, max 64). Measured on this machine's store, not estimated.
+NAME_P75 = 39
+
+#: Below this terminal width A stacks vertically. DERIVED, not chosen: A's list
+#: pane measures a steady 38% of the terminal, so its usable text width is
+#: `0.38 * cols - 2`, and the fixed columns spend 12 of those cells on the
+#: cursor, gaps and age. The name column therefore reaches NAME_P75 at
+#: 0.38 * cols - 14 >= 39, i.e. cols >= 140.
+STACK_BELOW_COLS = 140
+
+#: Stacked-layout row split. A fraction with clamps, not a fixed count: a fixed
+#: preview height either starves the list on a 24-row terminal or wastes half a
+#: 50-row one.
+PREVIEW_MIN = 8  # 3 header lines + 1 rule + body — below this the pane shows
+#: metadata and no conversation, which is not a preview
+PREVIEW_MAX = 14  # past this the list starves for no gain; the pane scrolls anyway
+LIST_MIN = 6  # fewer rows than this is a menu, not a list
+
+#: Markdown emphasis strippers for the preview (D5). Measured over 58
+#: previewable sessions: `code` in 74%, **bold** in 57%, ## heading in 34%,
+#: - bullet in 43%, _em_ in 2%. Regex-and-move-on is correct here — this is a
+#: throwaway preview, not a markdown parser, and it must not add a dependency.
+_MD_HEADING = re.compile(r"^#{1,6}[ \t]+", re.MULTILINE)
+_MD_CODE = re.compile(r"`([^`]+)`")
+_MD_BOLD = re.compile(r"\*\*(\S(?:[^*]*\S)?)\*\*|__(\S(?:[^_]*\S)?)__")
+_MD_EM_STAR = re.compile(r"(?<!\*)\*(\S(?:[^*\n]*\S)?)\*(?!\*)")
+#: `_` only when not flanked by word characters, so `snake_case` survives.
+_MD_EM_UNDER = re.compile(r"(?<![\w_])_(\S(?:[^_\n]*\S)?)_(?![\w_])")
+
+
+def _demark(text: str) -> str:
+    """Strip markdown emphasis markers, KEEP the text they wrapped.
+
+    Bullet markers (`- `, `* `) are deliberately kept: they are structure the
+    reader wants, not emphasis. The `*em*` pattern requires a non-space after
+    the opening star, so a `* item` bullet never matches it.
+    """
+    text = _MD_HEADING.sub("", text)
+    text = _MD_CODE.sub(r"\1", text)
+    text = _MD_BOLD.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    text = _MD_EM_STAR.sub(r"\1", text)
+    return _MD_EM_UNDER.sub(r"\1", text)
 
 
 def _ink() -> dict[str, str]:
@@ -240,6 +287,13 @@ class TelescopeScreen(_Filtering, Screen[None]):
         self._verbose = False
         self._pane_top = 0
         self._drawn = 0
+        #: Tri-state: None means "never applied", which forces the first
+        #: application on mount regardless of which side of the breakpoint we
+        #: start on.
+        self._stacked: bool | None = None
+        #: The preview height last applied in the stacked layout. Part of the
+        #: restyle guard: see `_apply_layout`.
+        self._applied_pane_rows: int | None = None
 
     def compose(self) -> ComposeResult:
         self._results = Static(id="results")
@@ -260,14 +314,92 @@ class TelescopeScreen(_Filtering, Screen[None]):
     def visible_rows(self) -> tuple[int, int]:
         return self._drawn, len(self._rows)
 
+    #: Rows `#cols` never gets: 1 filter row, 1 prototype state bar, 2 screen
+    #: chrome. Measured as a constant 4 at every geometry from 80x24 to 200x60.
+    CHROME_ROWS = 4
+
+    def _cols_height(self) -> int:
+        """Rows available to `#cols`, derived from the app rather than measured.
+
+        `self.query_one("#cols").size.height` is the obvious source and is the
+        WRONG one here: it lags the paint. On mount it reads one row ahead of
+        the settled layout, and immediately after a resize it reads the
+        PREVIOUS geometry — either way the state bar disagreed with the rows on
+        screen (`13 drawn` over 12 rendered at 80x24). `app.size` is always the
+        current terminal, and the chrome above is fixed, so this agrees with
+        what is painted on the first pass and after every resize.
+        """
+        return max(1, self.app.size.height - self.CHROME_ROWS)
+
+    def _pane_rows(self) -> int:
+        """Rows the preview gets in the STACKED layout, list keeps the rest."""
+        height = self._cols_height()
+        if height >= LIST_MIN + PREVIEW_MIN:
+            return min(PREVIEW_MAX, max(PREVIEW_MIN, height // 3))
+        # Too short for both. Chrome is reserved first, the list takes what is
+        # left and scrolls — the proposal's own precedent.
+        return max(4, height - LIST_MIN)
+
+    def _apply_layout(self) -> bool:
+        """Flip `#cols` between side-by-side and stacked. Returns `stacked`.
+
+        Restyles ONLY on an actual mode change: `refresh_view` runs on every
+        cursor move, and restyling there thrashes the layout engine. The widget
+        tree is never rebuilt — remounting the panes would lose `_pane_top`.
+        """
+        stacked = self.app.size.width < STACK_BELOW_COLS
+        # Guard on the mode AND the stacked preview height. Mode alone is not
+        # enough: the preview height is a function of terminal HEIGHT, which
+        # changes without crossing the width breakpoint, and a mode-only guard
+        # leaves a stale height applied (measured: 160x45 -> 80x24 kept a
+        # 13-row preview, giving a 7-row list where 12 is required). Neither
+        # value moves on a cursor keypress, so this still restyles only on a
+        # real geometry change rather than on every paint.
+        pane_rows = self._pane_rows() if stacked else None
+        if stacked == self._stacked and pane_rows == self._applied_pane_rows:
+            return stacked
+        self._stacked = stacked
+        self._applied_pane_rows = pane_rows
+        cols = self.query_one("#cols")
+        panel = self.app.theme_variables.get("panel", "#444444")
+        if stacked:
+            cols.styles.layout = "vertical"
+            self._results.styles.width = "100%"
+            self._preview.styles.width = "100%"
+            self._results.styles.height = "1fr"
+            self._preview.styles.height = pane_rows
+            # Clear the border we are not using: a `border-left` left on draws a
+            # stray vertical rule down the full-width preview. The ('none', c)
+            # TUPLE is the clear that always works — assigning None only drops
+            # the inline rule and lets DEFAULT_CSS's border back in, and the
+            # literal "none" reads the existing rule and so raises on an edge
+            # that never had one.
+            self._preview.styles.border_left = ("none", panel)
+            self._preview.styles.border_top = ("solid", panel)
+        else:
+            cols.styles.layout = "horizontal"
+            self._results.styles.width = "2fr"
+            self._preview.styles.width = "3fr"
+            self._results.styles.height = "1fr"
+            self._preview.styles.height = "1fr"
+            self._preview.styles.border_top = ("none", panel)
+            self._preview.styles.border_left = ("solid", panel)
+        return stacked
+
     def _budget(self) -> int:
-        """Rows the list can draw: `int(height * 0.9)` with NO PAGE_ROWS_MAX.
+        """LINES the list may draw — NO PAGE_ROWS_MAX.
 
         That 10-row ceiling is the single largest defect this prototype
         attacks — measured, production draws 10 rows at every terminal height.
+        Layout-aware: stacked, the list gets whatever the preview leaves.
+
+        Stacked, the list gets `#cols` less the preview. Both terms come from
+        `_cols_height`, which is derived from `app.size` and therefore never
+        lags a resize the way a measured widget height does.
         """
-        height = self.app.size.height
-        return max(1, int(height * 0.9) - 3)
+        if self._stacked:
+            return max(1, self._cols_height() - self._pane_rows())
+        return max(1, int(self.app.size.height * 0.9) - 3)
 
     def action_move(self, delta: int) -> None:
         self._move(delta)
@@ -287,7 +419,20 @@ class TelescopeScreen(_Filtering, Screen[None]):
         self.refresh_view()
 
     def _pane_height(self) -> int:
+        """Body lines the preview can show: its REAL height less the header."""
+        # 4 = 3 header lines + 1 rule. Falls back to the side-by-side estimate
+        # on the first paint, before layout has resolved a height.
+        real = self._preview.size.height
+        if real:
+            return max(1, real - 4)
         return max(1, int(self.app.size.height * 0.9) - 5)
+
+    def _pane_width(self) -> int:
+        """The preview's REAL text width; the 0.6 fraction was side-by-side only."""
+        real = self._preview.size.width
+        if real:
+            return max(20, real - 4)
+        return max(20, int(self.app.size.width * 0.6) - 6)
 
     def _pane_lines(self) -> list[tuple[str, str]]:
         """`(role, line)` for the current row, oldest-first from the TOP.
@@ -300,48 +445,158 @@ class TelescopeScreen(_Filtering, Screen[None]):
             return []
         sid = self._rows[self._cursor].id
         turns = self._data.verbose(sid) if self._verbose else self._data.condensed(sid)
-        width = max(20, int(self.app.size.width * 0.6) - 6)
+        width = self._pane_width()
         out: list[tuple[str, str]] = []
         for role, text, _ts in turns:
             out.append(("gutter", GUTTER.get(role, f"▪ {role}")))
-            for para in text.splitlines():
+            for para in _demark(text).splitlines():
                 if not para.strip():
                     continue
-                # Hard character wrap, not cell-exact: a prototype pane only
-                # has to be readable, and `textwrap` on CJK would need the
-                # cell model `truncate_cells` carries.
-                for start in range(0, len(para), width):
-                    out.append((role, para[start : start + width]))
+                # Word-boundary wrap, still character-counted rather than
+                # cell-exact: a prototype pane only has to be readable, and a
+                # cell-exact wrap on CJK would need the model `truncate_cells`
+                # carries. `break_long_words` keeps a 200-char URL from
+                # overflowing the pane.
+                for line in textwrap.wrap(
+                    para, width, break_long_words=True, break_on_hyphens=False
+                ):
+                    # Belt-and-braces against D11: a continuation line that
+                    # kept a leading space turns `_render_pane`'s uniform
+                    # 2-space indent into 3 on that row alone.
+                    stripped = line.rstrip()
+                    if stripped:
+                        out.append((role, stripped))
             out.append(("blank", ""))
         return out
 
+    def _usable(self) -> int:
+        """The list pane's REAL text width, not a fraction of the app.
+
+        `2fr` of the split is what the row actually gets, and guessing it
+        wrapped every row onto a second line at 80 cols. The `or` fallback
+        matters on the first paint, before layout resolves.
+        """
+        return max(12, (self._results.size.width or int(self.app.size.width * 0.4)) - 2)
+
+    def _show_id(self, usable: int) -> bool:
+        """Show the id only when it does not push the name below p75.
+
+        The old `width >= 52` turned the id on at 142 cols and cost 53 points
+        of uncut-name share — a wider window with a worse list. One rule for
+        both layouts: side-by-side keeps the id off until ~176 cols, stacked
+        has it on from 80, where the full width affords both.
+        """
+        return (usable - 2 - 2 - 8 - 2 - 12) >= NAME_P75
+
+    def _raw_context(self, row: SessionRow) -> str | None:
+        """Whether an exact-hit context EXISTS for `row`, regardless of layout.
+
+        Kept separate from `_context_for` so the `~` mark keeps one meaning in
+        both layouts: matching `GrepScreen`, `~` says the row is a soft/fuzzy
+        hit with no literal substring to show. A row whose context is merely
+        suppressed by the stacked layout is NOT a soft hit, and marking it as
+        one would make the glyph lie about the row.
+        """
+        query = self._query.strip()
+        if not query or not self._body_matched(row):
+            return None
+        return self._data.grep_context(row.id, query)
+
+    def _context_for(self, row: SessionRow) -> str | None:
+        """The context line to DRAW for `row`, or None when it draws none.
+
+        Stacked, the context line is the CURSOR row's only: cells are scarce
+        (12 list rows at 80x24) and a line on each would halve the list, while
+        the preview directly beneath already shows that row's content.
+        """
+        if self._stacked and self._rows[self._cursor].id != row.id:
+            return None
+        return self._raw_context(row)
+
+    def _row_lines(self, row: SessionRow) -> int:
+        """A row costs 1 line, or 2 when it DRAWS a context line."""
+        return 2 if self._context_for(row) else 1
+
+    def _fit(self) -> int:
+        """How many rows from `_top` fit in the LINE budget."""
+        budget = self._budget()
+        used = 0
+        count = 0
+        for row in self._rows[self._top :]:
+            cost = self._row_lines(row)
+            if used + cost > budget:
+                break
+            used += cost
+            count += 1
+        return max(1, count)
+
     def refresh_view(self) -> None:
+        # First: the layout may have just flipped, and every measurement below
+        # (pane widths, budgets, the preview's height) depends on which side of
+        # the breakpoint we are on.
+        self._apply_layout()
         ink = _ink()
-        drawn = self._budget()
+        # Two passes: the window size depends on the rows in it, and the cursor
+        # clamp depends on the window. One pass could leave the cursor on an
+        # undrawn row, which is the exact defect `_page_rows` exists for.
+        self._scroll_into_window(self._fit())
+        drawn = self._fit()
         self._scroll_into_window(drawn)
+        drawn = self._fit()
         page = self._rows[self._top : self._top + drawn]
         self._drawn = len(page)
 
-        # The real pane width, not a fraction of the app: `2fr` of the split
-        # is what the row actually gets, and guessing it wrapped every row onto
-        # a second line at 80 cols.
-        width = max(12, (self._results.size.width or int(self.app.size.width * 0.4)) - 2)
-        # The id is the first thing shed when the pane is narrow. A wrapped row
-        # breaks the one-row-per-session contract the cursor arithmetic assumes.
-        show_id = width >= 52
+        query = self._query.strip()
+        usable = self._usable()
+        show_id = self._show_id(usable)
+        # Fixed fields, so the id starts at a CONSTANT column on every row:
+        # "❯ " (2) | name (NAME_W, padded) | 2 | age (8, right) | 2 | id (12).
+        # Deriving the name budget from len(age) — which varies 6..8 cells
+        # across the real rows — is what made the id ragged.
+        #
+        # The trailing `~` gets a RESERVED 2-cell gutter whenever a query is
+        # active. Appending it unreserved overflowed the pane (measured: a
+        # 59-cell row + 3 = 62 in a 59-cell pane) and wrapped the mark onto its
+        # own line, which breaks the one-row-per-session contract the cursor
+        # arithmetic assumes.
+        mark_w = 2 if query else 0
+        name_w = max(8, usable - 2 - 2 - 8 - ((2 + 12) if show_id else 0) - mark_w)
         lines: list[Text] = []
         for offset, row in enumerate(page):
             selected = self._top + offset == self._cursor
             line = Text()
             line.append("❯ " if selected else "  ", style=ink["accent"])
             age = format_age(max(0.0, self._now - row.mtime))
-            budget = width - len(age) - (16 if show_id else 4)
-            name = truncate_cells(row.name or row.id, max(8, budget))
+            # `truncate_cells` is the repo's one cell-width model; pad with it
+            # rather than mixing in `len()`.
+            name = truncate_cells(row.name or row.id, name_w).ljust(name_w)
             line.append(name, style=f"bold {ink['fg']}" if selected else ink["fg"])
-            line.append(f"  {age}", style=ink["muted"])
+            line.append(f"  {age:>8}", style=ink["muted"])
             if show_id:
                 line.append(f"  {row.id}", style=ink["dim"])
+            context = self._context_for(row)
+            if query:
+                # Soft/fuzzy hit: no literal substring to locate. Soft hits are
+                # the majority for a broad query, so without this mark most
+                # rows would be unexplained and the user could not tell "no
+                # context" from "not a body match". Keyed to `_raw_context`, so
+                # a stacked row whose context is merely not drawn is not
+                # mismarked as fuzzy. The gutter is reserved above, so the
+                # glyph sits at a FIXED column rather than trailing text.
+                soft = self._body_matched(row) and self._raw_context(row) is None
+                line.append(f" {'~' if soft else ' '}", style=ink["warning"])
             lines.append(line)
+            if context:
+                marked = Text("    ")
+                marked.append(
+                    _highlight(
+                        truncate_cells(context, max(10, usable - 4)),
+                        query,
+                        ink["dim"],
+                        ink["warning"],
+                    )
+                )
+                lines.append(marked)
         self._results.update(Text("\n").join(lines) if lines else Text("no sessions"))
 
         self._preview.update(self._render_pane(ink))
@@ -373,10 +628,19 @@ class TelescopeScreen(_Filtering, Screen[None]):
         started = format_age(max(0.0, self._now - created)) if created else UNKNOWN
         worked = format_age(max(0.0, self._now - row.mtime))
         out.append(f"started {started} · last worked {worked}\n", style=ink["muted"])
-        out.append(
-            f"{_short_model(checkpoint)} · {_short_cwd(checkpoint)}\n", style=ink["dim"]
-        )
-        out.append("─" * max(10, int(self.app.size.width * 0.6) - 4) + "\n", style=ink["faint"])
+        # Omit the line entirely when there is no checkpoint, rather than
+        # printing a bare `· · ·` that reads as a loading state that never
+        # resolved. Measured: 112/141 rows have a checkpoint and on ALL of them
+        # both model and cwd are present, so the line is fully populated or
+        # fully absent — there is no partial case to design for. The reserved-
+        # column argument behind UNKNOWN is about LIST ROWS, where a vanishing
+        # column shifts names sideways; a header line in a single-row pane has
+        # no such alignment to protect.
+        if checkpoint:
+            out.append(f"{_short_model(checkpoint)} · {_short_cwd(checkpoint)}\n", style=ink["dim"])
+        # The rule must span the REAL preview width or it runs off the edge in
+        # the stacked layout.
+        out.append("─" * max(10, self._pane_width()) + "\n", style=ink["faint"])
 
         lines = self._pane_lines()
         height = self._pane_height()
