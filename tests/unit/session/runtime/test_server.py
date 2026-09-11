@@ -1429,14 +1429,14 @@ async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
 ) -> None:
     """The same invariant on the in-process start path.
 
-    ``start_in_process`` reaches ``_serve`` through a direct ``await`` on the
-    caller's own task, so today nothing can re-point the config dir in between
-    and this half is defence in depth rather than a closed race. It is still the
-    invariant both start paths share — the record's directory is decided when
-    the runtime is asked to START, never when the publisher is built — and this
-    fails if that pin is dropped, which is what makes it worth asserting rather
-    than assuming: `_serve` is made to observe a moved config dir, and the
-    record must land where this runtime started anyway.
+    Here the window is REAL, not manufactured: ``_serve`` reaches its first
+    yield — ``await asyncio.start_server`` — before it builds the publisher, so
+    a config dir that moves while ``start_in_process`` is suspended in that
+    await is exactly what a dropped pin lets the publisher resolve inside
+    ``_serve``. The wrapper below moves it at that point, and the record must
+    still land where this runtime started; removing the pin fails this test
+    (``assert []``) while the thread-path test still passes, so the two halves
+    are separately caught.
     """
 
     started_in = tmp_path / "started-in"
