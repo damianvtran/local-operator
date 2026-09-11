@@ -2189,22 +2189,58 @@ class SubagentView(Vertical):
         uses (``_reanchor_insert``, ``_scroll_to_tail``,
         ``_snap_landing_to_row_head``).
 
-        The follower is released explicitly because the programmatic guard
-        below suppresses the ``watch_scroll_y`` resync that used to carry that
+        The follower is released here too, because the programmatic guard below
+        suppresses the ``watch_scroll_y`` resync that used to carry that
         decision a frame later — and that frame is one an extent change could
-        use to drag the reader back to the bottom.
+        use to drag the reader back to the bottom. It is released only when the
+        press actually LEFT the tail (``scroll_y < max_scroll_y``): a press that
+        moved nothing cannot have left it, and a child page that is still short
+        is following its own output, so an eager release stops the rows it goes
+        on to produce from being carried into view (review round 1, M1).
         """
         body = self._body
-        body._tail_anchor.release()
         with body._tail_anchor.programmatic_scroll():
             body.scroll_home(animate=False, immediate=True)
-        # The intended offset is passed explicitly as well: it prevents the disk
-        # worker from sampling the old tail first and restoring it after the
-        # prepend, which made a real keyboard Home press appear to load nothing.
+        # Keyed on POSITION rather than on whether the move changed anything,
+        # the same shape `_snap_landing_to_row_head` uses for the same reason:
+        # `scroll_y < max_scroll_y` is what "this press left the tail" means.
+        # The move and the release are one synchronous step, so no extent change
+        # can land between them and `_scroll_to_tail()` the reader back down
+        # while the follower is still armed.
+        if body.scroll_y < body.max_scroll_y:
+            body._tail_anchor.release()
+        # The read is still requested HERE rather than left to the edge watcher
+        # the move triggers. That watcher (`_scroll_changed`) runs synchronously
+        # from the move and issues `_maybe_load_history()` of its own, with the
+        # same anchor — it samples the offset the move just wrote, which is this
+        # call's explicit 0.0 — but with `retry` off, so on the COMMON path it
+        # wins the race and this call returns early on `_history_loading`. The
+        # read count is unchanged either way; what only this call carries is
+        # `retry`, the one way through the `_history_error` /
+        # `_history_unavailable` latches a reader's Home uses to ask again, and
+        # `test_history_unavailable_and_error_retry_keep_trajectory_fallback`
+        # pins that second read. Stated because the two are otherwise identical,
+        # and only the immediate move above makes the anchors agree.
         self._maybe_load_history(anchor=0.0, retry=True)
 
     def action_end(self) -> None:
-        """Return to the live tail and re-acquire sticky following."""
+        """Return to the live tail and re-acquire sticky following.
+
+        The move stays DEFERRED here — ``scroll_end(animate=False)`` is the same
+        ``scroll_to(..., immediate=False)`` deferral ``action_home`` no longer
+        uses — and that difference is deliberate, not an oversight (review round
+        1, M3). End asks for the TAIL, so a late landing cannot put the reader
+        anywhere the press did not already ask for: either the insert's
+        transaction is still armed, and the travel folding rewrites the held gap
+        by exactly the travel it records (``target = block.y - gap`` with ``gap``
+        shifted by it, which lands on the new ``max_scroll_y``), or it has
+        already been consumed and the landing is simply the tail, re-acquiring
+        the follower through ``watch_scroll_y``'s ``resync(at_end=True)``.
+        Home's offset is NOT the tail, which is what makes the same lateness a
+        defect there — the reader is moved off the content the insert's anchor
+        hold exists to keep still. Reasoned from that arithmetic, not yet pinned
+        by a test: reaching the ordering needs fault injection.
+        """
         self._body.scroll_end(animate=False)
 
     def _maybe_load_history(
