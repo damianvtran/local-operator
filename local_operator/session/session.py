@@ -65,6 +65,7 @@ from local_operator.compaction.cutpoint import (
     RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
     build_compaction_marker,
     render_compaction_marker,
     replayed_user_message,
@@ -2733,12 +2734,13 @@ class Session:
     def _render_for_compaction(self, *, keep_images: bool = False) -> list[Message]:
         """The rendered history a compaction pass plans and commits against.
 
-        :meth:`_render_history` minus the todo reminders, because a reminder is
-        the ONE injection nothing persists (``_todo_continuation`` hands it to
-        the loop as a follow-up, which emits no event and reaches no
-        transcript), and compaction is built on the rendered history being
-        persisted history. Rendered into it, one reminder broke the pass at both
-        ends:
+        :meth:`_render_history` minus every LIVE-CONTEXT-ONLY injection — a
+        ``CustomMessage`` the transcript does not hold, which is one a resume
+        cannot replay. A todo reminder is the original member of that class:
+        ``_todo_continuation`` hands the reminder to the loop as a follow-up,
+        which emits no event and reaches no transcript. Compaction is built on
+        the rendered history being persisted history, and rendered into it one
+        ephemeral injection broke the pass at both ends:
 
         - ``_plan_compaction``'s replayability guard matches ``kept[0].id``
           against the transcript's entry ids, and a reminder's id is in no
@@ -2779,20 +2781,56 @@ class Session:
         the allow-list removal closed. Excluding it here keeps the live
         announcement in the REQUEST render (``_render_history``, untouched)
         while the rebuild the compaction commit owns stays persisted-only.
+
+        Those two are special cases of ONE class, and the enumeration was
+        itself the defect: an ephemeral injection type added later is filtered
+        only if someone remembers to list it here. The TRANSIENT model-switch
+        notice was the third member and went unlisted —
+        ``journal_model_switch(transient=True)`` appends a live-only failover
+        record, and the render baked it into the rebuilt context as a plain
+        ``Message(role="user")`` which the turn-end pass then persisted, so a
+        failover notice landed in a real session's transcript as a genuine
+        user row (four consecutive such rows in session ``835fbcafdc27``) and
+        every front end painted it as the user's own words. The predicate is
+        therefore STRUCTURAL rather than a list: a ``CustomMessage`` the
+        transcript does not hold is one a resume cannot replay, because the
+        only thing that puts a custom message back into a replayed context is
+        its own persisted entry. Filtering it here is what makes the rebuilt
+        context equal what a resume replays — the live/resume equivalence this
+        render exists to protect — and the absence is deliberate rather than a
+        loss: the live announcement still reaches the model through the
+        untouched request render.
+
+        The test is :meth:`Transcript.has_entry` (a constant-time id-set
+        check), NEVER :func:`_is_persistable_message`. That predicate answers a
+        different question — may the turn-end flush write this? — and returns
+        False for ``hub_message``, ``peer_message`` and ``wake_prompt``, whose
+        PRODUCERS persist them. Borrowing it here would drop persisted history
+        out of the rebuild and make a live context diverge from its own
+        resume.
+
+        The compaction marker is the one ``CustomMessage`` whose entry the
+        transcript holds under a DIFFERENT id: ``append_compaction`` stores it
+        as its own entry type (see :data:`_PERSISTABLE_CUSTOM_TYPES`), so the
+        fresh id ``build_compaction_marker`` mints is in no entry set while a
+        resume still replays the marker from that payload. It is exempted by
+        TYPE rather than by id, and load-bearing: dropping it would price and
+        plan every later pass against a context that has lost its own summary.
         """
 
         def _is_ephemeral_for_compaction(message: AgentMessage) -> bool:
             """Whether ``message`` must stay out of the compaction render.
 
-            Named rather than inlined because BOTH filters are
-            live-context-only injections whose rendered (id-carrying) copy
-            would otherwise be baked into the kept window and persisted by the
-            turn-end pass despite never being transcript material.
+            Named rather than inlined because every arm is a live-context-only
+            injection whose rendered (id-carrying) copy would otherwise be
+            baked into the kept window and persisted by the turn-end pass
+            despite never being transcript material.
             """
-            return _is_todo_reminder(message) or (
-                isinstance(message, CustomMessage)
-                and message.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
-            )
+            if not isinstance(message, CustomMessage):
+                return False
+            if message.custom_type == COMPACTION_MARKER_TYPE:
+                return False
+            return not self._transcript.has_entry(message.id)
 
         return self._render_history(
             [
