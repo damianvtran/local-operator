@@ -80,12 +80,16 @@ def isolated(tmp_path, monkeypatch):
 
 
 def _cells(app: OperatorApp) -> list[float | None]:
-    # ``_transcript_view()``, NOT ``query_one(TranscriptView)``. The sidebar
-    # gesture this file exercises leaves the OUTGOING conversation's view in
-    # the DOM beside the adopted one, and ``query_one`` returns the first in
-    # DOM order — the transcript being left behind. The assertion would then
-    # silently grade the wrong conversation, which is exactly the class of
-    # false green this file exists to prevent.
+    # ``_transcript_view()``, NOT ``query_one(TranscriptView)``. The divergence
+    # is real only on a genuine sidebar SWITCH to a different conversation:
+    # ``_select_sidebar_session(<other conversation>)`` leaves BOTH transcripts
+    # mounted, and ``query_one`` returns the first in DOM order — the OUTGOING
+    # conversation being left behind (measured: 22 blocks in the outgoing view
+    # against the adopted view's 11). This file's own gesture,
+    # ``_adopt_session(remote)`` on the same session, never diverges (one
+    # ``TranscriptView`` throughout, both accessors equal), so only a switch
+    # would expose it — and an assertion grading the wrong conversation is
+    # exactly the class of false green this file exists to prevent.
     view = app._transcript_view()
     return [b._duration for b in view.blocks() if isinstance(b, ToolCard)]
 

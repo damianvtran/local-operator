@@ -10035,7 +10035,7 @@ class _RecoveringAsyncLabelSession(_ColdAsyncLabelSession):
     _recovering = True
 
     def _unavailable_reason(self) -> str:
-        return "session owner is reconnecting"
+        return "the runtime is reconnecting"
 
 
 @pytest.mark.asyncio
@@ -10051,7 +10051,7 @@ async def test_switch_while_the_owner_is_being_recovered_says_reconnecting() -> 
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
     assert session.requested == [], session.requested
-    assert _unwrapped("session owner is reconnecting; try /model again in a moment") in text, text
+    assert _unwrapped("the runtime is reconnecting; try /model again in a moment") in text, text
     assert _unwrapped("send a message to start one") not in text, text
     assert _unwrapped("(this session)") not in text, text
 

@@ -1504,7 +1504,7 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
         runtime_locality: RuntimeLocality = "this-machine"
 
         async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
-            raise RuntimeError("session owner is reconnecting")
+            raise RuntimeError("the runtime is reconnecting")
 
     app = OperatorApp(lambda: _factory(RefusingFollowerSession()))
     async with app.run_test(size=(100, 30)) as pilot:
