@@ -30206,11 +30206,14 @@ class OperatorApp(App[None]):
             # title still reaches `_cmd_rename`.
             #
             # `--refresh` is the shape every other command teaches, so it is
-            # what the row offers and what lands in the buffer. The alias is not
-            # decoration: `match_choices` scores against `choice.names` but
-            # always displays `choice.name`, so a user who already learned the
-            # bare word still gets an exact-score hit instead of falling to a
-            # fuzzy subsequence score of 1 against `--refresh`.
+            # what the row offers and what lands in the buffer. The alias buys
+            # RANK, not reachability: `match_choices` scores against
+            # `choice.names` but always displays `choice.name`, so a user who
+            # already learned the bare word scores an exact 1000 instead of the
+            # fuzzy subsequence 13 that `refresh` earns against `--refresh`.
+            # The row is a subsequence match either way, so it would still be
+            # offered without the alias — it would just rank as a near-miss
+            # against any better-scoring sibling this list later grows.
             #
             # The description states the release, not just the call. That the
             # refresh hands the name back to automatic naming is the surprising
