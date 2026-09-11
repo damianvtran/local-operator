@@ -243,6 +243,36 @@ ROW_INDENT = 1
 #: because it is what answers a click on a row with nothing to show.
 ROW_INDENT_MIN_WIDTH = 30
 
+
+def row_indent(width: int) -> int:
+    """Cells of left inset a ledger row draws at ``width`` — the ONE derivation.
+
+    Called by every ledger row builder (`ToolCard`, and the wake and peer rows
+    in `transcript.py`) and by every one of their `copy_gutter`s. That
+    single-sourcing is the point, and it is load-bearing rather than tidy: a
+    gutter is subtracted from the row on copy by
+    `get_selection`/`row[max(start, copy_gutter(i)):]`, so a builder and a
+    gutter that derive the inset separately can drift, and the direction that
+    fails silently is an OVER-count, which eats the first character of the
+    row's name. One function cannot disagree with itself.
+
+    The inset is the SHARED ledger spine, not decoration: a wake receipt and an
+    inbound peer receipt sit between tool rows and must start their icon, name
+    column and summary on the same cells those rows do, or the column stops
+    reading as a column. It is given up below :data:`ROW_INDENT_MIN_WIDTH` for
+    the same reason :data:`ROW_INDENT` exists at all — breathing room is the
+    first thing a narrow ledger should spend, and at that width the row is
+    already shedding its name a character at a time.
+
+    Note WHICH width: the builders pass the width they are about to build at,
+    the gutters pass the width the row was last built at (`_built_width`).
+    Those are the same number on every applied row — `_refresh_row` sets
+    `_built_width` from the width it hands `_build_row` — and the only detached
+    path returns before either.
+    """
+    return ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+
+
 NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
@@ -1834,12 +1864,15 @@ class ToolCard(ExpandableActionBlock):
     def _row_indent(self) -> int:
         """Cells of left inset on the summary row AS BUILT.
 
-        One derivation, shared by the row builder and the copy gutter, so a
-        gutter can never disagree with the row it is measured against — an
+        The width, not a state flag: the row is built at whatever width the
+        pane gives it, so the gutter has to ask the same question of the same
+        number the builder did. Delegates to the ledger's one derivation
+        (:func:`row_indent`), which is what makes "a gutter can never disagree
+        with the row it is measured against" true rather than aspirational — an
         over-count eats the first character of the tool's name, an under-count
         pastes a leading space into a bug report.
         """
-        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
+        return row_indent(self._built_width)
 
     # -- rendering ----------------------------------------------------------
     def refresh_row(self) -> None:
@@ -2261,10 +2294,10 @@ class ToolCard(ExpandableActionBlock):
         # degradation ladder — sizes itself against the column it will really
         # be drawn in. Taking it later would let a rung fit itself to a width
         # the row no longer has and clip on the right.
-        # Same threshold the copy gutter reads (`_row_indent`), against the
-        # width being BUILT rather than the last one built, because this runs
-        # before `_built_width` is updated.
-        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        # Same threshold and same derivation the copy gutter reads
+        # (`_row_indent`), against the width being BUILT rather than the last
+        # one built, because this runs before `_built_width` is updated.
+        indent = row_indent(width)
         width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then

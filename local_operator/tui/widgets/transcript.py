@@ -761,6 +761,15 @@ class ExpandableActionBlock(TranscriptBlock):
     ]
     can_focus = True
 
+    #: The width the summary row was last BUILT at, written by each subclass's
+    #: ``_refresh_row``. Declared on the base because the base now owns a reader
+    #: of it (:meth:`_row_indent`): the copy gutter asks the inset question of
+    #: the width the row was PAINTED at, not of the current pane width, and the
+    #: two agree only because ``_refresh_row`` writes this from the width it
+    #: hands ``_build_row``. ``-1`` is "never built"; ``row_indent(-1)`` is 0,
+    #: which is the honest answer for a row that has not been drawn yet.
+    _built_width: int = -1
+
     @classmethod
     def _bound_keys(cls) -> frozenset[str]:
         """Every key this row class answers itself, MERGED across the hierarchy.
@@ -803,12 +812,52 @@ class ExpandableActionBlock(TranscriptBlock):
         """Rebuild and apply this subclass's current summary/expansion."""
         raise NotImplementedError
 
+    def _row_indent(self) -> int:
+        """Cells of left inset on this row's summary line AS BUILT.
+
+        Declared here rather than per subclass because BOTH ledger rows this
+        base carries (the wake receipt and the inbound peer receipt) draw the
+        same summary row, and the inset is one property of one ledger: a wake
+        or a peer row sitting between tool rows has to start its icon, name
+        column and summary on the same cells they do, or the column stops
+        reading as a column.
+
+        Delegates to the ledger's single derivation
+        (:func:`~local_operator.tui.widgets.tool_card.row_indent`, imported
+        locally because `tool_card` imports this module). That is what makes
+        the copy gutter and the painted row agree by construction — the two
+        callers read the same function of the same number, so a later change to
+        the rule cannot reach one and miss the other. The number is this row's
+        last built width, which is the width `_build_row` was given.
+        """
+        from local_operator.tui.widgets.tool_card import row_indent
+
+        return row_indent(self._built_width)
+
     @property
     def expanded(self) -> bool:
         return self._expanded
 
     def toggle_expanded(self) -> bool:
-        """Flip expansion when possible and refresh the adjacent block gap."""
+        """Flip expansion when possible and refresh the adjacent block gap.
+
+        Expanding a row reveals the body the collapsed line only summarised,
+        so when the row sits ABOVE the viewport the view is brought back to
+        its top: the tail anchor otherwise holds the bottom steady while the
+        extent grows above it, and the reader lands mid-body with the heading
+        and the first fields scrolled off and no key that reaches them (design
+        round 1, D3). A row already in view is left exactly where it was.
+
+        The reveal is asked for twice on purpose. The immediate call covers a
+        row the reader had already scrolled past. It does NOT cover the live
+        case: a card that has just settled at the tail is still in view at this
+        instant (its top is at 0 while the viewport is at 0), and only the
+        refresh that follows the toggle moves the extent — the tail anchor then
+        holds the BOTTOM, so a card taller than the viewport ends up with its
+        top above the fold and the reader lands mid-diagnosis (design round 2,
+        D3, measured at 5 of 26 rows off-screen). The deferred call re-asks the
+        same question once the layout has settled, when the answer is truthful.
+        """
         if not self._expanded and not self.can_expand():
             return self._expanded
         self._expanded = not self._expanded
@@ -818,6 +867,13 @@ class ExpandableActionBlock(TranscriptBlock):
         parent = self.parent
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_after(self)
+            if self._expanded:
+                parent.reveal_block(self)
+                # Same decision, after the growth and the anchor's re-anchor
+                # have been laid out. `reveal_block` is a no-op unless the top
+                # really did end up above the viewport, so a card that still
+                # fits leaves the tail exactly where it was.
+                parent.call_after_refresh(lambda: parent.reveal_block(self))
         return self._expanded
 
     def activate(self) -> bool:
@@ -1603,10 +1659,20 @@ class WakeBlock(ExpandableActionBlock):
         self._refresh_row()
 
     def copy_gutter(self, index: int) -> int:
-        """The icon field on the summary row; the expansion's indent below it."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+        """The icon field on the summary row; the expansion's indent below it.
 
-        return 2 if index == 0 else OUTPUT_INDENT
+        The summary row's field is the ledger's shared left inset
+        (:func:`row_indent`) plus the icon, exactly as :class:`ToolCard` counts
+        it — a wake row sits between tool rows, so a gutter measured against a
+        different spine would eat the first character of the wake's name when
+        copied. Read back off the row as built rather than assumed, because
+        the inset is given up on a narrow ledger.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
 
     def refresh_row(self) -> None:
         """Repaint at the current width — the ledger's shared column moved."""
@@ -1667,12 +1733,20 @@ class WakeBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_indent,
             truncate_cells,
         )
 
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+        # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
+        # taken off the budget BEFORE anything is measured, so the name column
+        # and every rung below size themselves against the width the row will
+        # really be drawn in. Read off the width being BUILT rather than
+        # `_built_width`, which this runs before updating, and through the
+        # ledger's one derivation so the copy gutter reads the same rule.
+        indent = row_indent(width)
+        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -1681,6 +1755,8 @@ class WakeBlock(ExpandableActionBlock):
         self._message = message
         if name_budget < 2:
             row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
             row.append(icon + " ", style=dim)
             return row
 
@@ -1700,6 +1776,8 @@ class WakeBlock(ExpandableActionBlock):
         summary = truncate_cells(identity, budget)
 
         row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
         row.append(summary, style=dim)
@@ -2183,10 +2261,20 @@ class PeerMessageBlock(ExpandableActionBlock):
         self._refresh_row()
 
     def copy_gutter(self, index: int) -> int:
-        """The icon field on the summary row; the expansion's indent below it."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+        """The icon field on the summary row; the expansion's indent below it.
 
-        return 2 if index == 0 else OUTPUT_INDENT
+        The summary row's field is the ledger's shared left inset
+        (:func:`row_indent`) plus the icon, exactly as :class:`ToolCard` counts
+        it — a peer receipt sits between tool rows, so a gutter measured
+        against a different spine would eat the first character of the peer
+        row's name when copied. Read back off the row as built rather than
+        assumed, because the inset is given up on a narrow ledger.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
 
     def copy_row_is_chrome(self, index: int) -> bool:
         """The summary and the sender identity are the app talking.
@@ -2257,12 +2345,20 @@ class PeerMessageBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            row_indent,
             truncate_cells,
         )
 
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+        # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
+        # taken off the budget BEFORE anything is measured, so the name column
+        # and every rung below size themselves against the width the row will
+        # really be drawn in. Read off the width being BUILT rather than
+        # `_built_width`, which this runs before updating, and through the
+        # ledger's one derivation so the copy gutter reads the same rule.
+        indent = row_indent(width)
+        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2284,6 +2380,8 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the identical reason; removing it here alone would make the two
             # rows disagree about their own floor.
             row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
             row.append(icon + " ", style=dim)
             return row
 
@@ -2333,6 +2431,8 @@ class PeerMessageBlock(ExpandableActionBlock):
         summary = truncate_cells(composed, budget)
 
         row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
         row.append(summary, style=dim)
@@ -3776,6 +3876,30 @@ class TranscriptView(ScrollableContainer):
                 repaint = getattr(block, "refresh_row", None)
                 if callable(repaint):
                     repaint()
+
+    def reveal_block(self, block: TranscriptBlock) -> bool:
+        """Scroll ``block``'s top back into view after it grew in place.
+
+        Only the above-the-viewport case is corrected. A row already on screen
+        is left alone, and a row BELOW the viewport is the tail anchor's
+        business — the reader asked to follow the bottom, and yanking them
+        forward would fight that. Returns whether it moved the view.
+
+        The block's TOP does not move when it expands (the height grows
+        downward), so the virtual region read here is the same before and
+        after the growth that prompted the call.
+        """
+        if block.parent is not self:
+            return False
+        top = block.virtual_region.y
+        if top >= self.scroll_y - 0.5:
+            return False
+        # A reader-initiated reveal, not the transcript's own correction: it
+        # stops the tail following, exactly as a page-back anchor jump does.
+        self._tail_anchor.release()
+        with self._tail_anchor.programmatic_scroll():
+            self.scroll_to(y=max(0.0, top), animate=False, immediate=True)
+        return True
 
     def refresh_gap_after(self, block: TranscriptBlock) -> None:
         """Re-decide the gap for the first real block below ``block``.
