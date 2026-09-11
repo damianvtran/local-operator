@@ -370,3 +370,54 @@ def test_detaching_stops_reports() -> None:
     reporter.release()
     reporter.join()
     assert recorder.states() == ["idle"]
+
+
+def test_attaching_wires_the_heartbeats_state_provider() -> None:
+    """The band is the heartbeat's state source, so it re-asserts, not invents.
+
+    Pinned by calling the provider directly rather than waiting 30 s: what
+    matters is that it exists and returns the SAME derivation
+    `_sync_terminal_title` pushes, which is what makes the heartbeat a
+    re-assertion instead of a second opinion.
+    """
+    recorder = Recorder()
+    status, reporter = _band(recorder)
+    provider = reporter._state_provider
+    assert provider is not None
+    assert provider() == "idle"
+    status.update(streaming=True)
+    assert provider() == "working"
+    status.set_attention(True)
+    assert provider() == "blocked"
+    reporter.release()
+    reporter.join()
+
+
+def test_the_heartbeat_re_asserts_the_bands_state_through_the_band() -> None:
+    """End to end at the seam: no transition, and the row is still re-sent.
+
+    A short interval is injected so the test does not wait out the 30 s
+    production one; the wiring under test is the same.
+    """
+    recorder = Recorder()
+    status = StatusLine(cast(Static, FakeDock(120)))
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        session_id="sess",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.02,
+    )
+    status.set_herdr_reporter(reporter)
+    status.update(streaming=True)
+    recorder.wait_for_calls(2)  # idle, working
+    # No further band activity from here: only the heartbeat can add calls.
+    recorder.wait_for_calls(4)
+    reporter.release()
+    reporter.join()
+    assert set(recorder.states()[2:]) == {"working"}
+    seqs = recorder.seqs()
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+    assert [sub for sub, _ in recorder.calls][-1] == "release-agent"
