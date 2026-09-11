@@ -2033,11 +2033,13 @@ MovePickerScreen .move-picker {
  * more screen look like a different app. It differs in one structural way:
  * the body can be long (a per-session table grows without bound), so the card
  * pins a title and a hint and gives the report a scrolling body between them,
- * rather than sizing to content the way the picker does. `/usage`'s body and
- * `/info`'s are a `Static` in a `VerticalScroll`; `/analytics`'s is a
- * `ReportView`, which paints its own lines and is its own scroller — the rule
- * (`#analytics-scroll`) and the reason (it repaints per mouse event, not per
- * key) are below. */
+ * rather than sizing to content the way the picker does. The three bodies
+ * differ, and the difference is the point: `/info`'s is a `Static` inside a
+ * `VerticalScroll`, `/usage`'s is the `UsagePanel` `Static` scrolling itself
+ * inside a plain container (it paints its own bar), and `/analytics`'s is a
+ * `ReportView` — a line-API widget that converts only the lines the compositor
+ * asks for. Why that one needed its own shape (it repaints per mouse event, not
+ * per key) and its rule (`#analytics-scroll`) are below. */
 AnalyticsScreen, SessionScreen, InfoScreen {
     align: center middle;
     background: $lo-sunken;

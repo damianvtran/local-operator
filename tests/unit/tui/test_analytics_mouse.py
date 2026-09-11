@@ -119,11 +119,19 @@ def _drag_to(screen: AnalyticsScreen, x: int, y: int) -> events.MouseMove:
     ``button=1`` rather than ``_move``'s 0, because the screen's selection
     machinery only grows a selection while a button is down; a hover move is a
     different event as far as this path is concerned.
+
+    ``x``/``y`` carry the SCREEN coordinate, like ``_press``/``_release`` and
+    unlike ``_move``'s 0,0: the screen resolves the selection's content offset by
+    hit-testing the pointer position it is given (``get_widget_and_offset_at``),
+    so a zeroed position resolves no offset at all — the drag then has a start
+    and no end, which Textual reads as "select to the end of the report". A
+    silently unbounded copy is exactly the kind of thing a test asserting
+    "the row is in the copied text" cannot see.
     """
     return events.MouseMove(
         widget=screen._body,
-        x=0,
-        y=0,
+        x=x,
+        y=y,
         delta_x=0,
         delta_y=0,
         button=1,
@@ -968,7 +976,6 @@ def test_a_drag_across_the_rows_selects_them_and_copies_them():
             top = _row_y(screen, first)
             bottom = _row_y(screen, first + 2)
             expected = screen.render_lines_for_test()
-            rows = [expected[screen._layout.session_first_line + i].strip() for i in (1, 2, 3)]
 
             def painted() -> dict[int, tuple[tuple[str, str | None], ...]]:
                 """Row -> (text, background) per segment: what the eye actually sees.
@@ -1010,6 +1017,12 @@ def test_a_drag_across_the_rows_selects_them_and_copies_them():
             ), f"the dragged row is not in the copied text: {selected[:120]!r}"
             assert rows[0].strip()[-24:] in selected, "the first dragged row's tail is missing"
             assert selected.count("\n") >= 2, f"fewer than three rows copied: {selected!r}"
+            # ...and no more than the rows the drag covered: an unresolved end
+            # offset reads as "select to the end of the report" (~40 lines here),
+            # which every other assertion in this test would happily accept.
+            assert (
+                selected.count("\n") <= 4
+            ), f"the drag selected past the rows it covered: {selected.count(chr(10))} lines"
 
             dragged = {screen._scroll.scrollable_content_region.y + first - 1 + i for i in range(4)}
             changed = {index for index, bg in painted().items() if before[index] != bg}
@@ -1028,5 +1041,132 @@ def test_a_drag_across_the_rows_selects_them_and_copies_them():
             assert all(
                 after_clear[index] == before[index] for index in dragged
             ), "clearing the selection did not repaint the rows it had highlighted"
+
+    asyncio.run(run())
+
+
+# -- paint == copy ------------------------------------------------------------
+
+
+def _selection_ground(app: OperatorApp) -> str:
+    """The background the selection band paints with, as the strips report it."""
+    return str(app.screen.get_component_rich_style("screen--selection").bgcolor)
+
+
+def _painted_by_selection(app: OperatorApp) -> dict[int, str]:
+    """Screen row -> the text the SELECTION ground is painted on, per row.
+
+    Read off the compositor's own strips, so it is the frame the reader sees
+    rather than what the widget intended: the concatenated text of the segments
+    whose background is the selection ground.
+    """
+    ground = _selection_ground(app)
+    rows: dict[int, str] = {}
+    for index, strip in enumerate(app.screen._compositor.render_strips()):
+        text = "".join(
+            segment.text
+            for segment in strip
+            if segment.text and segment.style and str(segment.style.bgcolor) == ground
+        )
+        if text:
+            rows[index] = text
+    return rows
+
+
+def test_the_selection_band_paints_the_characters_ctrl_c_copies():
+    """Paint and copy must describe the SAME characters — wide glyphs included.
+
+    The offsets a drag produces are CHARACTER offsets: ``Strip.apply_offsets``
+    advances ``x`` by ``len(segment.text)``, the compositor counts characters
+    into the segment the pointer landed on, and ``Selection.extract`` (what
+    ctrl+c ends up with) slices the plain string with the same numbers. Reading
+    them as cell columns and converting again is the identity only while every
+    glyph is one cell wide — true of the operator's real ledger and of every
+    other fixture here, which is exactly why the drift hid: on a line whose
+    prefix carries a 2-cell glyph the band highlights a different range than the
+    copy. A session title is free text, so a wide-glyph label is reachable even
+    though the ledger the PR was measured on has none.
+    """
+
+    async def run():
+        app = _app()
+        agg = _tall_report_agg()
+        # The first table row (the priciest root). Renamed rather than added so
+        # the row keeps its place, its widths and its sort order.
+        # setattr, not attribute access: the fixture hangs the labels on the
+        # aggregate the same way (`analytics_panel` reads them with `getattr`), so
+        # this is the shape the report actually consumes.
+        names = dict(getattr(agg, "session_names", {}))
+        names["root00000000"] = "日本語セッション"
+        setattr(agg, "session_names", names)
+        async with app.run_test(size=(120, 45)) as pilot:
+            screen = await _push(pilot, app, agg)
+            _show_table(screen)
+            await pilot.pause()
+            y = _row_y(screen, 0)
+            row = screen.render_lines_for_test()[screen._layout.session_first_line]
+            assert "語" in row, f"fixture row has no wide glyph: {row!r}"
+            start = _row_x(screen) + 2
+            screen._forward_event(_press(screen, start, y))
+            await pilot.pause()
+            for step in (1, 2, 3):
+                screen._forward_event(_drag_to(screen, start + 10 * step, y))
+                await pilot.pause()
+            screen._forward_event(_release(screen, start + 30, y))
+            await pilot.pause()
+
+            copied = app.screen.get_selected_text()
+            assert copied, "the drag selected nothing"
+            painted = _painted_by_selection(app).get(y, "")
+            assert painted, "the drag painted no selection band"
+            assert (
+                "語" in copied or "語" in painted
+            ), f"the drag missed the wide glyph, so this proves nothing: {copied!r}"
+            assert painted == copied, (
+                f"the band highlights {painted!r} while ctrl+c copies {copied!r} — "
+                f"the frame describes different characters than the clipboard"
+            )
+
+    asyncio.run(run())
+
+
+def test_a_selection_from_the_report_top_bands_only_the_selected_rows():
+    """A drag that starts on the report's FIRST line must band only its own rows.
+
+    ``/analytics`` opens at the report top, so body line 0 is the line under the
+    reader's pointer — and a drag upward is normalised to start there, so this is
+    the first gesture the screen offers. The selection style is applied per line
+    here (this widget knows the line index; a single-line visual does not), but
+    the generic visual path re-resolves the selection against the one line it is
+    handed, which reads body line 0's span for EVERY strip: with a selection
+    starting at line 0 the ground then covered all 28 visible rows / 1394 cells
+    where 4 rows were selected (measured, 120x45). The frame is what lies —
+    the copy was always right — so the copy cannot be the guard here.
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(120, 45)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg())
+            screen._scroll.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            content = screen._scroll.scrollable_content_region
+            x = _row_x(screen)
+            screen._forward_event(_press(screen, x, content.y))
+            await pilot.pause()
+            for step in (1, 2, 3):
+                screen._forward_event(_drag_to(screen, x + 40, content.y + step))
+                await pilot.pause()
+            screen._forward_event(_release(screen, x + 40, content.y + 3))
+            await pilot.pause()
+
+            assert app.screen.get_selected_text(), "the drag selected nothing"
+            selected_rows = set(range(content.y, content.y + 4))
+            banded = set(_painted_by_selection(app))
+            assert banded, "no row carries the selection ground, so this proves nothing"
+            assert banded <= selected_rows, (
+                f"a selection from body line 0 banded rows outside it: "
+                f"{sorted(banded - selected_rows)} (banded {sorted(banded)})"
+            )
 
     asyncio.run(run())
