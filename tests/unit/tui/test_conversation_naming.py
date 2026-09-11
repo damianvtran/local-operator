@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -1732,6 +1733,50 @@ async def test_a_refresh_that_supersedes_the_first_naming_call_frees_the_latch()
         assert (
             not app._interaction.naming.requested
         ), "an unnamed conversation was left with naming permanently disarmed"
+
+
+@pytest.mark.asyncio
+async def test_the_routed_budget_covers_the_history_read_too() -> None:
+    """The deadline must bound the WHOLE op, not just the naming call.
+
+    Reading the history sits outside `refresh_title`'s timeout and has no
+    ceiling of its own — `RemoteSession.materialize_history` pages a remote
+    journal in a `while token:` loop — so bounding only the second await left
+    the op at "unbounded + 8s" against a client that abandons it at 15, which
+    is the overrun the budget exists to prevent surviving the fix meant to
+    remove it. The op could store the title and still report failure.
+    """
+    slow = asyncio.Event()
+
+    class _Slow:
+        conversation_name = "Fix the login flow"
+
+        async def materialize_history(self) -> list[Any]:
+            await slow.wait()  # a page that never arrives
+            return []
+
+        async def complete_once(self, system: str, prompt: str) -> str:
+            return "<title>Never reached</title>"
+
+    started = time.monotonic()
+    try:
+        # Bounded by the TEST as well, generously: an unbudgeted op waits on
+        # that page forever, and a regression must fail in seconds rather than
+        # hang the suite until someone kills it.
+        result = await asyncio.wait_for(
+            naming.routed_refresh("Fix the login flow", _Slow()),
+            naming.ROUTED_TITLE_TIMEOUT_S + 4,
+        )
+    except asyncio.TimeoutError:  # pragma: no cover — the regression path
+        pytest.fail("the budget did not cover the history read: the op never returned")
+    finally:
+        slow.set()
+    elapsed = time.monotonic() - started
+
+    assert result.outcome == naming.TITLE_UNAVAILABLE
+    assert (
+        elapsed < naming.ROUTED_TITLE_TIMEOUT_S + 2
+    ), f"the op ran {elapsed:.1f}s: the budget did not cover the history read"
 
 
 @pytest.mark.asyncio

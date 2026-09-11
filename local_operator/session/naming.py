@@ -55,9 +55,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Awaitable, Sequence, cast
+
+#: Naming never speaks to the terminal: it is decoration running beside a live
+#: turn, so its failures go to the log file and its outcomes to a receipt.
+logger = logging.getLogger(__name__)
 
 #: A history entry as the theme sampler reads it. Deliberately ``Any`` and
 #: duck-typed via ``getattr`` rather than a ``Protocol`` or an import of the
@@ -1005,10 +1010,16 @@ def is_refresh_request(arg: str) -> bool:
 #: work that succeeded is worse than a shorter ceiling: the title is decoration,
 #: the receipt is what the user reads.
 #:
-#: 8 s leaves room for the ``materialize_history`` that precedes the call (it
-#: pages a remote journal) and still lands comfortably inside the ack. The TUI
-#: worker keeps the full :data:`TITLE_TIMEOUT_S`: it paints into its own
-#: transcript when the answer arrives and nothing is holding a socket for it.
+#: 8 s is the budget for the WHOLE handler, not for the naming call alone, and
+#: the callers must wrap both awaits in it. The history read that precedes the
+#: call is the unbounded part — ``RemoteSession.materialize_history`` pages a
+#: remote journal with no ceiling of its own — so bounding only the second await
+#: leaves the op at "unbounded + 8 s" and reintroduces exactly the overrun this
+#: constant exists to prevent. A timeout that fires resolves to
+#: :data:`TITLE_UNAVAILABLE`, which is an honest receipt inside the ack window.
+#:
+#: The TUI worker keeps the full :data:`TITLE_TIMEOUT_S`: it paints into its own
+#: transcript whenever the answer arrives and nothing is holding a socket for it.
 ROUTED_TITLE_TIMEOUT_S = 8.0
 
 #: What an on-demand refresh did, for a receipt that has to tell the user
@@ -1136,6 +1147,55 @@ async def refresh_title(
     if current and title.casefold() == current.casefold():
         return TitleRefresh(TITLE_UNCHANGED, current)
     return TitleRefresh(TITLE_REFRESHED, title)
+
+
+async def routed_refresh(current: str, session: Any) -> TitleRefresh:
+    """:func:`refresh_title` for a handler answering inside a request/response op.
+
+    Both routed handlers need the same three things, and each was got wrong once
+    by being written twice:
+
+    * **One budget over BOTH awaits.** Reading the history is not inside
+      :func:`refresh_title`'s timeout and has no ceiling of its own
+      (``RemoteSession.materialize_history`` pages a remote journal in a
+      ``while token:`` loop), so bounding only the naming call left the op at
+      "unbounded + 8 s" against a client that abandons it at ``ACK_TIMEOUT_S``
+      — the overrun :data:`ROUTED_TITLE_TIMEOUT_S` exists to prevent, surviving
+      the fix meant to remove it. Worse, the op could store the title and STILL
+      report failure.
+    * **Every failure resolving to a receipt**, never to an exception escaping
+      into a routed op: a timeout, a reconnect race mid-materialize, or a dead
+      provider all mean the same thing to the user, and the title stands.
+    * **The same history seam.** ``materialize_history`` when the facade has one,
+      ``history()`` when it does not.
+
+    The TUI worker deliberately does NOT use this: nothing holds a socket for it,
+    so it keeps the full :data:`TITLE_TIMEOUT_S` and paints whenever the answer
+    arrives.
+    """
+
+    async def _gather() -> TitleRefresh:
+        materialize = getattr(session, "materialize_history", None)
+        if callable(materialize):
+            # `session` is a duck-typed facade here (a real session, a remote
+            # one, or a test double), so the awaitable is cast rather than
+            # assumed — the probe-then-cast the runtime's optional ops use.
+            turns = await cast("Awaitable[list[Any]]", materialize())
+        else:
+            turns = list(session.history()) if hasattr(session, "history") else []
+        return await refresh_title(
+            current, session.complete_once, turns=turns, timeout=ROUTED_TITLE_TIMEOUT_S
+        )
+
+    try:
+        return await asyncio.wait_for(_gather(), ROUTED_TITLE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        # NOT swallowed: a cancelled op is the caller going away, and the
+        # runtime's own teardown must not be reported to it as a title outcome.
+        raise
+    except Exception:  # noqa: BLE001 — naming is decoration; never fail the op
+        logger.debug("routed title refresh could not complete", exc_info=True)
+        return TitleRefresh(TITLE_UNAVAILABLE)
 
 
 @dataclass

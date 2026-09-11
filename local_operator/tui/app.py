@@ -32549,23 +32549,10 @@ class OperatorApp(App[None]):
         generation = self._name_generation
         source = self._interaction
         current = session.conversation_name
-        turns = None
-        if not hasattr(session, "materialize_history"):
-            turns = list(session.history()) if hasattr(session, "history") else []
-        try:
-            if turns is None:
-                turns = await getattr(session, "materialize_history")()
-            result = await naming.refresh_title(
-                current,
-                session.complete_once,
-                turns=turns,
-                timeout=naming.ROUTED_TITLE_TIMEOUT_S,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
-            logger.debug("routed title refresh failed", exc_info=True)
-            result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
+        # One budget over the history read AND the naming call, and one failure
+        # policy for both — shared with the runtime-hosted twin so the two
+        # cannot drift on the deadline the way they once drifted on the receipt.
+        result = await naming.routed_refresh(current, session)
         # The rename-during-the-call guard the TUI worker documents: a `/rename`
         # that landed while this was in flight outranks an answer decided
         # against a title no longer in force, and storing over it would strip

@@ -2841,27 +2841,10 @@ class ServingSessionHandle(SessionHandle):
         if not callable(setter) or not callable(complete_once):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         current = getattr(session, "conversation_name", "") or ""
-        try:
-            materialize = getattr(session, "materialize_history", None)
-            if callable(materialize):
-                # A duck-typed handle: `session` is `Any` here (this runtime
-                # hosts real sessions and test doubles alike), so the awaitable
-                # is cast rather than assumed — the same probe-then-cast the
-                # server's optional ops use.
-                turns = await cast("Awaitable[list[Any]]", materialize())
-            else:
-                turns = list(session.history()) if hasattr(session, "history") else []
-            # Bounded by the INVOKER's deadline, not the model's: a terminal or
-            # phone is holding a socket open for this receipt and abandons the
-            # request at `ACK_TIMEOUT_S`. See `ROUTED_TITLE_TIMEOUT_S`.
-            result = await naming.refresh_title(
-                current, complete_once, turns=turns, timeout=naming.ROUTED_TITLE_TIMEOUT_S
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — naming is decoration; never fail the call
-            logger.debug("routed title refresh failed", exc_info=True)
-            result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
+        # One budget over the history read AND the naming call, and one failure
+        # policy for both — shared with the app-hosted twin so the two cannot
+        # drift on the deadline the way they once drifted on the receipt.
+        result = await naming.routed_refresh(current, session)
         # The second condition is the rename-during-the-call guard: a `/rename`
         # landing while this was in flight outranks an answer decided against a
         # title no longer in force, and storing over it would strip the latch
