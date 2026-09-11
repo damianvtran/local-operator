@@ -238,6 +238,52 @@ def test_the_runtime_dispatches_every_slash_command_it_advertises() -> None:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["title", "models", "recall"])
+async def test_a_routed_alias_reaches_the_same_handler_as_its_primary_name(
+    spelling: str,
+) -> None:
+    """The same defect class, one layer along: dispatched, but only if spelled
+    the way the branch happens to be written.
+
+    Both routed dispatchers match string LITERALS, so an alias arriving off the
+    wire fell past every branch and collected the terminal-only refusal — for a
+    command the runtime implements, that the registry advertises, and that the
+    invoker's own picker completed. Found on a live session: ``/title`` over the
+    control socket answered "run it from a terminal on the machine you want to
+    configure" while ``/rename`` worked, which is the local path's already-fixed
+    `slash_command_for` bug reappearing on the routed one.
+
+    Asserted as EQUIVALENCE to the primary spelling rather than as "not the
+    refusal", because the refusal is a legitimate answer for some of these:
+    ``/recall`` resolves to ``/resume``, which genuinely has no session-side
+    home. What must never differ is the ANSWER the two spellings get — one
+    entry, one behaviour, the same rule ``test_an_alias_inherits_its_command_policy``
+    pins on the local path. Driven off the REGISTRY's aliases rather than a
+    literal list, so the test keeps its meaning as commands gain and lose them.
+    """
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.slash_commands import slash_command_for
+
+    entry = slash_command_for(f"/{spelling}")
+    assert entry is not None and spelling != entry.name, f"{spelling} is not an alias"
+
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
+    handle._session = None  # type: ignore[attr-defined]
+    aliased = await handle._slash_result(spelling, "", SlashResult)
+    primary = await handle._slash_result(entry.name, "", SlashResult)
+    assert aliased.text == primary.text, (
+        f"/{spelling} answered differently from /{entry.name}: the routed "
+        "dispatcher matched the raw word instead of resolving it to its "
+        "registry primary name"
+    )
+    # And the refusal, when there is one, names the command the user can
+    # actually look up — never the alias that fell through to it.
+    if "does not hold" in aliased.text:
+        assert f"/{entry.name}" in aliased.text
+
+
 @pytest.mark.parametrize(
     "command",
     sorted(_advertised_authoritative_commands()),
