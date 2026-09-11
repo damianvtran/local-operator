@@ -434,3 +434,55 @@ class TestConfiguredEffort:
         compromise on."""
         assert configured_effort(None) is None
         assert configured_effort(object()) is None
+
+    def test_a_yaml_null_is_no_opinion_not_the_none_rung(self, tmp_path) -> None:
+        """B1: ``model_effort:`` with no value, ``model_effort: null`` and
+        ``model_effort: ~`` all parse to Python ``None``, and ``str(None)``
+        lowercases to ``"none"`` — a REAL rung of ``EFFORT_ORDER``.
+
+        So the plainest spelling of "clear the key" silently turned reasoning
+        OFF for every new conversation of any model whose ladder offers it, and
+        durably: D6's clause 2 reads the same value back, so a later
+        ``/model default`` re-persists it. This docstring's own promise — "a
+        missing key, an unreadable file and a non-string value all read as
+        ``None``" — was exactly the case that failed. Read through the FILE,
+        because a YAML null is how a hand edit spells it.
+        """
+        for stored in ("model_effort:\n", "model_effort: null\n", "model_effort: ~\n"):
+            (tmp_path / "config.yml").write_text(
+                "version: 0.0.0\nvalues:\n  hosting: anthropic\n"
+                "  model_name: claude-opus-5\n  " + stored
+            )
+            assert configured_effort(ConfigManager(tmp_path)) is None, stored
+
+    def test_a_null_stored_effort_leaves_the_boot_on_the_model_default(self, tmp_path) -> None:
+        """The consequence, composed the way ``session_factory._prepare``
+        composes it: the reader's answer goes through ``resolve_effort_in``
+        against the model's own ladder.
+
+        A null used to arrive there as the literal REQUEST ``none``, which clamps
+        onto the nearest rung instead of degrading to the documented default —
+        ``low`` on ``claude-opus-5``, reasoning at its floor, with no warning
+        anywhere (the boot clamp is silent by design and the band names the rung
+        in force, which is why nothing contradicted it on screen)."""
+        (tmp_path / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: anthropic\n"
+            "  model_name: claude-opus-5\n  model_effort:\n"
+        )
+        spec = build_model_spec("anthropic", "claude-opus-5")
+        resolved = resolve_effort_in(
+            spec.reasoning_efforts,
+            spec.reasoning_default_effort,
+            configured_effort(ConfigManager(tmp_path)),
+        )
+        assert resolved == "high"
+
+    def test_other_non_string_types_are_no_opinion(self, tmp_path) -> None:
+        """The mirror half of B1: an ``int`` read as ``'3'`` and a ``bool`` as
+        ``'true'``/``'false'``. Both were harmless only by accident — they are
+        off-vocabulary, so ``resolve_effort_in`` happened to reject them — and
+        neither is a level this key should answer with. ``none`` was the one
+        wrong type that is also in the vocabulary, which is why the guard has to
+        be a TYPE check rather than the vocabulary check downstream."""
+        assert configured_effort(self._stored(tmp_path, 3)) is None
+        assert configured_effort(self._stored(tmp_path, True)) is None

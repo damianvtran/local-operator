@@ -48,6 +48,18 @@ from local_operator.spawn.policy import fork_cmux_placement, fork_mode
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
+#: A spec of the shape ``build_model_spec`` produces for a model with a
+#: documented default: the level is SEEDED (both fields equal) and becomes a
+#: choice only once the user picks one. The M2 probe needs this shape, because
+#: ``MODEL`` seeds nothing and the seed-versus-choice rule is the whole point.
+SEEDED = ModelSpec(
+    provider="test",
+    model_id="m",
+    context_window=100_000,
+    reasoning_effort="high",
+    reasoning_default_effort="high",
+)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_registry():
@@ -123,8 +135,12 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
             enabled=("web_search", "web_fetch"),
         ),
     )
+    # ``model`` is overridable so a probe can seat a spec that SEEDS an effort
+    # (``build_model_spec`` sets ``reasoning_effort`` ==
+    # ``reasoning_default_effort``), which is the shape M2 is about; ``MODEL``
+    # seeds nothing and would leave the seed/choice distinction untested.
     return Session(
-        model=MODEL,
+        model=kwargs.pop("model", MODEL),
         stream_fn=stream,
         tools=tools,
         transcript=Transcript(tmp_path / "sess"),
@@ -1362,5 +1378,95 @@ async def test_an_external_effort_edit_says_so_once(tmp_path, monkeypatch) -> No
         # model and level are untouched.
         assert session.model.model_id == "chosen"
         assert session.model.reasoning_effort == MODEL.reasoning_effort
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_external_write_of_the_same_pair_says_nothing(tmp_path, monkeypatch) -> None:
+    """M2: a delivery carrying the SAME model pair must stay silent even when the
+    session's spec SEEDS a level.
+
+    ``build_model_spec`` sets ``reasoning_effort`` to ``reasoning_default_effort``
+    at build time and "they diverge as soon as the user picks a level" — so a
+    spec whose two fields are equal carries a SEED, not a choice, while a stored
+    ``""`` means "no opinion". Comparing the stored string against the raw field
+    made the guard fail to short-circuit for every seed-carrying model (Anthropic
+    seeds ``high``), so a write that changed nothing about the effective default
+    printed "someone changed your default" — on the exact surface the session
+    uses to tell the user that.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", SEEDED.provider)
+    session = make_session(
+        tmp_path, RebindableStream({}), model=SEEDED, compaction_settings=CompactionSettings()
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        # The model name arriving on disk under a session already on that model:
+        # one key changes, and the pair it lands on is the pair in force.
+        write_from_another_process(config_dir, "model_name", SEEDED.model_id)
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        assert change.changed_keys == frozenset({"model_name"})
+        await _settle(session)
+
+        assert _notices(session) == [], _notices(session)
+        assert session.model.model_id == SEEDED.model_id
+        assert session.model.reasoning_effort == "high"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_effort_only_external_edit_names_the_effort(tmp_path, monkeypatch) -> None:
+    """U6: with the model pair unchanged, the notice names the member that moved
+    AND its value.
+
+    "keeping <model>; default changed for new sessions" is literally true for an
+    effort edit, and it left the reader unable to tell whether the model default,
+    the effort default or both had moved — short of opening ``/settings``. The
+    value shown is the stored one, in the registry's vocabulary (``auto`` for the
+    empty string).
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", SEEDED.provider)
+    manager.set_config_value("model_name", SEEDED.model_id)
+    session = make_session(
+        tmp_path, RebindableStream({}), model=SEEDED, compaction_settings=CompactionSettings()
+    )
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        write_from_another_process(config_dir, "model_effort", "medium")
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        assert change.changed_keys == frozenset({"model_effort"})
+        await _settle(session)
+
+        events = [e for e in _EVENTS[id(session)] if e.type == "notice"]
+        assert len(events) == 1, events
+        assert events[0].headline == "Effort default changed"
+        assert events[0].text == (
+            "keeping test/m; reasoning effort default changed for new sessions (medium); "
+            "/model saved adopts it here"
+        )
+        # The birth default moved; the running session did not.
+        assert session.model.reasoning_effort == "high"
     finally:
         await session.dispose()

@@ -1327,3 +1327,94 @@ class TestConfigEditAcceptsAnEnumLabel:
         code = config_edit_command(argparse.Namespace(key="model_effort", value=typed))
         assert code == 0, capsys.readouterr()
         assert ConfigManager(tmp_path).get_config_value("model_effort") == stored
+
+
+class TestConfigEditEchoesTheTypedLabel:
+    """``lop config edit <enum key> <label>`` reports the word the user used.
+
+    The receipt printed the STORED value, which for an ENUM is a wire form, not
+    vocabulary: ``model_effort auto`` stores ``""``, so the confirmation read
+    "Successfully updated model_effort to " — the user typed a word and the
+    answer named nothing (design review D8). The same blank met every other
+    member whose value is empty (the ``providers.openrouter.*`` "default" rows),
+    and members whose label is not their value at all proposed a third spelling
+    (``display.nerd_icons auto`` stores ``None``).
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "typed", "echoed"),
+        [
+            ("model_effort", "auto", "auto"),
+            ("model_effort", "none", "none"),
+            ("model_effort", "HIGH", "high"),
+            ("display.nerd_icons", "auto", "auto"),
+        ],
+    )
+    def test_the_label_is_what_comes_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        key: str,
+        typed: str,
+        echoed: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key=key, value=typed))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert f"Successfully updated {key} to {echoed}" in out, out
+
+    def test_a_value_that_matched_no_label_still_echoes_what_was_stored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The other half: a value the schema accepts WITHOUT being a label is
+        echoed as stored, so nothing about the normalising path moved.
+
+        ``display.time_format`` stores ``12h`` while its label is ``12-hour``, so
+        the typed word matches no label and must fall through to the stored form
+        (a label lookup that swallowed this case would print ``12-hour`` for a
+        config that holds ``12h`` — the same class of lie the stored-value echo
+        exists to prevent, mirrored)."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="display.time_format", value="12h"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated display.time_format to 12h" in out, out
+
+
+class TestTheModelRowsHelpBudget:
+    """The three ``model`` rows' help must survive an 80-column footer.
+
+    The detail line for a row that is not at its default is
+    ``<help> · default: —``, measured at 74 usable cells at 80 columns, and the
+    ladder SHEDS the whole sentence rather than trimming it — so a help one cell
+    too long disappears entirely in exactly the state (an off-default row) where
+    the user is reading it. The new ``model_effort`` row shipped at 68 and was
+    the only one of the three to shed (design review D4); the cells went to the
+    row's own meaning instead, because the cell renders the unset value as ``—``
+    and the word ``auto`` is otherwise visible only inside the expansion (D5).
+    """
+
+    @pytest.mark.parametrize("key", ["hosting", "model_name", "model_effort"])
+    def test_the_help_fits_with_the_default_clause(self, key: str) -> None:
+        setting = settings_io.resolve_key(key)
+        assert setting is not None
+        assert setting.help
+        assert len(f"{setting.help} · default: —") <= 74, setting.help
+
+    def test_the_effort_help_says_what_the_resting_cell_means(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert "Unset" in setting.help and "model's own default" in setting.help, setting.help

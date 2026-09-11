@@ -587,7 +587,12 @@ def _theme_choices() -> tuple[Choice, ...]:
 #: sentence. ``tests/unit/test_settings_io.py`` pins that no rung is missing one,
 #: which is the loud failure this avoids at runtime.
 _EFFORT_LEVEL_HELP: dict[str, str] = {
-    "none": "no reasoning — fastest, cheapest",
+    # `reasoning off`, not `no reasoning — fastest, cheapest` (review round 1,
+    # m2): every other rung's description names a DEPTH, and the two benefits
+    # named the one row that costs the least, in a picker where the row directly
+    # above it is `auto`. A description has one job here — say what the member
+    # means — and the ladder's cheapest end is not the place to sell.
+    "none": "reasoning off",
     "minimal": "the least reasoning the model offers",
     "low": "light reasoning",
     "medium": "moderate reasoning",
@@ -659,10 +664,15 @@ SETTINGS: tuple[Setting, ...] = (
         # An ENUM member rather than `empty_unsets` so the page shows `auto`
         # beside the real rungs as a peer to pick between.
         default="",
-        # 68 cells — the same ~76-cell footer budget as `hosting` above; the
-        # clamp sentence is the half that matters most (an unsupported rung is
-        # survivable rather than hidden, so it need not be mentioned as a limit).
-        help="Effort for new conversations. A rung the model lacks clamps nearest.",
+        # 61 cells — the same ~76-cell footer budget as `hosting` above, and it
+        # has to hold the row's own meaning AND the resting state (design round
+        # 1, D4+D5). The clamp sentence the first cut carried is gone: at 61
+        # cells it cannot sit beside the fact that the row ships UNSET, and the
+        # resting cell renders that emptiness as `—`, so the one member a user
+        # cannot READ off the page was the one left unexplained. The clamp is
+        # documented where it happens instead — README, and the `/model default`
+        # receipt names the instance when a rung is dropped.
+        help="Effort for new conversations. Unset: the model's own default.",
         choices=_effort_choices(),
     ),
     # -- providers ----------------------------------------------------------

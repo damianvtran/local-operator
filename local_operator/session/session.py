@@ -11720,24 +11720,52 @@ class Session:
         default with no signal anywhere — the one member of the section that
         moved silently. The notice's advice is now literally true: ``/model
         saved`` adopts the configured effort here, so naming the change is
-        naming the thing the user can act on. Compared NORMALISED (``str(...)
-        or ""``) because the spec's effort is a level or ``None`` while the
-        stored value is always a string, and ``None``/``""`` both mean "no
-        configured level".
+        naming the thing the user can act on.
+
+        The third member is compared against the session's DELIBERATE level
+        rather than the raw ``self.model.reasoning_effort`` (M2), because the
+        two do not mean the same thing when the key is unset: ``""`` on the
+        config side is "no opinion", while the spec's field carries the value
+        ``build_model_spec`` SEEDED for the model (``high`` on Anthropic) and
+        diverges from ``reasoning_default_effort`` only once the user picks a
+        level. Compared raw, the guard never short-circuited for any
+        seed-carrying model, so an unrelated external write of the SAME pair
+        printed a false "default changed" for it. The rule applied is the one
+        the persist side uses (D6): ``reasoning_effort ==
+        reasoning_default_effort`` is a seed, not a choice, and reads as ``""``.
         """
         if self._job_id is not None:
             return
         if local:
             return
-        if (
-            values.get("hosting"),
-            values.get("model_name"),
-            str(values.get("model_effort") or ""),
-        ) == (
-            self.model.provider,
-            self.model.model_id,
-            self.model.reasoning_effort or "",
-        ):
+        stored_effort = str(values.get("model_effort") or "")
+        live_effort = self.model.reasoning_effort or ""
+        if live_effort == (self.model.reasoning_default_effort or ""):
+            live_effort = ""
+        pair_matches = values.get("hosting") == self.model.provider and (
+            values.get("model_name") == self.model.model_id
+        )
+        if pair_matches and stored_effort == live_effort:
+            return
+        if pair_matches:
+            # An EFFORT-ONLY delivery (U6): headline and body both name the
+            # member that moved and the value it moved to. "Model unchanged"
+            # with an unnamed "a default changed" was literally true and still
+            # left the reader unable to tell WHICH default without opening
+            # `/settings`.
+            self._spawn_background(
+                self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"keeping {self.model_label}; reasoning effort default changed "
+                            f"for new sessions ({stored_effort or 'auto'}); "
+                            "/model saved adopts it here"
+                        ),
+                        kind="info",
+                        headline="Effort default changed",
+                    )
+                )
+            )
             return
         self._spawn_background(
             self._emit(
