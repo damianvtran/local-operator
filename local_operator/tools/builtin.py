@@ -3893,12 +3893,6 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
 # unbounded one would cost more than the failure it reports. Each is applied
 # where it is named, and the whole message is capped last.
 
-#: Word overlap at or above which the closest region IS the hunk's own text.
-#: Only reachable when the two frames differ (on unchanged content the hunk
-#: would have matched, not been refused), so the report says which situation
-#: stands instead of printing "not found" beside "100% word overlap" with the
-#: caller's own text (review round 2, R10).
-_EDIT_SELF_MATCH_PERCENT = 100
 #: Failing hunks that get a full closest-region report. TWO, not three: a
 #: detailed report is up to ~15 rows in the tool card (six quoted lines, two
 #: candidates, the difference pair and the hint) and the expanded card paints
@@ -4181,8 +4175,25 @@ def _is_pure_insertion(pattern_lines: list[str], file_lines: list[str]) -> bool:
     return prefix + suffix >= limit
 
 
+def _own_text_on_disk(original: str, current: str, old_text: str) -> bool:
+    """Whether ``old_text`` is still in the FILE unchanged, while the batch state
+    no longer holds it.
+
+    The self-match clause needs an identity fact, and the similarity figure
+    cannot supply one: 100% bag-of-words overlap is also reached by a
+    punctuation-only rewrite, a reordered list, or any permutation of the same
+    words, so gating on it claimed an identity the metric never measured (review
+    round 3, R13 / design round 2, D8). A substring test answers the question
+    that is actually being asked, and it runs only for a hunk that already
+    failed. The frame comparison comes first because on unchanged content the
+    hunk would have matched rather than been refused, and the clause is about
+    what THIS call's earlier hunks did.
+    """
+    return current != original and old_text in original
+
+
 def _edit_not_found_compact(
-    scan: _FileScan, number: int, old_text: str, in_memory_moved: bool = False
+    scan: _FileScan, number: int, old_text: str, own_text_on_disk: bool = False
 ) -> list[str]:
     """One line for a failing hunk past the detailed-report cap.
 
@@ -4190,16 +4201,16 @@ def _edit_not_found_compact(
     roughly where the file says something similar — for about a tenth of a
     full report. ``scan`` is the ON-DISK frame, like the detailed report: a
     one-liner naming a line of the in-memory state would be the same wrong
-    answer, just shorter. ``in_memory_moved`` adds the self-match clause when
-    the closest region is the hunk's own text (review round 2, R10).
+    answer, just shorter. ``own_text_on_disk`` adds the clause for a hunk whose
+    own text is still in the file unchanged (review round 2, R10; gated on the
+    text itself rather than on the similarity figure in review round 3, D8).
     """
     regions = _closest_regions(scan, old_text.splitlines())
     if not regions:
         return [f"hunk {number}: old_text not found — no close match."]
     start, _end, overlap = regions[0]
-    self_match = in_memory_moved and _overlap_percent(overlap) >= _EDIT_SELF_MATCH_PERCENT
     if _overlap_percent(overlap) >= _EDIT_OVERLAP_LABEL_PERCENT:
-        tail = "; earlier hunks in this call would have replaced or moved it" if self_match else ""
+        tail = "; earlier hunks in this call would replace it" if own_text_on_disk else ""
         return [
             f"hunk {number}: old_text not found — closest text at line "
             f"{start + 1} ({_percent(overlap)} word overlap){tail}."
@@ -4232,7 +4243,7 @@ def _edit_not_found_report(
     old_text: str,
     display_path: str,
     anchor_line: int | None = None,
-    in_memory_moved: bool = False,
+    own_text_on_disk: bool = False,
 ) -> list[str]:
     """The closest-region report for one hunk whose ``old_text`` did not match.
 
@@ -4289,25 +4300,30 @@ def _edit_not_found_report(
     )
     if shown_last < last:
         heading += f" (showing first {_EDIT_MAX_WINDOW_LINES} of {last - first + 1})"
+    # The pair is decided here rather than after the clause because the clause
+    # may only appear when there is NO difference to show: "your text is still
+    # on disk, an earlier hunk would replace it" is false the moment the block
+    # goes on to diff the two texts.
+    pattern_index, file_index = _first_difference(pattern_lines, file_lines[start:end])
+    has_difference = pattern_index >= 0 or file_index >= 0
     lines = head + [heading + ":"]
     width = len(str(shown_last))
     for line_number in range(first, shown_last + 1):
         lines.append(f"    {line_number:>{width}}| {_clip_line(file_lines[line_number - 1])}")
-    if in_memory_moved and _overlap_percent(overlap) >= _EDIT_SELF_MATCH_PERCENT:
-        # "not found" beside "100% word overlap" with the caller's own text is
+    if own_text_on_disk and not has_difference:
+        # "not found" beside a quotation of the caller's own text is
         # self-contradictory on its face; name the situation instead (review
-        # round 2, R10). The region IS the hunk's text, unchanged on disk — what
-        # is missing is the text this call's earlier hunks would have left.
-        lines.append(
-            "  (this is this hunk's own text, still on disk unchanged — an earlier hunk in "
-            "this call would have replaced or moved it)"
-        )
+        # round 2, R10). The gate is the TEXT, not the similarity figure: a word
+        # bag reaches 100% for a punctuation-only rewrite or a reordered list,
+        # which is exactly when the clause was false (review round 3, R13 / D8).
+        # Short and cause-first, because the card clips every row from the right
+        # and the reason has to survive the 60-column budget (design round 2, D9).
+        lines.append("  (earlier hunks in this call would replace it; unchanged on disk)")
     for alt_start, alt_end, alt_overlap in regions[1:]:
         snippet = _clip_line(" ".join(file_lines[alt_start:alt_end]), _EDIT_MAX_SNIPPET_CHARS)
         lines.append(f'  also similar: line {alt_start + 1} ({_percent(alt_overlap)}) "{snippet}"')
 
-    pattern_index, file_index = _first_difference(pattern_lines, file_lines[start:end])
-    if pattern_index >= 0 or file_index >= 0:
+    if has_difference:
         your_number = pattern_index + 1 if pattern_index >= 0 else None
         file_number = start + file_index + 1 if file_index >= 0 else None
         lines.append(
@@ -4709,13 +4725,13 @@ def _edit_file_result_locked(
                     hunk.old_text,
                     display_path,
                     anchor_line,
-                    in_memory_moved=current != original,
+                    own_text_on_disk=_own_text_on_disk(original, current, hunk.old_text),
                 ),
                 lambda: _edit_not_found_compact(
                     _scan_for_disk(original),
                     number,
                     hunk.old_text,
-                    in_memory_moved=current != original,
+                    own_text_on_disk=_own_text_on_disk(original, current, hunk.old_text),
                 ),
             )
             continue
