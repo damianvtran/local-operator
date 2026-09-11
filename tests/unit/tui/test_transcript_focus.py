@@ -30,6 +30,7 @@ from local_operator.tui.widgets.transcript import (
     PeerMessageBlock,
     TranscriptBlock,
     TranscriptView,
+    UserBlock,
     WakeBlock,
 )
 
@@ -491,3 +492,52 @@ async def test_clicking_a_row_still_focuses_and_expands_it() -> None:
 
         assert cards[0].expanded is True
         assert app.focused is cards[0]
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_row_with_no_focus_of_its_own_reaches_the_composer() -> None:
+    """A click on a row that CANNOT take focus must not strand it on the
+    container either.
+
+    ``UserBlock`` (and ``AssistantBlock``, and a settled ``ToolCard`` with
+    nothing to expand) has ``can_focus = False`` and no document position of
+    its own, so Textual's own click-to-focus walk — ``MouseDown`` in
+    ``Screen._forward_event``, which runs BEFORE any ``on_click`` handler —
+    finds no focusable ancestor short of ``TranscriptView`` itself and lands
+    focus there. The old guard in ``TranscriptView.on_click``
+    (``isinstance(event.widget, TranscriptBlock): return``) bailed out on
+    exactly this case, on the theory that a click hitting a
+    ``TranscriptBlock`` had already been handled by that block's own
+    ``on_click`` — true for a card that activates (it calls ``event.stop()``,
+    which keeps the click from ever bubbling here at all), false for a block
+    with no click handler of its own. Measured on ``origin/main`` before this
+    fix: clicking a plain ``UserBlock`` left ``app.focused`` as
+    ``TranscriptView``, with the composer dark and unreachable by a second
+    click on the same spot.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app._append_block(UserBlock("hello there"))
+        await pilot.pause()
+
+        view = app.query_one(TranscriptView)
+        block = view.blocks()[-1]
+        assert block.can_focus is False, "premise: UserBlock cannot take focus"
+        offset = (block.region.x + 2, block.region.y)
+        hit, _ = app.screen.get_widget_at(*offset)
+        assert isinstance(hit, UserBlock), f"click site hit a {type(hit).__name__}"
+
+        # `widget=` matters: `Pilot.click`'s `event.widget` is the WIDGET
+        # PASSED IN, not the one Textual would resolve for a real click at
+        # that offset (that resolution — `get_widget_at` at `MouseDown` time —
+        # is exactly the mechanism this test exists to exercise). Omitting it
+        # defaults to the screen and never reaches the code path under test.
+        await pilot.click(widget=block, offset=(2, 0))
+        await pilot.pause()
+
+        assert app.focused is editor
+        assert app.query_one("#input-dock").has_class(COMPOSER_FOCUSED_CLASS)
