@@ -123,6 +123,8 @@ import warnings
 
 import pytest
 
+from tests import shard_stall_watchdog
+
 # ---------------------------------------------------------------------------
 # Real-store guard
 # ---------------------------------------------------------------------------
@@ -233,8 +235,36 @@ def _install_real_store_guard() -> None:
 _install_real_store_guard()
 
 
+# ---------------------------------------------------------------------------
+# Shard stall watchdog
+# ---------------------------------------------------------------------------
+# Four `test (3.12, N)` jobs have been CANCELLED at the workflow's 20-minute cap
+# after a silent ~6-minute tail, which fails the PR. That tail is invisible in
+# the log by construction: pytest prints one progress line per 72 completed
+# tests, so the final partial line is withheld until its slowest item finishes
+# and a single stuck test is indistinguishable from a uniformly slow batch. The
+# only way to recover the culpable test is to watch from inside the run, so this
+# records in-flight node ids on the controller and dumps worker stacks with the
+# C-level timer. Inert unless LOCAL_OPERATOR_SHARD_STALL_SECONDS is set, which
+# only the shard job in ci.yml does; tests/shard_stall_watchdog.py carries the
+# reasoning, the safety argument and the measurement behind the design.
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    shard_stall_watchdog.install(config)
+
+
+def pytest_runtest_logstart(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    shard_stall_watchdog.note_start(nodeid)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    shard_stall_watchdog.note_report(report)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Fail the run if any pre-existing entry of the real store is gone."""
+    shard_stall_watchdog.shutdown()
     if _REAL_STORE is None or _REAL_STORE_ENTRIES is None:
         return
     try:
