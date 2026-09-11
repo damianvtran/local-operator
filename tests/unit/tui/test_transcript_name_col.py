@@ -26,6 +26,7 @@ pointer anywhere in the sequence.
 from __future__ import annotations
 
 import pytest
+from rich.text import Text
 from textual.app import App
 
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -181,3 +182,53 @@ async def test_a_page_that_does_not_move_the_column_repaints_nothing() -> None:
         view.insert_blocks(0, [ToolCard("old2", LONGER_TOOL, {"command": "list them"}, "")])
         await _settle(pilot)
         assert sorted(repaints) == ["c1", "c2"]
+
+
+def _on_frame(app: App[None], block: TranscriptBlock) -> bool:
+    """Whether the frame is currently painting ``block`` at all."""
+    return 0 <= block.region.y < len(list(app.screen._compositor.render_strips()))
+
+
+def composed_row(block: TranscriptBlock) -> str:
+    """The row text ``block`` is holding, for a row the frame is not painting.
+
+    The compositor cannot speak for a row outside the viewport, so the widget's
+    own composed content is the instrument there — and it is the honest one for
+    the claim: this is what the row will paint when it is revealed, unless the
+    reveal itself rebuilds it.
+    """
+    rendered = block.render()
+    # The row is a Rich ``Text`` in every renderable state the ledger has; the
+    # cast is for the union ``Widget.render`` declares.
+    return rendered.plain.splitlines()[0] if isinstance(rendered, Text) else str(rendered)
+
+
+@pytest.mark.asyncio
+async def test_a_row_scrolled_out_of_view_is_repainted_too() -> None:
+    """A row the frame is not showing is rebuilt as well.
+
+    Read from the row's own composed content, because that is the only thing a
+    cell outside the viewport can be judged by: the reader who scrolls back to
+    it is who this is for, and a pointer never reaches it (hovering is what used
+    to repair a row).
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = _bash("c0", "echo step0")
+        view.append_block(first)
+        rest = [_bash(f"c{index}", f"echo step{index}") for index in range(1, 14)]
+        for card in rest:
+            view.append_block(card)
+        await _settle(pilot)
+        assert not _on_frame(app, first), "the fixture has to push the row off the frame"
+        narrow = composed_row(rest[-1]).index("echo step13")
+
+        # The column moves while `first` is above the viewport.
+        view.insert_blocks(0, [ToolCard("old", LONGER_TOOL, {"command": "list them"}, "")])
+        await _settle(pilot)
+
+        assert view.tool_name_col > narrow
+        off_frame = composed_row(first).index("echo step0")
+        assert off_frame > narrow
+        assert off_frame == composed_row(rest[-1]).index("echo step13")
