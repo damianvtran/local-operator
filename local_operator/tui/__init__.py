@@ -12,6 +12,10 @@ from typing import Any, Awaitable, Callable
 
 from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
+from local_operator.tui.terminal_modes import (
+    guard_pixel_mouse_latch,
+    reset_in_band_resize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,16 @@ async def run_tui(
     OUTERMOST thing here on purpose: session construction is the noisiest part
     of startup (provider probes, MCP discovery) and it happens inside the app.
     """
+    # Opt out of in-band window resize BEFORE Textual negotiates it. Both
+    # calls are load-bearing: the reset must land on the wire before the
+    # driver queries `?2048$p` (linux_driver.py:299), and the env guard must
+    # be set before `textual.constants` is imported (SMOOTH_SCROLL is a Final,
+    # read once). Together they stop the terminal sending resize reports and
+    # stop Textual re-enabling the mode after seeing our reset. See
+    # `terminal_modes` for why neither half suffices alone.
+    reset_in_band_resize()
+    guard_pixel_mouse_latch()
+
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 
     with file_logging():
