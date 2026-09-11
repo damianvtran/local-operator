@@ -45,7 +45,21 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def stopped_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+def _installer_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this platform has an installer.
+
+    The status RENDERING is platform-independent, but the command asks
+    `is_supported()` before probing at all — so on Linux (where there is no
+    installer and the honest answer is "wakes fire only while a session is
+    open") these fixtures would never be consulted and every assertion below
+    would be about the unsupported branch instead. Patching the capability
+    keeps the rendering under test on every runner rather than only on macOS.
+    """
+    monkeypatch.setattr("local_operator.wakes.install.is_supported", lambda: True)
+
+
+@pytest.fixture
+def stopped_supervisor(monkeypatch: pytest.MonkeyPatch, _installer_available: None) -> None:
     """Loaded, exited — the state that produced the permanent misses."""
     monkeypatch.setattr(
         "local_operator.wakes.install.supervisor_state",
@@ -54,7 +68,7 @@ def stopped_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def running_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+def running_supervisor(monkeypatch: pytest.MonkeyPatch, _installer_available: None) -> None:
     monkeypatch.setattr(
         "local_operator.wakes.install.supervisor_state",
         lambda _config: SupervisorState(loaded=True, running=True, pid=4242, detail="running"),
@@ -190,7 +204,10 @@ def test_list_marks_overdue_and_stale_schedules(
 
 
 def test_the_install_subcommand_reaches_the_repair_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _installer_available: None,
 ) -> None:
     """THE ROLLOUT PATH.
 
