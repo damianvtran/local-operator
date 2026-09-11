@@ -111,7 +111,11 @@ from local_operator.mcp.verbs import _home_relative
 
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
 # boot path nothing the lazy-import discipline above is protecting.
-from local_operator.model.effort import next_effort
+from local_operator.model.effort import (
+    configured_effort,
+    next_effort,
+    resolve_effort_in,
+)
 from local_operator.session import naming
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 
@@ -3760,6 +3764,16 @@ class OperatorApp(App[None]):
         # and dropped by `_spec_with_chosen_effort` when a model arrives that
         # cannot take it.
         self._effort_choice: str | None = None
+        #: A ONE-SHOT effort the NEXT model activation must apply CLAMPED
+        #: instead of consulting `_effort_choice`. Set by `_cmd_model_saved`
+        #: (adopt the configured default) and by the persist path of
+        #: `/model default` (so the saved rung and the running rung agree).
+        #: Consumed and cleared at the TOP of `_activate_resolved_model`, before
+        #: any early return, so it cannot leak onto a later, unrelated switch.
+        #: A tuple rather than `str | None` because "no override" and "override
+        #: to no opinion" are DIFFERENT: the second is how `/model saved` clears
+        #: a session level when the configured key is unset.
+        self._pending_effort_override: tuple[bool, str | None] = (False, None)
         #: The user's fast-mode choice, kept on the APP so it survives a session
         #: being replaced under it (`/new`, `/reload`, `/resume` all rebuild
         #: one) — the same reason `_effort_choice` lives here. Defaults False:
@@ -25887,6 +25901,27 @@ class OperatorApp(App[None]):
             if self._model_activation_pending == generation:
                 self._model_activation_pending = None
 
+    def _configured_default_effort(self) -> str | None:
+        """The stored ``model_effort``, or ``None`` when unset (D6's clause 2).
+
+        Reads through the ONE registry reader rather than a second config
+        vocabulary of its own, so the key NAME and its normalisation stay in
+        ``model.effort.configured_effort``. This exists — instead of the caller
+        opening a ``ConfigManager`` inline — because `/model default` needs the
+        stored value BEFORE its persist block builds the manager it writes
+        with, and because a read failure must mean "no configured level" rather
+        than a half-saved default. Deliberately NOT the session's live spec: on
+        this path the spec is the freshly RESOLVED target, which the session
+        factories' config application never touched (D6's whole point).
+        """
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
+
+            return configured_effort(ConfigManager(config_dir()))
+        except Exception:  # noqa: BLE001 — a read failure means "no opinion"
+            return None
+
     def _activate_resolved_model(
         self,
         session: Any,
@@ -25896,6 +25931,14 @@ class OperatorApp(App[None]):
         persist_default: bool,
         notice: NoticeFn,
     ) -> None:
+        # Consume the ONE-SHOT effort override FIRST, before any early return.
+        # `_cmd_model_saved` and the persist path leave it here so the NEXT
+        # activation applies the configured default CLAMPED; clearing it
+        # up-front means an early return (wrong session, refused source, a cold
+        # viewer) discards it rather than letting it leak onto a later, unrelated
+        # switch.
+        apply_effort_override, override_effort = self._pending_effort_override
+        self._pending_effort_override = (False, None)
         # Resolution can yield across a view switch. Recheck the captured
         # session, then the shared readiness boundary, immediately before any
         # setter or cold-bind task can be created.
@@ -25984,6 +26027,52 @@ class OperatorApp(App[None]):
         # form was derived from, so the two halves cannot disagree by case,
         # spacing, or a hosting alias the spec canonicalises.
         write_only = persist_default and new_label == old_label
+        # The reasoning effort to PERSIST alongside the model pair, and to put in
+        # force below (D6/D7). Computed here, before the live switch, so the saved
+        # rung and the running rung come from one value rather than from two
+        # derivations that can disagree.
+        #
+        # D6: persist the DELIBERATE effort, never an inferred one. The order is
+        # (1) the level the user picked this session, (2) the standing configured
+        # default — which the freshly resolved `spec` below does NOT carry, since
+        # only the session factories apply it, so this read is what keeps a bare
+        # `/model default` from ERASING a configured key — then (3) the spec's own
+        # level ONLY when it is not simply the model's documented default.
+        # Persisting that last case would freeze an inference into every future
+        # launch and, across a model change, silently deepen the new model's
+        # reasoning — a cost change arriving from a command about model
+        # IDENTITY. `""` is the registry's own "no opinion".
+        #
+        # The rung is then CLAMPED into the target's ladder: a level the target
+        # cannot express is saved as its NEAREST rung (or `""` when the target
+        # has no ladder at all), so what is saved is what will actually run — the
+        # whole point of D7. §4's "the stored key is not rewritten" is about the
+        # BOOT clamp, which must leave a wider ladder's `xhigh` recoverable on a
+        # later switch; an explicit `/model default` re-saves deliberately.
+        saved_effort: str | None = None
+        if persist_default:
+            choice = self._effort_choice
+            if choice:
+                saved_effort = choice
+            elif stored := self._configured_default_effort():
+                saved_effort = stored
+            else:
+                current = getattr(spec, "reasoning_effort", None)
+                default = getattr(spec, "reasoning_default_effort", None)
+                saved_effort = current if current and current != default else ""
+            if saved_effort:
+                saved_effort = (
+                    resolve_effort_in(
+                        tuple(getattr(spec, "reasoning_efforts", ()) or ()),
+                        getattr(spec, "reasoning_default_effort", None),
+                        saved_effort,
+                    )
+                    or ""
+                )
+        # Bound to ``spec`` so the override branch below can read the level the
+        # live switch actually applied even though the switch is skipped on the
+        # write-only path; that branch only runs when the switch DID run.
+        live_spec: Any = spec
         if not write_only:
             # The chosen effort rides along when the new model accepts it: a
             # user who dropped to `low` for cost did not mean "until I switch
@@ -25991,8 +26080,27 @@ class OperatorApp(App[None]):
             # pinned fallback route is withdrawn even when the choice
             # re-selects the model the fallback displaced — see
             # ``Session.set_model``.
+            #
+            # Two sibling paths, and which one runs is the D2/D7 split:
+            #   * the persist form carries the CLAMPED saved rung, so saved and
+            #     running agree (an Anthropic session whose `high` is only the
+            #     seeded default must not store `high` while the band reads
+            #     `auto`);
+            #   * an override (from `/model saved`) carries the configured
+            #     default CLAMPED, because the command means "put me back on my
+            #     configured baseline";
+            #   * the ordinary switch keeps the REMEMBERED-choice path, which
+            #     deliberately FORGETS a pick the new model cannot take — that
+            #     behaviour is pinned, and the clamp is a sibling for the case
+            #     where dropping the value silently is the failure.
+            if persist_default:
+                live_spec = self._spec_with_clamped_effort(spec, saved_effort or None)
+            elif apply_effort_override:
+                live_spec = self._spec_with_clamped_effort(spec, override_effort)
+            else:
+                live_spec = self._spec_with_chosen_effort(spec)
             session.set_model(
-                self._spec_with_chosen_fast_mode(self._spec_with_chosen_effort(spec)),
+                self._spec_with_chosen_fast_mode(live_spec),
                 explicit=True,
             )
             self._probe_quota_after_switch(session)
@@ -26010,6 +26118,24 @@ class OperatorApp(App[None]):
             # `/usage` right after the switch answers from disk too. The age
             # gate makes this a no-op when the row is already warm.
             self._warm_usage_background()
+        # The remembered choice follows the value just put in force, so the band,
+        # the persisted key and `_effort_choice` agree (D7/D8). On the persist
+        # path `saved_effort` is the clamped rung (or `""` — remember nothing);
+        # on an override it is the level the live spec actually carries, read
+        # BACK from the spec so a target with no ladder clears the choice rather
+        # than remembering a level it cannot express. The ordinary switch leaves
+        # `_effort_choice` to `_spec_with_chosen_effort`, which owns it.
+        if persist_default:
+            self._effort_choice = saved_effort or None
+        elif apply_effort_override:
+            # The level the live spec actually carries, so a target with no
+            # ladder clears the choice instead of remembering a level it cannot
+            # express — and an UNSET configured key clears it outright (D8), even
+            # though the spec then carries the model's own seeded default, which
+            # is not a choice anybody made.
+            self._effort_choice = (
+                getattr(live_spec, "reasoning_effort", None) if override_effort else None
+            )
         persist_result: str | None = None
         saved_to = ""
         if persist_default:
@@ -26035,24 +26161,35 @@ class OperatorApp(App[None]):
             # names only the key that happened to differ, and says "when" a
             # second time in a third phrasing.
             #
-            # Two facade calls, because the registry holds the pair as two
-            # settings — and each notifies the watcher separately, so this
-            # loop delivers TWO changes and the first carries a torn pair (new
-            # provider, old model name). Both arrive as ``local``, which is
-            # what keeps them silent: ``_on_config_change`` above returns
-            # early, and ``Session._on_configured_model_changed`` now reads
-            # the same flag. Until #785 the session did NOT, and printed a
-            # ``keeping ...`` notice off that torn pair, contradicting the
-            # receipt written below it.
+            # Three facade calls, because the registry holds the model pair as
+            # two settings and the effort as a third — and each notifies the
+            # watcher separately, so this loop delivers THREE changes and the
+            # first carries a torn pair (new provider, old model name). All
+            # arrive as ``local``, which is what keeps them silent:
+            # ``_on_config_change`` above returns early, and
+            # ``Session._on_configured_model_changed`` now reads the same flag.
+            # Until #785 the session did NOT, and printed a ``keeping ...``
+            # notice off that torn pair, contradicting the receipt written
+            # below it.
             try:
                 from local_operator import settings_io
                 from local_operator.config import ConfigManager
                 from local_operator.paths import config_dir
 
                 manager = ConfigManager(config_dir())
-                for key, value in (("hosting", provider), ("model_name", model_id)):
+                # The model pair first, then the effort LAST (design §4, "torn
+                # triple"): a mid-loop failure on the third write leaves the
+                # model pair exactly as durable as it was before this command,
+                # which is the pre-change semantics. Each key is one facade call,
+                # so each notifies; all three arrive as `local` and stay silent.
+                writes: list[tuple[str, Any]] = [
+                    ("hosting", provider),
+                    ("model_name", model_id),
+                    ("model_effort", saved_effort or ""),
+                ]
+                for key, value in writes:
                     setting = settings_io.resolve_key(key)
-                    if setting is None:  # pragma: no cover - both keys are registered
+                    if setting is None:  # pragma: no cover - all three are registered
                         raise KeyError(f"{key} is not a registered setting")
                     settings_io.write_setting(manager, setting, value)
                 saved_to = _home_relative(str(manager.config_file))
@@ -26101,7 +26238,8 @@ class OperatorApp(App[None]):
             # "new launch" vocabulary; it is a different surface.
             notice(
                 f"boot default saved to {saved_to}: hosting {provider}, "
-                f"model_name {model_id} (used by new sessions){suffix}"
+                f"model_name {model_id}, model_effort {saved_effort or 'auto'} "
+                f"(used by new sessions){suffix}"
             )
         else:
             # "(next turn)" alone read as permanent — the complaint behind this
@@ -26195,6 +26333,9 @@ class OperatorApp(App[None]):
             manager = ConfigManager(config_dir())
             provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
+            # The configured effort the baseline carries (D8). Read from the same
+            # manager; ARMED below, immediately before the re-dispatch.
+            saved_effort = configured_effort(manager)
         except Exception as error:  # noqa: BLE001 — reported, never fatal
             self._system_notice(f"could not read the saved default: {error}", "error")
             return
@@ -26210,6 +26351,20 @@ class OperatorApp(App[None]):
         # Re-enter the normal selector dispatch: local Sessions still use the
         # local activation path, while viewers await their owner and use its
         # canonical mutation/receipt rather than a fire-and-forget raw setter.
+        #
+        # The effort override is armed HERE, immediately before the dispatch,
+        # rather than up with the read: it is consumed and cleared only at the
+        # top of `_activate_resolved_model`, so an armed-but-undispatched
+        # override would survive the guards above and leak onto the next,
+        # unrelated activation. Adopting the configured BASELINE includes its
+        # effort (D8), so the activation puts the CLAMPED configured default in
+        # force — or clears this session's level when the key is unset, because
+        # "back to the baseline" with no configured level means the model's own
+        # default, not whatever was picked here. ONLY a local session arms it: a
+        # follower's re-dispatch routes through its owner's canonical mutation,
+        # and the owner decides the effort on its own copy.
+        if not callable(getattr(session, "route_shared_slash", None)):
+            self._pending_effort_override = (True, saved_effort)
         self._run_slash_command(f"/model {provider}/{model_id}")
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
@@ -26644,6 +26799,34 @@ class OperatorApp(App[None]):
             _forget_fast_refusal(session)
         self._system_notice(_fast_receipt(label, target))
 
+    def _spec_with_clamped_effort(self, spec: Any, requested: str | None) -> Any:
+        """``spec`` carrying ``requested`` CLAMPED into its own ladder.
+
+        The difference from :meth:`_spec_with_chosen_effort` is the whole point:
+        a person's PICK is theirs to re-make, so the remembered-choice path
+        FORGETS one the new model cannot take. A level the CONFIGURATION states
+        must survive the swap — it is the standing default that was carried
+        across, and dropping it silently is the failure ``resolve_effort_in``
+        exists to prevent. So an unsupported rung here lands on the target's
+        NEAREST rung (ties downward) instead of being discarded, and a target
+        with no ladder at all leaves the spec unchanged.
+
+        ``requested=None`` is a no-op in practice: on every route that reaches
+        this with no value, ``reasoning_default_effort == reasoning_effort`` at
+        build time, so the resolver returns the level the spec already carries
+        and the identity return below is taken. It is not special-cased because
+        the resolver's own answer is the correct one when a caller does pass a
+        ``None`` onto a spec whose two fields disagree.
+        """
+        resolved = resolve_effort_in(
+            tuple(getattr(spec, "reasoning_efforts", ()) or ()),
+            getattr(spec, "reasoning_default_effort", None),
+            requested,
+        )
+        if resolved is None or resolved == getattr(spec, "reasoning_effort", None):
+            return spec
+        return spec.model_copy(update={"reasoning_effort": resolved})
+
     def _spec_with_chosen_effort(self, spec: Any) -> Any:
         """``spec`` carrying the level the user picked, when the model takes it.
 
@@ -26703,13 +26886,18 @@ class OperatorApp(App[None]):
         in one keystroke, so the listing names that key instead of competing
         with it.
 
-        The level is SESSION-scoped and deliberately not persistable, which is
-        where this parts company with ``PERSIST_HINT``. The model is a standing
-        preference — you want the same one next launch — while effort is a
-        per-task dial: raised for a hard refactor, dropped for chat. Freezing
+        The level is SESSION-scoped: ``/effort`` has no durable form of its own,
+        which is where this parts company with ``PERSIST_HINT``. The model is a
+        standing preference — you want the same one next launch — while effort is
+        a per-task dial: raised for a hard refactor, dropped for chat. Freezing
         one task's dial into every future session is the failure mode, so there
-        is no ``/effort default`` to write one, and the receipt says how long
-        the choice lasts instead of pointing at a command that would extend it.
+        is still no ``/effort default``. What changed with the ``model_effort``
+        key is that a level CAN be made the BIRTH default for new conversations
+        — by saving the model with ``/model default`` while it is in force —
+        which is a separate, deliberate action about the DEFAULT rather than a
+        side effect of turning a dial. So the SET receipt points at that
+        command (D10). The ``/effort auto`` receipt deliberately does not: auto
+        withdraws the preference, so there is nothing there to keep.
         """
         session = self._session
         spec = _model_spec(session)
@@ -26798,7 +26986,14 @@ class OperatorApp(App[None]):
             return
         # `notice`, not `_system_notice`: this one CHANGED something, so it is a
         # receipt for an action rather than an answer about the app's settings.
-        notice(f"reasoning effort: {current or 'provider default'} → {wanted} (this session)")
+        # The pointer is the one place the app tells the user a level can be made
+        # the standing default (D10); it is on this receipt and not on the bare
+        # listing, whose budget is tight and whose "this session only" clause is
+        # still exactly true of the command it describes.
+        notice(
+            f"reasoning effort: {current or 'provider default'} → {wanted} "
+            f"(this session) — /model default to keep it"
+        )
 
     # -- theme --------------------------------------------------------------
     def _cmd_theme(self, arg: str, notice: NoticeFn) -> None:

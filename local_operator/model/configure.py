@@ -42,7 +42,11 @@ from local_operator.harness.types import (
 )
 from local_operator.model.catalogue import DEFAULT_TTL_S
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
-from local_operator.model.effort import default_effort, supported_efforts
+from local_operator.model.effort import (
+    default_effort,
+    resolve_effort_in,
+    supported_efforts,
+)
 from local_operator.model.ids import normalised_id as _normalised_id
 from local_operator.model.registry import (
     ModelInfo,
@@ -2212,6 +2216,7 @@ def configure_model(
     presence_penalty: Optional[float] = None,
     stop: Optional[list[str]] = None,
     seed: Optional[int] = None,
+    reasoning_effort: str | None = None,
 ) -> ModelConfiguration:
     """Configure a model for ``hosting``.
 
@@ -2300,6 +2305,30 @@ def configure_model(
         sampling_overrides["top_p"] = top_p
     if sampling_overrides:
         spec = spec.model_copy(update=sampling_overrides)
+    # The CONFIGURED default effort (``model_effort``), clamped into THIS spec's
+    # ladder — the spec's, not ``model.effort``'s table, because an aggregator
+    # listing can NARROW the ladder below the table's (see ``resolve_effort_in``
+    # and ``build_model_spec``). A level the chosen model cannot express lands on
+    # its nearest rung rather than reaching the wire, where the client's
+    # membership re-check would drop it while the status band still named it —
+    # the split-brain ``resolve_effort_in``'s docstring documents.
+    #
+    # ``reasoning_default_effort`` is deliberately NOT touched: that is what
+    # ``/effort auto`` restores, and it must stay the MODEL's own documented
+    # default, not the configured one. Overwriting it here would make ``auto``
+    # mean "the configured default", which is the opposite of the withdrawal the
+    # command performs (D4).
+    #
+    # Only when the caller passed a truthy level: ``None`` is "no opinion" and
+    # leaves the spec builder's own seeding (Anthropic's ``high``) alone. The
+    # guard also skips a needless ``model_copy`` when the resolved value equals
+    # what the spec already carries.
+    if reasoning_effort:
+        clamped = resolve_effort_in(
+            spec.reasoning_efforts, spec.reasoning_default_effort, reasoning_effort
+        )
+        if clamped is not None and clamped != spec.reasoning_effort:
+            spec = spec.model_copy(update={"reasoning_effort": clamped})
     # Radient base URL is env-overridable (legacy EnvConfig behaviour).
     if canonical == "radient" and env_config is not None:
         base_url = env_config.radient_api_base_url
