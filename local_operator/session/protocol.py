@@ -1033,14 +1033,20 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     # desktop routes' ``bridge.remote``, and ``info/collect.py``'s ``session``
     # parameter.
     #
-    # The OWNER-side readers of these same members are NOT an exception to that,
-    # because they hold the concrete class: ``harness/subagent.py`` types its
-    # ``parent_session`` as ``Session`` and reads ``mcp_manager`` /
-    # ``mcp_startup`` / ``jobs`` off it, and ``session/runtime/serving.py`` reads
-    # ``self._session.jobs`` on the owner. Those reads are already checked by
-    # pyright against the real class, so a protocol declaration would buy them
-    # nothing — which is why the placement is a claim about the DUCK-TYPED
-    # population and not the claim "only a viewer has these".
+    # The OWNER-side readers of these same members are NOT an exception to that.
+    # ``harness/subagent.py`` types its ``parent_session`` as ``Session`` and
+    # reads ``mcp_manager`` / ``mcp_startup`` / ``jobs`` off it, so pyright is
+    # already checking those against the real class.
+    #
+    # ``session/runtime/serving.py`` reads ``self._session.jobs`` on the owner
+    # too, and those reads are UNCHECKED: ``ServingSessionHandle.__init__``
+    # takes ``session: Any``, so ``self._session`` is ``Any`` there and pyright
+    # verifies nothing — not against the real class, not against a protocol.
+    # Restating the difference matters because it is the reason a declaration on
+    # ``SessionProtocol`` would buy those readers nothing either: what would
+    # check them is typing the handle's constructor, not widening the protocol.
+    # Either way the placement is a claim about the DUCK-TYPED population and
+    # not the claim "only a viewer has these".
     #
     # Declaring them is deliberately NOT the same as making them safe for any
     # host to read. A snapshot member answers from the last sync, so a caller

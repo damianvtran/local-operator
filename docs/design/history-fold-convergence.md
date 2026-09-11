@@ -14,8 +14,10 @@
 >
 > * **The §3 divergences are FIXED**, by #864 (`51c71ff6f`, `fix(mobile): stop
 >   the phone dropping refusals, failures and gate timeouts`), which is an
->   **ancestor of this file's PR base `633baf258`** — i.e. the present-tense
->   claims were already stale when the file was tracked. The worst case below
+>   **ancestor of this file's original PR base `633baf258`** — and therefore of
+>   the branch's current base `27466f669`, which the branch was rebased onto on
+>   2026-09-11 — i.e. the present-tense claims were already stale when the file
+>   was tracked. The worst case below
 >   (a hub/parent steer rendering as a clean `parent_message` card on a
 >   scrolled-up history page and as a raw `<parent-message>` XML envelope on
 >   attach) no longer reproduces: both phone folds emit the parent's own words,
@@ -44,12 +46,12 @@
 >
 > **What the file is still good for.** §1's pager-vs-fold correction, §5's
 > measured superset, §6's design and the "one fold, two renderers" decision are
-> the reasoning the code was written from, and four production comments cite
-> this file as the authority for those ( `harness/rows.py`,
-> `tui/session_presentation.py`, `mobile/projection.py`,
-> `tests/unit/mobile/test_fold_parity.py`). That citation is about the ROWS,
-> which is still current. Nothing below should be read as "these defects are
-> live today".
+> the reasoning the code was written from, and four comments cite this file as
+> the authority for those — three in production code (`harness/rows.py`,
+> `tui/session_presentation.py`, `mobile/projection.py`) and one in the parity
+> test (`tests/unit/mobile/test_fold_parity.py`). That citation is about the
+> ROWS, which is still current. Nothing below should be read as "these defects
+> are live today".
 
 **Author:** architect (lopdev team), task `arch-fold-convergence`
 **Date:** 2026-09-09
