@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install prototype-resume
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -125,6 +125,10 @@ adapter-osworld: ## Build the OSWorld V2 adapter wheel and print workspace steps
 	@echo "Wheel built under benchmarks/osworld_v2_adapter/dist/."
 	@echo "Materialise the workspace (needs HF_TOKEN) with:"
 	@echo "  python scripts/build_osworld_adapter.py --benchmark-release osworld-v2-2026.08.08 --out <workspace>"
+
+# THROWAWAY prototype, not a production target. See ~/workspace/PROPOSAL-resume-picker.md.
+prototype-resume: ## PROTOTYPE: the /resume picker variants (throwaway, read-only)
+	env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/prototype_resume_picker.py
 
 # Run security audit with pip-audit
 security: ## Run security audit with pip-audit
