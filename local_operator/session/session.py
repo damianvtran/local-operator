@@ -143,6 +143,7 @@ from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -4910,6 +4911,28 @@ class Session:
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
+        # `@path` expansion, and it runs HERE — before the lock, not inside it.
+        # An approval can park on a human indefinitely, and in the TUI the app
+        # awaiting this prompt is the same one that would draw the approval
+        # card; awaiting a person while holding `_turn_lock` also blocks the
+        # compaction that shares it, which is a deadlock-shaped risk rather
+        # than a slow turn. Expanding before `acquire()` costs nothing and
+        # removes the shape entirely.
+        #
+        # This one call is what gives every non-TUI surface the feature for
+        # free — CLI, headless, server, scheduler, mobile and subagents all
+        # funnel through `prompt`. The TUI expands earlier (to paint a short
+        # transcript row), so this pass is a no-op on its text by construction:
+        # `expand_references` is idempotent.
+        expansion = await expand_references(
+            text,
+            self._cwd,
+            request_approval=None if self._yolo else self._request_approval,
+        )
+        # Notices are discarded deliberately: `prompt` has no channel back to a
+        # UI. The TUI paints its own from its own earlier call, and the
+        # CLI/headless surfaces have nowhere to put them.
+        text = expansion.sent
         if self._turn_lock.locked():
             # An on-demand compaction holds the same lock a turn does, and for
             # the same reason — it is rewriting the history a request would be
