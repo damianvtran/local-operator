@@ -8129,8 +8129,9 @@ async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
         assert (
             len(picker.visible_rows) == total
         ), f"picker holds {len(picker.visible_rows)} of {total} sessions"
-        # And the header says so, rather than reporting a truncated total.
-        assert f"{total:,} sessions" in "\n".join(picker.render_lines_for_test())
+        # And the filter row says so, rather than reporting a truncated total.
+        # The tally lives there now, not in the card header.
+        assert f"{total:,}" in picker.render_footer_for_test()
 
         # The oldest session — the one furthest past every cap — is reachable by
         # filtering, which is the user-visible failure being fixed ("a session I

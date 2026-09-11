@@ -64,20 +64,31 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
+from pathlib import Path
 
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Static
+
+from local_operator.paths import config_dir
 
 # ``fork_haystack`` is imported rather than restated here: the phone's session
 # search matches over the same rows, and two spellings of "what text does this
 # row have" is how one surface ends up finding a fork the other cannot.
 from local_operator.resume import SessionRow, fork_haystack, format_age
+from local_operator.session.preview import (
+    SessionPreviews,
+    clip_to_height,
+    demark,
+    grep_context,
+    wrap_turns,
+)
 from local_operator.session.search_index import SoftSearchIndex, search_digests
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.terminal_title import SPINNER_FRAMES, SPINNER_INTERVAL_S
@@ -126,11 +137,65 @@ NAME_MIN_CELLS = 16
 #: edited here is measured against that cap, not eyeballed.
 RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are not listed"
 
-#: Rows of sessions shown before the list scrolls, when the terminal has room.
-#: A page that fills the screen makes the modal feel like a mode switch rather
-#: than a popup; ten is enough to scan. A CEILING, not the page size — see
-#: :meth:`SessionPickerScreen._page_rows`.
-PAGE_ROWS_MAX = 10
+#: Below this terminal width the two panes STACK vertically.
+#:
+#: MEASURED BY A SWEEP, NOT DERIVED ON PAPER, and that distinction is the whole
+#: reason this constant has a docstring: deriving it is exactly how design
+#: round 2 produced the D16 BLOCKER. The value is the smallest width at which
+#: the RENDERED side-by-side name field reaches :data:`NAME_MAX` and so stops
+#: being narrower than the stacked field at that same width.
+#:
+#: 159, not the 154 the same arithmetic predicts on paper: the rendered pane
+#: comes out 2–3 cells narrower than ``split × cols`` because the preview's
+#: ``border-left`` and both panes' ``padding: 0 1`` are taken before the text
+#: width, and Textual's ``fr`` resolution rounds. Re-run the sweep after
+#: touching :data:`LIST_FR`/:data:`PREVIEW_FR` or any fixed column, because all
+#: three move this number.
+STACK_BELOW_COLS = 159
+
+#: Cells the name column is capped at: the longest of the 141 real session
+#: names (p95 48, p99 53, max 64), measured in CELLS rather than characters.
+#:
+#: THIS CAP IS WHAT MAKES THE BREAKPOINT SOUND. It is not cosmetic, and
+#: removing it reopens round 2's BLOCKER. Uncapped, the fields are
+#: ``stacked = W − chrome`` and ``side-by-side = split×W − chrome``, so stacked
+#: gains a full cell per terminal column while side-by-side gains only
+#: ``split``: their gap DIVERGES without limit (at split 0.6, −64 cells at
+#: W=160 and −128 at W=320), and **no breakpoint value can satisfy** "side-by-
+#: side is never narrower than stacked would be at the same width". Raising the
+#: breakpoint is unsatisfiable, not merely expensive.
+#:
+#: A cap makes both layouts SATURATE at the same value, so past the width where
+#: side-by-side reaches it the two fields are exactly EQUAL and the invariant
+#: holds for every larger width. 64 is chosen because 0 of 141 real names
+#: exceed it: at the cap nothing truncates, so equal fields also means equally
+#: zero truncation rather than equally bad. Design round 3 measured the result:
+#: capacity 53 → 69 → 69 → 69 → 69 across 80 → 180, zero shrink events.
+NAME_MAX = 64
+
+#: p75 of the 141 real session names (median 33, p90 43, p95 46). Gates whether
+#: the id column is shown: the id is worth its 14 cells only while the name
+#: still clears the length three quarters of real names fit inside.
+NAME_P75 = 39
+
+#: The side-by-side split, in the LIST's favour (60/40). Round 2 had this
+#: backwards at 2fr/3fr — the pane that TRUNCATES got the minority share while
+#: the preview showed visible slack (measured at 140: an 83-cell pane drawing a
+#: 76-cell rule beside a 56-cell list truncating 33% of its names).
+LIST_FR = 3
+PREVIEW_FR = 2
+
+#: Stacked-layout row split: a fraction with clamps, not a fixed count. A fixed
+#: preview height either starves the list on a 24-row terminal or wastes half
+#: of a 50-row one.
+#:
+#: ``PREVIEW_MIN`` is 3 header lines + 1 rule + body — below it the pane shows
+#: metadata and no conversation, which is not a preview. Past ``PREVIEW_MAX``
+#: the list starves for no gain, since the pane scrolls anyway. Fewer than
+#: ``LIST_MIN`` rows is a menu, not a list.
+PREVIEW_MIN = 8
+PREVIEW_MAX = 14
+LIST_MIN = 6
 
 #: Name/id matches at which the picker stops consulting the bounded soft tier
 #: (see ``SessionPickerScreen._soft_tier_wanted``). Three, not one: a single
@@ -345,6 +410,174 @@ COMPLETION_MARKERS: dict[str, tuple[str, str]] = {
 #: carries state. One cell for the state glyph plus its separating space; the
 #: spinner frames, the wake glyph and the markers above are all one cell wide.
 STATE_COL_CELLS = 2
+
+
+#: Cells the widest ``format_age`` string occupies (``1000d ago``); ``just now``
+#: is 8. Measured with ``cell_len`` over the range the function can produce,
+#: because the age column is FIXED and right-aligned (D3: it was rendering at 13
+#: distinct start columns across 37 rows) and a guessed width re-rags it.
+AGE_CELLS = 9
+
+#: Cells a session id occupies plus its separator. The id is the field a user
+#: copies into ``/resume <id>``, which is why it is DROPPED rather than cut.
+ID_CELLS = 12
+
+#: Cells reserved for the soft-match ``~`` gutter while a query is active.
+#:
+#: RESERVED rather than appended, which is the whole point: appending the mark
+#: unreserved overflowed the pane (measured: a 59-cell row + 3 in a 59-cell
+#: pane) and wrapped it onto its own line, breaking the one-row-per-session
+#: arithmetic the cursor depends on.
+SOFT_GUTTER_CELLS = 2
+
+#: Cells of indent the grep-style context line is drawn at, under its row.
+CONTEXT_INDENT = 4
+
+#: The mark on a row admitted by a SOFT/fuzzy match, which by definition has no
+#: literal substring to build a context line from. Without it most rows under a
+#: broad query would be unexplained and the user could not tell "no context"
+#: from "not a body match".
+SOFT_MATCH_MARKER = "~"
+
+#: Cells of indent the preview's body lines are drawn at, under their role
+#: gutter. Subtracted from the wrap budget so a wrapped line plus its indent
+#: still fits the pane.
+PREVIEW_BODY_INDENT = 2
+
+#: Lines ``ctrl+u``/``ctrl+d`` move the preview. Half a small pane, so the eye
+#: keeps its place rather than being handed an entirely new screen.
+PREVIEW_SCROLL_LINES = 5
+
+
+@dataclass(frozen=True)
+class PickerLayout:
+    """Every geometry quantity the picker draws with, for one ``(width, height)``.
+
+    A frozen dataclass rather than loose returns because these values must be
+    mutually consistent: the name width, the breakpoint and the row budget are
+    three views of one arithmetic, and computing them at separate call sites is
+    what let design round 2 argue D16 on paper while the rendered frames
+    disagreed. Tests assert against this rather than re-deriving the
+    breakpoint arithmetic they are checking.
+    """
+
+    mode: str
+    screen_width: int
+    list_width: int
+    preview_width: int
+    list_rows: int
+    preview_rows: int
+    name_width: int
+    show_id: bool
+    age_width: int
+    context_width: int
+
+
+def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLayout:
+    """The whole picker geometry as a pure function of the terminal size.
+
+    THE PANE ARITHMETIC IS MEASURED, NOT ASSUMED. Textual resolves ``3fr``/
+    ``2fr`` against the container's own content box after both panes' padding
+    and the preview's ``border-left`` are taken, and it rounds; a sweep of
+    ``results.size.width`` across widths 80–240 under the production
+    stylesheet matched the expressions below at every one of the 161 widths,
+    and matched ``split × cols`` at none of them. Guessing here wrapped every
+    row onto a second line at 80 columns.
+
+    The row budget comes from ``height`` — the app's size — rather than from a
+    widget's measured height, because a widget height LAGS the paint: on mount
+    it reads one row ahead of the settled layout and after a resize it reads
+    the PREVIOUS geometry, which made the footer counter claim ``13 drawn``
+    over 12 rendered rows at 80x24.
+    """
+    width = max(1, width)
+    height = max(1, height)
+    # `Screen { padding: 1 }` insets the content box by two cells and two rows
+    # before anything below is resolved.
+    inner_w = max(1, width - 2)
+    # One filter row, plus the two screen padding rows.
+    cols_h = max(1, height - 3)
+    mode = "side-by-side" if width >= STACK_BELOW_COLS else "stacked"
+
+    if mode == "side-by-side":
+        # `fr` resolution rounds DOWN on the first pane; the preview then takes
+        # the remainder less its own `border-left`.
+        outer_list = inner_w * LIST_FR // (LIST_FR + PREVIEW_FR)
+        list_width = outer_list - 2
+        preview_width = inner_w - outer_list - 1 - 2
+        list_rows = cols_h
+        preview_rows = cols_h
+    else:
+        list_width = inner_w - 2
+        preview_width = inner_w - 2
+        if cols_h >= LIST_MIN + PREVIEW_MIN:
+            preview_rows = min(PREVIEW_MAX, max(PREVIEW_MIN, cols_h // 3))
+        else:
+            # Too short for both. Chrome is reserved first and the list takes
+            # what is left and scrolls, rather than the preview collapsing to a
+            # header with no conversation under it.
+            preview_rows = max(4, cols_h - LIST_MIN)
+        list_rows = max(1, cols_h - preview_rows)
+
+    list_width = max(12, list_width)
+    preview_width = max(12, preview_width)
+
+    # ONE definition of the name width, and nothing else computes it. The
+    # prototype's own note says inlining it meant D16 could only be argued on
+    # paper — the invariant is a comparison between two layouts at the SAME
+    # width, so the compared quantity needs a single source of truth.
+    fixed = GUTTER_CELLS + 2 + AGE_CELLS + (SOFT_GUTTER_CELLS if querying else 0)
+    show_id = (list_width - fixed - 2 - ID_CELLS) >= NAME_P75
+    raw_name = list_width - fixed - ((2 + ID_CELLS) if show_id else 0)
+    name_width = max(NAME_MIN_CELLS, min(NAME_MAX, raw_name))
+
+    return PickerLayout(
+        mode=mode,
+        # The filter row spans the container and carries the same `padding: 0 1`
+        # the panes do, so its text width is the container less those two cells
+        # — MEASURED against the real stylesheet at 80/100/120/140/159/160/180,
+        # where a `screen_width == inner_w` model was 2 too generous at every
+        # one and the row was clipped mid-word by Textual.
+        screen_width=max(1, inner_w - 2),
+        list_width=list_width,
+        preview_width=preview_width,
+        list_rows=max(1, list_rows),
+        preview_rows=max(1, preview_rows),
+        name_width=name_width,
+        show_id=show_id,
+        age_width=AGE_CELLS,
+        context_width=max(10, list_width - CONTEXT_INDENT),
+    )
+
+
+def fit_rows(costs: Sequence[int], top: int, budget: int) -> int:
+    """How many rows from ``top`` fit in a LINE budget of ``budget``.
+
+    Rows are not uniformly one line: a row drawing a grep context line costs
+    two, so the window size is a function of WHICH rows are in it.
+    """
+    used = 0
+    count = 0
+    for cost in costs[top:]:
+        if used + cost > budget:
+            break
+        used += cost
+        count += 1
+    return max(1, count)
+
+
+def scroll_into_window(costs: Sequence[int], top: int, cursor: int, budget: int) -> int:
+    """``top`` moved just far enough that ``cursor`` is drawn.
+
+    Scrolls by the minimum, so the list is stable while paging through the
+    middle of it — the same rule ``_move_to`` has always applied, restated
+    against a LINE budget rather than a row count.
+    """
+    if cursor < top:
+        return cursor
+    while cursor >= top + fit_rows(costs, top, budget):
+        top += 1
+    return top
 
 
 def filter_rows(
@@ -669,6 +902,11 @@ def render_rows(
     forked: bool | None = None,
     frame: int = 0,
     tagged: bool | None = None,
+    name_max: int | None = None,
+    age_width: int | None = None,
+    show_id: bool | None = None,
+    soft_gutter: bool = False,
+    exact_matched: AbstractSet[str] = frozenset(),
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -732,6 +970,22 @@ def render_rows(
     name_col, age_col, id_col = plan_columns(
         rows, width, ages, marked, any_forked, any_stated, any_tagged
     )
+    # The SCREEN's layout overrides the drop-ladder's own arithmetic when it
+    # supplies one, so the two panes agree about where the name ends. The
+    # ladder still runs first and still owns the narrow cases — this only caps
+    # what it produced (D16's saturation) and fixes the age column, which must
+    # be one right-aligned column across every drawn row rather than sized to
+    # whichever ages happen to be in view (D3: 13 distinct start columns).
+    if age_width is not None:
+        age_col = age_width if age_col else 0
+    if show_id is not None and not show_id:
+        id_col = 0
+    if name_max is not None:
+        name_col = min(name_col, name_max)
+    # The soft-match ``~`` gets a RESERVED gutter: appending it unreserved
+    # overflowed the pane and wrapped the mark onto its own line, breaking the
+    # one-row-per-session arithmetic the cursor depends on.
+    soft_col = SOFT_GUTTER_CELLS if soft_gutter else 0
     marker_col = cell_len(BODY_MATCH_MARKER) if marked else 0
     fork_col = cell_len(FORK_MARKER) if any_forked else 0
     state_col = STATE_COL_CELLS if any_stated else 0
@@ -854,8 +1108,100 @@ def render_rows(
         if id_col:
             line.append("  ", style=row_bg)
             line.append(row.id, style=row_bg + Style(color=dim))
+        if soft_col:
+            # A soft/fuzzy hit has no literal substring to locate, so it gets
+            # this mark and no context line. Keyed to the row being a body
+            # match WITHOUT an exact hit, so a row whose context is merely not
+            # drawn (stacked, off the cursor) is not mismarked as fuzzy.
+            soft = row.id in body_matched and row.id not in exact_matched
+            line.append(
+                _pad_cells(f" {SOFT_MATCH_MARKER}" if soft else "", soft_col),
+                style=row_bg + Style(color=theme_mod.semantic_color("warning")),
+            )
         lines.append(line)
     return lines
+
+
+def _content_width(widget: object) -> int:
+    """Cells available INSIDE ``widget``'s own padding, or 0 when unresolved.
+
+    Tolerant by design: the repaint-signature tests substitute a minimal stub
+    for a pane, and an unmounted screen has no resolved geometry at all.
+    Neither is an error — both mean "no measurement yet" and the caller falls
+    back to the planned size.
+    """
+    if widget is None or not getattr(widget, "is_mounted", False):
+        return 0
+    region = getattr(widget, "content_region", None)
+    if region is not None and getattr(region, "width", 0):
+        return int(region.width)
+    return 0
+
+
+def _content_height(widget: object) -> int:
+    """Rows available INSIDE ``widget``'s own border and padding, or 0.
+
+    Tolerant in the same way and for the same reasons as :func:`_content_width`.
+    """
+    if widget is None or not getattr(widget, "is_mounted", False):
+        return 0
+    region = getattr(widget, "content_region", None)
+    if region is not None and getattr(region, "height", 0):
+        return int(region.height)
+    return 0
+
+
+def _widget_size(widget: object, axis: str) -> int:
+    """``widget``'s resolved width/height, or 0 when it has none to report.
+
+    Tolerant by design: the repaint-signature tests substitute a minimal stub
+    for a pane to read what was painted, and a screen that has not been mounted
+    has no resolved geometry at all. Neither is an error — both simply mean
+    "no measurement yet", and the caller falls back to the planned size.
+    """
+    if widget is None or not getattr(widget, "is_mounted", False):
+        return 0
+    size = getattr(widget, "size", None)
+    return int(getattr(size, axis, 0) or 0)
+
+
+def _highlight(text: str, query: str) -> Text:
+    """``text`` with every case-insensitive run of ``query`` lifted to amber-bold.
+
+    THE HIGHLIGHT IS THE ENTIRE MECHANISM of the context line: design round 1
+    identified the amber-bold hit as what makes the eye land on the match, and
+    round 3 verified 28 of 28 populated context lines carrying it.
+    """
+    out = Text(text, style=Style(color=theme_mod.semantic_color("dim")))
+    needle = query.strip().lower()
+    if not needle:
+        return out
+    haystack = text.lower()
+    start = haystack.find(needle)
+    while start >= 0:
+        out.stylize(
+            Style(color=theme_mod.semantic_color("warning"), bold=True),
+            start,
+            start + len(needle),
+        )
+        start = haystack.find(needle, start + len(needle))
+    return out
+
+
+def _short_model(checkpoint: dict[str, object]) -> str:
+    """``anthropic/claude-opus-5`` → ``claude-opus-5``."""
+    effective = checkpoint.get("effective_model")
+    model = (effective or {}).get("model_id") if isinstance(effective, dict) else ""
+    return str(model).rsplit("/", 1)[-1] if model else "·"
+
+
+def _short_cwd(checkpoint: dict[str, object]) -> str:
+    """``/Users/x/workspace`` → ``~/workspace``."""
+    cwd = str(checkpoint.get("cwd") or "")
+    if not cwd:
+        return "·"
+    home = str(Path.home())
+    return "~" + cwd[len(home) :] if cwd.startswith(home) else cwd
 
 
 class SessionPickerScreen(ModalScreen[str | None]):
@@ -881,6 +1227,24 @@ class SessionPickerScreen(ModalScreen[str | None]):
         Binding("home", "jump(0)", "First", show=False),
         Binding("end", "jump(1)", "Last", show=False),
         Binding("backspace", "backspace", "Edit filter", show=False),
+        # EVERY NEW AFFORDANCE IS A CHORD, never a letter: printable keys type
+        # into the filter (``on_key``) and that stays true.
+        #
+        # ``ctrl+e`` is this codebase's established reveal chord —
+        # ``ask_picker.py:559`` binds it to ``toggle_reveal`` for exactly this
+        # "show me the full text" gesture — so this adds a shortcut rather than
+        # a second vocabulary. ``ctrl+u``/``ctrl+d``/``ctrl+g`` are listed in
+        # the composer keymap and bound at app level, but a ``ModalScreen`` on
+        # top owns its own bindings while it is up and the composer does not
+        # have focus behind it; this picker already rebinds ``pageup``/
+        # ``pagedown``/``home``/``end`` on the same terms. Verified against the
+        # running app in a pty, not against the binding tables: with the picker
+        # open all four act on the picker, nothing reaches the composer, and
+        # ``ctrl+d`` does not quit.
+        Binding("ctrl+e", "toggle_verbose", "Verbose preview", show=False),
+        Binding("ctrl+u", "pane_scroll(-1)", "Preview up", show=False),
+        Binding("ctrl+d", "pane_scroll(1)", "Preview down", show=False),
+        Binding("ctrl+g", "pane_end", "Newest turn", show=False),
     ]
 
     def __init__(
@@ -933,6 +1297,28 @@ class SessionPickerScreen(ModalScreen[str | None]):
         #: the screen lives — see :meth:`_exec_column_latched` for why the
         #: column may widen but must not narrow.
         self._saw_tagged = False
+        #: CONDENSED IS THE DEFAULT. Condensed content alone is median 1,346
+        #: chars and p90 6,789 against a 60x40 pane holding ~2,400, so 22 of 60
+        #: sessions overflow the pane with tool calls already stripped — a
+        #: verbose default is a wall the user escapes from on most rows.
+        #: Sticky for the LIFETIME of the open picker rather than per row: a
+        #: mode that resets as the cursor moves is one the user re-sets on
+        #: every row.
+        self._verbose = False
+        #: The preview's scroll offset, moved by ``ctrl+u``/``ctrl+d``/``ctrl+g``
+        #: and deliberately INDEPENDENT of the list cursor.
+        self._pane_top = 0
+        #: Bounded, cached preview reads, built lazily and discarded with the
+        #: screen. ``None`` until first use so a picker that never paints a
+        #: preview — a test host, an embedder — pays nothing.
+        self._preview_data: SessionPreviews | None = None
+        self._sessions_dir: Path | None = None
+        #: The layout last APPLIED to the widget tree, and the stacked preview
+        #: height that went with it. Both are part of the restyle guard; see
+        #: :meth:`_apply_layout`. ``None`` forces the first application on
+        #: mount regardless of which side of the breakpoint we start on.
+        self._applied_mode: str | None = None
+        self._applied_pane_rows: int | None = None
         #: Re-reads each row's live state, supplied by the host that knows how
         #: (``OperatorApp._overlay_live_state``). Optional: a host that does
         #: not pass one gets the pre-refresh behaviour — markers from open,
@@ -1115,6 +1501,22 @@ class SessionPickerScreen(ModalScreen[str | None]):
     def action_jump(self, to_end: int) -> None:
         self._move_to(len(self.visible_rows) - 1 if to_end else 0)
 
+    def action_toggle_verbose(self) -> None:
+        """Flip condensed/verbose. Sticky until the picker closes."""
+        self._verbose = not self._verbose
+        self._pane_top = 0
+        self._repaint()
+
+    def action_pane_scroll(self, direction: int) -> None:
+        """Scroll the preview WITHOUT moving the list cursor."""
+        self._pane_top = max(0, self._pane_top + direction * PREVIEW_SCROLL_LINES)
+        self._repaint()
+
+    def action_pane_end(self) -> None:
+        """Jump the preview to the newest turn."""
+        self._pane_top = max(0, len(self._preview_lines()) - self._pane_height())
+        self._repaint()
+
     def action_backspace(self) -> None:
         if self._query:
             self.set_query(self._query[:-1])
@@ -1205,19 +1607,33 @@ class SessionPickerScreen(ModalScreen[str | None]):
           resolved to real sessions further down the list;
         - and the resulting index must still be a row that exists.
         """
-        body = getattr(self, "_body", None)
-        if body is None or not body.is_mounted:
+        results = getattr(self, "_results", None)
+        if results is None or not results.is_mounted:
             return None
-        region = body.region
+        region = results.region
         if not region.contains(event.screen_x, event.screen_y):
             return None
-        row = event.screen_y - region.y - self._header_rows()
+        line = event.screen_y - region.y - self._header_rows()
         rows = self.visible_rows
-        drawn = min(self._page_rows(), max(0, len(rows) - self._offset))
-        if not 0 <= row < drawn:
+        costs = self._row_costs()
+        drawn = fit_rows(costs, self._offset, self._layout().list_rows)
+        if line < 0:
             return None
-        index = self._offset + row
-        return index if 0 <= index < len(rows) else None
+        # A ROW THAT DRAWS A CONTEXT LINE OCCUPIES TWO LINES, so the click's
+        # line offset is walked against the real per-row costs rather than used
+        # as an index. Treating it as an index resolved every click below the
+        # first context line to the wrong session — and a false positive here
+        # DISPOSES THE LIVE SESSION and reboots onto another one.
+        used = 0
+        for step in range(drawn):
+            index = self._offset + step
+            if index >= len(rows):
+                return None
+            cost = costs[index]
+            if used <= line < used + cost:
+                return index
+            used += cost
+        return None
 
     # -- geometry ------------------------------------------------------------
     def _screen_size(self) -> tuple[int, int]:
@@ -1245,39 +1661,84 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # measurement it is applied to.
         return max(1, size.width), max(8, size.height)
 
-    def _card_width(self) -> int:
-        """Content cells the card may use, measured against the terminal.
+    def _layout(self) -> PickerLayout:
+        """The geometry for the CURRENT terminal size.
 
-        The floor is applied only while it FITS. ``max(PICKER_MIN_WIDTH, …)``
-        alone outranked the margin and then the terminal itself: at 30 columns
-        it returned a 30-cell content box inside 4 cells of padding, so the
-        card was 38 wide on a 30-column screen and the rule and header were
-        cut. A minimum width is a preference; the terminal is not.
+        Derived from ``self.app.size`` rather than from a measured widget
+        height, because a widget height LAGS the paint: on mount it reads one
+        row ahead of the settled layout and after a resize it reads the
+        PREVIOUS geometry, which made the footer counter claim ``13 drawn``
+        over 12 rendered rows at 80x24.
         """
-        width, _ = self._screen_size()
-        padding = PICKER_PADDING_CELLS * 2
-        room = width - PICKER_WIDTH_MARGIN - padding
-        if room < PICKER_MIN_WIDTH:
-            # No room for the preferred floor: take what the screen has, and
-            # give up the breathing margin before giving up content.
-            return max(1, width - padding)
-        return min(PICKER_MAX_WIDTH, room)
+        try:
+            size = self.app.size
+            width, height = size.width, size.height
+        except Exception:  # pragma: no cover - only before the app has a screen
+            width, height = 80, 24
+        return plan_layout(max(1, width), max(8, height), querying=bool(self._query.strip()))
+
+    def _usable(self) -> int:
+        """The results pane's REAL text width — the ONE definition.
+
+        Measured off the RESOLVED widget rather than off a fraction of the
+        app: ``3fr`` of the split is what the row actually gets, and guessing
+        it wrapped every row onto a second line at 80 columns. The fallback
+        matters on the first paint, before layout resolves.
+        """
+        measured = _widget_size(getattr(self, "_results", None), "width")
+        if measured:
+            # The widget's own padding is inside its reported width.
+            return max(12, measured - 2)
+        return max(12, self._layout().list_width)
+
+    def _context_width(self) -> int:
+        """Cells the grep context line gets: the indent off the pane width."""
+        return max(10, self._usable() - CONTEXT_INDENT)
+
+    def _pane_width(self) -> int:
+        """The preview's REAL text width, measured off the resolved widget."""
+        measured = _widget_size(getattr(self, "_preview", None), "width")
+        if measured:
+            return max(20, measured - 2)
+        return max(20, self._layout().preview_width)
+
+    def _pane_height(self) -> int:
+        """Body lines the preview can show: its height less its own header.
+
+        The header is the name, the two clocks, an optional ``model · cwd``
+        line and the rule, so the reservation is asked of the header the pane
+        will actually draw rather than assumed at a constant.
+        """
+        # The CONTENT region, not `size`: stacked, the pane carries a
+        # `border-top`, and `size.height` counts that border row while the
+        # text does not get it. Budgeting against `size` left one line too
+        # many, so Textual clipped the last one AFTER `clip_to_height` had
+        # already run — and what it clipped was the body line under a role
+        # header, leaving the orphan `▪ lop` D30 exists to prevent. Measured
+        # in a rendered frame at 100x30, not reasoned about.
+        measured = _content_height(getattr(self, "_preview", None))
+        rows = measured or self._layout().preview_rows
+        return max(1, rows - self._preview_header_rows())
 
     def _page_rows(self) -> int:
-        """Session rows the card can actually DRAW right now.
+        """Session rows the list can actually DRAW right now.
 
-        Chrome is reserved FIRST and the list takes what is left. A fixed page
-        let the cursor sit on a row the card never rendered — Enter then
-        resumed a session the user could not see — and let the clip eat the
-        footer, which is the only statement of how to leave.
+        No ``PAGE_ROWS_MAX``: the row count is bounded only by the terminal.
+        That 10-row ceiling drew 10 rows out of 140 at every terminal height —
+        7% — while a 60-row terminal has room for 41.
         """
-        _, height = self._screen_size()
-        budget = int(height * CARD_MAX_HEIGHT_FRACTION) - CARD_PADDING_ROWS - CARD_CHROME_ROWS
-        return max(1, min(PAGE_ROWS_MAX, budget))
+        costs = self._row_costs()
+        return fit_rows(costs, self._offset, self._layout().list_rows)
 
     def _header_rows(self) -> int:
-        """Rows above the first session row: the header and its rule."""
-        return 2
+        """Rows above the first session row.
+
+        Zero: the results pane holds rows and their context lines and nothing
+        else. The title, the tally and the keys live in the filter row, and the
+        preview is a separate widget — which is precisely why the mouse
+        hit-test can measure against this pane's own region.
+        """
+        return 0
 
     def _exec_column_latched(self, rows: Sequence[SessionRow]) -> bool:
         """Should the exec column be reserved? Once yes, yes until the picker closes.
@@ -1347,11 +1808,157 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._offset = max(0, min(self._offset, max(0, len(rows) - page)))
         self._repaint()
 
+    # -- preview -------------------------------------------------------------
+    def _previews(self) -> SessionPreviews:
+        """The per-picker preview cache, built lazily and discarded with the screen."""
+        if self._preview_data is None:
+            self._preview_data = SessionPreviews(self._sessions_dir or config_dir() / "sessions")
+        return self._preview_data
+
+    def use_previews_for_test(self, sessions_dir: Path) -> None:
+        """Point the preview layer at a fixture store. Tests only."""
+        self._sessions_dir = Path(sessions_dir)
+        self._preview_data = None
+        self._repaint()
+
+    def _preview_header_rows(self) -> int:
+        """Rows the preview header occupies: name, clocks, optional meta, rule.
+
+        Asked of the header that will actually be drawn, because the
+        ``model · cwd`` line is omitted ENTIRELY when there is no checkpoint
+        (D7) — reserving a row for it would leave the blank the placeholder was
+        removed to avoid.
+        """
+        return 4 if self._selected_checkpoint() else 3
+
+    def _selected_row(self) -> SessionRow | None:
+        rows = self.visible_rows
+        if not rows:
+            return None
+        return rows[min(self._selected, len(rows) - 1)]
+
+    def _selected_checkpoint(self) -> dict[str, object]:
+        row = self._selected_row()
+        if row is None:
+            return {}
+        try:
+            return self._previews().checkpoint(row.id)
+        except Exception:  # pragma: no cover - a broken store must not stop the paint
+            return {}
+
+    def _preview_lines(self) -> list[tuple[str, str]]:
+        """``(kind, line)`` for the selected row's conversation."""
+        row = self._selected_row()
+        if row is None:
+            return []
+        try:
+            previews = self._previews()
+            turns = previews.verbose(row.id) if self._verbose else previews.condensed(row.id)
+            # The body's own two-space indent is subtracted from the wrap
+            # budget, not added on afterwards: a line wrapped to the full pane
+            # width becomes indent + width once drawn, which is one cell past
+            # the pane. Textual then wraps it onto a second row, pushing the
+            # real last line out and leaving the role header above it orphaned
+            # — the D30 shape, reintroduced from the other end. Measured in a
+            # rendered 100x30 frame, where a 94-cell line drew at 96 in a
+            # 96-cell pane.
+            return wrap_turns(turns, self._pane_width() - PREVIEW_BODY_INDENT, self._pane_height())
+        except Exception:  # pragma: no cover - a broken transcript must not stop the paint
+            return []
+
+    def _raw_context(self, row: SessionRow) -> str | None:
+        """The grep context for ``row``, or ``None`` when it matched only softly.
+
+        D17 — requested at the width it will actually be DRAWN at. Asking for a
+        wide window and truncating it into a narrow pane cuts the match off the
+        right end: measured, 0 of 9 context lines contained the query.
+        """
+        query = self._query.strip()
+        if not query or row.id not in self._body_matches:
+            return None
+        return grep_context(self._digests.get(row.id, ""), query, self._context_width())
+
+    def _context_for(self, row: SessionRow) -> str | None:
+        """The context line to DRAW for ``row``, or ``None`` when it draws none.
+
+        Stacked, only the CURSOR row draws one: cells are scarce at 12 list
+        rows, a line on each would halve the list, and the preview directly
+        beneath already shows that row's content.
+        """
+        if self._layout().mode == "stacked":
+            selected = self._selected_row()
+            if selected is None or selected.id != row.id:
+                return None
+        return self._raw_context(row)
+
+    def _row_costs(self) -> list[int]:
+        """Lines each visible row occupies: 2 when it draws a context line."""
+        return [2 if self._context_for(row) else 1 for row in self.visible_rows]
+
     # -- rendering -----------------------------------------------------------
     def compose(self) -> ComposeResult:
+        # Two panes side by side with the filter row beneath, following
+        # ``settings_view.py:894`` (``self._columns = Horizontal(...)``) — the
+        # repo's existing two-pane precedent, rather than a new idiom beside it.
         with Container(classes="session-picker"):
-            self._body = Static(self._card_text(), id="session-picker-body")
-            yield self._body
+            self._results = Static(id="session-picker-results")
+            self._preview = Static(id="session-picker-preview")
+            # So arrows never silently move focus off the list.
+            self._preview.can_focus = False
+            self._filter = Static(id="session-picker-filter")
+            with Horizontal(id="session-picker-cols"):
+                yield self._results
+                yield self._preview
+            yield self._filter
+
+    def _apply_layout(self) -> str:
+        """Restyle ``#session-picker-cols`` in place. Returns the mode.
+
+        NEVER REBUILDS THE WIDGET TREE: remounting the panes loses the
+        preview's scroll offset, which the live-resize test pins.
+
+        Guarded on the mode AND the stacked preview height. Mode alone is not
+        enough — the preview height is a function of terminal HEIGHT, which
+        changes without crossing the width breakpoint, and a mode-only guard
+        left a stale 13-row preview after 160x45 → 80x24, starving the list to
+        7 rows where 12 is required. Neither value moves on a cursor keypress,
+        so this still restyles only on a real geometry change.
+        """
+        plan = self._layout()
+        stacked = plan.mode == "stacked"
+        pane_rows = plan.preview_rows if stacked else None
+        results = getattr(self, "_results", None)
+        if results is None or not results.is_mounted or not self.is_mounted:
+            # Nothing to restyle yet; the mode is still the honest answer.
+            return plan.mode
+        if plan.mode == self._applied_mode and pane_rows == self._applied_pane_rows:
+            return plan.mode
+        self._applied_mode = plan.mode
+        self._applied_pane_rows = pane_rows
+
+        cols = self.query_one("#session-picker-cols")
+        # Clearing a border takes the ``("none", colour)`` TUPLE. Assigning
+        # ``None`` drops only the inline rule and lets ``DEFAULT_CSS`` back in,
+        # and the literal string ``"none"`` reads the existing rule and raises
+        # on an edge that never had one. Measured, not style.
+        edge = theme_mod.semantic_color("edge")
+        if stacked:
+            cols.styles.layout = "vertical"
+            self._results.styles.width = "100%"
+            self._preview.styles.width = "100%"
+            self._results.styles.height = "1fr"
+            self._preview.styles.height = pane_rows
+            self._preview.styles.border_left = ("none", edge)
+            self._preview.styles.border_top = ("solid", edge)
+        else:
+            cols.styles.layout = "horizontal"
+            self._results.styles.width = f"{LIST_FR}fr"
+            self._preview.styles.width = f"{PREVIEW_FR}fr"
+            self._results.styles.height = "1fr"
+            self._preview.styles.height = "1fr"
+            self._preview.styles.border_top = ("none", edge)
+            self._preview.styles.border_left = ("solid", edge)
+        return plan.mode
 
     def on_mount(self) -> None:
         self._repaint()
@@ -1492,228 +2099,342 @@ class SessionPickerScreen(ModalScreen[str | None]):
         )
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-measure: every column and the page size come from the screen."""
+        """Re-measure: every column, both pane budgets and the split.
+
+        ``_move_to`` repaints, and ``_repaint`` re-applies the layout — which
+        is what flips the split across the breakpoint without rebuilding the
+        widget tree and losing the preview's scroll offset.
+        """
         self._move_to(self._selected)
 
     def _repaint(self) -> None:
-        body = getattr(self, "_body", None)
-        if body is None or not body.is_mounted:
+        results = getattr(self, "_results", None)
+        if results is None or not results.is_mounted:
             return
-        body.update(self._card_text())
+        # The layout may have just flipped, and every measurement below — pane
+        # widths, the row budget, the preview's height — depends on which side
+        # of the breakpoint we are on.
+        self._apply_layout()
+        # TWO-PASS FIT. The window size depends on the rows in it (a context
+        # line costs a second line) and the cursor clamp depends on the window,
+        # so one pass can leave the cursor on an undrawn row — the exact defect
+        # ``_page_rows`` exists to prevent. Fit → clamp → fit again.
+        budget = self._layout().list_rows
+        costs = self._row_costs()
+        self._offset = scroll_into_window(costs, self._offset, self._selected, budget)
+        self._offset = max(0, min(self._offset, max(0, len(costs) - 1)))
+        results.update(self._results_text())
+        # Each pane is guarded on its own rather than on `results` alone: the
+        # repaint-signature tests stub a single pane to read what was painted,
+        # and a partially-composed screen must still paint the panes it has.
+        preview = getattr(self, "_preview", None)
+        if preview is not None and preview.is_mounted:
+            preview.update(self._preview_text())
+        filter_row = getattr(self, "_filter", None)
+        if filter_row is not None and filter_row.is_mounted:
+            filter_row.update(self._filter_text())
 
+    # -- test accessors ------------------------------------------------------
+    # Three panes are no longer one list of lines, so the accessors name WHICH
+    # pane they answer about. Every row-level assertion in the suite is really
+    # about the results pane; the chrome assertions are really about the filter
+    # row; and tests must not re-derive the breakpoint arithmetic they check.
     def render_lines_for_test(self) -> list[str]:
-        """The card as plain strings — what a user reads."""
-        return [line.plain for line in self._card_text().split("\n")]
+        """The RESULTS pane as plain strings: rows and their context lines."""
+        return [line.plain for line in self._results_text().split("\n")]
 
-    def _card_text(self) -> Text:
+    def render_preview_for_test(self) -> list[str]:
+        """The PREVIEW pane as plain strings."""
+        return [line.plain for line in self._preview_text().split("\n")]
+
+    def render_footer_for_test(self) -> str:
+        """The filter row as one plain string."""
+        return self._filter_text().plain
+
+    def layout_mode_for_test(self) -> str:
+        """``"stacked"`` or ``"side-by-side"``."""
+        return self._layout().mode
+
+    def preview_mode_for_test(self) -> str:
+        """``"condensed"`` (the default) or ``"verbose"``."""
+        return "verbose" if self._verbose else "condensed"
+
+    def preview_offset_for_test(self) -> int:
+        """The preview's scroll offset, which must survive a resize round trip."""
+        return self._pane_top
+
+    # -- the three panes -----------------------------------------------------
+    def _results_text(self) -> Text:
+        """The list pane: one line per session, plus any grep context lines."""
         dim = Style(color=theme_mod.semantic_color("dim"))
-        fg_colour = theme_mod.semantic_color("fg")
-        faint = Style(color=theme_mod.semantic_color("faint"))
-        label = Style(color=theme_mod.semantic_color("label"))
-        width = self._card_width()
         rows = self.visible_rows
+        width = self._usable()
 
-        # The active filter is the user's only receipt that typing reached this
-        # modal, so narrow terminals shed the tally and then the title before
-        # they shed the query. Truncating the assembled line did the opposite:
-        # at 50 columns it preserved the static title and clipped
-        # ``filter asteroid`` completely.
-        title = "Resume a conversation"
-        header = Text(no_wrap=True, overflow="ellipsis")
-        if self._query:
-            lead = "  filter "
-            compact_lead = "filter "
-            # Grouped: `24,310` is read at a glance where `24310` is parsed as
-            # a digit string. Only worth doing since the picker was uncapped —
-            # at a 200-row ceiling the number never reached four digits. One
-            # cell per group, and at the widths where that matters the tally
-            # has already been shed entirely (see the shed order below).
-            tally = f"  {len(rows):,} of {len(self._all):,}"
-            full_width = cell_len(title) + cell_len(lead) + cell_len(self._query) + cell_len(tally)
-            titled_width = cell_len(title) + cell_len(lead) + cell_len(self._query)
-            if full_width <= width:
-                header.append(title, style=Style(color=fg_colour))
-                header.append(lead, style=faint)
-                header.append(self._query, style=label)
-                header.append(tally, style=dim)
-            elif titled_width <= width:
-                header.append(title, style=Style(color=fg_colour))
-                header.append(lead, style=faint)
-                header.append(self._query, style=label)
-            elif cell_len(compact_lead) < width:
-                header.append(compact_lead, style=faint)
-                header.append(
-                    truncate_cells(self._query, width - cell_len(compact_lead)),
-                    style=label,
-                )
-            else:
-                header.append(truncate_cells(self._query, width), style=label)
-        else:
-            # Singular when there is one. Pre-existing, but filtering makes a
-            # one-row list the common case rather than the rare one: a machine
-            # whose delegated fan-out dominates now lands there routinely.
-            count = len(self._all)
-            tally = f"  {count:,} session" if count == 1 else f"  {count:,} sessions"
-            if cell_len(title) + cell_len(tally) > width:
-                header.append(truncate_cells(title, width), style=Style(color=fg_colour))
-            else:
-                header.append(title, style=Style(color=fg_colour))
-                header.append(tally, style=dim)
-
-        out = Text()
-        out.append_text(header)
-        out.append("\n")
-        # Raised card ground needs the raised hairline too: ``edge`` is tuned
-        # against the app background and nearly vanishes on ``overlay``.
-        out.append("─" * width, style=faint)
-        out.append("\n")
-
-        page = self._page_rows()
-        counter: tuple[int, int, int] | None = None
-        if not self._all:
-            # WRAPPED to the measured width, not printed flat. Every other line
-            # in this card is bounded by the runtime width; this one was a
-            # constant, so it fitted the 74-cell ceiling and still overflowed
-            # the actual card on any narrow terminal — at 60 columns it was cut
-            # to "…subagent runs are", losing the clause that explains why the
-            # list is empty, which is the whole reason the wording changed.
-            # Wrapped rather than truncated for that reason: the explanation is
-            # the message, so it must survive the narrow case, not be the first
-            # thing dropped.
+        if not rows and not self._query:
+            # The shared empty-store notice, whose "subagent runs are not
+            # listed" clause is the EXPLANATION and not decoration — it must
+            # survive the narrow case, so it wraps rather than truncating.
+            out = Text()
             for index, line in enumerate(_wrap_cells(RESUME_EMPTY_NOTICE, width)):
                 if index:
                     out.append("\n")
                 out.append(line, style=dim)
-        elif not rows:
-            # The header already echoes the query; repeating it here — and via
-            # ``repr``, whose quoting flips on an apostrophe — said it twice in
-            # two grammars.
-            out.append("no session matches that filter", style=dim)
-        else:
-            window = rows[self._offset : self._offset + page]
-            for index, line in enumerate(
-                render_rows(
-                    window,
-                    self._selected - self._offset,
-                    width,
-                    self._now,
-                    None if self._hovered is None else self._hovered - self._offset,
-                    self.body_matched_ids,
-                    # The RESULT SET, not this page: a column that appears as a
-                    # fork scrolls into view and disappears as it scrolls out
-                    # makes every name jump sideways on one arrow press.
-                    any(getattr(row, "forked", False) for row in rows),
-                    # The animated phase. Without it every call took the
-                    # default 0 and the running marker never moved (D1).
-                    self._frame,
-                    # The LATCHED exec fact, for the reason `_exec_column_latched`
-                    # states. Passing it here also gives the exec column the
-                    # result-set scoping its own docstring claims and did not
-                    # have: `window` is one PAGE, so leaving this to derive from
-                    # `rows` made the column appear and vanish as the one-shot
-                    # scrolled in and out of view — the very jump the fork
-                    # argument above exists to prevent, measured at 7 cells.
-                    self._exec_column_latched(rows),
-                )
-            ):
-                if index:
-                    out.append("\n")
-                out.append_text(line)
-            if len(rows) > page:
-                counter = (
-                    self._offset + 1,
-                    self._offset + len(window),
-                    len(rows),
-                )
+            return out
+        if not rows:
+            # The filter row already echoes the query; repeating it here said
+            # it twice in two grammars.
+            return Text("no session matches that filter", style=dim)
 
-        # Body, then one quiet row, then the card's META — the position, the
-        # legends and the key hints, which are the same KIND of row (statements
-        # ABOUT the list, not entries in it) and so travel together at the
-        # bottom. This is the usage card's grammar; the two overlays differ only
-        # by whether the position row is there at all. The counter is EMITTED
-        # only when the list scrolls: printing an empty line in its place left
-        # two blank rows and pushed the keys away from the block they belong to.
-        out.append("\n\n")
-        # The marker legend appears only when a marked row is actually on
-        # screen, so an empty query or a pure name match never advertises a mark
-        # the user cannot see (D2: teach the glyph where it is used, not always).
-        has_marked = bool(self.body_matched_ids)
-        # The SAME latched fact the column reserves on, deliberately: a legend
-        # explaining a column that is no longer reserved, or a reserved column
-        # with no legend, is the footer and the list disagreeing about what the
-        # user is looking at. One source, so they cannot.
-        has_exec = self._exec_column_latched(rows)
-        # LEGENDS SHARE THE COUNTER'S ROW, and that placement is the fix for
-        # design round 2's D2 rather than a tidier arrangement. They used to sit
-        # at the front of the key row, where the arithmetic made three of the
-        # four list shapes unreachable: the full key row is 69 cells against a
-        # card capped at PICKER_MAX_WIDTH = 74, so a 24-cell `[exec]` legend
-        # could only appear by evicting a key — and the shed order rightly makes
-        # the keys win, because keys OPERATE the card and a legend only teaches.
-        # The result was a legend that painted only on a list short enough not to
-        # scroll, i.e. never on this repo's own store of ~500 sessions, at any
-        # terminal width including 200 columns.
-        #
-        # This row is the one place with the width to spare and it costs no
-        # height: CARD_CHROME_ROWS reserves it UNCONDITIONALLY (so the card
-        # cannot change height as the user types, which is why the reservation
-        # is unconditional in the first place), and it is drawn empty on a list
-        # that fits one page. The counter is ~19 cells when present, leaving
-        # ~52 for legends against the 43 both together need.
-        #
-        # It is also the better home on the merits: a legend states what a mark
-        # in the list MEANS, which is a statement about the list — exactly what
-        # this row already carries — while the row below it is how the card is
-        # driven. The two kinds no longer compete for the same cells.
-        legends = _meta_legends(
-            width,
-            has_marked=has_marked,
-            has_exec=has_exec,
-            counter_cells=_counter_cells(counter),
-        )
-        if counter is not None or legends:
-            if counter is not None:
-                # Numerals carry the fact at the readable ``dim`` step; grammar
-                # can stay quiet at ``faint`` because it is adjacent to those
-                # anchors.
-                first, last, total = counter
-                out.append("showing ", style=faint)
-                out.append(f"{first:,}–{last:,}", style=dim)
-                out.append(" of ", style=faint)
-                out.append(f"{total:,}", style=dim)
-            for index, (glyph, meaning) in enumerate(legends):
-                if index or counter is not None:
-                    out.append(" · ", style=faint)
-                # The GLYPH at `dim` and its gloss at `faint`, the same split
-                # the keys below use: the thing being explained is the anchor,
-                # the explanation is subordinate to it.
-                out.append(glyph, style=dim)
-                out.append(f" {meaning}", style=faint)
-            out.append("\n")
-        # Key NAMES at `dim` and their labels at `faint`, matching the usage
-        # card: at `faint` on this ground the keys themselves were 1.49:1.
-        # Hints DROP to fit, in reverse order of need — the same discipline the
-        # columns use. A footer that overflowed the card was the one row that
-        # could not afford to: it is the only statement of how to get out.
-        #
-        # This row carries KEYS ONLY since D2 — the legends moved up to the
-        # counter's row. ``scrolls`` still matters here because it reorders the
-        # shed between ``pgup/pgdn`` and ``type``: paging must not be the first
-        # thing sacrificed on a list that actually pages (round 1, D3).
-        # ``counter`` is set exactly when the list is longer than a page, so it
-        # is already the "does this scroll" fact the shed order needs.
-        for index, (key, what) in enumerate(
-            _footer_hints(
+        budget = self._layout().list_rows
+        costs = self._row_costs()
+        drawn = fit_rows(costs, self._offset, budget)
+        window = rows[self._offset : self._offset + drawn]
+        query = self._query.strip()
+
+        out = Text()
+        for index, line in enumerate(
+            render_rows(
+                window,
+                self._selected - self._offset,
                 width,
-                scrolls=counter is not None,
-                empty=not rows and bool(self._query),
+                self._now,
+                None if self._hovered is None else self._hovered - self._offset,
+                self.body_matched_ids,
+                # The RESULT SET, not this page — a column that appears as a
+                # fork scrolls into view and vanishes as it scrolls out makes
+                # every name jump sideways on one arrow press.
+                any(getattr(row, "forked", False) for row in rows),
+                self._frame,
+                # The LATCHED exec fact: the column may widen, never narrow.
+                self._exec_column_latched(rows),
+                name_max=self._layout().name_width,
+                age_width=self._layout().age_width,
+                show_id=self._layout().show_id,
+                soft_gutter=bool(query),
+                exact_matched=self._body_matches,
             )
         ):
             if index:
-                out.append(" · ", style=faint)
-            out.append(key, style=dim)
-            if what:
-                out.append(f" {what}", style=faint)
+                out.append("\n")
+            out.append_text(line)
+            row = window[index]
+            if query:
+                context = self._context_for(row)
+                if context:
+                    out.append("\n")
+                    out.append(" " * CONTEXT_INDENT)
+                    # ``demark`` BEFORE highlighting (D19), so literal ``**``
+                    # and backticks do not ride into the list pane and so the
+                    # match offsets stay honest.
+                    out.append_text(
+                        _highlight(
+                            truncate_cells(demark(context), self._context_width()),
+                            query,
+                        )
+                    )
+        return out
+
+    def _preview_text(self) -> Text:
+        """The conversation preview for the row under the cursor."""
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        faint = Style(color=theme_mod.semantic_color("faint"))
+        fg_colour = theme_mod.semantic_color("fg")
+
+        row = self._selected_row()
+        if row is None:
+            return Text("no session", style=dim)
+
+        out = Text()
+        out.append(f"{row.name or row.id}\n", style=Style(color=fg_colour, bold=True))
+        created = 0.0
+        try:
+            created = self._previews().created_at(row.id) or row.created_at
+        except Exception:  # pragma: no cover - a broken store must not stop the paint
+            created = row.created_at
+        started = format_age(max(0.0, self._now - created)) if created else "·"
+        worked = format_age(max(0.0, self._now - row.mtime))
+        out.append(f"started {started} · last worked {worked}\n", style=muted)
+        # Omitted ENTIRELY when there is no checkpoint (D7), rather than drawn
+        # as a bare `· · ·` that reads as a load that never resolved. Measured:
+        # on all 113 rows that have one, both model and cwd are present, so the
+        # line is fully populated or fully absent.
+        checkpoint = self._selected_checkpoint()
+        if checkpoint:
+            out.append(
+                f"{_short_model(checkpoint)} · {_short_cwd(checkpoint)}\n",
+                style=dim,
+            )
+        # Spans the REAL preview width, or it runs off the edge when stacked.
+        out.append("─" * max(10, self._pane_width()) + "\n", style=faint)
+
+        lines = self._preview_lines()
+        height = self._pane_height()
+        # Clamped on every paint: the row budget changes with the terminal, and
+        # an offset from a taller geometry would leave the pane blank.
+        self._pane_top = max(0, min(self._pane_top, max(0, len(lines) - height)))
+        if not lines:
+            out.append("(no prose in this transcript)", style=dim)
+            return out
+
+        for kind, text in clip_to_height(lines, self._pane_top, height):
+            if kind == "gutter":
+                ink = "accent" if text.endswith("you") else "success"
+                out.append(
+                    f"{text}\n",
+                    style=Style(color=theme_mod.semantic_color(ink), bold=True),
+                )
+            elif kind == "blank":
+                out.append("\n")
+            else:
+                # A uniform two-space indent; the wrap already rstripped each
+                # line so a continuation cannot turn it into three (D11).
+                out.append(f"  {text}\n", style=Style(color=fg_colour))
+        return out
+
+    def _filter_text(self) -> Text:
+        """One row: the query, the counters, the legends and the key hints.
+
+        This row carries what the card's last three lines used to: the position
+        is stated, the keys are stated, and they do not collide. The query is
+        the user's only receipt that typing reached this modal, so narrow
+        terminals shed the tally and then the hints before they shed the query.
+        """
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        faint = Style(color=theme_mod.semantic_color("faint"))
+        label = Style(color=theme_mod.semantic_color("label"))
+        accent = Style(color=theme_mod.semantic_color("accent"))
+
+        rows = self.visible_rows
+        # Measured off the resolved widget when there is one. The accessors are
+        # deliberately usable on an UNMOUNTED screen — a large part of the suite
+        # asserts rendered text without a pilot — so this falls back to the
+        # planned width rather than requiring `compose` to have run.
+        # Measured off the widget's CONTENT region — the cells left inside its
+        # own padding — rather than off `size` less a guessed inset. The guess
+        # was one cell out at 140 columns and the row was clipped mid-word by
+        # Textual, which is the silent-clip failure this file keeps warning
+        # about: nothing reads back that it happened.
+        measured = _content_width(getattr(self, "_filter", None))
+        # The row spans the SCREEN, not the list pane, so the fallback is the
+        # full planned width rather than `list_width` — which would shed the
+        # tally and the keys on an unmounted screen, where much of the suite
+        # reads this row. One source, so a stubbed layout and the real one
+        # cannot disagree about how much room this row has.
+        width = max(1, measured or self._layout().screen_width)
+        costs = self._row_costs()
+        drawn = fit_rows(costs, self._offset, self._layout().list_rows) if rows else 0
+
+        out = Text(no_wrap=True, overflow="ellipsis")
+        out.append("/ ", style=accent)
+        if self._query:
+            out.append(self._query, style=label)
+        else:
+            out.append("type to filter", style=dim)
+
+        counter: tuple[int, int, int] | None = None
+        if rows and len(rows) > drawn:
+            counter = (self._offset + 1, self._offset + drawn, len(rows))
+
+        # The tally, then the legends, then the keys — statements ABOUT the
+        # list before the keys that OPERATE it, which is the card's own
+        # grammar moved into one row.
+        tail = Text(no_wrap=True, overflow="ellipsis")
+        if counter is not None:
+            first, last, total = counter
+            tail.append("   showing ", style=faint)
+            tail.append(f"{first:,}–{last:,}", style=dim)
+            tail.append(" of ", style=faint)
+            tail.append(f"{total:,}", style=dim)
+        else:
+            count = len(self._all)
+            word = "session" if count == 1 else "sessions"
+            tail.append(f"   {count:,} {word}", style=dim)
+
+        # LEGENDS TRAVEL WITH THE COUNTER, not with the keys, and that
+        # placement is design round 2's D2 rather than a tidier arrangement.
+        # A legend states what a mark in the list MEANS — a statement ABOUT the
+        # list, which is what this half of the row already carries — while the
+        # keys say how the picker is driven. Ranking the legend against the
+        # hints is what made it paint only on a list short enough not to
+        # scroll, i.e. never on a real store at any terminal width.
+        for glyph, meaning in _meta_legends(
+            width,
+            has_marked=bool(self.body_matched_ids),
+            has_exec=self._exec_column_latched(rows),
+            counter_cells=_counter_cells(counter),
+        ):
+            tail.append(" · ", style=faint)
+            tail.append(glyph, style=dim)
+            tail.append(f" {meaning}", style=faint)
+
+        # Asked for the room the KEYS actually have — the row already spent
+        # cells on the query and the tally — so `_footer_hints`' own shed
+        # ladder runs against the real budget instead of against the whole
+        # row. Handing it the full width let it return 91 cells for an 80-cell
+        # row, and the whole block was then dropped as one.
+        # The preview-mode hint is built FIRST and MEASURED, not estimated: it
+        # is the one hint that is also a status, so its width changes with the
+        # mode. A constant estimate here over-fed `_footer_hints` by three
+        # cells, which spent the tail's room on a hint and dropped the counter
+        # and the legend from a row that had space for both.
+        mode_hint = Text(no_wrap=True, overflow="ellipsis")
+        mode_hint.append(" · ", style=faint)
+        mode_hint.append("ctrl+e", style=dim)
+        mode_hint.append(f" {self.preview_mode_for_test()}", style=faint)
+
+        def key_row(room: int) -> Text:
+            """The key hints that fit ``room``, plus the always-present mode hint."""
+            out_keys = Text(no_wrap=True, overflow="ellipsis")
+            for index, (key, what) in enumerate(
+                _footer_hints(
+                    max(0, room),
+                    scrolls=counter is not None,
+                    empty=not rows and bool(self._query),
+                )
+            ):
+                out_keys.append(" · " if index else "   ", style=faint)
+                out_keys.append(key, style=dim)
+                if what:
+                    out_keys.append(f" {what}", style=faint)
+            out_keys.append_text(mode_hint)
+            return out_keys
+
+        keys = key_row(
+            width - cell_len(out.plain) - cell_len(tail.plain) - cell_len(mode_hint.plain)
+        )
+
+        # SHED IN ORDER OF NEED, and the query is never dropped: it is the
+        # user's only receipt that typing reached the modal. The keys go next
+        # to last because they are the only statement of how to leave, and the
+        # tally — a nicety — goes first. Each candidate is appended only if the
+        # WHOLE row still fits, so the row can never overflow the terminal.
+        # THE KEYS ARE NEVER SHED. `_footer_hints` has already reduced itself
+        # to `enter`/`esc` at its narrowest, and between them they are how the
+        # picker is used and how it is left — the one row that cannot afford to
+        # overflow is also the one that cannot afford to go silent. So only the
+        # TAIL is optional here: the counter and the legends are a nicety, the
+        # way out is not.
+        room = width - cell_len(out.plain) - cell_len(keys.plain)
+        if cell_len(tail.plain) > room:
+            # The keys are already at their narrowest that still fits, so the
+            # only cells left to find are in their LABELS. Shedding those before
+            # the tail is design round 2's D2 ordering: the counter and the
+            # legend explain what is on screen and have no other home, while a
+            # bare `enter · esc` still states the way out. `_footer_hints` does
+            # exactly this reduction itself when asked for less room.
+            keys = key_row(0)
+            room = width - cell_len(out.plain) - cell_len(keys.plain)
+        if cell_len(tail.plain) <= room:
+            out.append_text(tail)
+        out.append_text(keys)
+        # The row is `no_wrap` with ellipsis overflow, but Textual only applies
+        # that against the widget's REAL width — and this text is also read
+        # back by the accessors on an unmounted screen. Truncating here keeps
+        # the two answers identical and makes the "never wider than the
+        # terminal" invariant a property of the text, not of the paint.
+        if cell_len(out.plain) > width:
+            return Text(truncate_cells(out.plain, width), style=out.style)
         return out
 
 
@@ -1751,9 +2472,10 @@ _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 #: legend could only appear there by evicting a key — and the keys must win,
 #: because they OPERATE the card while a legend teaches. Design round 1 resolved
 #: that by ranking the legend above the two disposable hints, which made it
-#: paint on a list that FITS one page and never on one that scrolls; with
-#: :data:`PAGE_ROWS_MAX` at 10 and real stores in the hundreds, that is the
-#: ordinary case, at any terminal width (design round 2, D2). The legends
+#: paint on a list that FITS one page and never on one that scrolls; against
+#: real stores in the hundreds that is the ordinary case, at any terminal width
+#: (design round 2, D2) — and it was worse still under the old 10-row page cap
+#: this redesign removed. The legends
 #: therefore share the position counter's row and shed against their own budget
 #: — see :func:`_meta_legends`.
 
