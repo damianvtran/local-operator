@@ -52,11 +52,72 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
-## v0.1.8 — submitted 2026-09-06, pending review as of 2026-09-06
+## v0.1.10 — submitted 2026-09-10, published 2026-09-11
 
 | Field | Value |
 | --- | --- |
-| Extension version | 0.1.8 (submitted; **not yet the approved version**) |
+| Extension version | 0.1.10 (**the live published version**) |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `7ad53a5e1` (`chore(extension): bump version to 0.1.10 and add store publishing guidance`, PR #907, squash-merged to `main`) |
+| `extension/` tree hash | `7d5585a6d430ae57b4cc0948f148ffa4c9c8fa5b` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.8 below* |
+| Artifact size | 13 files, no source maps; 104KiB as reported by the store listing |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 34489484307](https://github.com/damianvtran/local-operator/actions/runs/34489484307), dispatched with `ref=7ad53a5e1` `version=0.1.10` |
+| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 34610983340](https://github.com/damianvtran/local-operator/actions/runs/34610983340), dispatched with `version=0.1.10` |
+| Store state | `PUBLISHED` (promoted 2026-09-11 ~14:35 UTC) |
+| State last checked | 2026-09-11 |
+| Approval timestamp | 2026-09-11 — review completed and the approved revision was promoted the same day; confirmed live on the listing as "Updated September 11, 2026" |
+| Previously published | v0.1.8, live during review (promoted 2026-09-10, run 34482703148) |
+
+**Third release through the automated path, both halves of it.** The stage run
+validated and submitted in one pass — `validated Chrome Web Store package v0.1.10
+(13 files, no source maps)`, then `submitted ... v0.1.10 with STAGED_PUBLISH
+(PENDING_REVIEW)` — and the promote run later reported `promoted Chrome Web Store
+extension ... v0.1.10 to PUBLISHED`. v0.1.7 was the first release to go out that
+way on both halves (see its entry below); the releases before it involved a
+dashboard step.
+
+**What this version carries.** Four merged PRs landed in the `extension/` tree
+between v0.1.8's source commit (`ff9b16b5`) and this one:
+
+- **#766** (`e3cb1ebc8`) — removes the deterministic jitter from the pairing
+experience; the user-reported "jittery pairing code" fix. This is why the
+release matters to users.
+- **#798** (`ee146fb73`) — makes tab allocation exception-safe and ownership
+durable. Adds `OWNER_REFUSED` and four `owner_*` methods to `protocol.gen.ts`.
+- **#782** (`be2546ec0`) — release tooling only: the store script surfaces the
+store's own rejection reason instead of a bare `curl: (22)`. Not shipped in the
+store package (the thirteen zipped files below do not include `scripts/`).
+- **#907** (`7ad53a5e1`) — the version bump itself, plus the store-publishing
+guidance now carried in `AGENTS.md`.
+
+**Why this version is 0.1.10 and not 0.1.9.** 0.1.9 was never submitted. It was
+bumped in the tree, but #798 then changed nine `extension/` files — including
+`protocol.gen.ts` — **without** bumping the version, so "0.1.9" no longer named a
+single tree and could not be pinned by this record. #907 bumped to 0.1.10 to
+restore the version-to-tree correspondence before submitting. There is therefore
+no v0.1.9 entry in this file and none should be added: no artifact with that
+version ever reached the store.
+
+**Permissions unchanged from v0.1.8.** No permission was added, removed, or
+altered, which is why the automated path applied without a dashboard step. The
+standing rule in `submission-checklist.md` sends any permission-adding package to
+a human, because the Chrome Web Store API cannot set permission justifications.
+
+**Review duration.** Submitted 2026-09-10 14:31 UTC, approved 2026-09-11 — about
+24 hours, against ~4.5 days for v0.1.8. Both are ordinary for an extension
+carrying `debugger` plus broad host access; do not read the difference as a trend
+from two samples.
+
+---
+
+## v0.1.8 — submitted 2026-09-06, published 2026-09-10
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.8 (published 2026-09-10; **superseded by v0.1.10**) |
 | Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
 | Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
 | Source commit | `ff9b16b5` (`feat(extension): scoped Allow (domain/site/once) and dangerous allow-all setting (0.1.8)`, PR #672, squash-merged to `main`) |
@@ -65,9 +126,10 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 | Artifact size | 12 files, no source maps (byte size not recorded — see note below) |
 | Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
 | Submission route | **Automated** — `chrome-web-store.yml`, [run 34000911184](https://github.com/damianvtran/local-operator/actions/runs/34000911184), dispatched with `ref=main` `version=0.1.8` |
-| Store state | `PENDING_REVIEW`, 100% deployment |
-| State last checked | 2026-09-06 |
-| Approval timestamp | *pending — append when review completes* |
+| Promotion route | **Automated** — `chrome-web-store-promote.yml`, [run 34482703148](https://github.com/damianvtran/local-operator/actions/runs/34482703148), dispatched with `version=0.1.8` |
+| Store state | `PUBLISHED`, 100% deployment |
+| State last checked | 2026-09-10 |
+| Approval timestamp | 2026-09-10 — appended when review completed; superseded by v0.1.10 on 2026-09-11 |
 | Previously published | v0.1.7, live at 100% during review (promoted 2026-09-04, run 33926643637) |
 
 **Second release to go out through the automated path**; v0.1.7 was the first
