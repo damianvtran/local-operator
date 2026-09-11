@@ -105,6 +105,17 @@ class TestTheFloorDecidesWhereATokenOpens:
         """`/team del$` is still inside the unterminated name token."""
         assert _token("/team del$") is None
 
+    @pytest.mark.parametrize("text", ["/team  $x", "/team   $x", "/agent  $x"])
+    def test_skill_token_declines_on_doubled_space_before_name(self, text: str):
+        """Extra spaces before the name still leave the name slot OPEN.
+
+        `partition(" ")` splits on the FIRST of two spaces, so a doubled space
+        reports an empty-but-"terminated" name. Reading that as a finished name
+        handed the caret to the skill picker and dropped the roster list the
+        floor exists to protect.
+        """
+        assert _token(text) is None
+
     def test_skill_token_opens_in_goal_argument(self):
         """`/goal` offers no name list, so its argument starts at the request."""
         token = _token("/goal $cte")

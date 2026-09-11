@@ -350,8 +350,11 @@ def _skill_argument_floor(
         # argument is the request and the boundary is where it starts.
         return arg_start
     first, first_sep, _rest = argument.partition(" ")
-    if not first_sep:
-        # The name slot is still open: the roster list owns this caret.
+    if not first_sep or not first:
+        # The name slot is still open: the roster list owns this caret. An EMPTY
+        # `first` is the doubled-space case (`/team  $x`), where `partition`
+        # splits on the first of two spaces and reports a terminated name that
+        # was never typed; a blank token is an open slot, not a finished name.
         return None
     if word in ("team", "teams") and first.lower() == "chart":
         # `/team chart <name>`'s second slot is another name list, not free
