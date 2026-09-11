@@ -73,7 +73,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from local_operator.providers.registry import get_provider_definition
+from local_operator.providers.registry import (
+    credential_provider_id,
+    get_provider_definition,
+)
 
 #: Human labels for the unit a usage amount is measured in. The renderer reads
 #: this rather than interpolating the raw key, so an amount prints ``519.86 USD``
@@ -2136,8 +2139,15 @@ async def fetch_qwencloud_console_usage(
                 "content-type": "application/x-www-form-urlencoded",
                 "origin": QWENCLOUD_CONSOLE_ORIGIN,
                 "referer": QWENCLOUD_CONSOLE_REFERER,
+                # A header rather than ``cookies=``, which httpx deprecates
+                # per-request (0.28 warns, 1.x drops it) precisely because
+                # persistence is ambiguous. The client is caller-owned and
+                # shared across providers (module docstring above), so the
+                # cookie must NOT reach its jar: a full-account console
+                # session cookie would then ride along on every other
+                # provider's request on that pool.
+                "cookie": f"login_qwencloud_ticket={ticket}",
             },
-            cookies={"login_qwencloud_ticket": ticket},
         )
     except httpx.HTTPError:
         return None
@@ -2228,7 +2238,20 @@ async def fetch_usage(
     # "no access_token" would never fire. Falling through on None is what
     # keeps a teams account working — the personal endpoint is absent or
     # zero there, and BSS still reports the monthly window below.
-    if extra_creds and extra_creds.get("ticket"):
+    #
+    # The PROVIDER gate is not redundant with the ticket check. Without it any
+    # caller passing ``extra_creds`` generically would spend a full-account
+    # console session cookie on every unrelated provider's fetch AND get back a
+    # report labelled ``alibaba-token-plan`` for, say, ``openrouter`` — the
+    # caller then files QwenCloud's 7-day window into another provider's slot.
+    # Compared on the STORAGE id so the ``alibaba-token-plan-oauth`` login
+    # flavour, which ``_FETCHERS`` deliberately carries as its own key, still
+    # reports.
+    if (
+        credential_provider_id(provider) == "alibaba-token-plan"
+        and extra_creds
+        and extra_creds.get("ticket")
+    ):
         report = await _run_fetcher(
             client, "qwencloud-console-usage", "", account_id, creds=extra_creds
         )
