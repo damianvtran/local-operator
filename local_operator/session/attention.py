@@ -132,6 +132,18 @@ def _optional_column(row: sqlite3.Row, name: str) -> str:
     return str(value or "")
 
 
+#: How much of a reason the STORE keeps. This string rides every attach frame
+#: (once per conversation in the canonical `attention` state, and once per child
+#: for a job row), so an unbounded provider message would spend the frame ceiling
+#: that `tests/unit/session/test_attach_frame_size.py` guards. The full text is
+#: not lost: the live transcript notice and the journal row
+#: (`completion_attention`, replayed by `_default_convert_to_llm`) both carry it
+#: verbatim. 500 characters is past any harness-authored sentence and past the
+#: opening of a provider error, which is all a one-line tooltip or a phone
+#: banner can use.
+REASON_WIRE_CHARS = 500
+
+
 def _supersedes_provisional(
     existing: Any,
     conversation: str,
@@ -720,6 +732,7 @@ class AttentionStore:
         """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
+        reason = str(reason or "")[:REASON_WIRE_CHARS]
         if str(uuid.UUID(token)) != token:
             raise ValueError("invalid completion token")
         with closing(self._connect()) as conn, conn:

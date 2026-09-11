@@ -65,7 +65,9 @@ class OutcomeSession(FakeSession):
         return await asyncio.to_thread(self.store.acknowledge, self.identity, token)
 
 
-async def _start_and_end_turn(app: OperatorApp, pilot: Any, *, aborted: bool, error: str | None) -> None:
+async def _start_and_end_turn(
+    app: OperatorApp, pilot: Any, *, aborted: bool, error: str | None
+) -> None:
     """Drive a turn to the point where the app has painted its own end row."""
     from local_operator.tui.events import TurnEnded, TurnStarted
     from local_operator.tui.widgets.editor import Editor
@@ -89,7 +91,9 @@ async def _start_and_end_turn(app: OperatorApp, pilot: Any, *, aborted: bool, er
 
 
 @pytest.mark.asyncio
-async def test_a_cut_off_turn_paints_the_reason_and_never_interrupted(tmp_path, monkeypatch) -> None:
+async def test_a_cut_off_turn_paints_the_reason_and_never_interrupted(
+    tmp_path, monkeypatch
+) -> None:
     """Design test 15: one row, the error sentence, with the cause in it.
 
     The classifier rewrote the end event to ``aborted=False, error=<notice>``,
@@ -172,7 +176,9 @@ async def test_an_interrupted_outcome_keeps_its_own_spelling(tmp_path, monkeypat
                 break
             await pilot.pause()
             await asyncio.sleep(0.01)
-        session.publish("interrupted", cause="user-stop", reason="the session was stopped by the user")
+        session.publish(
+            "interrupted", cause="user-stop", reason="the session was stopped by the user"
+        )
         await app._poll_completion_attention()
         await pilot.pause()
         # The deliberate stop keeps the existing spelling: the reason is for a

@@ -451,7 +451,14 @@ async def test_going_cold_ends_an_in_flight_turn_directly(tmp_path, monkeypatch)
     remote._go_cold()
 
     ends = [event for event in received if isinstance(event, AgentEndEvent)]
-    assert len(ends) == 1 and ends[0].aborted is True and ends[0].error is None
+    # ONE end, delivered directly (the unchanged half), and it is now a CUT-OFF
+    # ERROR rather than a bare abort: a confirmed owner death is not a user's
+    # cancel, and publishing it as ``interrupted`` is the defect this taxonomy
+    # exists to remove.
+    assert len(ends) == 1
+    assert ends[0].aborted is False
+    assert ends[0].cut_off_cause == "owner-lost"
+    assert "cut off" in str(ends[0].error)
     assert remote._buffered_events == []
     assert remote.is_streaming is False
     assert remote.is_cold
@@ -563,7 +570,10 @@ async def test_going_cold_survives_a_controllers_higher_adopted_generation(
 
     ends = [m for m in app.posted if isinstance(m, TurnEnded)]
     assert len(ends) == 1, "the synthesised end never reached the app"
-    assert ends[0].aborted is True
+    # ``aborted`` is False because the end is a cut-off ERROR now; what this
+    # test is about is that it got THROUGH the generation barrier at all.
+    assert ends[0].aborted is False
+    assert "cut off" in str(ends[0].error)
     assert remote.is_streaming is False
 
 
