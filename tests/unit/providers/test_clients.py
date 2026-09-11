@@ -2318,6 +2318,94 @@ def test_openai_compat_markers_gate_on_cache_support():
     assert "cache_control" not in str(plain["messages"])
 
 
+def test_openai_compat_chat_body_carries_prompt_cache_key():
+    """Chat-completions body carries prompt_cache_key when the model supports
+    caching and the request carries a lineage key. OpenRouter uses this as the
+    sticky-routing key; the field is absent when the model reports no cache
+    support so non-caching providers are not sent a field they may not know."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("a")],
+            prompt_cache_key="lineage-123",
+        )
+    )
+    assert body["prompt_cache_key"] == "lineage-123"
+
+    spec_nocache = _spec()
+    spec_nocache.supports_prompt_cache = False
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(
+        ChatRequest(
+            model=spec_nocache,
+            messages=[Message.user("a")],
+            prompt_cache_key="lineage-123",
+        )
+    )
+    assert "prompt_cache_key" not in body
+
+
+def test_openai_compat_chat_body_omits_prompt_cache_key_without_key():
+    """No prompt_cache_key is sent when the request does not carry one, even if
+    the model supports caching. This keeps the wire minimal for callers that
+    have not opted into lineage-based cache affinity."""
+    from local_operator.providers.clients import OpenAICompatClient
+
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(
+        ChatRequest(model=spec, messages=[Message.user("a")])
+    )
+    assert "prompt_cache_key" not in body
+
+
+def test_openai_compat_chat_body_preserves_fork_lineage(tmp_path):
+    """A fork inherits the parent's cache_lineage_id via SessionStreamFn;
+    ``_build_body`` must emit that inherited id on the chat-completions wire.
+
+    Hardcoding the same key on both bodies would pass even if the stream-fn
+    path stopped plumbing ``cache_lineage_id``. Drive the real fork →
+    ``create_stream_fn(..., cache_lineage_id=...)`` path instead.
+    """
+    from local_operator.fork import fork_parent, fork_session
+    from local_operator.model.configure import create_stream_fn
+    from local_operator.providers.clients import OpenAICompatClient
+    from local_operator.resume import TRANSCRIPT_NAME
+
+    parent_id = "parent-sess"
+    parent = tmp_path / "sessions" / parent_id
+    parent.mkdir(parents=True)
+    (parent / TRANSCRIPT_NAME).write_text("{}\n", encoding="utf-8")
+    fork_id = fork_session(tmp_path, parent_id)
+    fork_dir = tmp_path / "sessions" / fork_id
+
+    class _Auth:  # only the resolved ids are inspected; nothing is streamed
+        pass
+
+    stream = create_stream_fn(
+        _Auth(),  # type: ignore[arg-type]
+        settings={},
+        session_id=fork_id,
+        cache_lineage_id=fork_parent(fork_dir) or None,
+    )
+    lineage = stream._cache_lineage_id
+    assert lineage == parent_id
+
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    body = OpenAICompatClient("https://openrouter.ai/api/v1")._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("a"), Message.user("forked")],
+            prompt_cache_key=lineage,
+        )
+    )
+    assert body["prompt_cache_key"] == parent_id
+
+
 def test_reasoning_effort_reaches_openai_and_anthropic_wires() -> None:
     # The ladder is declared on both specs: `_reasoning_effort` refuses a level
     # the model does not accept, so a spec that names one but never lists it is
