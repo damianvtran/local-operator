@@ -30,6 +30,20 @@ FRAME is one of:
                  mounted and unreleasable. Pre-fix this frame is frozen — the
                  row still reads "older messages above" and the five clicks
                  moved nothing; post-fix the gate reopens and the clicks page.
+    loading      the head notice while an UNMOUNTED lease holds the gate, i.e.
+                 ``loading older messages…``. It exists because that copy is
+                 the state this fix is most about and it had never been seen
+                 on a painted frame: a synthetic session settles inside one
+                 paint, so exporting "during" a real load captures the settled
+                 row instead (design review round 1, D4). The lease is taken
+                 and HELD here rather than the fetch being slowed, so the row
+                 is painted from the same ``_reconcile_head_notice`` branch a
+                 real in-flight fetch drives.
+    unreachable  the head notice in its ``— click to load`` state: more
+                 history exists and the frame cannot scroll to it, so the row
+                 offers itself as the control. Reached by suppressing the
+                 geometry fill, which is what the tall-viewport case does in
+                 practice (design review round 1, D3).
 """
 
 from __future__ import annotations
@@ -58,6 +72,8 @@ FRAMES = [
     *[f"mount-{i}" for i in range(4)],
     *[f"paint-{i}" for i in range(4)],
     "wedged",
+    "loading",
+    "unreachable",
 ]
 
 #: How many times the ``wedged`` frame activates the head notice before the
@@ -203,10 +219,92 @@ async def capture(path: Path, frame: str, size: tuple[int, int]) -> None:
                     await pilot.pause()
             # At the top, where the notice is, so the frame shows the row the
             # reader was clicking rather than the tail they never left.
+            #
+            # ASK REPEATEDLY, AND ASSERT. One `scroll_home` is enough on the
+            # broken branch (nothing loads, so nothing moves) and NOT enough
+            # on the fixed one: reaching the head reopens the gate, every
+            # recovered page mounts above the reader, and the anchor restore
+            # holds their rows — which puts the offset back where it was. The
+            # single-shot version therefore captured the "after" frame with
+            # the notice 46 rows above the viewport, so the evidence for a
+            # fix to a ROW did not contain that row and a reader could not
+            # tell repair from removal (design review round 1, D1).
             view.note_user_scroll()
-            view.scroll_home(animate=False)
-            for _ in range(12):
+            for _ in range(60):
+                view.scroll_home(animate=False)
                 await pilot.pause()
+                head = app._resume_head_notice
+                if view.scroll_y <= 0.5 and head is not None and head.region.y >= 0:
+                    break
+            for _ in range(4):
+                await pilot.pause()
+            head = app._resume_head_notice
+            # The script must never again silently produce a frame without its
+            # subject: a capture that cannot show the row is a failed capture,
+            # not a frame to be published with a caption explaining it away.
+            if head is None or head.region.y < 0:
+                where = None if head is None else head.region.y
+                raise SystemExit(
+                    f"the head notice is not in the viewport (y={where}); "
+                    f"the frame would not show its subject"
+                )
+        elif frame in ("loading", "unreachable"):
+            # Both states are decided by `_reconcile_head_notice` from the
+            # CURRENT lease and geometry, so each is reached by establishing
+            # that state and letting the production funnel restate the row —
+            # never by writing the copy onto the widget, which would prove
+            # only that the string exists.
+            if frame == "loading":
+                # An UNMOUNTED lease is the "a fetch is in flight" state. Held
+                # for the capture instead of racing a real fetch: on a
+                # synthetic session the round trip settles within one paint,
+                # so every attempt to export mid-load exported the settled row.
+                lease = app._acquire_paging_lease(app._interaction)
+                if lease is None:
+                    raise SystemExit("the paging gate was already held; cannot stage `loading`")
+            else:
+                # `RESUME_UNREACHABLE_NOTICE` needs more-exists AND an
+                # unscrollable frame AND no fill in flight. The fill is what
+                # normally prevents it, so stand it down and shrink the
+                # content back to fit — the same end state a very tall
+                # viewport reaches with the fill capped.
+                # Strip everything below the notice so the content no longer
+                # exceeds the viewport, which is the `not scrollable` half of
+                # the state. The deferred head is untouched, so "more exists"
+                # stays true — exactly the combination a very tall viewport
+                # produces when the fill cannot outgrow the screen.
+                for block in list(view.blocks())[1:]:
+                    view.remove_block(block)
+                # Let the extent shrink before anything reads it. The offset
+                # follows on its own once the canvas is one viewport tall;
+                # scrolling here instead would move against the OLD extent.
+                for _ in range(20):
+                    await pilot.pause()
+                # Cleared last, so a fill in flight cannot re-arm it while the
+                # rows are being taken out from under it.
+                app._resume_fill_active = False
+            if frame == "loading":
+                # The `loading` frame keeps its full transcript, so the notice
+                # has to be scrolled back into view. `unreachable` deliberately
+                # skips this: its canvas is already one viewport tall (nothing
+                # to scroll), and `note_user_scroll` would re-arm the demand
+                # this state is defined by the absence of.
+                view.note_user_scroll()
+                view.scroll_home(animate=False)
+                for _ in range(8):
+                    await pilot.pause()
+            app._reconcile_head_notice()
+            for _ in range(8):
+                await pilot.pause()
+            head = app._resume_head_notice
+            # Assert the state actually painted: a frame captioned with a copy
+            # it does not contain is worse than no frame (D1's lesson).
+            wanted = "loading older messages" if frame == "loading" else "click to load"
+            if head is None or wanted not in head.text() or head.region.y < 0:
+                raise SystemExit(
+                    f"expected {wanted!r} on screen, got "
+                    f"{None if head is None else (head.text(), head.region.y)}"
+                )
         elif frame.startswith("paint-"):
             # Same parking as `mount-*`, but the SVG is exported from inside
             # the compositor refresh — the moment the terminal is written —

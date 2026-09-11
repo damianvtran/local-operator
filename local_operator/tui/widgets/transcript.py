@@ -3607,6 +3607,18 @@ class TranscriptView(ScrollableContainer):
             # are already mounted and `_reanchor_insert` above has already
             # taken the offset correction that matters for a frame anyone can
             # still see.
+            #
+            # INLINE MAKES THE RESUME FILL CHAIN SYNCHRONOUS, and what keeps
+            # that safe is `RESUME_FILL_MAX_PAGES`. `release_gate` → the
+            # fill's `on_settled` → the next `_mount_older_resume_page` then
+            # runs in one stack instead of one page per refresh (measured with
+            # every settle refused: 16 mounts, max depth 154, no
+            # `RecursionError`). That is the unbounded mid-interaction render
+            # cost the one-page-per-gesture bound exists to prevent — but it
+            # is only reachable once the pump is dead, i.e. when no frame will
+            # be painted and nobody is waiting on one, and the page cap bounds
+            # it regardless (review round 1, MINOR-3). Anyone raising that cap
+            # should re-measure this path.
             if on_settled is not None:
                 on_settled()
 
