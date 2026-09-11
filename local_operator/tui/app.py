@@ -21875,6 +21875,16 @@ class OperatorApp(App[None]):
                 # contract forbids. The routed twins already resolve it this way.
                 logger.debug("title refresh could not read the history", exc_info=True)
                 result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
+            # A cancel that the naming call swallowed on our behalf. The
+            # `except` above cannot see it — `_ask_for_title` catches
+            # `CancelledError` for the detached workers and RETURNS a sentinel,
+            # so this worker resumes normally with a cancelled outcome rather
+            # than unwinding. Painting here would tell a user who just
+            # cancelled that the model judged the name still fits; no judgement
+            # happened. Silence is the honest answer, and it is what the
+            # `except` branch would have given.
+            if result.outcome == naming.TITLE_CANCELLED:
+                return
             # Superseded (a reload) or belonging to a session no longer on
             # screen: touch neither the title nor the transcript.
             if generation != source.naming.generation or source.retired:

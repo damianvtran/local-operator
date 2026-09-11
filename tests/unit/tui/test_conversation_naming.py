@@ -1767,6 +1767,52 @@ async def test_a_routed_refresh_also_frees_the_latch_it_superseded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_slow_provider_gets_a_receipt_not_a_raised_cancellation() -> None:
+    """The budget's own deadline must answer with a receipt, never an exception.
+
+    `asyncio.wait_for` enforces a deadline by CANCELLING the body, and
+    `_ask_for_title` swallows `CancelledError` and returns a sentinel — which
+    defeats the deadline outright: no `TimeoutError`, and the slow-provider case
+    walked CALL_CANCELLED -> TITLE_CANCELLED -> `raise asyncio.CancelledError`.
+    That is a `BaseException`, so the runtime's `except Exception` never caught
+    it: no ack, no error frame, the reader loop unwound into `_drop_client` and
+    the phone that typed the command waited out ACK_TIMEOUT_S with its
+    connection dropped. `asyncio.timeout`'s `expired()` is what tells our fired
+    deadline apart from a caller-cancel THROUGH that swallow.
+    """
+
+    class _SlowProvider:
+        conversation_name = "Fix the login flow"
+
+        def history(self) -> list[Any]:
+            return [SimpleNamespace(role="user", text="now rewrite the billing importer")]
+
+        async def complete_once(self, system: str, prompt: str) -> str:
+            await asyncio.sleep(60)  # a provider that never answers
+            return "<title>Never reached</title>"
+
+    started = time.monotonic()
+    # Bounded by the test too: a regression that re-raises would surface as the
+    # assertion below, but one that HANGS must fail in seconds, not wedge the
+    # suite.
+    result = await asyncio.wait_for(
+        naming.routed_refresh("Fix the login flow", _SlowProvider()),
+        naming.ROUTED_TITLE_TIMEOUT_S + 4,
+    )
+    elapsed = time.monotonic() - started
+
+    # The receipt itself, not merely the absence of a raise: the user must be
+    # told no judgement happened rather than that the name still fits.
+    assert result.outcome == naming.TITLE_UNAVAILABLE
+    assert naming.refresh_receipt(result, "Fix the login flow") == (
+        "could not reach the model — the title is unchanged"
+    )
+    assert (
+        elapsed < naming.ROUTED_TITLE_TIMEOUT_S + 2
+    ), f"the op ran {elapsed:.1f}s: the deadline did not fire"
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_routed_refresh_is_never_answered_with_a_verdict() -> None:
     """A cancel is the caller going away, so it must not come back as a title
     outcome — and it must behave the same whichever await it lands in.
@@ -1794,6 +1840,58 @@ async def test_a_cancelled_routed_refresh_is_never_answered_with_a_verdict() -> 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_naming_worker_paints_nothing() -> None:
+    """A user who cancelled must not be told the model judged the name still fits.
+
+    `_title_refresh_worker` calls `refresh_title` DIRECTLY, and the swallow in
+    `_ask_for_title` means its own `except asyncio.CancelledError` never fires:
+    it resumes with `outcome='cancelled'` and `changed` False, one fallthrough
+    from painting "title unchanged: <name>" for a judgement that never happened.
+    Asserts the outcome the worker branches on, which is the thing that decides
+    whether anything is painted.
+    """
+
+    app, session = await _boot()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        session.set_conversation_name("Fix the login flow")
+
+        async def _never_answers(system: str, prompt: str) -> str:
+            await asyncio.sleep(30)  # cancelled while the model is thinking
+            return "<title>Never reached</title>"
+
+        session.complete_once = _never_answers  # type: ignore[assignment]
+        source = app._interaction
+        painted: list[tuple[str, Any]] = []
+        app._notice_for = lambda src, text, kind="info": painted.append(  # type: ignore[assignment]
+            (text, kind)
+        )
+
+        # The real worker, driven the way `_title_refresh_slash_result` drives
+        # it, then cancelled mid-call exactly as `workers.cancel_all()` does at
+        # shutdown.
+        # Duck-typed like every other turn list in these suites: the naming
+        # sampler reads only `.role` and `.text`, and the real `AgentMessage`
+        # union is deliberately not what this exercises.
+        turns: list[Any] = [SimpleNamespace(role="user", text="now rewrite the billing importer")]
+        task = asyncio.ensure_future(
+            app._title_refresh_worker(
+                session,
+                "Fix the login flow",
+                source.naming.generation,
+                turns,
+                source,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert painted == [], f"a cancelled refresh painted a verdict: {painted}"
 
 
 def test_a_receipt_never_quotes_a_title_that_does_not_exist() -> None:
