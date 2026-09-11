@@ -5711,6 +5711,43 @@ async def test_loop_no_goal_hint_surfaces_inline_form() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_stop_says_where_the_control_is_when_a_turn_is_in_flight() -> None:
+    """`/loop stop` must ask a DECLARED predicate, not a dead probe.
+
+    ``_session_is_busy`` probed ``is_busy``/``busy`` — names that exist on
+    NEITHER session class — so it answered a hard-coded ``False`` and this
+    branch, the whole reason it exists, was unreachable: a second viewer
+    watching a turn arrive from another terminal was told "no loop is running",
+    a flat contradiction of its own screen. ``is_streaming`` is the declared
+    predicate for "a turn is in flight".
+    """
+    session = GoalSession()
+    session.streaming = True
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        # Collapse wrap so an 80-col break inside the notice does not matter.
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running in THIS terminal" in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_loop_stop_says_none_when_no_turn_is_running() -> None:
+    """The other side of the same predicate, so the fix is not a constant True."""
+    session = GoalSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await _type_command(pilot, app, "loop stop")
+        text = " ".join(_transcript_text(app).split())
+    assert "no loop is running" in text
+    assert "THIS terminal" not in text
+    assert session.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_loop_stops_on_turn_error() -> None:
     session = GoalSession()
     session.set_goal("g")

@@ -4747,10 +4747,19 @@ class OperatorApp(App[None]):
             raise RuntimeError("a sidebar viewer never takes over a session")
 
         if not speculative:
+            # The fallback working directory a saved preview uses when its own
+            # journal records none: this session's REAL cwd, read through the
+            # declared ``frontend_state`` accessor. It used to be
+            # ``getattr(self._session, "cwd", "")`` — a name that exists on
+            # neither session class, so the fallback was always the empty
+            # string and a preview with no recorded cwd opened at the process
+            # default instead of the session's directory.
+            current = self._session
+            fallback_cwd = current.frontend_state.cwd if _is_viewer(current) else ""
             remote = await AttachedSession.saved_preview(
                 session_id,
                 config_dir=directory,
-                cwd=str(getattr(self._session, "cwd", "")),
+                cwd=fallback_cwd,
                 takeover_factory=no_takeover,
             )
         else:
@@ -11372,19 +11381,20 @@ class OperatorApp(App[None]):
         Deliberately asks the SESSION rather than this viewer's own state: the
         turn may have been submitted by another terminal, or by the phone, and
         the answer is still "yes, work is happening".
+
+        ``is_streaming`` is the declared predicate for exactly that question:
+        an owner holds it for the whole of ``_run_turn`` — tool execution
+        included — and clears it when the turn ends, and a viewer mirrors the
+        runtime's own ``streaming`` flag. It replaces a probe for
+        ``is_busy``/``busy``, names that exist on NEITHER class, so this always
+        returned ``False`` and the ``/loop stop`` notice that calls it was
+        unreachable code. ``runtime_idle`` would also fold in a running job and
+        a parked gate, but it is viewer-only (the app types its session as
+        ``SessionProtocol``) and it reads a COLD viewer as "not idle", which
+        would report an empty session as busy.
         """
         session = self._session
-        if session is None:
-            return False
-        for probe in ("is_busy", "busy"):
-            value = getattr(session, probe, None)
-            try:
-                resolved = value() if callable(value) else value
-            except Exception:  # noqa: BLE001 — a probe must never break a command
-                continue
-            if isinstance(resolved, bool):
-                return resolved
-        return False
+        return session is not None and session.is_streaming
 
     def _overlay_live_state(self, rows: list[Any]) -> list[Any]:
         from local_operator.paths import config_dir

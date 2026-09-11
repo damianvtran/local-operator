@@ -31,25 +31,32 @@ members escaped typing in the first place.
 **What the derivation reaches, stated precisely — it is not "every access".**
 It sees ``<expr>.member`` and a two-or-more-argument call to any name in
 ``_PROBE_CALLS`` (``getattr``, ``hasattr``, and ``info/collect.py``'s ``_attr``
-wrapper) with a literal member name, where ``<expr>`` is one of the bindings
-registered for that file in ``_SCANNED``. It is blind to:
+wrapper) whose member name is a literal string, a variable bound by a
+``for probe in ("a", "b")`` loop, or a module-level string constant — where
+``<expr>`` is one of the bindings registered for that file in ``_SCANNED`` or a
+single-level local ALIAS of one (``session = source.session``, followed inside
+the scope that binds it and no further). It is blind to:
 
-* local aliases — ``s = self._session; s.member`` (see ``_SESSION_EXPRS``);
+* an alias chased through a second hop (``a = self._session; b = a``);
 * any other attribute or helper return holding a session
   (``self._current_session().member``);
-* computed probe names — ``getattr(session, probe, None)`` where ``probe`` is a
-  variable. ``_session_is_busy`` (``app.py:9313``) is a live example: it loops
+* a probe name computed at runtime by neither route — a dict lookup, a list
+  built incrementally, an f-string. ``_session_is_busy`` was the canonical
+  instance of the SHAPE this now covers: it looped
   ``for probe in ("is_busy", "busy")``, neither name exists on either class, so
-  it always returns ``False`` and its caller takes a dead branch. The guard
-  runs over that exact line and structurally cannot see it. That is the
-  syntactic approach's ceiling, recorded here so nobody reads a green run as
-  "no duck-probe is broken";
+  it returned a hard-coded ``False`` and its ``/loop stop`` caller took a dead
+  branch. That loop is now recognized — and was removed rather than declared
+  around — with ``test_the_guard_sees_a_loop_computed_probe_name`` proving the
+  loop shape still fails here if it comes back;
 * sessions arriving as differently-named parameters;
 * files outside ``_SCANNED``.
 
 A green run means "no *reachable-by-this-derivation* probe is undeclared", not
 "the front end is fully typed". Widening any of the above is a matter of adding
-an expression or a path — the machinery does not change.
+an expression or a path — the machinery does not change. What is NOT a way to
+widen it: an exclusion set. There is none for undeclared members any more (see
+the note where one used to live), so a new member reached by any of the routes
+above fails with its name and ``file:line``.
 
 **Do not narrow pyright's path to ``local_operator/``.** Half of the
 conformance claim is not in ``session/`` at all: it is carried by
@@ -64,6 +71,7 @@ alone, therefore disarms the static half silently and leaves the suite green.
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import local_operator
@@ -95,12 +103,13 @@ _ROOT = Path(local_operator.__file__).resolve().parent
 #: ``test_every_registered_session_binding_still_matches_the_source`` (QA round
 #: 2, Q5), which is what makes that claim checkable instead of aspirational.
 #:
-#: These are BINDINGS, matched literally. ``s = self._session; s.member`` is
-#: not covered: a local alias is a different expression, and the guard does no
-#: dataflow. Following aliases means resolving assignments per scope, which is
-#: where the false positives that nearly killed this probe come from — so the
-#: boundary is deliberate, and this list is the thing to extend when a new
-#: session binding appears.
+#: These are the ROOT bindings, matched literally. A single-level local alias
+#: of one of them (``session = source.session``, then ``session.member``) IS
+#: followed — inside the scope that binds it and no further, which is the part
+#: that keeps it safe: resolving assignments ACROSS scopes is where the false
+#: positives that nearly killed this probe come from. See ``_scope_aliases``
+#: and ``_scope_nodes`` for the boundary. This list stays the thing to extend
+#: when a new root binding appears; a new alias needs no edit here.
 _SESSION_EXPRS = frozenset(
     {
         "self._session",
@@ -286,74 +295,35 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
     }
 )
 
-#: Undeclared members that live on BOTH classes.
+#: There is deliberately NO "undeclared member" exclusion set any more.
 #:
-#: Not viewer-surface, so out of this PR's scope, but real: the TUI duck-probes
-#: them exactly like the viewer members and they are equally invisible to
-#: pyright. Listed rather than silently skipped so the debt is visible and the
-#: guard shrinks as they are declared. Declaring them belongs with the call-site
-#: migration (Stage 3), not with this additive change.
+#: Two sets used to sit here. ``_UNDECLARED_ON_BOTH_CLASSES`` held 18 members
+#: that exist on BOTH classes but on no protocol (``subagent_comms``, ``jobs``,
+#: ``wake_scheduler``, ``mcp_manager``, ``pending_gate``, ``epoch``, the
+#: attention pair, …), each reached by a duck-probe the guard could see and
+#: pyright could not. ``_KNOWN_MISSING_ON_BOTH_CLASSES`` held one name, ``cwd``,
+#: probed by ``app.py`` but present on NEITHER class, so the saved preview's
+#: working directory was ALWAYS ``""``. Both are closed: the 18 are declared on
+#: ``ViewerSessionProtocol`` — the protocol every host that reads them holds,
+#: and the one whose conformance the doubles already satisfy — and the ``cwd``
+#: read goes through the declared ``frontend_state`` accessor. The contract is
+#: TOTAL, so there is nothing left to exclude.
 #:
-#: Every name here is asserted to be present on both classes by
-#: ``test_the_exclusion_sets_state_true_facts`` — the set is a claim about the
-#: code, not a mute list, so an entry that stops being true fails rather than
-#: silently widening the guard's blind spot.
+#: Reinstating a name here would re-open the exact class of defect this file
+#: exists to close: an undeclared member whose ``getattr`` default reports a
+#: plausible wrong answer while pyright stays silent. A new undeclared member
+#: is therefore a FAILURE naming the member and its ``file:line`` — never a
+#: mute list. If a member is genuinely engine-internal, the fix is to move the
+#: host read onto the concrete type or an already-declared accessor, exactly as
+#: ``cwd`` was moved, and to say why in the comment beside that read.
 #:
-#: ``subagent_comms`` is the MOTIVATING member of this whole file and it sits
-#: here rather than on a protocol, which needs saying plainly. It is read by
-#: ``/info`` and lives on both classes, so declaring it is Stage 3's call-site
-#: work like every other name in this set. What matters for round 2 is that it
-#: is now DERIVED at all: until ``info/collect.py`` joined ``_SCANNED`` the
-#: reviewer could re-ship the original outage — rename it on the facade — with
-#: a green guard and zero pyright errors (review round 2, MAJOR-1). Being an
-#: entry in a checked set means a rename to a name that exists on NEITHER class
-#: now fails here, which is the shape the original bug had.
-_UNDECLARED_ON_BOTH_CLASSES = frozenset(
-    {
-        "acknowledge_attention",
-        "active_agent",
-        "active_team_name",
-        "agent_registry",
-        "context_breakdown",
-        "epoch",
-        "fork_snapshot",
-        "jobs",
-        "mcp_manager",
-        "mcp_startup",
-        "pending_gate",
-        "record_shell",
-        "refresh_attention",
-        "restored_usage",
-        "subagent_comms",
-        "subscribe_frontend",
-        "team_registry",
-        "wake_scheduler",
-    }
-)
-
-#: Probed by a host but present on NEITHER class — the probe is already dead.
-#:
-#: Kept apart from ``_UNDECLARED_ON_BOTH_CLASSES`` because that set's whole
-#: point is "this member exists, it is merely undeclared". Parking a name here
-#: records the opposite and worse fact: the call site reads a member that does
-#: not exist, so its ``getattr`` default is the only value it will ever see.
-#: Filing these as ordinary debt would let the guard built to surface
-#: silent-wrong-answers permanently silence one.
-#:
-#: * ``cwd`` — ``app.py`` passes ``getattr(self._session, "cwd", "")`` to
-#:   ``saved_preview(...)``, so the saved preview's working directory is
-#:   ALWAYS ``""``. Pre-existing (present at ``a8f98be3b``), behavioural, and
-#:   out of scope for this additive change: deferred to Stage 3, where that
-#:   call site is rewritten against a declared member. Cited by call SHAPE
-#:   rather than by line number on purpose — a line number in a moving file is
-#:   the rot this file eliminated elsewhere (review round 2, MINOR-3), and the
-#:   name itself is machine-checked below, so the prose carries no claim the
-#:   suite cannot verify.
-#:
-#: ``test_the_exclusion_sets_state_true_facts`` asserts these are absent from
-#: both classes, so a name here that someone later implements fails the suite
-#: and gets promoted rather than lingering as a false claim.
-_KNOWN_MISSING_ON_BOTH_CLASSES = frozenset({"cwd"})
+#: ``subagent_comms`` is worth naming because it was this file's MOTIVATING
+#: member. It is read by ``/info``, it lives on both classes, and until
+#: ``info/collect.py`` joined ``_SCANNED`` the reviewer could re-ship the
+#: original fabricated zero-subagent outage with a green guard and zero pyright
+#: errors (review round 2, MAJOR-1). Declaring it is what turns a rename to a
+#: name that exists on neither class into a failure HERE rather than in a
+#: user's terminal.
 
 #: Names that MUST NOT come back — neither read by a host nor defined on a class.
 #:
@@ -379,8 +349,8 @@ _KNOWN_MISSING_ON_BOTH_CLASSES = frozenset({"cwd"})
 #: cannot be re-added to ``AttachedSession`` and duck-probed), absent from BOTH
 #: protocols (so it cannot be laundered by declaring it), and read by NO scanned
 #: host (so a probe against a name that exists nowhere cannot sit there
-#: returning its default forever, which is the ``cwd`` defect in
-#: ``_KNOWN_MISSING_ON_BOTH_CLASSES``).
+#: returning its default forever — the ``cwd`` defect, closed by rewriting that
+#: read against a declared accessor.
 _RETIRED = frozenset({"is_remote"})
 
 
@@ -391,30 +361,188 @@ def _unparse(node: ast.AST) -> str:
         return ""
 
 
+def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node belonging to ``scope`` itself, nested scopes EXCLUDED.
+
+    A nested ``def``/``class``/``lambda`` body is a scope of its own (see
+    ``_scopes``), and the walk stops at that boundary. The boundary is what
+    makes alias following safe: a helper's ``own = self._session`` must not
+    turn every ``own.<attr>`` in the method around it into a session read, and
+    the TUI reuses names like ``previous``/``current``/``remote`` for rows,
+    widgets and strings. Cross-scope leakage of exactly that kind made an
+    earlier version of this probe report ``partition``, ``focus`` and ``label``
+    as session members and nearly got it deleted.
+    """
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _scopes(tree: ast.Module) -> Iterator[ast.AST]:
+    """The module scope, and every class and function scope inside it."""
+    yield tree
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node
+
+
+def _string_names(node: ast.AST | None) -> frozenset[str]:
+    """The member names a literal string (or literal sequence of them) spells.
+
+    ``frozenset({"a", "b"})`` counts: wrapping a literal collection in its
+    constructor is how a module probe set is usually written, and reading
+    through the wrapper costs nothing while missing it would leave the shape
+    half-covered — the exact "it looks watched" gap this file exists to avoid.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return frozenset({node.value})
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return frozenset(
+            elt.value
+            for elt in node.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"frozenset", "tuple", "set", "list"}
+        and len(node.args) == 1
+    ):
+        return _string_names(node.args[0])
+    return frozenset()
+
+
+def _module_probe_constants(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Module-level names that hold probe member names.
+
+    ``getattr(session, _PROBES, None)`` is the second computed-probe shape: the
+    member name arrives as a constant, not a literal, so a literal-only
+    derivation reads nothing from the line at all. Only MODULE scope is read,
+    so a same-named local elsewhere cannot smuggle a probe past this.
+    """
+    constants: dict[str, frozenset[str]] = {}
+    for node in tree.body:
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        names = _string_names(value)
+        for target in targets:
+            if isinstance(target, ast.Name) and names:
+                constants[target.id] = names
+    return constants
+
+
+def _loop_probe_names(
+    scope: ast.AST, constants: dict[str, frozenset[str]]
+) -> dict[str, frozenset[str]]:
+    """Names a ``for probe in ("is_busy", "busy")`` loop binds to probe names.
+
+    This is the shape ``_session_is_busy`` shipped: the member name is a loop
+    variable, so the probe call's second argument is a ``Name`` and the old
+    derivation recorded nothing — two names that exist on neither class stayed
+    invisible behind a green guard while the function returned a hard-coded
+    ``False``.
+    """
+    bound: dict[str, frozenset[str]] = {}
+    for node in _scope_nodes(scope):
+        if not (isinstance(node, ast.For) and isinstance(node.target, ast.Name)):
+            continue
+        names = _string_names(node.iter)
+        if not names and isinstance(node.iter, ast.Name):
+            names = constants.get(node.iter.id, frozenset())
+        if names:
+            bound[node.target.id] = names
+    return bound
+
+
+def _scope_aliases(scope: ast.AST, exprs: frozenset[str]) -> frozenset[str]:
+    """Names this scope binds to a watched session expression.
+
+    ONE level, by construction: only an assignment whose VALUE is already a
+    watched expression qualifies, so an alias of an alias is not chased and an
+    expression that merely shares a spelling never becomes a session.
+    """
+    aliases: set[str] = set()
+    for node in _scope_nodes(scope):
+        if isinstance(node, ast.Assign) and _unparse(node.value) in exprs:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    aliases.add(target.id)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and node.value is not None
+            and isinstance(node.target, ast.Name)
+            and _unparse(node.value) in exprs
+        ):
+            aliases.add(node.target.id)
+    return frozenset(aliases)
+
+
 def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, list[int]]:
     """Session members one file reads, by name, with line numbers.
 
     ``exprs`` is per-file because the binding that holds a session differs by
     host: the TUI has ``self._session``, the desktop bridge has ``self.remote``.
+
+    Three resolutions beyond the registered binding itself, each of which used
+    to hide a member completely — the ceiling the class docstring used to
+    record as permanent:
+
+    * a local ALIAS of a watched expression (``session = source.session``),
+      followed for exactly one level and only inside the scope that binds it;
+    * a probe whose member name is a LOOP VARIABLE (``for probe in ("is_busy",
+      "busy")``), the shape that shipped ``_session_is_busy``;
+    * a probe whose member name is a MODULE CONSTANT (``getattr(session,
+      _PROBES, None)``).
+
+    Two limits are deliberate and stay. An alias is not chased through a
+    second hop, and a name computed at runtime that is neither a bound loop
+    variable nor a module-level string constant — a dict lookup, an f-string —
+    is still invisible. The probe strings reached by neither are also the ones
+    no rename can silently break, so the residual gap is the one that is
+    defensible; widening it is a change to THIS function, never to the
+    protocols it checks.
     """
     tree = ast.parse(source)
+    constants = _module_probe_constants(tree)
     touched: dict[str, list[int]] = {}
-    for node in ast.walk(tree):
-        # session.member / self._session.member
-        if isinstance(node, ast.Attribute) and _unparse(node.value) in exprs:
-            touched.setdefault(node.attr, []).append(node.lineno)
-        # getattr(session, "member", ...) / hasattr(session, "member") /
-        # _attr(session, "member", default) — see ``_PROBE_CALLS``.
-        if isinstance(node, ast.Call):
-            if (
-                isinstance(node.func, ast.Name)
+
+    def record(name: str, line: int) -> None:
+        touched.setdefault(name, []).append(line)
+
+    for scope in _scopes(tree):
+        watch = exprs | _scope_aliases(scope, exprs)
+        computed = dict(constants)
+        computed.update(_loop_probe_names(scope, constants))
+        for node in _scope_nodes(scope):
+            # session.member / self._session.member, aliases included.
+            if isinstance(node, ast.Attribute) and _unparse(node.value) in watch:
+                record(node.attr, node.lineno)
+            # getattr(session, "member", ...) / hasattr(session, "member") /
+            # _attr(session, "member", default) — see ``_PROBE_CALLS``.
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
                 and node.func.id in _PROBE_CALLS
                 and len(node.args) >= 2
-                and _unparse(node.args[0]) in exprs
-                and isinstance(node.args[1], ast.Constant)
-                and isinstance(node.args[1].value, str)
+                and _unparse(node.args[0]) in watch
             ):
-                touched.setdefault(node.args[1].value, []).append(node.lineno)
+                literal = _string_names(node.args[1])
+                if literal:
+                    for name in literal:
+                        record(name, node.lineno)
+                elif isinstance(node.args[1], ast.Name):
+                    for name in sorted(computed.get(node.args[1].id, frozenset())):
+                        record(name, node.lineno)
     return touched
 
 
@@ -511,12 +639,7 @@ def test_every_session_member_a_host_touches_is_declared() -> None:
     # this test would pass. Reads of a retired name are failed by
     # ``test_a_retired_session_flag_cannot_be_reintroduced`` instead, with a
     # message that says why the name is gone rather than "declare it".
-    known = (
-        declared
-        | _OWNER_ONLY_CAPABILITY_PROBES
-        | _UNDECLARED_ON_BOTH_CLASSES
-        | _KNOWN_MISSING_ON_BOTH_CLASSES
-    )
+    known = declared | _OWNER_ONLY_CAPABILITY_PROBES
 
     offenders = {
         name: sites
@@ -530,7 +653,12 @@ def test_every_session_member_a_host_touches_is_declared() -> None:
         + ". A duck-typed member is invisible to pyright, so a rename or a typo "
         "in the probe string degrades it to a silent None instead of an error. "
         "Declare it on SessionProtocol (both kinds of session have it) or on "
-        "ViewerSessionProtocol (only an attached facade has it)."
+        "ViewerSessionProtocol (only an attached facade has it). A name that "
+        "reaches here from a local ALIAS (``session = source.session`` then "
+        "``session.member``) or from a COMPUTED probe (``for probe in (...): "
+        "getattr(session, probe, None)``, or a module-constant name) is a real "
+        "read like any other: declare the member, or move the read onto the "
+        "concrete type and say why beside it."
     )
 
 
@@ -543,24 +671,45 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
     which is this guard's job, and pyright catches the signatures.
 
     What it does NOT catch, contrary to what this docstring claimed for two
-    rounds, is an ``__init__``-assigned attribute disappearing. The four below
+    rounds, is an ``__init__``-assigned attribute disappearing. The eight below
     are hand-assigned to satisfy ``__new__``, so the ``isinstance`` passes
     whether or not ``__init__`` still sets them — the reviewer deleted
     ``runtime_version`` from the class outright and got 7 tests passing against 2
-    pyright errors (review round 2, MINOR-2). For those four the division of
+    pyright errors (review round 2, MINOR-2). For those eight the division of
     labour runs the other way: **pyright is the guard and this test is
     structurally blind.** Stated here because a test believed to cover a case it
     cannot is worse than an uncovered case.
+
+    Four of the eight arrived with the engine-state block: declaring ``jobs``,
+    ``wake_scheduler``, ``mcp_manager`` and ``mcp_startup`` on
+    ``SessionProtocol`` makes them contract members, and the contract is checked
+    HERE, on an instance, not only by pyright — a Protocol member that an
+    instance lacks fails ``isinstance`` even when the annotation is perfect.
+    They are built with the same no-argument snapshot constructors ``__init__``
+    uses, so the assignment states what production holds rather than a stand-in.
     """
+    from local_operator.session.frontend_state import (
+        SnapshotJobs,
+        SnapshotMcpManager,
+        SnapshotWakeScheduler,
+    )
+
     session = AttachedSession.__new__(AttachedSession)
     # The instance attributes are assigned in ``__init__``, which dials a
     # socket. Set them directly: presence is what the protocol requires, and
     # constructing a real facade would make this a network test. See the
-    # docstring: this assignment is exactly why the four are pyright's to guard.
+    # docstring: this assignment is exactly why the eight are pyright's to guard.
     session.runtime_version = ""
     session.runtime_source_ref = ""
     session.degraded_reason = ""
     session.saved_preview_partial = False
+    # The engine-state snapshots, exactly as `AttachedSession.__init__` builds
+    # them (`attached.py`): a follower's read-only view of the runtime's jobs,
+    # wakes and MCP servers, and the startup outcome `None` until one is read.
+    session.jobs = SnapshotJobs()
+    session.wake_scheduler = SnapshotWakeScheduler()
+    session.mcp_manager = SnapshotMcpManager()
+    session.mcp_startup = None
 
     assert isinstance(session, ViewerSessionProtocol)
     assert isinstance(session, SessionProtocol)
@@ -844,10 +993,10 @@ def test_a_retired_session_flag_cannot_be_reintroduced() -> None:
       probes legitimate, which is the laundering route that test's ``known``
       union no longer offers.
     * **In a host.** A probe against a name that exists nowhere does not raise:
-      it returns the ``False`` default forever, silently, which is the exact
-      shape of the ``cwd`` defect recorded in
-      ``_KNOWN_MISSING_ON_BOTH_CLASSES``. A green suite is what that failure
-      looks like.
+      it returns the ``False`` default forever, silently — the shape of the
+      ``cwd`` defect this file now closes by rewriting that read against a
+      declared accessor, and of ``_session_is_busy``'s ``is_busy``/``busy``.
+      A green suite is what that failure looks like.
 
     This is deliberately an extension of the existing derivation rather than a
     parallel mechanism: it reuses ``_all_touched``/``_members``/``_declared``,
@@ -894,35 +1043,18 @@ def test_a_retired_session_flag_cannot_be_reintroduced() -> None:
 
 
 def test_the_exclusion_sets_state_true_facts() -> None:
-    """Each exclusion set asserts something about the classes; check it holds.
+    """Each remaining exclusion set asserts something about the classes.
 
     An exclusion set is a claim, and a false claim inside the guard is worse
     than no guard: it silences a member while telling the reader the silence is
     justified. ``cwd`` was listed as living on BOTH classes when it lives on
     neither, which converted an always-empty-value defect into permanently
-    silenced debt (review M2). Each set now has to be true.
+    silenced debt (review M2). The two sets that made those claims are gone —
+    their members are declared, and the ``cwd`` read is rewritten — so the only
+    set left to justify is the owner-only one, checked from BOTH sides below.
     """
     owner_members = _members(Session, "session.py", "Session")
     viewer_members = _members(AttachedSession, "attached.py", "AttachedSession")
-
-    missing = sorted(
-        n for n in _UNDECLARED_ON_BOTH_CLASSES if n not in owner_members or n not in viewer_members
-    )
-    assert not missing, (
-        f"_UNDECLARED_ON_BOTH_CLASSES claims these live on both classes: {missing}. "
-        "They do not. A name absent from both is a DEAD probe reading its own "
-        "default forever — move it to _KNOWN_MISSING_ON_BOTH_CLASSES, recording "
-        "the value it actually returns, or declare it."
-    )
-
-    resurrected = sorted(
-        n for n in _KNOWN_MISSING_ON_BOTH_CLASSES if n in owner_members or n in viewer_members
-    )
-    assert not resurrected, (
-        "_KNOWN_MISSING_ON_BOTH_CLASSES claims these exist on neither class: "
-        f"{resurrected}. They now exist, so the probe is live: declare them on a "
-        "protocol and drop them from this set."
-    )
 
     not_owner_only = sorted(n for n in _OWNER_ONLY_CAPABILITY_PROBES if n in viewer_members)
     assert not not_owner_only, (
@@ -942,9 +1074,10 @@ def test_the_exclusion_sets_state_true_facts() -> None:
     assert not not_on_owner, (
         "_OWNER_ONLY_CAPABILITY_PROBES justifies each name as an OWNER "
         f"capability, but these are absent from Session too: {not_on_owner}. A "
-        "name on neither class is a DEAD probe reading its own default forever "
-        "— move it to _KNOWN_MISSING_ON_BOTH_CLASSES, recording the value it "
-        "actually returns, rather than laundering it as an owner capability."
+        "name on neither class is a DEAD probe reading its own default forever. "
+        "Declare it if a class implements it, or rewrite the host read against "
+        "the concrete type or a declared accessor — the route ``cwd`` took — "
+        "rather than laundering it as an owner capability."
     )
 
 
@@ -1159,3 +1292,112 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
         "notice). Adding one is good news and needs this list updated too; "
         "either way, say which in the commit."
     )
+
+
+# --- the shapes that used to hide a member -----------------------------------
+#
+# Each test below plants ONE previously-invisible read and shows the REAL
+# predicate — the same one `test_every_session_member_a_host_touches_is_declared`
+# applies — reporting it as undeclared. They exist because the shapes were the
+# guard's stated ceiling, and a ceiling that is described in a docstring but
+# never exercised is how `_session_is_busy` shipped a hard-coded `False` behind
+# a green run for six releases.
+
+
+def _derived_undeclared(source: str, exprs: frozenset[str]) -> set[str]:
+    """Members ``source`` reads through ``exprs`` that no protocol declares.
+
+    Deliberately the guard's own predicate rather than a stand-in. A planted
+    violation judged by a separate rule could pass while the guard it is meant
+    to demonstrate stays blind, which is the failure mode these tests exist to
+    prevent in the first place.
+    """
+    touched = _session_members_touched(source, exprs)
+    known = _declared() | _OWNER_ONLY_CAPABILITY_PROBES
+    return {name for name in touched if not name.startswith("_") and name not in known}
+
+
+def test_the_guard_sees_an_undeclared_member_read_through_a_local_alias() -> None:
+    """A one-level local alias must not hide a member.
+
+    The derivation used to match only the registered expression itself, so
+    ``session = source.session`` followed by a read off ``session`` was
+    invisible. The live instance is the sidebar's gate identity, whose
+    ``session = source.session`` local reached ``pending_gate`` and ``epoch``
+    that no protocol declared.
+    """
+    source = (
+        "def view(source):\n" "    session = source.session\n" "    return session.no_such_member\n"
+    )
+    assert _derived_undeclared(source, frozenset({"source.session"})) == {"no_such_member"}
+
+
+def test_the_guard_credits_a_declared_member_reached_through_an_alias() -> None:
+    """The alias route must credit a DECLARED member too, or it is just noise."""
+    source = (
+        "def view(source):\n" "    session = source.session\n" "    return session.session_id\n"
+    )
+    assert _derived_undeclared(source, frozenset({"source.session"})) == set()
+
+
+def test_the_guard_sees_a_loop_computed_probe_name() -> None:
+    """The ``for probe in (...)`` shape ``_session_is_busy`` shipped must fail.
+
+    It looped over ``("is_busy", "busy")`` — neither name exists on either
+    class — so it returned ``False`` forever and its ``/loop stop`` caller took
+    a dead branch. The guard derived probe names from string literals only, ran
+    over that exact line, and saw nothing.
+    """
+    source = (
+        "def busy(session):\n"
+        "    for probe in ('is_busy', 'busy'):\n"
+        "        value = getattr(session, probe, None)\n"
+        "        if value:\n"
+        "            return True\n"
+        "    return value\n"
+    )
+    assert _derived_undeclared(source, frozenset({"session"})) == {"is_busy", "busy"}
+
+
+def test_the_guard_sees_a_module_constant_probe_name() -> None:
+    """A probe named by a module-level constant must fail as well.
+
+    ``getattr(session, _PROBES, None)`` hides every member behind a constant the
+    literal-only derivation never resolved. Both spellings a probe set is
+    written in are covered: a bare literal collection and the constructor form.
+    """
+    source = (
+        "_PROBES = ('also_not_real', 'nor_is_this')\n"
+        "_WRAPPED = frozenset({'nor_is_this_either'})\n"
+        "\n"
+        "def state(session):\n"
+        "    first = getattr(session, _PROBES, None)\n"
+        "    return getattr(session, _WRAPPED, first)\n"
+    )
+    assert _derived_undeclared(source, frozenset({"session"})) == {
+        "also_not_real",
+        "nor_is_this",
+        "nor_is_this_either",
+    }
+
+
+def test_an_alias_is_not_followed_out_of_its_own_scope() -> None:
+    """The alias route must stop at the scope boundary that binds it.
+
+    Without the boundary, an alias leaked between sibling scopes and names the
+    TUI reuses for rows, widgets and strings (``previous``, ``current``,
+    ``remote``) were read as sessions — the false-positive class that nearly had
+    this probe deleted. ``helper`` binds the same spelling to a plain row.
+    """
+    source = (
+        "def outer(source):\n"
+        "    previous = source.session\n"
+        "    return previous.session_id\n"
+        "\n"
+        "def helper(rows):\n"
+        "    previous = rows[-1]\n"
+        "    return previous.label\n"
+    )
+    exprs = frozenset({"source.session"})
+    assert _derived_undeclared(source, exprs) == set()
+    assert "label" not in _session_members_touched(source, exprs)
