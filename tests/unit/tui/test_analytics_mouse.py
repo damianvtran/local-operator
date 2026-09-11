@@ -96,6 +96,61 @@ def _click(screen: AnalyticsScreen, x: int, y: int, button: int = 1) -> events.C
     )
 
 
+def _press(screen: AnalyticsScreen, x: int, y: int) -> events.MouseDown:
+    """Mouse button DOWN at a screen coordinate, as the screen sees it."""
+    return events.MouseDown(
+        widget=screen._body,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
+def _drag_to(screen: AnalyticsScreen, x: int, y: int) -> events.MouseMove:
+    """A move with the button HELD — the event a drag is made of.
+
+    ``button=1`` rather than ``_move``'s 0, because the screen's selection
+    machinery only grows a selection while a button is down; a hover move is a
+    different event as far as this path is concerned.
+    """
+    return events.MouseMove(
+        widget=screen._body,
+        x=0,
+        y=0,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
+def _release(screen: AnalyticsScreen, x: int, y: int) -> events.MouseUp:
+    return events.MouseUp(
+        widget=screen._body,
+        x=x,
+        y=y,
+        delta_x=0,
+        delta_y=0,
+        button=1,
+        shift=False,
+        meta=False,
+        ctrl=False,
+        screen_x=x,
+        screen_y=y,
+    )
+
+
 def _hover_index(screen: AnalyticsScreen) -> int | None:
     """The hovered row as an INDEX, resolved against the painted layout.
 
@@ -877,5 +932,101 @@ def test_the_empty_scrollbar_gutter_takes_no_hover_and_no_click():
             await pilot.click(screen, offset=(gutter_x, row_y))
             await pilot.pause()
             assert screen._expanded == before, "the empty gutter took a click"
+
+    asyncio.run(run())
+
+
+# -- text selection -----------------------------------------------------------
+
+
+def test_a_drag_across_the_rows_selects_them_and_copies_them():
+    """The drag/ctrl+c affordance the widget swap could silently have taken.
+
+    A line-API widget returns no ``Text``/``Content`` from ``_render()``, so
+    ``Widget.get_selection`` extracts nothing; and because the compositor
+    recovers the pointer's CONTENT offset from an ``"offset"`` style meta on the
+    rendered segments, a strip returned without one makes the drag resolve a
+    start and no end — textually "select everything from here to the end". Both
+    halves are asserted here because both were broken at once: the selection
+    must PAINT (a drag that highlights nothing reads as "the drag did nothing")
+    and ``ctrl+c`` must hand over those rows' text, which is the only way a
+    session name or a figure leaves this read-only screen.
+
+    The report is the ``Static`` body's replacement, so this is a regression
+    pin rather than a new feature: on the tree before the swap a drag over these
+    same three rows paints them and copies their text.
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(120, 45)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg())
+            _show_table(screen)
+            await pilot.pause()
+            first = 1
+            x = _row_x(screen)
+            top = _row_y(screen, first)
+            bottom = _row_y(screen, first + 2)
+            expected = screen.render_lines_for_test()
+            rows = [expected[screen._layout.session_first_line + i].strip() for i in (1, 2, 3)]
+
+            def painted() -> dict[int, tuple[tuple[str, str | None], ...]]:
+                """Row -> (text, background) per segment: what the eye actually sees.
+
+                Iterated rather than indexed: ``Strip.__getitem__`` is a CROP, not
+                a sequence access, so ``strip[0]`` is not the first segment.
+                """
+                out: dict[int, tuple[tuple[str, str | None], ...]] = {}
+                for index, strip in enumerate(app.screen._compositor.render_strips()):
+                    out[index] = tuple(
+                        (segment.text, str(segment.style.bgcolor) if segment.style else None)
+                        for segment in strip
+                        if segment.text
+                    )
+                return out
+
+            before = painted()
+            expanded_before = set(screen._expanded)
+
+            screen._forward_event(_press(screen, x, top))
+            await pilot.pause()
+            for step in range(1, 4):
+                screen._forward_event(
+                    _drag_to(screen, x + 20 * step, top + (bottom - top) * step // 3)
+                )
+                await pilot.pause()
+            screen._forward_event(_release(screen, x + 60, bottom))
+            await pilot.pause()
+
+            selected = app.screen.get_selected_text()
+            assert selected, "the drag selected nothing — the body paints no selection"
+            # The drag starts mid-row, so the FIRST row is only partially covered;
+            # the row in the middle is fully inside it, so its whole composed text
+            # must be in the copy. Asserted on the text the user reads, taken from
+            # the same renderer the tests always read the report through.
+            rows = [expected[screen._layout.session_first_line + i] for i in (1, 2, 3)]
+            assert (
+                rows[1].strip() in selected
+            ), f"the dragged row is not in the copied text: {selected[:120]!r}"
+            assert rows[0].strip()[-24:] in selected, "the first dragged row's tail is missing"
+            assert selected.count("\n") >= 2, f"fewer than three rows copied: {selected!r}"
+
+            dragged = {screen._scroll.scrollable_content_region.y + first - 1 + i for i in range(4)}
+            changed = {index for index, bg in painted().items() if before[index] != bg}
+            assert (
+                changed & dragged
+            ), f"the drag painted no selection on the rows it covered: changed={sorted(changed)}"
+
+            # The gesture must not be read as a row action: no expansion.
+            assert screen._expanded == expanded_before, "a drag toggled a row"
+
+            # And the paint goes away with the selection, so the highlight is the
+            # selection and not a side effect of moving the pointer.
+            app.screen.clear_selection()
+            await pilot.pause()
+            after_clear = painted()
+            assert all(
+                after_clear[index] == before[index] for index in dragged
+            ), "clearing the selection did not repaint the rows it had highlighted"
 
     asyncio.run(run())
