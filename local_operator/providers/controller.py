@@ -1348,6 +1348,14 @@ class ProviderController:
                 )
                 if label:
                     accesses_by_id[str(label)] = access
+            # The console ticket is ONE session for the whole account, not one
+            # per login, so it is spent at most once per cycle however many
+            # dead grants are expected. Attempting it per identity would send
+            # a request each and land a report under each, and the panel
+            # flattens limits with no dedup by id -- the same window would
+            # render twice. Set on the ATTEMPT, not on success: a failure is a
+            # property of the ticket, not of the identity that reached it.
+            console_attempted = False
             for identity in expected:
                 prior = previous_by_id.get(identity)
                 if self._account_in_backoff(prior, now_ms, force=force_refresh):
@@ -1363,9 +1371,12 @@ class ProviderController:
                     # separately can still answer, and this is the only place
                     # it is reachable -- with `expected` non-empty the API-key
                     # route below is dead code for this provider.
+                    if console_attempted:
+                        continue
                     console = self._qwencloud_console_creds(provider)
                     if console is None:
                         continue
+                    console_attempted = True
                     try:
                         report = await self._fetch_one(
                             client, provider, access=None, extra_creds=console
