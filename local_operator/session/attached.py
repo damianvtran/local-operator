@@ -4369,6 +4369,15 @@ class AttachedSession:
         if not self._streaming and not force:
             return
         end = AgentEndEvent(aborted=aborted, generation=0, error=error)
+        if error:
+            # The cause rides WITH the sentence, so a consumer that only has the
+            # event (the phone's projection, a log line, a test) can classify it
+            # without re-parsing operator-facing prose. ``cause_from_reason``
+            # inverts ``format_cut_off_notice``'s own rendering, which is what
+            # keeps the two from drifting into a vocabulary nobody can read.
+            from local_operator.incidents import cause_from_reason
+
+            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error) or "owner-lost"})
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and

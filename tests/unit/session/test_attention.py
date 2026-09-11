@@ -909,7 +909,12 @@ def test_reason_and_cause_round_trip_and_an_old_database_migrates(
     store = AttentionStore(path)
     token = str(uuid.uuid4())
     store.publish(
-        "session/a", token, "anchor", "error", reason="the runtime went away", cause="runtime-killed"
+        "session/a",
+        token,
+        "anchor",
+        "error",
+        reason="the runtime went away",
+        cause="runtime-killed",
     )
     state = store.state("session/a")
     assert state["reason"] == "the runtime went away"

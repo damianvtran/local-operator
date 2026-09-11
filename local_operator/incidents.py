@@ -294,6 +294,26 @@ def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     return f"{sentence}{detail}"
 
 
+def cause_from_reason(reason: str) -> str:
+    """The cause token a rendered reason came from, or ``""`` when unknown.
+
+    The inverse of :func:`format_cut_off_notice` / :func:`render_cut_off_reason`,
+    for the one place that has the SENTENCE and needs the classification: a
+    locally synthesised turn end carries operator-facing prose (that is what
+    every surface prints), and a machine token must be recoverable from it so a
+    consumer can group or log the cause without parsing English twice.
+
+    Longest-prefix match rather than an exact one, because the notice append
+    parenthetical detail (``(0.54.11@b133eba → 0.54.12@402af7f)``). Returns
+    ``""`` for prose this vocabulary did not write, so a provider's own error
+    message is never misclassified as a harness cause.
+    """
+    for cause, sentence in CUT_OFF_CAUSES.items():
+        if sentence and sentence in reason:
+            return cause
+    return ""
+
+
 def format_cut_off_notice(cause: str, *, detail: str = "") -> str:
     """The LIVE transcript notice for a cut-off turn.
 

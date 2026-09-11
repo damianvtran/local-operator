@@ -13,17 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.harness.types import (
-    AgentEndEvent,
-    Message,
-    ModelSpec,
-    TextContent,
-    ToolCall,
-)
+from local_operator.harness.types import AgentEndEvent, Message, ModelSpec, TextContent
 from local_operator.incidents import format_cut_off_notice, render_cut_off_reason
 from local_operator.session.attention import AttentionStore, conversation_identity
 from local_operator.session.frontend_state import JobState
@@ -33,12 +29,24 @@ from local_operator.session.transcript import Transcript
 MODEL = ModelSpec(provider="test", model_id="mock")
 
 
-def _make_session(directory: Path, *, stream: object | None = None):
+async def _no_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+    """A stream double that never yields: these tests do not run a turn.
+
+    An async GENERATOR rather than a plain callable, because that is what
+    ``stream_fn``'s annotation actually requires — a stub that only returns
+    ``None`` type-checks as a mistake and would raise the first time a turn
+    did run, which is exactly the kind of double that hides a broken test.
+    """
+    return
+    yield  # pragma: no cover — the ``yield`` is what makes this a generator
+
+
+def _make_session(directory: Path, *, stream: Any = None):
     from local_operator.session.session import Session
 
     return Session(
         model=MODEL,
-        stream_fn=stream or (lambda *_args, **_kwargs: None),
+        stream_fn=stream or _no_stream,
         tools=[],
         transcript=Transcript(directory),
         system_blocks_provider=lambda *_args: [],
@@ -294,9 +302,12 @@ class _LatchHost:
     begin_retire = _H.begin_retire
     _retiring_refusal = _H._retiring_refusal
 
+    #: Typed ``Any`` on purpose: the real attribute holds a ``Session``, and the
+    #: tests below substitute a recorder that only implements ``note_cut_off``.
+    _session: Any = None
+
     def __init__(self, *, reason: str = "") -> None:
         self._retiring_cause = ""
-        self._session = None
         self.reason = reason
         self.notes: list[tuple[str, str]] = []
 

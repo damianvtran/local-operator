@@ -180,8 +180,14 @@ async def test_rebind_to_a_newer_generation_ends_the_suspect_not_the_successor(
 
 
 @pytest.mark.asyncio
-async def test_recovery_going_cold_emits_one_aborted_end(tmp_path, monkeypatch) -> None:
-    """Test 18: recovery goes cold → one aborted end (unchanged)."""
+async def test_recovery_going_cold_emits_one_cut_off_end(tmp_path, monkeypatch) -> None:
+    """Test 18: recovery goes cold → one CUT-OFF end (exactly once).
+
+    The exactly-once property is what this test owns and it is unchanged. The
+    KIND changed deliberately: a confirmed owner death is the case the cut-off
+    taxonomy exists for, and it used to be published as a bare abort — the same
+    shape a user's own ``/stop`` produces.
+    """
     remote = _facade(tmp_path, monkeypatch, can_go_cold=True)
     received: list[Any] = []
     remote.subscribe(received.append)
@@ -190,7 +196,9 @@ async def test_recovery_going_cold_emits_one_aborted_end(tmp_path, monkeypatch) 
     remote._go_cold()
 
     ends = [event for event in received if isinstance(event, AgentEndEvent)]
-    assert len(ends) == 1 and ends[0].aborted is True and ends[0].error is None
+    assert len(ends) == 1
+    assert ends[0].aborted is False
+    assert ends[0].cut_off_cause == "owner-lost"
     assert remote.is_streaming is False
 
 

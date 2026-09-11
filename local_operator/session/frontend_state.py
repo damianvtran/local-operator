@@ -1275,8 +1275,8 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
-    """Omit the launch-reconciliation keys from a row that has no launch.
+def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Omit the per-row keys that are EMPTY from a row that has neither fact.
 
     An absent fact must not buy wire bytes. These two keys are empty on every
     bash job and on every child that was never resumed, and at roster scale the
@@ -1290,6 +1290,13 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
     reading neither key takes the same degrade path as one attached to a runtime
     that predates the fields. So this is a pure byte saving, not a semantic one.
 
+    ``cut_off_cause`` joins them for the same reason, measured the same way:
+    it is empty on every row that was not restored from a roster record, and one
+    key's worth of JSON on each of 200 rows was enough to push the same class
+    guard 4 KB over the line on its own. Its non-empty value is a single token
+    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
+    tens of bytes on the handful of rows that carry it.
+
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
@@ -1298,6 +1305,8 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_message_id", None)
     if not job.get("launch_prompts"):
         job.pop("launch_prompts", None)
+    if not job.get("cut_off_cause"):
+        job.pop("cut_off_cause", None)
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1982,7 +1991,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_launch_fields_in_place(job)
+                    _drop_absent_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -3179,7 +3188,7 @@ class FrontendStateStore:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_launch_fields_in_place(summary)
+                _drop_absent_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
