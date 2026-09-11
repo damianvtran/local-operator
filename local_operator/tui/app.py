@@ -27124,8 +27124,17 @@ class OperatorApp(App[None]):
             )
             return
         if wanted == current:
+            # The no-op voice, under the same 70-cell row budget as the receipts
+            # beside it (design review D2: a notice row holds `width - 10` cells,
+            # 70 at 80 columns). `restores the default` rather than `restores the
+            # model's default` is the 8 cells that holds it there at the LONGEST
+            # level name the vocabulary can carry (`minimal`, 69 cells); the
+            # qualifier it drops is what the sibling `/effort auto` receipt spells
+            # out in full, so the shorter form still points at the state it means.
+            # Kept word for word in `_effort_slash_result`, or a phone and a
+            # terminal answer one command two ways.
             self._system_notice(
-                f"reasoning effort: already {wanted} — /effort auto restores the model's default"
+                f"reasoning effort: already {wanted} — /effort auto restores the default"
             )
             return
         if not self._apply_effort(wanted):
@@ -33100,12 +33109,11 @@ class OperatorApp(App[None]):
                 style="warning",
             )
         if wanted == current:
+            # Word for word the sibling site above, including its cell budget: the
+            # two surfaces exist so one command gets one answer whatever renders it.
             return SlashResult(
                 kind="notice",
-                text=(
-                    f"reasoning effort: already {wanted} — "
-                    "/effort auto restores the model's default"
-                ),
+                text=f"reasoning effort: already {wanted} — /effort auto restores the default",
                 style="info",
             )
         if not self._apply_effort(wanted):
