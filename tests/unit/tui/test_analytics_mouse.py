@@ -9,16 +9,20 @@ declare no ``CSS_PATH``, so a card sized by percentage rules is not sized at
 all under one, and a mouse coordinate against an unsized card means nothing.
 
 The hit-test geometry these tests pin was MEASURED before it was written, and
-two of the measurements are why the guards exist:
+one of the measurements is why the guards exist:
 
-* ``_body`` is ``height: auto`` inside the scroll container, so its region
-  tracks the scroll offset (measured: ``region.y`` 8 -> 4 for an offset of 3).
-  The body line under a screen row is therefore a plain subtraction.
-* the body OVERHANGS the viewport by everything scrolled out of sight
-  (measured: 27 rows on a 40-row frame), and ``body.region`` contains the hint
-  line below the card. A hit-test guarded by the body alone resolves clipped
-  coordinates to real rows, which is what ``test_a_click_below_the_viewport_
-  is_not_a_row`` pins.
+* the body and the viewport are now the SAME widget (``ReportView``), so a row's
+  screen position is the viewport plus the scroll offset with nothing in
+  between: ``region.y`` cannot lag a scroll because there are no longer two
+  regions to disagree. Before that they were a ``Static`` inside a
+  ``VerticalScroll``, its region tracked the scroll offset a frame late
+  (measured: ``region.y`` 8 -> 4 for an offset of 3) and it OVERHANGED the
+  viewport by everything scrolled out of sight (measured: 27 rows on a 40-row
+  frame). A hit-test guarded by the body region alone therefore resolved clipped
+  coordinates to real rows, and ``test_a_click_below_the_viewport_is_not_a_row``
+  still asserts the guard that rejects them — one widget does not make the guard
+  unnecessary, it just makes it the only thing standing between the pointer and
+  the row arithmetic, which that test's precondition pins.
 """
 
 from __future__ import annotations
@@ -322,11 +326,21 @@ def test_a_right_click_does_not_toggle_a_row():
 
 
 def test_a_click_below_the_viewport_is_not_a_row():
-    """The body overhangs the viewport, so ``body.region`` alone is not a guard.
+    """A coordinate BELOW the viewport is not a row, whatever the row maths says.
 
-    Measured on this fixture: the body extends well past the scroll viewport
-    and its region CONTAINS the hint line under the card. Clicking there must
-    not resolve to whatever table row happens to sit at that body line.
+    The defect this pins came with the body-inside-a-scroll-container shape: the
+    body overhung the viewport by everything scrolled out of sight and its region
+    contained the hint line under the card, so a hit-test that trusted the body
+    resolved a clipped coordinate to a real table row.
+
+    The body and the viewport are one widget now, which is what makes the
+    precondition below the interesting half of this test: the row arithmetic on
+    its own — screen y, minus the viewport's top, plus the scroll offset, minus
+    the table's first line — DOES name a real row at this coordinate. So the
+    viewport guard is the only thing rejecting the click, and this test would
+    pass on a hit-test that had lost it only if the fixture stopped aiming below
+    the frame. Asserting that is the difference between exercising the guard and
+    asserting something that was already true.
     """
 
     async def run():
@@ -335,17 +349,21 @@ def test_a_click_below_the_viewport_is_not_a_row():
             screen = await _push(pilot, app, _tall_report_agg())
             _show_table(screen)
             await pilot.pause()
-            body = screen._body.region
-            hint_y = screen._hint.region.y
-            # The precondition this test exists for: the coordinate really is
-            # inside the body and outside the viewport, so the guard is being
-            # exercised rather than trivially satisfied.
-            assert body.contains(_row_x(screen), hint_y), "fixture no longer reproduces overhang"
-            assert not screen._scroll.scrollable_content_region.contains(_row_x(screen), hint_y)
+            viewport = screen._scroll.scrollable_content_region
+            x, hint_y = _row_x(screen), screen._hint.region.y
+            # The coordinate is outside the viewport...
+            assert not viewport.contains(x, hint_y), "fixture no longer aims below the frame"
+            # ...and the arithmetic the guard protects would land on a real row.
+            line = hint_y - viewport.y + int(screen._scroll.scroll_offset.y)
+            index = line - screen._layout.session_first_line
+            assert 0 <= index < len(screen._layout.session_rows), (
+                "the unguarded arithmetic no longer resolves a row, so this test "
+                "would pass without the viewport guard"
+            )
 
             before = set(screen._expanded)
-            assert screen._row_at(_click(screen, _row_x(screen), hint_y)) is None
-            screen.on_click(_click(screen, _row_x(screen), hint_y))
+            assert screen._row_at(_click(screen, x, hint_y)) is None
+            screen.on_click(_click(screen, x, hint_y))
             await pilot.pause()
             assert screen._expanded == before
 

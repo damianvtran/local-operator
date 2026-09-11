@@ -24,6 +24,23 @@ the content can be asserted as plain strings in a test
 (``render_lines_for_test``), exactly like ``usage_panel`` and
 ``session_picker`` do — a passing test is not evidence a TUI looks right, but
 it is the right way to pin what the screen SAYS.
+
+The body is a :class:`~local_operator.tui.widgets.report_view.ReportView`, not
+a ``Static``, and that is a fix rather than a preference. A ``Static`` renders
+its whole content on every dirty repaint — ``Widget._render_content`` converts
+the widget's OWN height to strips — and this body's height is the whole report
+(846 lines / 85,446 cells on the operator's ledger against a 2,929-cell
+viewport), so every pointer row crossing re-stripped the entire report to
+change two of its lines. Measured on a copy of that ledger at 120x45 through
+the real app, loop-thread CPU: **243 ms mean / 320 ms max per row crossed**,
+174 ms per wheel line with the pointer resting on the table, against a 6.6 ms
+mean / 13.6 ms max floor for the same pointer moves with no analytics screen
+open. ``ReportView`` renders only the lines the compositor asks for, and a
+hover change recomposes just the two rows whose tint changed — 8 ms mean per
+row-to-row crossing, of which the body's own share is two strip conversions
+(4 ms across twelve crossings in total). The widths a single-row recompose
+needs come from :class:`ReportLayout`, never from the row list it is handed —
+see :func:`_session_row_line` for why that is load-bearing rather than tidy.
 """
 
 from __future__ import annotations
@@ -36,7 +53,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
@@ -50,6 +67,7 @@ from local_operator.analytics.model import (
     session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 
@@ -924,6 +942,7 @@ def build_report(
                 cursor=cursor_index,
                 hover=hover_index,
                 suffixes=[suffixes[row.session_id] for row in structure],
+                layout=layout,
             )
         )
 
@@ -936,6 +955,30 @@ def build_report(
         lines.append(legend)
 
     return lines
+
+
+def _flatten_blocks(blocks: list[Text]) -> list[Text]:
+    """One ``Text`` per BODY LINE, from the multi-line blocks the report builds.
+
+    ``build_report`` composes section by section — a table is one ``Text``
+    holding hundreds of lines — because that is the readable way to write it,
+    and it keeps returning blocks on purpose: the plain-text tests index a
+    section's own block, so flattening AT THE RENDERER would move a test's
+    premise for no reader-visible gain. The body widget is where the shape has
+    to change, because it addresses lines by index; the split therefore happens
+    at that boundary, which is also where the blocks stop being readable.
+
+    The line numbering ``ReportLayout.session_first_line`` publishes (and so
+    every hit-test and every patch) is a count of THESE lines, which is why the
+    two must agree about blank spacers: ``allow_blank=True`` is load-bearing,
+    since a plain ``str.split`` drops the empty pieces and every index below a
+    section break would shift by one. Splitting a ``Text`` is style-preserving,
+    so a row keeps its spans.
+    """
+    flat: list[Text] = []
+    for block in blocks:
+        flat.extend(block.split("\n", allow_blank=True))
+    return flat
 
 
 #: Below this content width the per-group tables drop the cache column to keep
@@ -952,11 +995,14 @@ _WIDE_TABLE_MIN = 72
 _MIN_NAME_COL = 30
 _MAX_NAME_COL = 48
 
-#: Cells the scroll container reserves for its vertical scrollbar. The
+#: Cells the body widget reserves for its own vertical scrollbar. The
 #: ``#analytics-scroll`` rule sets ``scrollbar-gutter: stable``, so the column is
 #: held whether or not the bar is drawn — a report composed against the full
 #: card width therefore paints one cell wider than the box that receives it, and
-#: the rightmost column is cut. Kept beside the width maths that spends it.
+#: the rightmost column is cut. The gutter belongs to the ``ReportView`` that
+#: paints the report (body and viewport are one widget), which is why it is still
+#: subtracted here and not measured off a child. Kept beside the width maths
+#: that spends it.
 _SCROLLBAR_GUTTER = 1
 
 
@@ -1133,6 +1179,26 @@ class ReportLayout:
     #: above it, and row ``i`` is at ``session_first_line + i`` because every row
     #: is composed ``no_wrap`` and truncated to the content box.
     session_first_line: int = 0
+    #: The ``(label, depth, aggregate)`` triples the table painted, in the same
+    #: order as ``session_rows``. Kept because a single-row REPAINT needs the
+    #: inputs the full paint used, and re-deriving them means walking the forest
+    #: again (31 ms on the operator's ledger) as a second definition of what is
+    #: visible that could disagree with the paint.
+    session_triples: list[tuple[str, int, "UsageAggregate"]] = field(default_factory=list)
+    #: The table's column widths AS PAINTED, alongside the switches that decide
+    #: which columns exist. A repaint of one row must take every width from
+    #: here: these are maxima over the whole table, and a caller that recomposes
+    #: a single row from that row's OWN figures gets a narrower column and moves
+    #: the row sideways (see :func:`_session_row_line`).
+    name_col: int = 0
+    tokens_col: int = 0
+    cost_col: int = 0
+    calls_col: int = 0
+    #: Whether the ``% cache`` column is present — the width switch, not a width.
+    show_cache: bool = False
+    #: The ``+N subagents`` tail each row advertises, parallel to
+    #: ``session_triples``. Part of the row's content, so a repaint needs it too.
+    suffixes: list[str] = field(default_factory=list)
 
 
 def _descendant_count(node: "SessionNode") -> int:
@@ -1333,6 +1399,7 @@ def _session_section(
     cursor: int | None = None,
     hover: int | None = None,
     suffixes: Sequence[str] | None = None,
+    layout: "ReportLayout | None" = None,
 ) -> Text:
     """The per-session table, pre-ordered and pre-indented by the forest walk.
 
@@ -1385,79 +1452,127 @@ def _session_section(
     and the section meta beside it are all dim. Passing the string rather than a
     length keeps the split honest under truncation: a suffix the budget cut is
     simply not found at the tail and the row paints in one style, as before.
+
+    ``layout`` publishes everything a LATER single-row repaint needs — the row
+    triples, the label budget, the four column widths and their switch. The
+    screen owns a long-lived layout and asks for one row to be recomposed on
+    every pointer crossing; without these figures the patch path would have to
+    walk the forest and re-measure the columns a second time, which is both the
+    31 ms it exists to avoid and a second definition of the table's geometry
+    that could disagree with the paint. ``None`` (the default, and what the
+    plain-text callers and the scripts pass) just skips publishing.
     """
-    fg = semantic_style("fg")
     dim = semantic_style("dim")
-    accent = semantic_style("accent")
     block = section_header("By session", meta)
     if not rows:
         block.append("\n  (none)", style=dim)
         return block
 
-    show_cache = width >= _WIDE_TABLE_MIN
+    # Every column is a maximum over the WHOLE table, which is exactly why it is
+    # published rather than left in the loop: a single-row repaint recomposes
+    # one row against the table's columns, and a row measured against ITSELF
+    # gets a narrower column and shifts sideways (the width trap).
+    target = layout if layout is not None else ReportLayout()
     pairs = [(label, agg) for label, _, agg in rows]
-    cost_col = max(len(format_cost(agg)) for _, agg in pairs)
-    tokens_col = _tokens_col(pairs)
-    calls_col = _calls_col(pairs)
-    for index, (label, depth, agg) in enumerate(rows):
+    target.session_triples = rows
+    target.name_col = name_col
+    target.tokens_col = _tokens_col(pairs)
+    target.cost_col = max(len(format_cost(agg)) for _, agg in pairs)
+    target.calls_col = _calls_col(pairs)
+    target.show_cache = width >= _WIDE_TABLE_MIN
+    target.suffixes = list(suffixes) if suffixes is not None else [""] * len(rows)
+    for index, row in enumerate(rows):
         block.append("\n")
-        # Where this row's cells begin, so the hover tint can be laid over the
-        # WHOLE row once it is composed. Taken after the newline, which belongs
-        # to the row above: tinting it would paint a notch into the previous
-        # row's right edge.
-        row_start = len(block.plain)
-        # A nested row is dimmed as well as indented: its dollars are already
-        # inside the root above it, so it must not compete visually with the
-        # rows that actually partition the total.
-        style = fg if depth == 0 else dim
-        on_cursor = cursor is not None and index == cursor
-        on_hover = hover is not None and index == hover
-        if on_cursor:
-            block.append(f"{_ROW_CURSOR} ", style=accent)
-        else:
-            block.append("  ")
-        # TRUNCATE as well as pad, in CELLS, exactly as ``_group_section`` does:
-        # a bare ``{label:<{name_col}}`` pushes every numeric column right by
-        # whatever the label overran, and the cost column is the one thing this
-        # screen exists to let you scan straight down. Labels arrive budgeted
-        # (prefix included), so this is a backstop rather than the mechanism.
-        clipped = truncate_cells(label, name_col)
-        pad = " " * max(0, name_col - cell_len(clipped))
-        suffix = suffixes[index] if suffixes is not None and index < len(suffixes) else ""
-        # The cursor row keeps ONE style across the whole label: the caret's
-        # highlight is what says "you are here", and breaking it in the middle
-        # would read as two spans rather than one selected row.
-        if suffix and not on_cursor and clipped.endswith(suffix):
-            block.append(clipped[: len(clipped) - len(suffix)], style=style)
-            block.append(suffix, style=dim)
-            block.append(pad)
-        else:
-            block.append(clipped + pad, style=accent if on_cursor else style)
-        block.append(f"{format_tokens(agg.total_tokens):>{tokens_col}} tokens", style=style)
-        block.append("   ")
-        append_cost(block, agg, cost_col, style, dim)
-        block.append(f"   {agg.calls:>{calls_col}} calls", style=dim)
-        if show_cache:
-            block.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
-        if on_hover:
-            # A BACKGROUND laid over the finished row, never a re-styling of it:
-            # `Text.stylize` adds a span, so every foreground the row already
-            # chose (dim suffix, dim calls, accent caret) survives underneath and
-            # only the ground changes. Re-composing the row in a "hover style"
-            # would flatten those distinctions exactly on the row the user is
-            # looking at hardest.
-            #
-            # Spanned to the row's own composed cells rather than padded out to
-            # ``width``: the table is narrower than the card whenever the name
-            # column hits its cap (100 cells inside a 134-cell box), and a tint
-            # run to the box edge would highlight a band of empty margin that is
-            # not part of the table. Every row composes to the same cell count,
-            # so the tint is a clean rectangle down the table.
-            ground = "tint-select-hi" if on_cursor else "tint-select"
-            block.stylize(
-                Style(bgcolor=theme_mod.semantic_color(ground)), row_start, len(block.plain)
-            )
+        block.append_text(_session_row_line(target, index, row, cursor=cursor, hover=hover))
     return block
+
+
+def _session_row_line(
+    layout: ReportLayout,
+    index: int,
+    row: tuple[str, int, "UsageAggregate"],
+    *,
+    cursor: int | None,
+    hover: int | None,
+) -> Text:
+    """ONE row of the per-session table, composed from the LAYOUT's columns.
+
+    One composer with two call sites: the full paint loops over the rows, and a
+    hover/cursor change recomposes the one or two rows whose appearance changed
+    instead of the whole table. A second composer for the patch path would be a
+    second definition of what a row looks like, and the two would drift.
+
+    **The argument it takes is the layout, not a row list, and that is the
+    point.** ``tokens_col``/``cost_col``/``calls_col`` are maxima over every row
+    in the table, so composing a row against its OWN figures silently changes
+    the numeric columns: measured on the operator's ledger, a patch that
+    re-entered the table composer with a one-row list produced rows shifted
+    sideways in 24 of the 26 crossings, and 26 of 26 were byte-identical to a
+    full recompose only once the widths were hoisted out of the loop and read
+    from the layout. Passing ``ReportLayout`` rather than the widths keeps that
+    trap out of reach of a future caller, which a bag of four integers would not.
+
+    The two indices are the paint's current selection state, both resolved
+    against the layout's row order: ``cursor`` is the row the keyboard is on,
+    ``hover`` the row the pointer is on. A row is a pure function of the layout,
+    its index and those two indices, which is what lets the patch path recompose
+    a row and get exactly the cells the full paint would have produced.
+    """
+    fg = semantic_style("fg")
+    dim = semantic_style("dim")
+    accent = semantic_style("accent")
+    label, depth, agg = row
+    on_cursor = cursor is not None and index == cursor
+    on_hover = hover is not None and index == hover
+    line = Text()
+    # A nested row is dimmed as well as indented: its dollars are already inside
+    # the root above it, so it must not compete visually with the rows that
+    # actually partition the total.
+    style = fg if depth == 0 else dim
+    if on_cursor:
+        line.append(f"{_ROW_CURSOR} ", style=accent)
+    else:
+        line.append("  ")
+    # TRUNCATE as well as pad, in CELLS, exactly as ``_group_section`` does: a
+    # bare ``{label:<{name_col}}`` pushes every numeric column right by whatever
+    # the label overran, and the cost column is the one thing this screen exists
+    # to let you scan straight down. Labels arrive budgeted (prefix included), so
+    # this is a backstop rather than the mechanism.
+    clipped = truncate_cells(label, layout.name_col)
+    pad = " " * max(0, layout.name_col - cell_len(clipped))
+    suffix = layout.suffixes[index] if index < len(layout.suffixes) else ""
+    # The cursor row keeps ONE style across the whole label: the caret's
+    # highlight is what says "you are here", and breaking it in the middle would
+    # read as two spans rather than one selected row.
+    if suffix and not on_cursor and clipped.endswith(suffix):
+        line.append(clipped[: len(clipped) - len(suffix)], style=style)
+        line.append(suffix, style=dim)
+        line.append(pad)
+    else:
+        line.append(clipped + pad, style=accent if on_cursor else style)
+    line.append(f"{format_tokens(agg.total_tokens):>{layout.tokens_col}} tokens", style=style)
+    line.append("   ")
+    append_cost(line, agg, layout.cost_col, style, dim)
+    line.append(f"   {agg.calls:>{layout.calls_col}} calls", style=dim)
+    if layout.show_cache:
+        line.append(f"   {format_percent(agg.cache_hit_rate):>4} cache", style=dim)
+    if on_hover:
+        # A BACKGROUND laid over the finished row, never a re-styling of it:
+        # `Text.stylize` adds a span, so every foreground the row already chose
+        # (dim suffix, dim calls, accent caret) survives underneath and only the
+        # ground changes. Re-composing the row in a "hover style" would flatten
+        # those distinctions exactly on the row the user is looking at hardest.
+        #
+        # Spanned to the row's own composed cells rather than padded out to the
+        # box: the table is narrower than the card whenever the name column hits
+        # its cap (100 cells inside a 134-cell box), and a tint run to the box
+        # edge would highlight a band of empty margin that is not part of the
+        # table. Every row composes to the same cell count, so the tint is a
+        # clean rectangle down the table. The run starts at 0 because this is one
+        # row's `Text`, not a slice of the multi-row block the full paint builds.
+        ground = "tint-select-hi" if on_cursor else "tint-select"
+        line.stylize(Style(bgcolor=theme_mod.semantic_color(ground)), 0, len(line.plain))
+    return line
 
 
 def _group_section(
@@ -1545,8 +1660,17 @@ class AnalyticsScreen(ModalScreen[None]):
     restores the previous view exactly — the screen reads the ledger and shows
     it, it never mutates anything, so leaving it is a plain pop with no state to
     reconcile. Modelled on :class:`SessionPickerScreen`: a centred card over a
-    dimmed transcript, one ``Static`` body inside a ``VerticalScroll`` so a long
-    per-session table scrolls rather than clipping.
+    dimmed transcript, and a scrolling body so a long per-session table scrolls
+    rather than clipping.
+
+    The body is a :class:`ReportView` — one widget that is BOTH the scroller and
+    the renderer — rather than a ``Static`` inside a ``VerticalScroll``. That is
+    not a preference: the two-widget shape re-renders the whole report on every
+    dirty repaint, and this screen repaints on every pointer row crossing (see
+    the module docstring for the measured cost). Keeping the body and the
+    viewport in one widget is also what makes the hit-test honest: the row under
+    a screen coordinate is the viewport's own geometry, not a second widget's
+    region that lagged a scroll by a frame.
     """
 
     BINDINGS = [
@@ -1554,9 +1678,10 @@ class AnalyticsScreen(ModalScreen[None]):
         Binding("q", "dismiss_screen", "Back", show=False),
         Binding("t", "toggle_metric", "Cost/tokens", show=False),
         # ``priority=True`` on the row keys, and it is load-bearing rather than
-        # defensive. Focus sits on the inner ``VerticalScroll``, which handles
-        # the arrows itself whenever it can still scroll — so a plain screen
-        # binding is reached only at the ends of the travel. That is why the
+        # defensive. Focus sits on the scroller (the ``ReportView`` body, whose
+        # ``ScrollableContainer`` base handles the arrows itself whenever it can
+        # still scroll) — so a plain screen binding is reached only at the ends
+        # of the travel. That is why the
         # ``action_scroll_up``/``down`` this replaces were effectively dead on
         # any report tall enough to scroll, and why the cursor would otherwise
         # move only on a short one (measured: it worked at 110x40, where the
@@ -1651,8 +1776,12 @@ class AnalyticsScreen(ModalScreen[None]):
         #: Lazily built by ``_forest()``; see there for why it is cached.
         self._forest_cache: list["SessionNode"] | None = None
         self._title: Static
-        self._body: Static
-        self._scroll: VerticalScroll
+        #: The body IS the viewport — one ``ReportView``, aliased twice because
+        #: the screen has always spoken of them separately (``_body`` where it
+        #: paints, ``_scroll`` where it scrolls) and the geometry is now the
+        #: same object's either way.
+        self._body: ReportView
+        self._scroll: ReportView
 
     def compose(self) -> ComposeResult:
         with Container(classes="analytics-panel"):
@@ -1660,10 +1789,17 @@ class AnalyticsScreen(ModalScreen[None]):
             # (the ``bars: cost``/``bars: tokens`` suffix — reviews U1/U4).
             self._title = Static(self._title_text(), id="analytics-title")
             yield self._title
-            with VerticalScroll(id="analytics-scroll") as scroll:
-                self._scroll = scroll
-                self._body = Static(id="analytics-body")
-                yield self._body
+            # One widget for the body AND the viewport, deliberately: ``_body``
+            # and ``_scroll`` are the same object, so the row under a screen
+            # coordinate is the scroller's own geometry (see ``_row_at``) and
+            # none of this screen's state can disagree with itself about where a
+            # row is. The id stays ``analytics-scroll`` because that rule is
+            # what gives the body its height and scrollbar chrome; it must NOT
+            # become ``analytics-body``, whose ``height: auto`` would collapse
+            # the viewport to the report's height and take the scrolling away.
+            view = ReportView(id="analytics-scroll")
+            self._body = self._scroll = view
+            yield view
             self._hint = Static(self._hint_text(scrollable=False), id="analytics-hint")
             yield self._hint
 
@@ -1743,11 +1879,15 @@ class AnalyticsScreen(ModalScreen[None]):
         #
         # ``_SCROLLBAR_GUTTER`` comes off the top because ``#analytics-scroll``
         # sets ``scrollbar-gutter: stable`` (see the stylesheet): the column is
-        # reserved whether or not the bar is currently drawn, so the body is
+        # reserved whether or not the bar is currently drawn, so the report is
         # ALWAYS painted one cell narrower than the card. Counting it here
         # rather than at the call sites keeps one number describing "cells the
         # report may paint into" — measured, not assumed: at a 114-column
-        # terminal the card is 96 and ``scrollable_content_region`` is 95.
+        # terminal the card is 96 and ``scrollable_content_region`` is 95. It
+        # was measured with a ``Static`` body inside a ``VerticalScroll`` and is
+        # deliberately unchanged now the body and the viewport are one widget:
+        # the reserved column is the same column either way, and the frame
+        # comparison pins that the paint did not move.
         try:
             terminal = self.app.size.width
             card = min(140, int(terminal * 0.9))
@@ -1936,14 +2076,17 @@ class AnalyticsScreen(ModalScreen[None]):
         return any(row.expandable for row in self._layout.session_rows)
 
     def _repaint(self, *, force: bool = True) -> None:
-        """Recompose the body, unless a width-driven repaint would change nothing.
+        """Recompose the WHOLE body, unless a width-driven repaint changes nothing.
 
         ``force=False`` is the resize path (see ``on_resize``): a rebuild is
         0.5-0.6 s on a real ledger and a terminal drag emits a burst of resize
         events, so the ones that leave the content box unchanged must not each
-        pay for one. Every other caller changed the CONTENT (metric flipped, a
-        row expanded, the cursor moved) and forces, because the width is the same
-        by definition and only the content differs.
+        pay for one.
+
+        This is the coarse path, and it is the right one whenever the REPORT's
+        SHAPE changes: a metric flip re-draws the charts, an expand inserts rows
+        and so renumbers every line below it, a resize recomposes at a new width.
+        The narrow path for a change of two rows' COLOUR is ``_patch_rows``.
         """
         body = getattr(self, "_body", None)
         if body is None or not body.is_mounted:
@@ -1951,16 +2094,55 @@ class AnalyticsScreen(ModalScreen[None]):
         width = self._card_width()
         if not force and width == self._painted_width:
             return
-        combined = Text()
-        for i, line in enumerate(self._report_lines()):
-            if i:
-                combined.append("\n")
-            combined.append_text(line)
-        body.update(combined)
+        body.set_lines(_flatten_blocks(self._report_lines()), width)
         self._painted_width = width
 
+    def _patch_rows(self, indices: Sequence[int | None]) -> None:
+        """Recompose and repaint ONLY the listed session rows.
+
+        The point of the whole virtualized body. A hover change alters the
+        composed text of exactly two rows — the one the pointer left and the one
+        it entered — and re-entering ``build_report`` for that costs a full
+        recompose of all 846 lines (measured: 40 ms per crossing with the
+        virtualized body alone, against 4.0 ms for two patched rows).
+
+        The rows are composed by :func:`_session_row_line`, the SAME function
+        the full paint uses, fed the layout the full paint published. Taking the
+        widths from anywhere else is the trap that misaligns a patched row.
+
+        Out-of-range indices are dropped rather than clamping: an index that no
+        longer names a row means the paint it came from is stale, and painting a
+        different row's content on that line would be worse than leaving it.
+        """
+        body = getattr(self, "_body", None)
+        if body is None or not body.is_mounted:
+            return
+        layout = self._layout
+        triples = layout.session_triples
+        if not triples:
+            # Nothing painted yet (or no table in this report): fall back so a
+            # caller never has to know which shape it is in.
+            self._repaint()
+            return
+        cursor = self._cursor_index()
+        hover = self._hover_index()
+        for index in sorted({i for i in indices if i is not None}):
+            if not 0 <= index < len(triples):
+                continue
+            body.set_line(
+                layout.session_first_line + index,
+                _session_row_line(layout, index, triples[index], cursor=cursor, hover=hover),
+            )
+
     def render_lines_for_test(self) -> list[str]:
-        """The report as plain strings — what a user reads."""
+        """The report as plain strings — what a user reads.
+
+        Reads the renderer, not the widget: this is what the report SAYS, which
+        is what the plain-text tests are about. ``_body.lines_for_test()`` is the
+        report as PAINTED (the lines the strips are built from) and is what a
+        test that asks about the shape of the body — one line per row, patched
+        rows included — should read.
+        """
         out: list[str] = []
         for line in self._report_lines():
             out.extend(line.plain.split("\n"))
@@ -2029,6 +2211,22 @@ class AnalyticsScreen(ModalScreen[None]):
                 for i, row in enumerate(self._layout.session_rows)
                 if row.session_id == self._cursor
             ),
+            None,
+        )
+
+    def _hover_index(self) -> int | None:
+        """Where the POINTER sits in the CURRENT paint, or ``None`` if nowhere.
+
+        The mirror of ``_cursor_index``, and it exists for the same reason: the
+        hover is stored as a session id (so it survives a rebuild), while a
+        repaint needs the row it lands on. Resolved against the same layout the
+        paint published, so the index a patch is composed for is the index the
+        row is painted at.
+        """
+        if self._hover is None:
+            return None
+        return next(
+            (i for i, row in enumerate(self._layout.session_rows) if row.session_id == self._hover),
             None,
         )
 
@@ -2120,28 +2318,33 @@ class AnalyticsScreen(ModalScreen[None]):
     def _row_at(self, event) -> int | None:  # type: ignore[no-untyped-def]
         """Index of the session row under a mouse event, or ``None``.
 
-        Resolved against the VIEWPORT plus the scroll offset, and deliberately
-        NOT against ``_body.region``. The two are arithmetically identical — the
-        body is ``height: auto`` inside the container, so ``body.y ==
-        viewport.y - scroll_offset.y`` held exactly at every offset measured —
-        but they are not equally CURRENT. ``body.region`` is recomputed by
-        layout and lags a scroll by a frame, while ``scroll_y`` is the reactive
-        whose change notifies ``_viewport_moved`` in the first place. Basing the
-        hit-test on the body read a stale ``body.y`` of -9 against an already
-        settled offset of 0 (measured), resolving the pointer 16 rows away from
-        the truth and leaving the highlight stuck on a row it had scrolled past.
-        This basis is correct at the instant the watcher runs.
+        Resolved against the VIEWPORT plus the scroll offset. Note that after
+        the body was virtualized the viewport and the body are the SAME widget,
+        so this is no longer a choice between two regions — but the reason the
+        arithmetic reads ``scrollable_content_region`` and ``scroll_offset``
+        rather than ``region`` is worth keeping, because it was measured: a hit
+        test based on the body widget's ``region`` was recomputed by layout and
+        lagged a scroll by a frame, while ``scroll_y`` is the reactive whose
+        change notifies ``_viewport_moved`` in the first place. That basis read
+        a stale ``body.y`` of -9 against an already settled offset of 0
+        (measured), resolving the pointer 16 rows away from the truth and
+        leaving the highlight stuck on a row it had scrolled past. This basis is
+        correct at the instant the watcher runs.
 
         Two guards, and the FIRST is mandatory rather than defensive:
 
         - the point must be inside the SCROLL VIEWPORT, not merely inside the
-          body's region. The body overhangs the viewport by however much of the
-          report is scrolled out of sight — measured at 27 rows on a 40-row
-          frame — so ``body.region.contains`` alone resolves coordinates that
-          are clipped, including the hint line below the card (measured: the
-          hint at y=33 is inside ``body.region`` and outside the viewport). This
-          is a modal over the transcript, so the backdrop also bubbles events
-          from well outside the panel, which the same guard rejects;
+          widget's own box. It always was, and it still is now that the body IS
+          the scroller: the content region is the box minus the reserved
+          scrollbar gutter, so the gutter column resolves to no row, and a
+          coordinate BELOW the card (the hint line, or the modal's backdrop,
+          which bubbles events from well outside the panel) is outside the box
+          entirely and is rejected by the same test. The regression this pins is
+          older and worse — while the body was a separate ``Static`` it
+          overhung the viewport by everything scrolled out of sight (measured:
+          27 rows on a 40-row frame) and its region CONTAINED the hint line, so
+          a guard written against the body region alone resolved clipped
+          coordinates to real rows;
         - and the resulting index must be a row that EXISTS. The table is one
           section of a long report: everything above it (totals, both charts,
           the input attribution, the provider table) and the legend below it
@@ -2168,7 +2371,7 @@ class AnalyticsScreen(ModalScreen[None]):
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
         """Drop the highlight when the pointer leaves the rows.
 
-        ``Leave`` bubbles from the body ``Static``, and its ORDERING relative to
+        ``Leave`` bubbles from the body widget, and its ORDERING relative to
         the ``MouseMove`` that lands somewhere else was measured before relying
         on it: moving row -> hint delivers ``move`` and then ``leave``, and hint
         -> row delivers ``leave`` (of the hint) and then ``move``. In neither
@@ -2198,8 +2401,25 @@ class AnalyticsScreen(ModalScreen[None]):
         self.styles.pointer = "pointer" if row is not None and row.expandable else "default"
         if session_id == self._hover:
             return
+        # The row the pointer left and the row it entered — no more. Both are
+        # recomposed from the layout's own columns, so the cells are the ones a
+        # full paint would have produced; the rest of the report is untouched.
+        #
+        # This covers entering and leaving the table as well as crossing inside
+        # it, and that is worth stating because the obvious reading — "if either
+        # index is missing, fall back to the whole body" — costs a full 846-line
+        # recompose on two ordinary gestures (measured on the real ledger: 71 ms
+        # entering the table, 40 ms leaving it, against 2-4 ms for a patched
+        # pair). Neither index being absent changes anything for the OTHER row:
+        # a row's cells are a function of the layout, its index and the current
+        # cursor/hover indices, so with no hover painted anywhere the row to
+        # un-tint is exactly the one ``previous`` names.
+        #
+        # ``_patch_rows`` still falls back to ``_repaint`` when there is no
+        # layout to patch (nothing painted yet), so this needs no guard here.
+        previous = self._hover_index()
         self._hover = session_id
-        self._repaint()
+        self._patch_rows([previous, index])
 
     def _refresh_hover(self) -> None:
         """Re-resolve the highlight against the LAST KNOWN pointer position.
@@ -2315,8 +2535,13 @@ class AnalyticsScreen(ModalScreen[None]):
             target = self._visible_row_index() or 0
         else:
             target = max(0, min(len(rows) - 1, index + delta))
+        # Both caret positions, taken BEFORE the id moves: a cursor that drifted
+        # off screen still has a painted line inside the body's model, and a
+        # wheel or a scroll back would show a stale caret on it if the patch
+        # only covered the rows the viewport can see.
+        previous = self._cursor_index()
         self._cursor = rows[target].session_id
-        self._repaint()
+        self._patch_rows([previous, target])
         self._scroll_cursor_into_view()
 
     def _scroll_cursor_into_view(self) -> None:
