@@ -14,9 +14,9 @@ import pytest
 from textual.events import MouseScrollUp
 
 from local_operator.harness.types import Message, TextContent
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, _PagingLease
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_presentation import OlderHistoryNotice
@@ -66,10 +66,10 @@ async def remote_session(tmp_path: Path, rows: list[Message], name: str = "pagin
     directory = config / "sessions" / f"synthetic-{name}"
     await seed_transcript(directory, rows)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,
@@ -214,7 +214,7 @@ async def test_remote_fetch_lease_extends_through_painted_settlement(tmp_path) -
             view = app._transcript_view()
             assert view.scroll_y >= view.container_size.height
             # Consume only already-local rows so the next real control action
-            # must cross the production RemoteSession / runtime RPC boundary.
+            # must cross the production AttachedSession / runtime RPC boundary.
             while app._resume_pending_head:
                 app._mount_older_resume_page()
                 await settled(app, pilot)
@@ -1077,10 +1077,10 @@ async def compacted_session(tmp_path: Path, *, compactions: int = 3, rows_each: 
     directory = config / "sessions" / "synthetic-compacted"
     await compacted_history(directory, compactions=compactions, rows_each=rows_each)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,
@@ -1270,3 +1270,400 @@ def test_the_compaction_marker_is_spaced_apart_from_the_head_notice() -> None:
         "share a glyph, an ink and their opening words, and one is clickable "
         "while the other is not"
     )
+
+
+async def _pump(pilot, count: int) -> None:
+    for _ in range(count):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_page_fetch_is_retired_by_the_next_click(tmp_path) -> None:
+    """The stuck frame from the operator's report, and its fix.
+
+    A fetch whose owner socket never answers — and whose teardown never
+    arrives to cancel it — holds the paging lease forever. Every gesture gates
+    on that lease: the click's `_check_resume_page` and the wheel's
+    `_transcript_scrolled` both stand down against `_resume_paging`, so the
+    frame is left unscrollable with the head notice still advertising an action
+    no input can take. The reader's repeated click must retire the abandoned
+    gate and load the page itself.
+    """
+    async with remote_session(tmp_path, history(count=130)) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 60)) as pilot:
+            await settled(app, pilot)
+            assert remote.history_before_token or app._resume_pending_head
+
+            fetched = asyncio.Event()
+            stall = asyncio.Event()
+            real_load = remote.load_older_display_page
+
+            async def wedged_load():
+                fetched.set()
+                try:
+                    # Bound so a missed cancel cannot hang an xdist worker.
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+                return await real_load()
+
+            remote.load_older_display_page = wedged_load
+            notice = app._resume_head_notice
+            assert isinstance(notice, OlderHistoryNotice)
+            view = app._transcript_view()
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await _pump(pilot, 4)
+            await pilot.click(notice)
+            await asyncio.wait_for(fetched.wait(), 5)
+            await _pump(pilot, 10)
+
+            # The wedge holds the gate; the notice names the in-flight load
+            # rather than advertising a gesture the gate will swallow.
+            assert app._resume_paging
+            assert "loading older messages" in notice.text()
+            assert "scroll up to load" not in notice.text()
+
+            # The transport is healthy again underneath, and the reader clicks
+            # the same row a second time — the gesture that used to be
+            # swallowed by the gate the wedged holder never released.
+            remote.load_older_display_page = real_load
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await _pump(pilot, 4)
+            await pilot.click(notice)
+            await settled(app, pilot)
+            for _ in range(8):
+                await pilot.pause()
+
+            # The retired holder freed the gate and the retry mounted rows.
+            assert not app._resume_paging
+            assert not remote.history_before_token
+            assert not app._resume_pending_head
+            assert notice.text() == "start of conversation"
+            stall.set()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_leaves_a_retryable_notice(tmp_path) -> None:
+    """A transport drop at attach must not strand the head notice.
+
+    The first fill's remote fetch raises ConnectionError; the fill stands
+    down, the frame is unscrollable, and the notice still says there is more
+    to load. Clicking it after the transport recovers must fetch and mount.
+    """
+    async with remote_session(tmp_path, history(count=130)) as remote:
+        real_load = remote.load_older_display_page
+        failing = {"flag": True}
+
+        async def flaky_load():
+            if failing["flag"]:
+                raise ConnectionError("history owner is unavailable")
+            return await real_load()
+
+        remote.load_older_display_page = flaky_load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            notice = app._resume_head_notice
+            assert notice is not None
+            assert "load" in notice.text()
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert remote.history_before_token
+            assert not app._resume_paging
+
+            failing["flag"] = False
+            assert isinstance(notice, OlderHistoryNotice)
+            await pilot.click(notice)
+            await settled(app, pilot)
+            for _ in range(12):
+                await pilot.pause()
+            assert not remote.history_before_token
+            assert notice.text() == "start of conversation"
+
+
+@pytest.mark.asyncio
+async def test_an_unscrollable_stuck_frame_loads_on_click(tmp_path) -> None:
+    """The operator's stuck state: no scrollbar, notice present, click loads.
+
+    A wedged first fetch holds the lease with the local head already drained
+    into an unscrollable frame. Neither a wheel notch nor a first click that
+    stood down against the lease used to recover; the second click (after
+    the breaker) must.
+    """
+    async with remote_session(tmp_path, history(count=250)) as remote:
+        wedged = {"flag": True}
+        stall = asyncio.Event()
+        real_load = remote.load_older_display_page
+
+        async def load():
+            if wedged["flag"]:
+                try:
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+            return await real_load()
+
+        remote.load_older_display_page = load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            notice = app._resume_head_notice
+            assert notice is not None
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert app._resume_paging
+            assert remote.history_before_token
+            # An unmounted lease is in flight (or wedged): the copy must not
+            # look idle, and must not advertise a gesture the gate swallows.
+            assert "loading older messages" in notice.text()
+            assert "scroll up to load" not in notice.text()
+
+            wedged["flag"] = False
+            assert isinstance(notice, OlderHistoryNotice)
+            await pilot.click(notice)
+            await settled(app, pilot)
+            for _ in range(16):
+                await pilot.pause()
+            assert not remote.history_before_token
+            assert not app._resume_paging
+            stall.set()
+
+
+@pytest.mark.asyncio
+async def test_a_mounted_lease_survives_a_second_click(tmp_path) -> None:
+    """F1: a click must not retire a lease that has already painted rows.
+
+    The breaker exists for wedges, not for a healthy insert whose settle is
+    still answering. A second click against a mounted lease must leave the
+    holder in place so the in-flight settle is the one that releases it.
+    """
+    async with remote_session(tmp_path, history(count=250)) as remote:
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settled(app, pilot)
+            source = app._interaction
+            lease = app._acquire_paging_lease(source)
+            assert lease is not None
+            lease.mounted = True
+            broke = app._break_abandoned_paging_lease(source)
+            assert broke is False
+            assert app._paging_leases.get(source.token) is lease
+            app._release_paging_lease(lease)
+            assert source.token not in app._paging_leases
+
+
+def _wheel_up(view) -> None:
+    view.post_message(MouseScrollUp(view, 1, 1, 0, -1, 0, False, False, False))
+
+
+@pytest.mark.asyncio
+async def test_a_scrollable_wedged_lease_does_not_advertise_scroll_up(tmp_path) -> None:
+    """U1: an unmounted lease on a scrollable frame must not promise the wheel.
+
+    Reconcile used to flip back to "scroll up to load" as soon as the frame
+    could scroll, while the gate still swallowed every notch. The honest
+    restatement is loading copy until a page mounts; recovery is click or
+    ctrl+home, not the wheel. After recovery a healthy gate still pages on
+    scroll-up.
+    """
+    async with remote_session(tmp_path, history(count=600)) as remote:
+        wedged = {"flag": True}
+        stall = asyncio.Event()
+        real_load = remote.load_older_display_page
+        calls = {"n": 0}
+
+        async def load():
+            calls["n"] += 1
+            if wedged["flag"]:
+                try:
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+            return await real_load()
+
+        remote.load_older_display_page = load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert app._resume_paging
+            assert view.virtual_size.height <= viewport
+            notice = app._resume_head_notice
+            assert isinstance(notice, OlderHistoryNotice)
+            assert "loading older messages" in notice.text()
+
+            await pilot.resize_terminal(100, 40)
+            await _pump(pilot, 12)
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height > viewport, "resize made the frame scrollable"
+            assert app._resume_paging
+            assert "scroll up to load" not in notice.text()
+            assert "loading older messages" in notice.text()
+
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await _pump(pilot, 4)
+            before_calls = calls["n"]
+            _wheel_up(view)
+            await _pump(pilot, 8)
+            assert calls["n"] == before_calls, "wheel must not be the recovery"
+
+            wedged["flag"] = False
+            await pilot.click(notice)
+            stall.set()
+            await _pump(pilot, 80)
+            assert not app._resume_paging
+            assert "scroll up to load" in notice.text() or "start of conversation" in notice.text()
+            remaining = len(app._resume_pending_head)
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await _pump(pilot, 8)
+            after_calls = calls["n"]
+            for _ in range(6):
+                _wheel_up(view)
+                await _pump(pilot, 8)
+            if remaining:
+                assert len(app._resume_pending_head) < remaining, (
+                    "healthy gate still pages on scroll-up "
+                    f"(pending {remaining}->{len(app._resume_pending_head)}, "
+                    f"calls {after_calls}->{calls['n']})"
+                )
+            else:
+                assert "start of conversation" in notice.text()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_home_recovers_a_wedged_unscrollable_frame(tmp_path) -> None:
+    """U2: the documented keyboard chord must retire an unmounted lease.
+
+    ``ctrl+home`` is the help-screen recovery for this state. Walking the
+    real key path — not ``action_older`` — has to load in place.
+    """
+    async with remote_session(tmp_path, history(count=250)) as remote:
+        wedged = {"flag": True}
+        stall = asyncio.Event()
+        real_load = remote.load_older_display_page
+        calls = {"n": 0}
+
+        async def load():
+            calls["n"] += 1
+            if wedged["flag"]:
+                try:
+                    await asyncio.wait_for(stall.wait(), 20)
+                except asyncio.TimeoutError as exc:
+                    raise ConnectionError("history owner is unavailable") from exc
+            return await real_load()
+
+        remote.load_older_display_page = load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert app._resume_paging
+            first = calls["n"]
+            assert first >= 1
+
+            wedged["flag"] = False
+            await pilot.press("ctrl+home")
+            stall.set()
+            await _pump(pilot, 80)
+            assert calls["n"] > first
+            assert not app._resume_paging
+            notice = app._resume_head_notice
+            assert notice is not None
+            assert "start of conversation" in notice.text()
+
+
+@pytest.mark.asyncio
+async def test_an_unmounted_in_flight_notice_is_not_idle_copy(tmp_path) -> None:
+    """U3: while an unmounted lease is held the notice must not look idle."""
+    async with remote_session(tmp_path, history(count=250)) as remote:
+        stall = asyncio.Event()
+        real_load = remote.load_older_display_page
+
+        async def slow_load():
+            await stall.wait()
+            return await real_load()
+
+        remote.load_older_display_page = slow_load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            notice = app._resume_head_notice
+            assert isinstance(notice, OlderHistoryNotice)
+            assert app._resume_paging
+            text = notice.text()
+            assert "loading older messages" in text
+            assert "scroll up to load" not in text
+            assert "click to load" not in text
+            stall.set()
+            await _pump(pilot, 80)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_on_an_unscrollable_frame_does_not_tell_the_reader_to_scroll(
+    tmp_path,
+) -> None:
+    """U4: the fault toast inherits the geometry-aware verb."""
+    async with remote_session(tmp_path, history(count=250)) as remote:
+        real_load = remote.load_older_display_page
+
+        async def failing_load():
+            raise RuntimeError("unexpected paging failure")
+
+        remote.load_older_display_page = failing_load
+
+        async def factory():
+            return remote
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=(100, 200)) as pilot:
+            await _pump(pilot, 80)
+            view = app._transcript_view()
+            viewport = view.container_size.height or view.size.height
+            assert view.virtual_size.height <= viewport
+            assert not app._resume_paging
+            notice = app._resume_head_notice
+            assert notice is not None
+            assert "click to load" in notice.text()
+            faults = [
+                block.text()
+                for block in view.blocks()
+                if isinstance(block, NoticeBlock) and "Could not load earlier" in block.text()
+            ]
+            assert faults, "the genuine-fault toast never appeared"
+            assert all("scroll up" not in text for text in faults)
+            assert any("click" in text for text in faults)
+            remote.load_older_display_page = real_load

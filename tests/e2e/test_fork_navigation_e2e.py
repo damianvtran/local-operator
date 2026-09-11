@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import (
     ScriptedStream,
@@ -43,7 +43,7 @@ async def test_snapshot_reply_survives_navigation(
         directory = config / "sessions" / sid
         await seed_transcript(directory, [user_message(text)])
         owner = build_session(directory, ScriptedStream([]), cwd=workspace)
-        handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
+        handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
         server = RuntimeServer(handle, kind="daemon")
         await server.start_in_process()
         owners[sid] = (owner, server)
@@ -66,7 +66,7 @@ async def test_snapshot_reply_survives_navigation(
 
     async def connect(sid):
         server = owners[sid][1]
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             server._record,
             sid,
             config_dir=config,

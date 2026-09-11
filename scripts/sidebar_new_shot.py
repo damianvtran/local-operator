@@ -125,7 +125,7 @@ async def main() -> None:
         return fresh
 
     app = OperatorApp(lambda: _factory(home), resume_factory=resume_factory)
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(int(columns), int(rows))) as pilot:
             for _ in range(20):
                 await pilot.pause()

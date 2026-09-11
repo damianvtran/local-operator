@@ -103,7 +103,7 @@ class SilentSession(JobsSession):
 class HangingFollowerSession(JobsSession):
     """Route (f): a FOLLOWER, whose ``prompt()`` returns while the turn runs.
 
-    ``RemoteSession.prompt`` returns on the OWNER's acknowledgement — the owner
+    ``AttachedSession.prompt`` returns on the OWNER's acknowledgement — the owner
     acks as soon as the user's row is durable ("prompt admitted"), not when the
     turn ends — so the worker's `finally` fires mid-turn on every attached TUI.
     ``is_streaming`` stays True until the owner's `agent_end` arrives over the
@@ -114,7 +114,7 @@ class HangingFollowerSession(JobsSession):
     rather than merely the one that happens to run first.
     """
 
-    #: What `RemoteSession` declares (`remote.py:203`), and the app reads it to
+    #: What `AttachedSession` declares (`attached.py`), and the app reads it to
     #: know this worker's `error=None` means "the owner did not tell me" rather
     #: than "the turn succeeded". A follower fake without it models the wire
     #: ORDER while claiming the authority of an in-process session.
@@ -132,8 +132,8 @@ class HangingFollowerSession(JobsSession):
 class OwnerEndRacingFollowerSession(JobsSession):
     """The follower interleaving that breaks a latch placed at the CALL SITE.
 
-    `RemoteSession._on_wire_event` clears `_streaming` and only THEN emits the
-    relayed `agent_end` (remote.py: the `AgentEndEvent` arm), and it runs on the
+    `AttachedSession._on_wire_event` clears `_streaming` and only THEN emits the
+    relayed `agent_end` (attached.py: the `AgentEndEvent` arm), and it runs on the
     socket read pump — a different task from Textual's message pump. So the
     owner's end can land inside the fallback's own post-to-dispatch window:
     guard 2 reads a just-cleared False, the fallback proceeds, and the real
@@ -1504,7 +1504,7 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
         runtime_locality: RuntimeLocality = "this-machine"
 
         async def prompt(self, text: str, images: Any = None, **kwargs: Any) -> None:
-            raise RuntimeError("session owner is reconnecting")
+            raise RuntimeError("the runtime is reconnecting")
 
     app = OperatorApp(lambda: _factory(RefusingFollowerSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1524,7 +1524,7 @@ async def test_a_follower_whose_prompt_is_refused_before_start_still_clears_the_
 async def test_a_followers_held_turn_settles_when_the_owner_dies() -> None:
     """Owner death releases the hold: `›`, an "interrupted" notice, no toast.
 
-    `RemoteSession._end_turn_locally` synthesises an aborted `AgentEndEvent`
+    `AttachedSession._end_turn_locally` synthesises an aborted `AgentEndEvent`
     on EOF, which reaches the app as `TurnEnded(aborted=True)`. The held band
     must read that as the terminal state it is — not a failure (the owner did
     not report one) and not a completion (nothing completed).
@@ -1567,7 +1567,7 @@ async def test_a_followers_loop_turn_holds_working_between_iterations() -> None:
     viewer: `_synthesise_cold_state` advertises no `slash_capabilities`, so
     `_run_slash_command`'s routing branch (which needs a matching capability)
     is not taken, `/loop` is not in `_needs_runtime_first`, and the LOCAL loop
-    worker drives the `RemoteSession` — whose `prompt()` returns on the
+    worker drives the `AttachedSession` — whose `prompt()` returns on the
     owner's ACK, mid-turn. The loop workers' bare `update(streaming=False)`
     then wrote `lo ›` between every iteration with the owner still live:
     `⣾ → › → ⣾ → ›`, D-1 verbatim on the one surface the issue calls out as

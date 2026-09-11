@@ -6,7 +6,7 @@ the release owner handles that.
 ## 1. The problem as found in the code
 
 Since 0.46.0 every fresh `lop` is a **viewer**: the TUI holds a cold
-`RemoteSession` and a separate runtime process
+`AttachedSession` and a separate runtime process
 (`python -m local_operator.session.runtime.process`, spawned from
 `sys.executable` — `local_operator/session/runtime/launch.py:210-211`) owns the
 real `Session`. Two long-lived populations therefore coexist on one host —
@@ -18,13 +18,13 @@ The Sep 5 incident is the concrete shape:
 
 1. TUI (pid 87909) ran in-memory code ≤ v0.46.23, i.e. **pre-#624** (e1db6e8da
    landed in v0.46.25; `git tag --contains e1db6e8da` starts at v0.46.25).
-2. `/new` built a cold `RemoteSession`; `_engage_runtime_eagerly`
+2. `/new` built a cold `AttachedSession`; `_engage_runtime_eagerly`
    (`tui/app.py:8774`) spawned a runtime **from the new on-disk build**
    (0.48.0), because the spawn resolves `sys.executable` — the uv-tool path —
    fresh at spawn time.
 3. `/team lopdev <request>` routed to that runtime.
-   `OwnedSessionHandle._team_attach_slash`
-   (`local_operator/session/runtime/owned.py:1817-1891`) attached the team and
+   `ServingSessionHandle._team_attach_slash`
+   (`local_operator/session/runtime/serving.py:1817-1891`) attached the team and
    returned `SlashResult(kind="notice", text="sending to lopdev. manager is
    coordinating.", data={"type": "team_attached", "request": ...})`.
 4. Since #624 the **viewer** is expected to consume that receipt:
@@ -72,11 +72,11 @@ The attach auth frame gains an opt-in declaring which action-carrying receipt
 types the client consumes. When a routed result carries a request the
 connected client did not declare, the runtime admits the request itself
 through the same admission path as the `prompt` op
-(`owned.py:687-732`, `_PromptCommand` queue).
+(`serving.py:687-732`, `_PromptCommand` queue).
 
 **C. Version exchange.** Additive `version`/`source_ref` on `SessionRecord`
 (the record file *is* the hello channel an attach client reads before and at
-dial — `RemoteSession._bind_to(record)` at `session/remote.py:1002`); the
+dial — `AttachedSession._bind_to(record)` at `session/attached.py:1002`); the
 viewer compares with its own build on bind.
 
 **Recommendation: ship A + B + C in one PR.** They are one coherent change —
@@ -177,8 +177,8 @@ SLASH_ACTION_RECEIPTS: tuple[str, ...] = ("team_attached", "agent_attached")
 (`local_operator/mobile/attach_client.py:128`) gains
 `slash_consumers: Sequence[str] | None = None`; `connect` adds
 `auth["slash_consumers"] = list(...)` when set (next to the `events`/
-`frontend_state` flags at attach_client.py:195-201). `RemoteSession._dial`
-(`session/remote.py:1042`) passes `SLASH_ACTION_RECEIPTS` — the full-TUI
+`frontend_state` flags at attach_client.py:195-201). `AttachedSession._dial`
+(`session/attached.py:1042`) passes `SLASH_ACTION_RECEIPTS` — the full-TUI
 viewer is the client that consumes them (at `app.py:14674`).
 
 **Server side.** `RuntimeServer` auth handling
@@ -193,8 +193,8 @@ viewer is the client that consumes them (at `app.py:14674`).
   handle implementations and test doubles that lack the parameter keep working
   unchanged (`tests/unit/session/runtime/test_server.py:135` has one).
 
-**Handle side.** `OwnedSessionHandle.run_slash_authoritative`
-(`owned.py:1550-1587`) gains `consumers: Iterable[str] | None = None`. After
+**Handle side.** `ServingSessionHandle.run_slash_authoritative`
+(`serving.py:1550-1587`) gains `consumers: Iterable[str] | None = None`. After
 `result = await self._slash_result(...)`, one call:
 
 ```python
@@ -216,9 +216,9 @@ result = await self._complete_unconsumed_action(result, images, consumers)
 3. Otherwise admit the request as a user turn, mirroring the viewer's own
    `_submit_prompt` split (`app.py:12229-12241`):
    - `self._session.is_streaming` → `await self.steer(request, images=images,
-     command_id=<fresh uuid4>)` (owned.py:877);
+     command_id=<fresh uuid4>)` (serving.py:877);
    - else → `await self.prompt(request, images=images, command_id=<fresh
-     uuid4>)` (owned.py:687). This is the same `_PromptCommand` admission the
+     uuid4>)` (serving.py:687). This is the same `_PromptCommand` admission the
      `prompt` op uses: durable append resolves `admitted`, the drain emits the
      user `MessageStartEvent`, and the old viewer — which since 0.46.x
      subscribes with `events=True` (verified in v0.46.23's remote.py) — paints
@@ -260,7 +260,7 @@ contract documented at `app.py:21291-21293`:
   its `_slash_result` outcome. Its completion submits through the app's own
   user-row path so the row paints once and the echo registry stays
   consistent: `images = _image_blocks(wire_images)` (the same helper
-  owned.py/tui_handle.py use), then
+  serving.py/tui_handle.py use), then
   `self._submit_prompt(request, images, None, typed=request)`
   (`app.py:12163`) — **not** `_submit_command_prompt`, which would re-resolve
   markers against a composer map that does not exist owner-side and drop the
@@ -269,7 +269,7 @@ contract documented at `app.py:21291-21293`:
 
 **Static guard.** `tests/unit/tui/test_noop_consumers.py` audits that every
 produced `noop` type has a consumer. Extend it with the action-carrying
-twin: every `SlashResult` producer in `owned.py` and `app.py` whose
+twin: every `SlashResult` producer in `serving.py` and `app.py` whose
 `SlashResult(...)` call passes a `request` key in `data` must have its
 `data["type"]` listed in `SLASH_ACTION_RECEIPTS`, and every
 `SLASH_ACTION_RECEIPTS` entry must be consumed in
@@ -281,7 +281,7 @@ incident.
 
 The discovery record **is** the version channel: an attach client reads it
 before dial (`find_runtime_record`) and holds it at bind
-(`RemoteSession._bind_to(record)`, remote.py:1002); the daemon reads records
+(`AttachedSession._bind_to(record)`, attached.py); the daemon reads records
 the same way. No frame change is needed — the "ready/hello" for a v5 attach
 client effectively arrives with the record. (The task suggested the frontend
 sync frame; the record is strictly earlier, needs no pydantic change, and
@@ -310,7 +310,7 @@ one comparison at bind is complete.)
   the dataclass via `to_json()`, so the fields ride every rewrite for free
   (coder: confirm `RecordPublisher` rewrites from the live record object, and
   pin it in a test).
-- `local_operator/session/remote.py` — at bind, stash the owner's stamp on
+- `local_operator/session/attached.py` — at bind, stash the owner's stamp on
   the facade: `self.runtime_version = record.version`,
   `self.runtime_source_ref = record.source_ref` in `_bind_to` (and the
   equivalent in `connect`).
@@ -519,9 +519,9 @@ One PR, conventional commit
 `fix(runtime): detect and complete across viewer/runtime build skew`. Files:
 `local_operator/update.py`, `local_operator/session/runtime/types.py`,
 `local_operator/session/runtime/server.py`,
-`local_operator/session/runtime/owned.py`,
+`local_operator/session/runtime/serving.py`,
 `local_operator/mobile/attach_client.py`,
-`local_operator/mobile/tui_handle.py`, `local_operator/session/remote.py`,
+`local_operator/mobile/tui_handle.py`, `local_operator/session/attached.py`,
 `local_operator/tui/app.py`, `local_operator/cli.py`; tests as in §5. No
 `pyproject.toml` bump. Gates per AGENTS.md: flake8 / black==26.1.0 /
 isort==5.13.2 / pyright over the whole tree, the unit suite, the e2e stage

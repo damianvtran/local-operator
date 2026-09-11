@@ -131,6 +131,7 @@ from local_operator.session.protocol import SessionProtocol, ViewerSessionProtoc
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
+    primary_slash_name,
     slash_command_for,
 )
 from local_operator.tui import images as images_mod
@@ -188,6 +189,7 @@ from local_operator.tui.session_presentation import (
     OlderHistoryNotice,
     PreparedReplay,
     SessionPresentation,
+    live_projection_call_ids,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
@@ -1024,10 +1026,11 @@ RESUME_START_NOTICE = "start of conversation"
 #:
 #: Deliberately NOT "start of conversation" (which would be false) and not the
 #: "scroll up to load" instruction (which the reader cannot carry out here). It
-#: states what is true and offers the row itself as the way out: the notice is
-#: a control (:class:`OlderHistoryNotice`), so it does not have to recite a
-#: keyboard chord the product documents nowhere else.
-RESUME_UNREACHABLE_NOTICE = "older messages above — select to load"
+#: names the gesture the row actually honours: the notice is a control
+#: (:class:`OlderHistoryNotice`) with a full-width hover band, so "click"
+#: matches what the reader sees rather than a picker verb. Keyboard recovery
+#: is the documented ``ctrl+home`` chord, not this clause.
+RESUME_UNREACHABLE_NOTICE = "older messages above — click to load"
 
 #: The audit-phase twins of the two notices above, shown once the reader has
 #: drained everything the model can still see and the rows above are
@@ -1047,7 +1050,7 @@ RESUME_AUDIT_NOTICE = "earlier history above — scroll up to load"
 
 #: The unreachable twin: more pre-compaction history exists but this frame
 #: cannot be scrolled to it, so the row offers itself as the control instead.
-RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — select to load"
+RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — click to load"
 
 #: How many times one fetch transaction re-issues against a moved display
 #: window before declaring the head genuinely unstable. The window moves on a
@@ -1068,12 +1071,24 @@ _OLDER_PAGE_TRANSPORT_NOTICE = "session is reconnecting; earlier messages will l
 
 #: The genuine-fault message. Still an error — a contiguity violation or an
 #: unexpected failure must surface — but phrased for a human: what happened,
-#: and that scrolling up is the way to ask again. Never carries the internal
-#: `not attached` / `history changed while paging` wording.
+#: and how to ask again. The verb is geometry-aware because the same toast on
+#: an unscrollable frame used to instruct a gesture the head notice correctly
+#: said was impossible (UX U4). Never carries the internal `not attached` /
+#: `history changed while paging` wording.
 _OLDER_PAGE_FAULT_NOTICE = "Could not load earlier messages right now — scroll up to try again"
+_OLDER_PAGE_FAULT_NOTICE_CLICK = "Could not load earlier messages right now — click to try again"
+
+#: Restated onto the head notice while an unmounted paging lease is held.
+#: Wedged and in-flight are indistinguishable from this side of the gate, so
+#: the copy must not look idle ("scroll up" / "click to load") while a fetch
+#: is already the thing that will make the frame scrollable. A second click
+#: may still retire an unmounted lease — that is the wedge escape — but the
+#: row has to say a load is underway rather than asking the reader to start one.
+RESUME_LOADING_NOTICE = "loading older messages…"
+RESUME_AUDIT_LOADING_NOTICE = "loading earlier history…"
 
 
-@dataclass(frozen=True)
+@dataclass
 class _PagingLease:
     """Ownership of ONE backward-paging transaction, request through settle.
 
@@ -1090,9 +1105,29 @@ class _PagingLease:
     and are checked separately. Ownership answers a different question — may
     this completion open the gate — and the honest answer is "only if the gate
     is still the one it took", which is object identity and nothing else.
+
+    ``mounted`` is mutated in place on THIS object rather than by swapping a
+    replacement into the dict: ``owns()`` and ``_release_paging_lease``
+    compare identity, so replacing the stored lease would make the in-flight
+    fetch's object no longer the holder and its settle would refuse to
+    release. Frozen was the original F1 shape; the flags that let a click
+    retire a wedged holder have to live on the same object.
+
+    ``mounted`` records whether THIS transaction ever painted a page. A lease
+    that has held through an explicit request (click or the documented
+    ``ctrl+home`` chord) without mounting anything belongs to a fetch that
+    will never complete — a wedged owner socket that no disconnect event
+    reaches — so the next such request retires it rather than standing down
+    against a gate that nothing will ever release. A holder that HAS mounted
+    is merely settling, and keeps its gate (F1): a dropped ``insert_blocks``
+    settle is a TranscriptView defect outside this path, and breaking that
+    lease would re-consume a cursor whose rows are already painted. A fetch
+    that has not yet returned is indistinguishable from a wedge, so the
+    request is also the reader's way out of a hung wait.
     """
 
     source_token: str
+    mounted: bool = False
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -1328,7 +1363,7 @@ ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 #: `_admit_sidebar_presentation`), which is what refuses the pathological
 #: 200 MB-journal case regardless of this count. The count exists to bound
 #: the number of live viewer sockets (a parked presentation pins its leased
-#: `RemoteSession` and its frontend subscription) and mounted transcript
+#: `AttachedSession` and its frontend subscription) and mounted transcript
 #: trees, so it has to be sized to the WORKING SET — the conversations a user
 #: alternates between — or every switch past it is a cold rebuild: connect,
 #: history window, replay, MOUNT, layout wait, teardown, on the event loop.
@@ -1537,14 +1572,14 @@ def _attempts_outlasting(span_s: float) -> int:
 
 def _sidebar_connect_attempts() -> int:
     # IMPORTED HERE, AND THIS DOES NOT DEFER ANYTHING. The call below is at
-    # module scope, so `session.remote` (five modules, ~6.7 ms) loads whenever
+    # module scope, so `session.attached` (five modules, ~6.7 ms) loads whenever
     # `tui.app` does — an earlier version of this comment claimed the local
     # import avoided that cost, which its own call site falsified. Kept local
     # only because it reads at the one place that needs the constant; the honest
-    # statement of the cost is that `tui.app` now pulls in `session.remote` at
+    # statement of the cost is that `tui.app` now pulls in `session.attached` at
     # import. No user-facing boot regression: the CLI defers `tui.app` itself, so
     # `import local_operator.cli` loads neither — verified on both trees.
-    from local_operator.session.remote import COLD_FALLBACK_S
+    from local_operator.session.attached import COLD_FALLBACK_S
 
     # 50% margin over the recovery bound: the last attempt must land clearly
     # after `_go_cold`, not in a photo finish with it on a loaded machine.
@@ -2011,7 +2046,7 @@ class _PendingUserEcho(NamedTuple):
     internally, so registering one here would key the entry to an id no
     announcement can carry and paint every row twice. Such an entry keeps the
     historical text match, limit included. Both in-tree sessions accept the
-    keyword (``Session``, and ``RemoteSession`` — the class an attached
+    keyword (``Session``, and ``AttachedSession`` — the class an attached
     follower TUI drives, which kept the #228 swallow until it did); the
     fallback covers implementations outside the protocol's guarantee, not a
     shipping path.
@@ -3302,6 +3337,11 @@ class OperatorApp(App[None]):
         self._block_sink: list[Any] | None = None
         self._projection_message_id = ""
         self._projection_part = 0
+        # Seeded per projection by `_project_settled_rows`; see
+        # `session_presentation.project_settled_rows` for the contract. Default
+        # empty: a projection that never re-seeds is the cold-resume case.
+        self._projection_live_call_ids: set[str] = set()
+        self._projection_skipped_live: list[Any] = []
         #: One page per USER GESTURE, not per scroll callback. Held from the
         #: first trigger until the mount's settle pass has restored the scroll
         #: anchor: Textual ANIMATES pageup/home, so the scroll watcher fires
@@ -3331,9 +3371,9 @@ class OperatorApp(App[None]):
         #: across the gaps between attempts where the gate is open.
         #:
         #: Read only by `_reconcile_head_notice`, to withhold the pessimistic
-        #: "select to load" copy while the fill is still working. Stating it
+        #: "click to load" copy while the fill is still working. Stating it
         #: from intermediate geometry made the row round-trip its own copy on
-        #: painted frames — `scroll up` -> `select` -> `scroll up` — which
+        #: painted frames — `scroll up` -> `click` -> `scroll up` — which
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
         self._resume_fill_serial = 0
@@ -3551,7 +3591,7 @@ class OperatorApp(App[None]):
         self._approvals_default_auto: bool = False
         # The mode the user typed with `/approvals` in THIS pane, or None.
         # Deliberately the same shape as `Session._explicit_model_choice` (and
-        # `OwnedSessionHandle._explicit_approvals_mode`, which is the authority
+        # `ServingSessionHandle._explicit_approvals_mode`, which is the authority
         # whenever a runtime is attached), and the symmetry is the point: a
         # config edit may not revoke a hardening a human typed here, exactly as
         # it may not revoke an explicit `/model` pick.
@@ -4693,7 +4733,7 @@ class OperatorApp(App[None]):
     ) -> SessionInteraction:
         from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
-        from local_operator.session.remote import RemoteSession
+        from local_operator.session.attached import AttachedSession
 
         source = self._sidebar_sources.get(session_id)
         if source is not None and not source.retired:
@@ -4707,7 +4747,7 @@ class OperatorApp(App[None]):
             raise RuntimeError("a sidebar viewer never takes over a session")
 
         if not speculative:
-            remote = await RemoteSession.saved_preview(
+            remote = await AttachedSession.saved_preview(
                 session_id,
                 config_dir=directory,
                 cwd=str(getattr(self._session, "cwd", "")),
@@ -4716,8 +4756,8 @@ class OperatorApp(App[None]):
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
-                raise RuntimeError("The prepared owner is no longer active")
-            remote = await RemoteSession.connect(
+                raise RuntimeError("The prepared runtime is no longer active")
+            remote = await AttachedSession.connect(
                 record,
                 session_id,
                 config_dir=directory,
@@ -4725,7 +4765,7 @@ class OperatorApp(App[None]):
                 display_window=True,
             )
         if not _is_viewer(remote):
-            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
@@ -4801,13 +4841,13 @@ class OperatorApp(App[None]):
         try:
             session = source.session
             if not _is_viewer(session):
-                raise RuntimeError("Sidebar navigation requires an owner-backed session")
+                raise RuntimeError("Sidebar navigation requires a runtime-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
             #
             # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
             # v0.52.16 (#849) bounds `_recover_runtime` at 90s, so a
-            # `RemoteSession` can reach a TERMINAL cold state on a path that
+            # `AttachedSession` can reach a TERMINAL cold state on a path that
             # used to retry forever; a speculative prepare can therefore meet
             # `is_cold` for real rather than only in transit. Verified by
             # execution against a terminally cold session rather than reasoned
@@ -4819,7 +4859,7 @@ class OperatorApp(App[None]):
             # logs at debug and whose `finally` releases the preparation, so no
             # user-visible surface observes it.
             if speculative and session.is_cold:
-                raise RuntimeError("The prepared owner is no longer ready")
+                raise RuntimeError("The prepared runtime is no longer ready")
             if speculative or refresh:
                 await session.ensure_display_current()
             if not refresh:
@@ -4869,10 +4909,18 @@ class OperatorApp(App[None]):
             history = session.display_history_window()
             replay_revision = session.display_history_revision
             source_stamp = self._sidebar_source_stamp(source)
+            # An offscreen presentation has no `_session` the projection could
+            # ask, so the caller hands the in-flight answer in: a call still
+            # executing on the session being prepared must not grow a second
+            # settled row beside the live one. The seed is the gate-free set
+            # (`live_projection_call_ids`) so the pending scan below keeps a
+            # gate-parked call `waiting` instead of the painter showing it
+            # `running`.
             replay.prepare(
                 history,
                 bound=max(12, self.size.height // 2),
                 anchor_id=source.draft.scroll_anchor_id if not source.draft.following_tail else "",
+                live_call_ids=live_projection_call_ids(session),
             )
             preview_unavailable = (
                 not replay.blocks
@@ -4893,6 +4941,20 @@ class OperatorApp(App[None]):
             # which is the moment these cards become the app's to retire.
             prepared_live_cards: dict[str, ToolCard] = {}
             self._mark_pending_tool_rows(replay.blocks, session, prepared_live_cards)
+            # The replay SKIPPED the still-executing calls (see the `prepare`
+            # seed above) precisely so the live row would own them; where no
+            # live relay painted one (a local resume), paint the ONE row here
+            # from the calls the skip recorded. No-op when a card already
+            # exists for the call.
+            # The view is NOT mounted yet, so the painter cannot append to it
+            # directly; it collects into `replay.blocks` and the bulk append
+            # below mounts the row with the rest of the presentation.
+            self._paint_skipped_live_tool_rows(
+                replay.view,
+                prepared_live_cards,
+                replay._projection_skipped_live,
+                collect=replay.blocks,
+            )
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
             # A screen overlay is excluded from flow/virtual bounds; parking it
@@ -5664,8 +5726,9 @@ class OperatorApp(App[None]):
         preparation loop expensive.
 
         Both terms move only on durable content. `display_history_revision` is
-        bumped by compaction, prune and recovery (`remote.py:1385,1506`) — the
-        rewrites that can make an over-budget window SMALLER.
+        bumped by compaction, prune and recovery (`attached.py`'s
+        `_invalidate_display_history`) — the rewrites that can make an
+        over-budget window SMALLER.
         `history_message_count` is the durable row count.
         """
         session = source.session
@@ -5884,7 +5947,7 @@ class OperatorApp(App[None]):
         if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
         if not _is_viewer(session):
-            raise RuntimeError("The conversation is not owner-backed")
+            raise RuntimeError("The conversation is not runtime-backed")
         if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
@@ -5897,7 +5960,7 @@ class OperatorApp(App[None]):
         focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not _is_viewer(previous):
-            raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed current session")
         if not refreshing:
             self._close_subagent_view()
             self._close_org_chart_view()
@@ -6382,7 +6445,7 @@ class OperatorApp(App[None]):
                 # A BIND THAT DID NOT BIND IS A FAILURE. The bind has two
                 # silent returns that look identical here — "already bound,
                 # nothing to do" and "cannot bind right now" (the facade is
-                # `_recovering`, remote.py) — and only the second leaves the
+                # `_recovering`, attached.py) — and only the second leaves the
                 # session cold. Committing on that second one publishes a COLD
                 # session as connected: `display_only` goes False, the saved
                 # transcript is swapped in live, and then
@@ -6856,7 +6919,7 @@ class OperatorApp(App[None]):
         respect ``RETAINED_PRESENTATIONS``, and the evicted session — still
         live, still top-ranked, no longer cached — matched this filter again on
         the very next poll. Once live sessions outnumbered the bound that was
-        a real ``RemoteSession.connect`` plus a dispose per candidate per 2 s
+        a real ``AttachedSession.connect`` plus a dispose per candidate per 2 s
         poll, forever: measured 60 connects + 60 disposes over 30 polls at 10
         live sessions, poll loop-CPU 9.5 → 110 ms, paid for as long as the
         sidebar was open and gone the moment it was closed — which is the
@@ -7377,7 +7440,7 @@ class OperatorApp(App[None]):
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
-            # seam here is what lets RemoteSession reach back to rewrite the
+            # seam here is what lets AttachedSession reach back to rewrite the
             # optimistic notice with the authoritative number.
             set_cancel_resolution = getattr(session, "set_cancel_resolution", None)
             if callable(set_cancel_resolution):
@@ -7414,7 +7477,7 @@ class OperatorApp(App[None]):
         ):
             # A follower's remembered local effort must not silently rewrite
             # the shared owner's model. The owner projection is authoritative;
-            # explicit /effort remains routed through RemoteSession.
+            # explicit /effort remains routed through AttachedSession.
             #
             # Fast mode rides the SAME restore for the same reason: a `/reload`
             # or `/new` that dropped the dial would repaint the band without a
@@ -7478,7 +7541,7 @@ class OperatorApp(App[None]):
             # on every surface that names a conversation, because its own
             # `conversation_name` is deliberately empty — so the tab would
             # otherwise read identically to the parent's in a window switcher.
-            # `getattr` because a reduced facade (embedded SDK, RemoteSession,
+            # `getattr` because a reduced facade (embedded SDK, AttachedSession,
             # a pilot double) need not expose the property, and "not a fork" is
             # the answer that leaves such a host exactly as it was.
             forked=bool(getattr(session, "wears_inherited_title", False)),
@@ -7708,7 +7771,7 @@ class OperatorApp(App[None]):
         Says the same thing the owner's own ``/stop`` says, because it is the
         same fact: the session is cold and ``/resume`` is the way back. The
         id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
-        is what turns every later "owner is reconnecting" into the truth.
+        is what turns every later "runtime is reconnecting" into the truth.
         """
         source = source or self._interaction
         session = source.session
@@ -7919,7 +7982,7 @@ class OperatorApp(App[None]):
 
         ``call_later`` runs under Textual's active-app context; creating the
         handler task there is what makes widget composition legal. The relay
-        future mirrors completion/cancellation back to RemoteSession without
+        future mirrors completion/cancellation back to AttachedSession without
         letting a late card settle a cancelled owner request.
         """
         source = source or self._interaction
@@ -8771,6 +8834,10 @@ class OperatorApp(App[None]):
                 self._fetch_older_display_page(source, lease, on_settled=settled),
                 group=source.worker_group("history-page"),
             )
+            # The fetch is now the thing that will make the frame scrollable.
+            # Until it lands, an unmounted lease must not advertise a gesture
+            # the gate will swallow — restate as loading copy.
+            self._reconcile_head_notice()
         else:
             self._resume_fill_active = False
             self._reconcile_head_notice()
@@ -8843,18 +8910,39 @@ class OperatorApp(App[None]):
             # rendered at `info`/`dim`, 3.77:1 on the light theme against the
             # 4.5:1 AA floor (design review round 1, D4).
             self._restate_head_notice(notice, RESUME_START_NOTICE, "note")
-        elif not scrollable and self._resume_fill_active:
+            return
+        lease = self._paging_leases.get(self._interaction.token)
+        if lease is not None and not lease.mounted:
+            # An unmounted lease is a fetch in flight or a wedge. Either way
+            # the wheel stands down against `_resume_paging`, so advertising
+            # "scroll up to load" is the stuck frame's lie on a scrollable
+            # geometry (UX U1) and "click to load" looks idle while a load is
+            # already underway (UX U3 / D2). Loading copy until a page mounts
+            # is the honest state; a second click or ctrl+home may still
+            # retire the lease. A holder that HAS mounted is merely settling
+            # and falls through so R6's skip still applies.
+            self._restate_head_notice(
+                notice,
+                RESUME_AUDIT_LOADING_NOTICE if audit else RESUME_LOADING_NOTICE,
+                "note",
+            )
+            return
+        if not scrollable and self._resume_fill_active:
             # A fill attempt is still in flight, and the frame it is about to
             # produce is the one worth describing. Stating "unreachable" from
             # intermediate geometry the fill is on its way to invalidating made
             # the row ROUND-TRIP its copy on painted frames — `scroll up` ->
-            # `select` -> `scroll up` at 120x300, which a reader sees as the
+            # `click` -> `scroll up` at 120x300, which a reader sees as the
             # notice changing its mind and changing it back (review round 2,
             # R6). The pessimistic state is worth stating once the fill has
             # actually given up, and the fill's own exits do exactly that:
             # every one of them clears this flag before reconciling.
+            #
+            # Unmounted in-flight leases already returned above with loading
+            # copy. A fill that still has this flag with no such lease (or
+            # with a mounted one) is the R6 skip: keep the current row.
             return
-        elif not scrollable:
+        if not scrollable:
             # `note`, not `info`: this is the answer to "where did my history
             # go", which is the role `NoticeBlock` reserves `note` for, and it
             # carries an instruction the reader must be able to READ to act
@@ -9007,6 +9095,14 @@ class OperatorApp(App[None]):
     def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
+        session = self._session
+        # Snapshot the in-flight calls BEFORE the fold: the answer can change
+        # mid-projection, and replay reads only this set. The seed is the
+        # gate-free set (`live_projection_call_ids` documents the pending
+        # subtraction), so a gate-parked call keeps its `waiting` row from
+        # `_mark_pending_tool_rows` below; the fold's own fallback re-asks the
+        # same subtracted question for a target that never seeded.
+        self._projection_live_call_ids = live_projection_call_ids(session)
         try:
             projected = project_settled_rows(self, history, bound=bound)
             # The visible transcript, so the app's own registry is the right
@@ -9015,9 +9111,92 @@ class OperatorApp(App[None]):
             self._mark_pending_tool_rows(
                 self._transcript_view().blocks(), self._session, self._tool_cards
             )
+            painted = self._paint_skipped_live_tool_rows(
+                self._transcript_view(), self._tool_cards, self._projection_skipped_live
+            )
+            if painted and self._controller is not None:
+                # The adopt path's settle seam. The skipped call's
+                # `ToolStarted` predates this process's subscription, so the
+                # controller never registered it: the eventual `ToolEnded`
+                # would be buffered as an orphan and dropped at turn end, and
+                # `_retire_live_tool_cards` would stamp a REAL success
+                # `interrupted`. Registering the painted ids — what the
+                # presentation-commit path does for its replayed rows — makes
+                # the controller pair the end with this card, and drains an
+                # end that already arrived while the card was being painted.
+                self._controller.register_restored_tools(set(painted))
+            self._refresh_working_activity()
             return projected
         finally:
             self._projection_message_id = ""
+            self._projection_live_call_ids = set()
+            self._projection_skipped_live = []
+
+    @staticmethod
+    def _paint_skipped_live_tool_rows(
+        view: Any,
+        live_cards: dict[str, ToolCard],
+        calls: list[Any],
+        *,
+        collect: list[Any] | None = None,
+    ) -> list[str]:
+        """Paint the ONE row for a still-executing call the replay skipped.
+
+        Returns the ids it actually painted, so the caller can hand them to
+        the settle seam: the visible path registers them with the event
+        controller (`register_restored_tools`) because no `ToolStarted` will
+        ever pair their `ToolEnded`; the prepare path ignores the return and
+        registers at commit, where its presentation becomes the app's.
+
+        The replay drops the settled row for an in-flight call so the live
+        path owns it — but on a LOCAL resume the turn's ``ToolStarted`` fired
+        before this process (re)subscribed, so no card ever arrives for it
+        and the transcript would show nothing for a call that is running.
+        Mounting here rather than inside the fold keeps the invariant "one
+        visible row per call": the check against the already-painted cards is
+        what makes this a no-op when a live row DOES exist (the reconnect gap,
+        where the relay painted it before the disconnect).
+
+        The registry is passed rather than read off ``self`` because the
+        prepare caller is painting a presentation that is not yet the app's:
+        registering into ``self._tool_cards`` there would attribute another
+        conversation's live call to the visible one.
+
+        ``collect`` is the prepare case: the presentation's view is not mounted
+        yet, so the row is appended to the presentation's block list for the
+        caller's bulk mount rather than to the (unmountable) view. The visible
+        path leaves it ``None`` and appends to the live view directly.
+        """
+        painted: list[str] = []
+        for call in calls:
+            call_id = getattr(call, "id", "") or ""
+            if not call_id or call_id in live_cards:
+                continue
+            haystack = collect if collect is not None else view.blocks()
+            if any(
+                isinstance(block, ToolCard) and block.tool_call_id == call_id for block in haystack
+            ):
+                continue
+            # `restore`, not the constructor's default running clock: the true
+            # start is when the tool began, not when this view painted the row,
+            # so the card must not invent an elapsed time it cannot know — the
+            # same reason `restore(state="running")` clears `_started`.
+            card = ToolCard(
+                call_id,
+                getattr(call, "name", "") or "",
+                getattr(call, "arguments", None) or {},
+            )
+            card.restore(state="running")
+            if collect is not None:
+                collect.append(card)
+            else:
+                view.append_block(card)
+            # Registered as live so the turn-death paths and the working line
+            # count it, and so `_retire_live_tool_cards` settles it if the
+            # owner dies rather than returning a result.
+            live_cards[call_id] = card
+            painted.append(call_id)
+        return painted
 
     def on_history_page_notice_requested(self, message: HistoryPageNotice.Requested) -> None:
         message.stop()
@@ -9025,7 +9204,18 @@ class OperatorApp(App[None]):
             self._mount_newer_resume_page()
 
     def on_older_history_notice_requested(self, message: OlderHistoryNotice.Requested) -> None:
-        """The explicit affordance uses the same demand lease as upward input."""
+        """The explicit affordance uses the same demand lease as upward input.
+
+        One extra duty the wheel does not carry: the click is the reader
+        ASKING for the page the row advertises, so a gate that swallowed the
+        previous ask without mounting anything is abandoned, not busy. Retire
+        it and let this click fetch — otherwise a wedged holder (an owner
+        socket that never answers and is never torn down) leaves the frame
+        with a notice no input can answer: the stuck "older messages above"
+        state. ``ctrl+home`` carries the same retirement through
+        :meth:`_check_resume_page` so a keyboard reader is not stuck waiting
+        for a mouse.
+        """
         message.stop()
         if message.notice is self._resume_head_notice:
             self._resume_fill_active = False
@@ -9188,7 +9378,7 @@ class OperatorApp(App[None]):
                     # can scroll. Fall through to the honest fault rather than
                     # live-lock; the next scroll-up asks again.
                     self._resume_fill_active = False
-                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
+                    self._notice(self._older_page_fault_notice(), "error")
                 elif failure == "transport":
                     # The connection is down; reattach is the transport
                     # layer's floor and is driven underneath this one. Do NOT
@@ -9207,7 +9397,7 @@ class OperatorApp(App[None]):
                     # as five identical red rows.
                     self._older_page_retries.pop(lease.source_token, None)
                     self._resume_fill_active = False
-                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
+                    self._notice(self._older_page_fault_notice(), "error")
         finally:
             # `transferred` means the mount now carries the lease to its settle.
             # Otherwise this transaction ends here, and only it may end itself.
@@ -9249,7 +9439,7 @@ class OperatorApp(App[None]):
         without going through either. So the copy was correct on every path a
         test drove and wrong on the one a reader takes most often: the notice
         told a reader to scroll up in a frame with no scrollbar after the
-        window grew, and went on offering `select to load` after it shrank back
+        window grew, and went on offering `click to load` after it shrank back
         into a scrollable frame (design review round 2, D1; QA Q5).
 
         Keyed on the EXTENT rather than on a resize event, which is the same
@@ -9268,6 +9458,21 @@ class OperatorApp(App[None]):
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
+
+    def _older_page_fault_notice(self) -> str:
+        """Genuine-fault toast, with a verb this frame can actually honour.
+
+        The scrollable clause is the original instruction. On an unscrollable
+        frame it would contradict the head notice (UX U4): "scroll up to try
+        again" next to "click to load". Dropping the gesture entirely would
+        leave a toast with no next step; naming the click matches the control
+        the head row already is.
+        """
+        view = self._transcript_view()
+        viewport = view.container_size.height or view.size.height
+        if viewport and view.virtual_size.height > viewport:
+            return _OLDER_PAGE_FAULT_NOTICE
+        return _OLDER_PAGE_FAULT_NOTICE_CLICK
 
     @property
     def _resume_paging(self) -> bool:
@@ -9343,6 +9548,9 @@ class OperatorApp(App[None]):
             self._fetch_older_display_page(source, lease, on_settled=on_settled),
             group=source.worker_group("history-page"),
         )
+        # Until this fetch lands, an unmounted lease must not advertise a
+        # gesture the gate will swallow. Restate as loading copy.
+        self._reconcile_head_notice()
 
     def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
         """Take the backward-paging gate for ``source``, or refuse.
@@ -9371,6 +9579,49 @@ class OperatorApp(App[None]):
         if self._paging_leases.get(lease.source_token) is not lease:
             return False
         del self._paging_leases[lease.source_token]
+        return True
+
+    def _break_abandoned_paging_lease(self, source: SessionInteraction) -> bool:
+        """Retire a paging gate whose holder will never release it.
+
+        Only an explicit ASK may do this — the notice click, or the documented
+        ``ctrl+home`` chord — and only against a lease that has produced
+        NOTHING: it held the gate through one explicit request and still
+        mounted no rows. That combination means the holder is wedged — a fetch
+        parked on an owner socket that never answers and whose teardown never
+        arrives — and every input gates on it, so the frame is stuck until the
+        lease is retired. The wheel is not this gesture: every notch of a
+        healthy in-flight fetch would otherwise cancel and restart it.
+
+        A fetch that has not yet returned is indistinguishable from a wedge
+        from this side of the gate, so the ask is also the way out of a hung
+        wait. A holder that HAS mounted is merely settling, and keeping that
+        gate is F1: retiring it would let a second fetch re-consume the same
+        cursor. A dropped ``insert_blocks`` settle is a TranscriptView defect
+        outside this path and is deliberately not retired here.
+
+        The replacement inherits ``_older_page_retries`` for this source: the
+        budget is against a moving window, not a particular transaction, so a
+        wedged fetch that already spent retries should not get a fresh count.
+
+        Retiring is safe because the wedged holder's own completion is fenced
+        on identity: when it finally lands (or is cancelled) it no longer owns
+        the gate, so it releases nothing it does not hold and publishes nothing
+        to a screen it no longer owns. The replacement fetch re-reads the same
+        ``history_before_token`` cursor the wedged one never consumed, so no
+        page is skipped or duplicated.
+
+        Returns whether a lease was retired, so the caller can decide whether
+        the gesture should now proceed to a fresh fetch.
+        """
+        lease = self._paging_leases.get(source.token)
+        if lease is None or lease.mounted:
+            return False
+        # Cancel the wedged fetch's worker so its coroutine unwinds through
+        # its own `finally` (which now releases nothing, having lost the gate)
+        # rather than lingering against the retired lease.
+        self.workers.cancel_group(self, source.worker_group("history-page"))
+        del self._paging_leases[source.token]
         return True
 
     def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
@@ -9422,7 +9673,17 @@ class OperatorApp(App[None]):
             view.call_after_refresh(run_check)
 
     def _check_resume_page(self, *, force: bool = False) -> None:
-        """Spend one demand only after motion settles in the prefetch zone."""
+        """Spend one demand only after motion settles in the prefetch zone.
+
+        ``force=True`` is an explicit ASK (the notice click, or the documented
+        ``ctrl+home`` chord), not a wheel notch. A wedged unmounted lease
+        stands every other input down against `_resume_paging`; retiring it
+        here is what lets the documented keyboard route recover in place
+        (UX U2). The wheel still calls without force, so a healthy in-flight
+        fetch is not cancelled by every notch.
+        """
+        if force:
+            self._break_abandoned_paging_lease(self._interaction)
         if not self._resume_in_zone or self._resume_paging:
             return
         view = self._transcript_view()
@@ -9569,6 +9830,10 @@ class OperatorApp(App[None]):
             # stays the top row and the conversation keeps its order.
             mounted = transcript.blocks()
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            # Flag BEFORE the insert's settle: a click arriving while gaps
+            # are still answering must see a working transaction, not a
+            # wedge. Mutated on this object so identity (F1) is unchanged.
+            lease.mounted = True
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
             # Hidden-only pages still yield; otherwise initial fill projects
@@ -10921,7 +11186,7 @@ class OperatorApp(App[None]):
         identically. Failures inside the new factory surface through
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
 
-        A session already live elsewhere is represented by RemoteSession and
+        A session already live elsewhere is represented by AttachedSession and
         adopted through this SAME full-app path. The owner remains the sole
         transcript writer; this TUI consumes durable history plus relayed
         AgentEvents and sends mutations over the authenticated loopback socket.
@@ -11255,14 +11520,14 @@ class OperatorApp(App[None]):
         return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
-        """Build a RemoteSession and adopt it like any ordinary resume.
+        """Build a AttachedSession and adopt it like any ordinary resume.
 
         Protocol <4 has no full event stream. The degraded projection view was
         deliberately deleted, so a mixed-version owner gets a precise upgrade
         refusal rather than silently falling back to a divergent UI.
         """
         from local_operator.mobile.attach_client import find_runtime_record
-        from local_operator.session.remote import RemoteSession
+        from local_operator.session.attached import AttachedSession
 
         record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
         if record is None or found_owner != owner or record.protocol < 4:
@@ -11279,7 +11544,7 @@ class OperatorApp(App[None]):
             return await self._resume_factory(concrete)
 
         try:
-            remote = await RemoteSession.connect(
+            remote = await AttachedSession.connect(
                 record,
                 concrete,
                 config_dir=config_root,
@@ -11565,7 +11830,7 @@ class OperatorApp(App[None]):
         second to observe a flag that changes twice a session.
 
         Defensive on both sides: a host whose session has no ``has_pending_fork``
-        (the lightweight facades, ``RemoteSession``) simply never lights the
+        (the lightweight facades, ``AttachedSession``) simply never lights the
         segment, which is the same behaviour it had before the indicator
         existed.
         """
@@ -12286,7 +12551,7 @@ class OperatorApp(App[None]):
             # wrong persona answering confidently is worse than a refusal,
             # because nothing on screen tells the user which one they got.
             #
-            # Reachable on a viewer (`RemoteSession`), which serves the teams
+            # Reachable on a viewer (`AttachedSession`), which serves the teams
             # LISTING from local config but has no seam to stamp an attachment
             # onto the runtime that will build the turn. The wording says
             # exactly that: the teams are fine, attaching them here is what is
@@ -12938,7 +13203,7 @@ class OperatorApp(App[None]):
         ``session.mcp_startup`` is a frozen BOOT SNAPSHOT, and this method runs
         on every adoption — boot, ``/new``, ``/resume``, a remote takeover, and
         every sidebar click, which re-adopts a session and replays a snapshot
-        taken minutes ago (``RemoteSession`` even rehydrates the OWNER's round,
+        taken minutes ago (``AttachedSession`` even rehydrates the OWNER's round,
         so attaching to a peer replayed a round this process never ran). MCP
         servers are process-wide and shared, so re-confirming "12 servers, 425
         tools" on each sidebar click is pure noise over the user's work.
@@ -13014,7 +13279,7 @@ class OperatorApp(App[None]):
         # rather than assumed: all three `_report_mcp_startup` callers are on
         # the adopted-session path, `SessionProtocol.session_id` returns `str`,
         # `Session` falls back to the transcript directory name,
-        # `RemoteSession` takes the id as a constructor argument, and the one
+        # `AttachedSession` takes the id as a constructor argument, and the one
         # `str | None` implementation (`headless_print`) is never adopted by
         # this app. Keying id-less hosts by `id(session)` would close the lane
         # but buy nothing reachable, so the honest statement is that a keyless
@@ -14606,7 +14871,7 @@ class OperatorApp(App[None]):
 
         A viewer that quits right after this offers its runtime back
         (``_retire_unused_runtime``); the runtime refuses because the attach
-        journalled ``attachment.json``, which ``OwnedSessionHandle.is_pristine``
+        journalled ``attachment.json``, which ``ServingSessionHandle.is_pristine``
         consults alongside the transcript — a bare ``/team <name>`` writes no
         row, so the sidecar is the only thing that makes it durable (review
         round 2, R7). The request form is additionally held by its in-flight
@@ -14731,7 +14996,7 @@ class OperatorApp(App[None]):
         finish AFTER the swap had disposed its viewer, attaching a socket to a
         dead facade that then held the old runtime resident for the life of
         the process (review round 1, MAJOR-1). Cancelling at the swap closes
-        that from this side; `RemoteSession._ensure_bound` refusing to bind a
+        that from this side; `AttachedSession._ensure_bound` refusing to bind a
         disposed facade closes it from the other, for callers that are not
         this app.
         """
@@ -16187,7 +16452,7 @@ class OperatorApp(App[None]):
                         # recoverable (press again), so it renders as a
                         # warning that says exactly what is unknown.
                         self._replace_stop_notice(
-                            f"could not confirm the stop with the session owner — "
+                            f"could not confirm the stop with the runtime — "
                             f"{offered} subagent{'s' if offered != 1 else ''} may still "
                             "be running; press Esc twice again to retry",
                             "warning",
@@ -19198,7 +19463,7 @@ class OperatorApp(App[None]):
 
         WHY THIS IS NOT PART OF ``_mobile_adopted``. That method manages a
         SESSION-scoped registrant and tears it down whenever the app follows a
-        ``RemoteSession`` — which is the normal sidebar state — because a second
+        ``AttachedSession`` — which is the normal sidebar state — because a second
         registrant for one transcript corrupts daemon routing. Correct, and it
         leaves a sidebar user's TUI listening on nothing, which is why a
         notification click had no live process to route to and spawned a whole
@@ -19561,7 +19826,7 @@ class OperatorApp(App[None]):
         be a startup gate for the terminal. The lazy import keeps the mobile
         package off the CLI path for every run that never mounts the app.
         """
-        # A RemoteSession is already a client of the owner's registrant. Starting
+        # A AttachedSession is already a client of the owner's registrant. Starting
         # another registrant here would publish a second record for the same
         # transcript and corrupt daemon routing. If this process previously
         # owned a local session, tear its record down while following remotely;
@@ -19885,7 +20150,7 @@ class OperatorApp(App[None]):
             record = getattr(session, "record_shell", None) if session is not None else None
             if not callable(record):
                 self._notice_for(
-                    source, "Shell finished, but this owner cannot save its receipt", "error"
+                    source, "Shell finished, but this runtime cannot save its receipt", "error"
                 )
                 return
             try:
@@ -20139,7 +20404,7 @@ class OperatorApp(App[None]):
             # `steer_message` takes the Message OBJECT, so the id is carried by
             # the thing queued rather than offered alongside it. Both in-tree
             # sessions preserve it — `Session` announces the queued object
-            # itself at the drain, and `RemoteSession` sends
+            # itself at the drain, and `AttachedSession` sends
             # `command_id=message.id`, which the owner adopts as the Message id.
             #
             # That is the contract this registration relies on, and it is
@@ -20281,7 +20546,7 @@ class OperatorApp(App[None]):
         # long after the announcement, so the correlation key has to travel
         # outward. The keyword is optional on `SessionProtocol`, so a session
         # without it mints its own id and the entry registers id-less, falling
-        # back to text. Both in-tree sessions accept it -- `RemoteSession`
+        # back to text. Both in-tree sessions accept it -- `AttachedSession`
         # included, which is what an attached follower TUI drives and which
         # swallowed cross-surface prompts until it did (round 1, F1).
         source.turn.operation += 1
@@ -20507,7 +20772,7 @@ class OperatorApp(App[None]):
                 # event-driven, not timed.
                 #
                 # Accepted residual: the owner ACKs on the durable append BEFORE
-                # `agent_start` (`runtime/owned.py` `prompt` vs `harness/loop.py`
+                # `agent_start` (`runtime/serving.py` `prompt` vs `harness/loop.py`
                 # `_run_turn`), so a `finally` that runs inside that gap reads
                 # `is_streaming` False and clears the band — a working→idle→
                 # working blip bounded by the owner's prompt preparation, not by
@@ -20549,7 +20814,7 @@ class OperatorApp(App[None]):
         premise that `/loop` always routes to the owner; it does not on a COLD
         viewer, whose `_synthesise_cold_state` advertises no
         `slash_capabilities`, so the `route_shared_slash` branch is not taken
-        and the LOCAL worker drives the `RemoteSession` (see the corrected
+        and the LOCAL worker drives the `AttachedSession` (see the corrected
         note in `_run_slash_command`'s routing branch).
 
         WITHHELD on a follower whose owner is still streaming: that worker
@@ -20589,7 +20854,7 @@ class OperatorApp(App[None]):
         `_finalize_turn` directly would run AHEAD of the queued real end.
 
         WHETHER THE WORKER KNOWS THE OUTCOME is carried separately from what the
-        outcome was, because on a FOLLOWER it does not know. `RemoteSession`'s
+        outcome was, because on a FOLLOWER it does not know. `AttachedSession`'s
         `prompt()` returns on the owner's ACK ("prompt admitted"), so this
         worker's `finally` runs MID-TURN with `error=None` — which means "I have
         no error to report", not "the turn succeeded". Reported as a clean
@@ -20638,7 +20903,7 @@ class OperatorApp(App[None]):
             return
         if not session.owns_runtime:
             # NAMING BELONGS TO THE RUNTIME NOW.
-            # ``OwnedSessionHandle.prompt`` calls its own
+            # ``ServingSessionHandle.prompt`` calls its own
             # ``_maybe_name_conversation``, so the title is generated beside
             # the transcript that stores it, by the process that owns the
             # provider. A viewer must not race that: its ``complete_once``
@@ -21038,14 +21303,17 @@ class OperatorApp(App[None]):
         rename always wins, including one that landed while this call was in
         flight, so this may store nothing and return the name already there.
 
-        ``turn_count`` distinguishes the two callers and drives the growth
-        gate's counters. ``None`` is the FIRST title (the naming path): the
-        session's identity starts here, so the baseline is seeded from the
-        transcript's current turn count and the refresh budget is (re)set to
-        zero — this is where omp's ``lastTitledTurnCount``/``refreshCount`` are
-        initialised. An int is a RE-title: the baseline moves to the count the
-        check was dispatched at and one refresh is spent, so the next re-title
-        needs another doubling of the transcript.
+        ``turn_count`` distinguishes the callers and drives the growth gate's
+        counters. ``None`` means the conversation's identity is being DECIDED,
+        not merely refined, so the baseline is seeded from the transcript's
+        current turn count and the refresh budget is (re)set to zero — this is
+        where omp's ``lastTitledTurnCount``/``refreshCount`` are initialised.
+        Two callers pass it: the first naming call, where the identity starts;
+        and ``/title refresh``, where the user has just re-decided it by hand,
+        which restarts the drift clock for the same reason rather than by
+        coincidence. An int is an automatic RE-title: the baseline moves to the
+        count the check was dispatched at and one refresh is spent, so the next
+        one needs another doubling of the transcript.
         """
         stored = session.set_conversation_name(title, user_set=False)
         if turn_count is None:
@@ -21240,7 +21508,7 @@ class OperatorApp(App[None]):
         """Point the session at ``destination``, rebuilding its runtime if bound.
 
         The two outcomes are the session's to decide, not this app's — see
-        ``RemoteSession.set_working_directory``, which owns the reasoning about
+        ``AttachedSession.set_working_directory``, which owns the reasoning about
         why a cold viewer is a field assignment and a bound one is a runtime
         rebind. This method is the UI half: it reports what happened, keeps the
         band in step, and re-engages the successor.
@@ -21287,7 +21555,7 @@ class OperatorApp(App[None]):
 
         if outcome == "rebound":
             # NOTHING to re-engage here. The runtime leaves by the `retiring`
-            # route (see `RemoteSession.set_working_directory`), which the
+            # route (see `AttachedSession.set_working_directory`), which the
             # facade turns into `_go_cold(refresh=True)` and the refresh
             # callback this app already installs — `_on_runtime_refreshed` —
             # engages the successor eagerly. Starting a second engage from here
@@ -21432,7 +21700,7 @@ class OperatorApp(App[None]):
         self._status.update(cwd=cwd)
 
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
-        """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
+        """``/title`` — report; ``/title <text>`` — set it; ``/title refresh`` — ask.
 
         The ONE production writer of ``user_set=True``, which is what the
         precedence flag on :class:`ConversationName` is for: a title a human
@@ -21441,8 +21709,10 @@ class OperatorApp(App[None]):
         ``ConversationName.set``) and every later re-title, which
         :meth:`_maybe_retitle_conversation` declines to even spend a call on.
 
-        No provider call on either branch. The words are the user's, so the only
-        work is putting them on the two surfaces that show a conversation's name.
+        No provider call on the report or the set branch. The words are the
+        user's, so the only work is putting them on the two surfaces that show a
+        conversation's name. ``refresh`` is the one branch that spends a call,
+        and it is delegated to :meth:`_cmd_title_refresh`.
         """
         session = self._session
         if session is None:
@@ -21451,10 +21721,18 @@ class OperatorApp(App[None]):
             # `notice` would collapse it. The rule `_cmd_goal` follows.
             self._system_notice("session is still starting…", "warning")
             return
-        if not arg:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            notice(str(error), "warning")
+            return
+        if is_refresh:
+            self._cmd_title_refresh(session, notice)
+            return
+        if not title:
             current = session.conversation_name
             if current:
-                notice(f"conversation: {current} — /rename <title> to change it")
+                notice(f"conversation: {current} — /title <words>, or /title refresh")
             elif self._provisional_name:
                 # The band is wearing a stand-in, not a name (see
                 # `_show_provisional_name`). Answering a bare "unnamed" with an
@@ -21462,12 +21740,12 @@ class OperatorApp(App[None]):
                 # what the label actually is.
                 notice(
                     f"unnamed — the label above is a quote of your first message "
-                    f"({self._provisional_name}); /rename <title> names it"
+                    f"({self._provisional_name}); /title <words> names it"
                 )
             else:
-                notice("unnamed — /rename <title> names this conversation")
+                notice("unnamed — /title <words> names this conversation")
             return
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         # Superseded, and by the best possible answer: cleared for the reason
         # `_store_title` clears it, so nothing downstream still believes the
         # band is showing a stand-in.
@@ -21497,6 +21775,165 @@ class OperatorApp(App[None]):
         # ignored the format, while this is just a long name the user chose, and
         # refusing it outright would lose a title they typed.
         notice(f"renamed: {stored} — auto-naming will not override it")
+
+    def _cmd_title_refresh(self, session: SessionProtocol, notice: NoticeFn) -> None:
+        """``/title refresh`` — re-read the conversation and name it now.
+
+        The on-demand counterpart to :meth:`_maybe_retitle_conversation`, and
+        every difference between them follows from who asked. The automatic path
+        is a guess about whether a refresh is WANTED, so it is gated four ways
+        (``user_set``, low signal, growth, a churn floor) to keep the guessing
+        cheap. This caller is not guessing, so all four gates are dropped:
+        the user has just said the title is wrong, which is better evidence than
+        any schedule.
+
+        ``user_set`` is not merely bypassed but RELEASED
+        (``ConversationName.release_user_set``), and that is the load-bearing
+        half of this command. Asking for a fresh title is withdrawing the name
+        you typed — keeping the flag would mean the refreshed title landed and
+        then automatic naming stayed disabled forever on the strength of a
+        rename the user had just abandoned. Released, the conversation goes back
+        to tracking its own subject, which is what "refresh" means. The release
+        happens in the worker and only once a replacement is actually in hand —
+        see :meth:`_title_refresh_worker`.
+
+        The growth budget is not charged either. It bounds AUTOMATIC calls so an
+        unattended session cannot spend indefinitely; a call the user asked for
+        is not unattended, and charging it would let two deliberate refreshes
+        exhaust the automatic schedule for the rest of the session. A landed
+        refresh instead re-seeds the schedule through ``_store_title``'s
+        first-title branch, which is the honest reading: this conversation's
+        identity was just re-decided, so its drift clock starts again here.
+        """
+        # Generation-stamped like the automatic path so a `/new` or `/resume`
+        # landing while the call is in flight cannot repaint the replacement
+        # conversation with this one's title.
+        self._name_generation += 1
+        generation = self._name_generation
+        # Snapshot on the UI thread, exactly as the automatic path does: the
+        # sampler only reads role/text, so a shallow copy is enough, and taking
+        # it now titles the conversation as it stands rather than as it looks
+        # after a concurrent turn has written more history.
+        turns = (
+            None
+            if hasattr(session, "materialize_history")
+            else (list(session.history()) if hasattr(session, "history") else [])
+        )
+        notice("refreshing the title…")
+        self.run_worker(
+            self._title_refresh_worker(
+                session,
+                session.conversation_name,
+                generation,
+                turns,
+                source=self._interaction,
+            ),
+            thread=False,
+            group=self._interaction.worker_group("naming"),
+        )
+
+    async def _title_refresh_worker(
+        self,
+        session: SessionProtocol,
+        current: str,
+        generation: int,
+        turns: list[AgentMessage] | None,
+        source: SessionInteraction | None = None,
+    ) -> None:
+        """One isolated refresh call, whose every outcome gets a receipt.
+
+        Unlike :meth:`_retitle_conversation_worker`, silence is not an option on
+        any branch. That worker runs unasked and repaints only on a genuinely
+        new title, so "no change" and "the call failed" can both correctly
+        resolve to doing nothing. Here a user typed a command and is watching
+        for an answer, so each outcome says which one it was — a refresh that
+        quietly changed nothing is indistinguishable from a broken command.
+
+        ``source`` is captured at DISPATCH and every write goes through it —
+        ``_store_title_for``, ``_notice_for`` — rather than through
+        ``self._interaction``, which is a moving target: a sidebar switch during
+        the call moves it, and a worker that re-read it on resume would paint
+        the refreshed title onto the conversation the user switched TO and stamp
+        that innocent session's naming schedule. The neighbouring naming workers
+        both take the source as a parameter for this reason; this one is not
+        special.
+        """
+        source = source or self._interaction
+        source.active_workers += 1
+        try:
+            try:
+                if turns is None:
+                    turns = await getattr(session, "materialize_history")()
+                result = await naming.refresh_title(current, session.complete_once, turns=turns)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 — silence is the one defect here
+                # `refresh_title` swallows the NAMING call's failures, but
+                # `materialize_history` is outside it and raises on ordinary
+                # reconnect races ("history changed while materializing").
+                # Uncaught, the worker dies with `refreshing the title…` still on
+                # screen and no answer ever — precisely what this method's
+                # contract forbids. The routed twins already resolve it this way.
+                logger.debug("title refresh could not read the history", exc_info=True)
+                result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
+            # A cancel that the naming call swallowed on our behalf. The
+            # `except` above cannot see it — `_ask_for_title` catches
+            # `CancelledError` for the detached workers and RETURNS a sentinel,
+            # so this worker resumes normally with a cancelled outcome rather
+            # than unwinding. Painting here would tell a user who just
+            # cancelled that the model judged the name still fits; no judgement
+            # happened. Silence is the honest answer, and it is what the
+            # `except` branch would have given.
+            if result.outcome == naming.TITLE_CANCELLED:
+                return
+            # Superseded (a reload) or belonging to a session no longer on
+            # screen: touch neither the title nor the transcript.
+            if generation != source.naming.generation or source.retired:
+                return
+            # Re-read rather than trusting `current`, the rule
+            # `_retitle_conversation_worker` follows: a `/rename` may have landed
+            # while this call was in flight, and it outranks an answer decided
+            # against a title no longer in force. Without this the release below
+            # would strip the very latch protecting the name the user just typed,
+            # and the refresh would overwrite it — silently revoking their most
+            # recent instruction in favour of their previous one.
+            standing = session.conversation_name
+            if not result.changed or standing != current:
+                self._notice_for(source, naming.refresh_receipt(result, standing, stored=False))
+                return
+            # Released only once a replacement is actually in hand. Released
+            # before the call instead, a refresh that came back "unchanged"
+            # would still have silently re-armed automatic naming over a name
+            # the user typed and is keeping.
+            #
+            # Dereferenced DIRECTLY, unlike the two routed handlers that probe
+            # with `getattr`, and the difference is the type rather than the
+            # care taken: `session` is `SessionProtocol` here, which makes
+            # `conversation_name_state` mandatory (see its declaration there),
+            # so a probe would guard a state pyright already forbids — and
+            # would silently skip the release if the member were ever dropped,
+            # where this line fails the type-check that is the real guard. The
+            # routed paths take `Any` (whatever facade a follower's owner
+            # holds) and have no such promise, so they must probe.
+            session.conversation_name_state.release_user_set()
+            stored = self._store_title_for(source, session, result.title)
+            self._notice_for(source, naming.refresh_receipt(result, stored))
+        finally:
+            source.active_workers -= 1
+            # Naming fires ONCE per conversation, and the only thing that re-arms
+            # it is `_name_conversation_worker`'s own failure path — which a
+            # worker superseded by this one's generation bump returns before
+            # reaching. So a refresh dispatched while the opening naming call was
+            # still in flight would leave an unnamed conversation with naming
+            # permanently disarmed AND no title, the two failures compounding.
+            #
+            # In the `finally` rather than on one branch because the condition is
+            # about the OUTCOME, not the route to it: any exit that leaves this
+            # conversation unnamed — superseded, nothing-yet, a dead provider,
+            # cancellation — should let a later substantive message try again. A
+            # landed title sets the name, so the latch correctly stays spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
@@ -23052,7 +23489,7 @@ class OperatorApp(App[None]):
         change is the contract; the subscription is dropped on unmount.
 
         Goes through :func:`process_watcher` rather than the session because a
-        ``RemoteSession`` follower has no watcher of its own, yet its user
+        ``AttachedSession`` follower has no watcher of its own, yet its user
         still edits config and still deserves the notice. ``start`` is
         idempotent, so calling it here is what makes a follower-only process
         poll at all.
@@ -23241,7 +23678,7 @@ class OperatorApp(App[None]):
         if "tool_approval_mode" in changed:
             # ONE receipt per event, from the process that owns the gate
             # (design round 1, D1). When a runtime is attached the gate lives
-            # there, `OwnedSessionHandle.follow_config` moves it and emits the
+            # there, `ServingSessionHandle.follow_config` moves it and emits the
             # accurate line, and a value clause here was a second sentence
             # about one fact in a second vocabulary ("tool approvals now auto"
             # over "tool approvals: auto") — read as two events, with the
@@ -23334,7 +23771,7 @@ class OperatorApp(App[None]):
         round 2, D8).
 
         **The rule is asymmetric** (review round 1 R1, UX round 1 U1), and it
-        is the same rule ``OwnedSessionHandle.follow_config`` applies, stated
+        is the same rule ``ServingSessionHandle.follow_config`` applies, stated
         once there in full:
 
         * tightening (``auto`` → ``ask``) follows the file unconditionally;
@@ -23435,7 +23872,7 @@ class OperatorApp(App[None]):
     def _gate_is_owned_elsewhere(self) -> bool:
         """Whether an attached RUNTIME, not this app, owns the approval gate.
 
-        When it does, ``OwnedSessionHandle.follow_config`` moves the real gate
+        When it does, ``ServingSessionHandle.follow_config`` moves the real gate
         and emits the receipt every attached viewer and the phone already see,
         so a second value clause from here is one event told twice (design
         round 1, D1). This app's own ``_approve_all`` still tracks the mode —
@@ -23659,7 +24096,7 @@ class OperatorApp(App[None]):
             # second line about the same fact pointing the other way is the
             # defect, not the diagnosis.
             logger.debug(
-                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                "build skew (runtime) at %s: %s is current, this window (%s) is behind",
                 reason,
                 owner.label(),
                 loaded.label(),
@@ -23729,7 +24166,7 @@ class OperatorApp(App[None]):
                 # in this build, so anything without it is older than this
                 # window.
                 announce(
-                    "owner-unknown",
+                    "runtime-unknown",
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
@@ -23764,7 +24201,7 @@ class OperatorApp(App[None]):
                 # reaper compares itself against disk and acts on the answer
                 # (QA round 1, Q-1 all-refs sub-case).
                 announce(
-                    "owner",
+                    "runtime",
                     owner.label(),
                     loaded.label(),
                     # Collapsed by hand when the versions are EQUAL (the
@@ -23794,7 +24231,7 @@ class OperatorApp(App[None]):
                 )
                 return
             announce(
-                "owner",
+                "runtime",
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
@@ -23805,7 +24242,7 @@ class OperatorApp(App[None]):
 
         if runtime_idle and callable(ask):
             logger.debug(
-                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                "build skew (runtime) at %s: %s -> %s; runtime idle, requesting refresh",
                 reason,
                 owner.label() if owner is not None else "<unstamped>",
                 loaded.label(),
@@ -23933,7 +24370,7 @@ class OperatorApp(App[None]):
             # Every ``noop`` MUST correspond to a surface this terminal opens
             # on its own. ``team_mutate``/``agent_mutate`` did not — they were
             # produced and never consumed, so the command vanished (see
-            # ``owned.py::_team_slash``). ``tests/unit/tui/test_noop_consumers.py``
+            # ``serving.py::_team_slash``). ``tests/unit/tui/test_noop_consumers.py``
             # now fails CI on any ``data.type`` that reaches here with no
             # handler, so a future producer cannot reintroduce the silence.
             if data.get("type") == "agent_list":
@@ -24031,7 +24468,7 @@ class OperatorApp(App[None]):
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
         # Spelled as LITERALS, deliberately, and kept in step with
-        # ``SLASH_ACTION_RECEIPTS`` — the set ``RemoteSession`` declares in its
+        # ``SLASH_ACTION_RECEIPTS`` — the set ``AttachedSession`` declares in its
         # auth frame — by ``test_noop_consumers``, which reads these strings
         # statically out of this function. Importing the constant here would
         # blind that audit to the very seam it guards: a type declared on the
@@ -24156,7 +24593,7 @@ class OperatorApp(App[None]):
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
-        # A RemoteSession keeps process/terminal commands local, but every
+        # A AttachedSession keeps process/terminal commands local, but every
         # command the owner advertises as ``authoritative_session`` in its
         # capability list runs on the owner through the routing seam below —
         # the owner's capability scope, not a hardcoded command list, decides.
@@ -24362,8 +24799,8 @@ class OperatorApp(App[None]):
             # list (a reduced test double) still falls through, matching the
             # pre-guard behaviour the round-4 walk established.
             self._system_notice(
-                f"/{entry.name} is not available from this session's owner; "
-                "run it in the owner's terminal",
+                f"/{entry.name} is not available from this session's runtime; "
+                "run it in the runtime's terminal",
                 "warning",
             )
             return
@@ -24559,7 +24996,7 @@ class OperatorApp(App[None]):
         ownership to a runtime), so "stop" here is deny gates → abort →
         dispose the in-process session → show it cold: the transcript stays
         on screen and the app reports the session ended and ``/resume``
-        reopens it. On a follower (a RemoteSession) the same command sends
+        reopens it. On a follower (a AttachedSession) the same command sends
         the graceful ``stop`` op to the owner and paints the receipt.
 
         ``/stop <target>`` uses the `send` target vocabulary — pid, session
@@ -24807,10 +25244,10 @@ class OperatorApp(App[None]):
             # nothing. Left latched, the NEXT stop — a stranger's — was
             # reported as the user's own (round-5 MINOR-5), the same latching
             # class as round-3 MAJOR-1 and unlatched the same way
-            # `RemoteSession.request_stop` does.
+            # `AttachedSession.request_stop` does.
             self._issued_own_stop = False
             self._system_notice(
-                "cannot stop this session's owner — the owner is an older process; "
+                "cannot stop this session's runtime — the runtime is an older process; "
                 "close it there or upgrade",
                 "warning",
             )
@@ -25469,7 +25906,7 @@ class OperatorApp(App[None]):
         # The DESTINATION is derived from the spec this command resolved, never
         # re-read from ``session.model_label`` after ``set_model``. On a local
         # ``Session`` the two agree — ``set_model`` assigns synchronously — but
-        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # on a ``AttachedSession`` (a terminal attached to another owner's
         # session) ``set_model`` only schedules the request as a task and
         # ``model_label`` keeps reading the owner's frontend-state sync, which
         # lands on a later tick. Re-reading there printed
@@ -25481,7 +25918,7 @@ class OperatorApp(App[None]):
         if not persist_default and bool(getattr(session, "is_cold", False)):
             # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
             # viewer after `/stop`) is bound to no runtime, and
-            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # ``AttachedSession.set_model`` with no client RETURNS without doing
             # anything — the same silent drop its ``set_goal`` and
             # ``set_conversation_name`` siblings perform, and deliberately not
             # changed there: the facade cannot raise from a synchronous setter
@@ -25500,20 +25937,22 @@ class OperatorApp(App[None]):
                 self._system_notice(text_line, kind)
             elif bool(getattr(session, "_recovering", False)):
                 # `is_cold` is a superset of the drop: it is also true while
-                # the facade is redialing an owner that died. There "send a
+                # the facade is redialing a runtime that died. There "send a
                 # message" is not the lever — the facade's own answer for the
-                # gap is `_unavailable_reason()` ("session owner is
+                # gap is `_unavailable_reason()` ("the runtime is
                 # reconnecting"), the sentence the prompt path already uses
-                # (review round 2, R2-M1).
+                # (review round 2, R2-M1). That literal is matched nowhere;
+                # `_is_runtime_gone` excludes it on the `reconnecting`
+                # substring alone, which the wording keeps.
                 reason = getattr(session, "_unavailable_reason", None)
                 self._system_notice(
-                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    f"{reason() if callable(reason) else 'the runtime is reconnecting'}; "
                     "try /model again in a moment",
                     "warning",
                 )
             else:
                 # NO give-up-specific arm here, and that is deliberate — see
-                # `RECOVERY_GIVE_UP_S` in `session/remote.py`. A viewer that
+                # `RECOVERY_GIVE_UP_S` in `session/attached.py`. A viewer that
                 # gave up on a
                 # live-but-silent owner is cold with a callable `_ensure_bound`,
                 # which is exactly the shape `_needs_runtime_first` diverts into
@@ -26875,7 +27314,18 @@ class OperatorApp(App[None]):
         untouched — the whole point of the chord is that the composer keeps
         the caret, so a reader checking the start of a long session can type
         the moment they return with ``ctrl+end``.
+
+        On a wedged unscrollable frame the scroll itself is a no-op — there is
+        no offset to travel, and every later check stands down against the
+        held gate. The help screen documents this chord as the keyboard
+        recovery for that state, so it has to carry the same unmounted-lease
+        retirement the notice click got (UX U2). Retire first, then take the
+        existing scroll path: ``note_user_scroll`` still fires at y=0 (clamped
+        input rearms), and with the gate open the deferred check can fetch.
+        A wheel notch never comes through this action, so a healthy in-flight
+        fetch is not cancelled by scrolling.
         """
+        self._break_abandoned_paging_lease(self._interaction)
         self._transcript_view().action_scroll_home()
 
     def action_transcript_end(self) -> None:
@@ -28294,7 +28744,7 @@ class OperatorApp(App[None]):
         try:
             selected = _model_spec(session)
         except Exception:
-            # `RemoteSession.model` is a PROPERTY THAT RAISES when the owner has
+            # `AttachedSession.model` is a PROPERTY THAT RAISES when the owner has
             # no selected spec yet, and `getattr(..., None)` does not suppress an
             # exception raised inside a property. Unguarded, a follower attached
             # before the owner's model syncs got `failover list failed: owner has
@@ -28322,7 +28772,7 @@ class OperatorApp(App[None]):
         )
 
         # The model ACTUALLY serving, via `effective_model` rather than the
-        # route's `active_fallback`: RemoteSession implements `effective_model`
+        # route's `active_fallback`: AttachedSession implements `effective_model`
         # but not the route state, so this is the one comparison that is correct
         # on both the owning terminal and an attached follower.
         try:
@@ -28579,7 +29029,15 @@ class OperatorApp(App[None]):
         runtime = replace(runtime, spend_is_floor=self._spend_is_floor)
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
-        screen = SessionScreen(None, runtime)
+        #
+        # The host's opener-derived stand-in goes in BEFORE the push, because it
+        # is already in memory: the header then names the conversation the way
+        # the band and the tab do on the FIRST frame, instead of reading
+        # "Untitled session" until the worker answers. The label only disk knows
+        # — what a RESUMED conversation is left with, since the reload clears
+        # that stand-in — follows from the worker; see
+        # `_open_session_report_worker`.
+        screen = SessionScreen(None, runtime, provisional_name=self._provisional_name)
         self.push_screen(screen)
         self.run_worker(
             self._open_session_report_worker(session, runtime, screen),
@@ -28592,8 +29050,41 @@ class OperatorApp(App[None]):
         self, session: SessionProtocol, runtime: SessionDiagnostics, screen: SessionScreen
     ) -> None:
         from local_operator.analytics import AnalyticsStore
+        from local_operator.analytics.model import SessionReport
+        from local_operator.paths import config_dir
+        from local_operator.resume import session_name
 
-        report = await asyncio.to_thread(AnalyticsStore().session_report, runtime.session_id)
+        def _read() -> tuple[SessionReport, str]:
+            """The ledger report and the store-derived label, in ONE thread hop.
+
+            Both halves are blocking reads, which is why the screen is pushed
+            before either starts: the keypress path must never wait on the disk.
+            ``session_name`` is the very helper ``session.catalog`` builds every
+            sidebar row through, at its default ``max_chars``, so on the DISK
+            path the header carries the row's own text — the miss this exists to
+            close was ``/session`` saying "Untitled session" beside a sidebar
+            that named it.
+
+            "Cannot disagree" is true of that path only: a stand-in outranks
+            this label (the band and the tab are what the operator is watching)
+            and is capped harder — ``naming.provisional_title``'s 8 words / 48
+            chars against ``session_name``'s ``NAME_MAX_CHARS`` = 64 — so a
+            conversation with a provisional in force wears a SHORTER label from
+            the same opener, not a different one (design D3).
+
+            The label is decoration on the report, so it is read inside its own
+            guard: a raise here must not cost the ledger half, which is what the
+            screen is actually for, and an empty label simply falls through the
+            existing precedence (stand-in, then "Untitled session").
+            """
+            report = AnalyticsStore().session_report(runtime.session_id)
+            try:
+                name = session_name(config_dir() / "sessions" / runtime.session_id)
+            except Exception:  # noqa: BLE001 — decoration: never cost the report
+                name = ""
+            return report, name
+
+        report, disk_name = await asyncio.to_thread(_read)
         if screen.presentation_cancelled or screen not in self.screen_stack:
             return
         if self._session is not session or session.session_id != runtime.session_id:
@@ -28606,6 +29097,13 @@ class OperatorApp(App[None]):
         if runtime.epoch is not None and getattr(state, "epoch", None) != runtime.epoch:
             screen.invalidate()
             return
+        # The label first: `set_report` repaints, so publishing the name after it
+        # would spend one frame on "Untitled session" in the common case where
+        # the ledger read is the slow half. Both publishers re-check the
+        # cancellation flag, and both run only past the identity/epoch guards
+        # above — a /new or /resume that landed mid-read is already rejected
+        # there, so no old conversation's label can reach the new one.
+        screen.set_disk_name(disk_name)
         screen.set_report(report)
 
     def _cmd_info(self, arg: str, notice: NoticeFn) -> None:
@@ -29213,8 +29711,9 @@ class OperatorApp(App[None]):
         self._interaction.draft.aside = None
         panel.close()
         panel._on_height = None
-        # Give the transcript its own last rows back, and land the reader at
-        # the end of the conversation they came back to.
+        # Give the transcript its own last rows back, and land the reader
+        # back where THEY were — the tail only if that is where they already
+        # were (see the `is_following_tail` guard below).
         #
         # DROP the inline rule rather than write a number back. The sheet's own
         # bottom padding is the conversation's trailing row of ground (1 in the
@@ -29226,8 +29725,31 @@ class OperatorApp(App[None]):
         # which is the only place that knows which layout is up.
         transcript = self._transcript_view()
         if transcript is not None:
+            # `follow_tail()` ONLY when the reader was already at the end —
+            # not unconditionally. The unconditional call was itself a
+            # defect: a reader who scrolled BACK to re-read something before
+            # opening the aside (the exact gesture the docstring at
+            # `_reserve_ground_for_aside` names — "re-reading is a thing
+            # people do WHILE asking an aside about it") got yanked to the
+            # tail the moment they closed the card, landing on unrelated
+            # content and one click away from the D2/D3 defects this same
+            # change fixes elsewhere. Measured: parked at `scroll_y=3` of 15,
+            # `/btw` opened and closed with no scroll gesture in between —
+            # `scroll_y` came back as `15`, not `3`. Clearing the padding
+            # rule alone (no `follow_tail()`) already lands the SAME row at
+            # the SAME offset, because the padding is the only thing that
+            # moved: the conversation's own rows never did.
+            #
+            # `is_following_tail()`, not `is_near_bottom()`: the anchor is the
+            # authority on INTENT (did the reader ask to be at the end),
+            # which is what a re-acquire on close should honour, and it is
+            # already resynced against the padded extent by
+            # `_reserve_ground_for_aside`'s own `follow_tail()` call when the
+            # aside opened at the tail.
+            was_following = transcript.is_following_tail
             transcript.styles.clear_rule("padding")
-            transcript.follow_tail()
+            if was_following:
+                transcript.follow_tail()
         draft = self._aside_draft
         images = self._aside_draft_images
         self._aside_draft = None
@@ -29658,6 +30180,34 @@ class OperatorApp(App[None]):
                 ]
             )
             picker.set_notice("")
+            return
+        if message.command in ("rename", "title"):
+            # ONE row, and it is the whole reason this command takes a list. The
+            # other argument is free text — a title cannot be offered from a
+            # list, because the app does not know what the conversation should
+            # be called — so the list exists to teach the one word a user could
+            # not guess. Free typing is unaffected: the editor RANKS what is
+            # typed and never filters what may be submitted, so an arbitrary
+            # title still reaches `_cmd_rename`.
+            #
+            # The description states the release, not just the call. That the
+            # refresh hands the name back to automatic naming is the surprising
+            # half of the command, and this row is the last surface before it
+            # runs.
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name="refresh",
+                        description="Re-read the conversation and name it again",
+                        detail="resumes auto-naming",
+                    )
+                ]
+            )
+            picker.set_notice(
+                f"conversation: {self._session.conversation_name}"
+                if self._session is not None and self._session.conversation_name
+                else "or type a title"
+            )
             return
         if message.command == "mcp":
             # Clear BEFORE the fill: the builder may set a notice of its own
@@ -31425,7 +31975,7 @@ class OperatorApp(App[None]):
         # is itself a chord (`fn+ctrl+←`) on most Mac keyboards.
         #
         # It says "loads" because that is the part a reader cannot guess. On a
-        # frame too tall to scroll, `select to load` is followable with a mouse
+        # frame too tall to scroll, `click to load` is followable with a mouse
         # in one click, while `pageup` and `home` are no-ops (there is no
         # offset to travel) and reaching the notice by arrow traversal costs
         # ~129 presses — so the only practical keyboard route was a key whose
@@ -31793,8 +32343,8 @@ class OperatorApp(App[None]):
 
         A session is owned either by a detached runtime or by THIS app, and
         both hosts must agree — the same mirror contract
-        ``_team_attach_slash_result`` keeps with ``owned.py``. So the rule is
-        identical to ``OwnedSessionHandle._complete_unconsumed_action``: a
+        ``_team_attach_slash_result`` keeps with ``serving.py``. So the rule is
+        identical to ``ServingSessionHandle._complete_unconsumed_action``: a
         request-carrying attach receipt whose type the client did NOT declare
         is submitted here, because that client will not submit it and would
         otherwise drop it in silence.
@@ -31855,12 +32405,22 @@ class OperatorApp(App[None]):
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
+        # Resolved to the registry PRIMARY name before any branch reads it, for
+        # the reason `_run_slash_command` does the same: the branches below
+        # match literals, so an ALIAS arriving off the wire (`/title`,
+        # `/models`, `/recall`) would fall past every one of them and be
+        # answered with the "not available from an attached terminal" refusal —
+        # for a command this owner implements and the invoker's own picker
+        # completed. The local path resolves at dispatch and the routed path did
+        # not, which is precisely how one spelling of a command worked in a
+        # terminal and failed on a phone.
+        command = primary_slash_name(command)
         if command == "context":
             return self._context_slash_result(SlashResult)
         if command == "goal":
             return self._goal_slash_result(args, SlashResult)
         if command == "rename":
-            return self._rename_slash_result(args, SlashResult)
+            return await self._rename_slash_result(args, SlashResult)
         if command == "effort":
             return self._effort_slash_result(args, SlashResult)
         if command == "fast":
@@ -31957,25 +32517,136 @@ class OperatorApp(App[None]):
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
-    def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """``/title`` over the remote/mobile control path.
+
+        Async solely for the refresh branch, which spends a provider call. The
+        report and set branches are the same synchronous work they have always
+        been — awaiting a coroutine that never suspends costs nothing, and the
+        alternative (a sync entry that spawns a detached task) would answer the
+        phone with a receipt for a title that had not been decided yet.
+
+        The refresh is AWAITED rather than run on a worker for the same reason:
+        this path's whole contract is that the returned ``SlashResult`` is the
+        answer the invoker renders. A follower has no naming worker of its own
+        and no second chance to paint, so a result produced before the call
+        finished would be a receipt for work that had not happened.
+        """
         session = self._session
         if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
-        if not arg:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        if is_refresh:
+            return await self._title_refresh_slash_result(session, SlashResult)
+        if not title:
             current = session.conversation_name
             text = (
-                f"conversation: {current} — /rename <title> to change it"
+                f"conversation: {current} — /title <words>, or /title refresh"
                 if current
-                else "unnamed — /rename <title> names this conversation"
+                else "unnamed — /title <words> names this conversation"
             )
             return SlashResult(kind="notice", text=text, style="info")
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         return SlashResult(
             kind="notice",
             text=f"renamed: {stored} — auto-naming will not override it",
             style="info",
             data={"stored": stored},
         )
+
+    async def _title_refresh_slash_result(self, session: Any, SlashResult: Any) -> Any:
+        """``/title refresh`` routed from a follower, with this app as owner.
+
+        Shares :func:`naming.refresh_title`, the release-on-success rule and
+        :func:`naming.refresh_receipt` with :meth:`_title_refresh_worker` rather
+        than reimplementing any of them, so a phone and a terminal cannot drift
+        on what a refresh does to the ``user_set`` flag or on what it says.
+        What differs is the delivery — a receipt returned as data rather than
+        painted — and the deadline: a client is holding a socket open for this
+        answer, so the call gets :data:`naming.ROUTED_TITLE_TIMEOUT_S` instead
+        of the worker's full budget.
+
+        ``source`` is captured at DISPATCH here for the same reason the worker
+        does it, and it is easy to miss on this path precisely because there is
+        no worker in sight: the two awaits below are just as long, so
+        ``self._interaction`` is just as much a moving target, and
+        ``_store_title``'s convenience wrapper (which re-reads it) is safe only
+        for callers that do not suspend.
+        """
+        # Generation-stamped at DISPATCH exactly as :meth:`_cmd_title_refresh`
+        # does, and for the same reason: an automatic naming call dispatched
+        # BEFORE this one still matches its own captured generation when it
+        # resumes, so without the bump it stores its pre-refresh answer over the
+        # title this refresh just landed. The follower asked for a fresh name
+        # and would be left with the stale one (review round 1, MAJOR-1).
+        self._name_generation += 1
+        generation = self._name_generation
+        source = self._interaction
+        current = session.conversation_name
+        try:
+            # One budget over the history read AND the naming call, and one
+            # failure policy for both — shared with the runtime-hosted twin so
+            # the two cannot drift on the deadline the way they once drifted on
+            # the receipt.
+            result = await naming.routed_refresh(current, session)
+            # The rename-during-the-call guard the TUI worker documents: a
+            # `/rename` that landed while this was in flight outranks an answer
+            # decided against a title no longer in force, and storing over it
+            # would strip the latch protecting the words the user just typed.
+            standing = session.conversation_name
+            # Superseded alongside the rename guard, for the reason the worker
+            # twin checks both: a `/new` or `/resume` landing mid-call makes
+            # this answer belong to a conversation that is no longer here, and
+            # the retired source must not be painted or stamped.
+            if generation != source.naming.generation or source.retired:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            if not result.changed or standing != current:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            # Probed rather than called outright: `session` is `Any` on this
+            # path (it is whatever facade the follower's owner holds), and the
+            # sibling in `serving.py` guards for the same reason. An
+            # AttributeError here would surface as a failed routed op rather
+            # than as a missing rename.
+            release = getattr(
+                getattr(session, "conversation_name_state", None), "release_user_set", None
+            )
+            if callable(release):
+                release()
+            stored = self._store_title_for(source, session, result.title)
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, stored),
+                style="info",
+                data={"stored": stored},
+            )
+        finally:
+            # The OTHER half of the generation fence, and it is not optional:
+            # the bump above supersedes any first-naming worker in flight, and
+            # that worker returns at its own generation check BEFORE reaching
+            # the re-arm which is the only thing that ever clears
+            # `naming.requested`. Without this, a `/title refresh` run from a
+            # phone during the opening turn — exactly when a user sees
+            # "untitled" and reaches for the command — leaves the conversation
+            # permanently unnamed with naming disarmed.
+            #
+            # In the `finally` and keyed on the OUTCOME, for the reason
+            # `_title_refresh_worker` does the same: every exit that leaves this
+            # conversation without a title should let a later message try again,
+            # and a landed title sets the name so the latch correctly stays
+            # spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     def _fast_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """``/fast`` over the remote/mobile control path.
@@ -32199,7 +32870,7 @@ class OperatorApp(App[None]):
             ]
             return SlashResult(kind="block", data={"type": "team_list", "items": items})
         # The attach runs HERE, on the authoritative session, for the same
-        # reason ``owned.py::_team_slash`` does it: stamping the roster and the
+        # reason ``serving.py::_team_slash`` does it: stamping the roster and the
         # briefs mutates session state the follower does not have. This used to
         # return an unconsumed ``noop {"type": "team_mutate"}``, so a follower
         # attached to a TUI-hosted session got the same silence a viewer got
@@ -32221,7 +32892,7 @@ class OperatorApp(App[None]):
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
         """``/team <name> [<request>]`` for a follower of THIS TUI's session.
 
-        The mirror of ``owned.py::_team_attach_slash``; the two exist because
+        The mirror of ``serving.py::_team_attach_slash``; the two exist because
         a session can be hosted either by a detached runtime or by this app,
         and a follower must get the same answer from both.
 
@@ -32400,7 +33071,7 @@ class OperatorApp(App[None]):
             )
         old_label = session.model_label
         # Destination from the RESOLVED spec, not a re-read of the session's
-        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # label — same reason as in ``_cmd_model``: a ``AttachedSession`` applies
         # ``set_model`` asynchronously and its label follows the owner's sync.
         new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
@@ -33524,7 +34195,7 @@ class OperatorApp(App[None]):
         turn got two "interrupted" notices.
 
         That order is not hypothetical, it is the FOLLOWER order.
-        `RemoteSession._on_wire_event` clears `_streaming` and only then emits
+        `AttachedSession._on_wire_event` clears `_streaming` and only then emits
         `agent_end`, on the socket read pump — a different task from Textual's
         message pump. So the owner's end can land inside the post-to-dispatch
         window: guard 2 reads a just-cleared `False`, the fallback proceeds, and
@@ -33701,7 +34372,7 @@ class OperatorApp(App[None]):
         # NOT a silence hole: a follower whose owner dies, is stopped, or whose
         # viewer goes cold with no successor (`_go_cold`, #642) gets a real
         # aborted `AgentEndEvent` synthesised locally
-        # (`RemoteSession._end_turn_locally`), which reaches this method through
+        # (`AttachedSession._end_turn_locally`), which reaches this method through
         # `on_turn_ended` and settles the ladder. The abandoned route is the
         # fallback for a turn NOBODY ends, and on a follower that is precisely
         # the case where this app has no outcome to report.
@@ -34209,7 +34880,7 @@ class OperatorApp(App[None]):
         registering ours would produce an entry no announcement can ever match
         — every prompt would then paint twice. Probed rather than assumed
         because `SessionProtocol` does not require the keyword and the mobile
-        handles already probe the same seam the same way (`owned.py`,
+        handles already probe the same seam the same way (`serving.py`,
         `tui_handle.py`); a session that cannot be introspected is treated as
         the older shape, which is the safe direction.
         """
@@ -34688,7 +35359,7 @@ class OperatorApp(App[None]):
         MATCHED BY MESSAGE ID, not by pointer identity. Pointer identity was a
         single-process assumption that held only for the in-process `Session`,
         whose `queued_steering` drains and re-puts the very objects the app
-        queued. `RemoteSession.queued_steering` rebuilds brand-new `Message`
+        queued. `AttachedSession.queued_steering` rebuilds brand-new `Message`
         objects out of the serialized frontend state on every call, so on any
         daemon-attached session — which is how a `kind=daemon` runtime is
         always driven — no snapshot entry could ever BE the held object and
@@ -34699,8 +35370,8 @@ class OperatorApp(App[None]):
 
         The id is the seam's real identity, and it already is everywhere else
         that crosses the process boundary: `_send_steer_when_ready` sends
-        `command_id=message.id`, `owned.py::recall_steer` finds the queued
-        message by that id, and `RemoteSession.recall_steering` matches on it.
+        `command_id=message.id`, `serving.py::recall_steer` finds the queued
+        message by that id, and `AttachedSession.recall_steering` matches on it.
         The TUI was the one place still reading pointers. Identity is kept as
         the fast path so the in-process session, where the objects genuinely
         are shared, never depends on the id round trip at all.
@@ -34708,7 +35379,7 @@ class OperatorApp(App[None]):
         An id only counts as an identity when it NAMES ONE ENTRY. Two things
         break that, and both are the same hazard: a snapshot carrying the id
         twice, and `UNIDENTIFIED_STEER_ID` — the placeholder
-        `RemoteSession.queued_steering` substitutes for a wire item with no id
+        `AttachedSession.queued_steering` substitutes for a wire item with no id
         of its own, which by construction names every id-less entry rather
         than any one of them. Matching either would let a recall unsend one
         message while handing the composer another's text, so neither is an
@@ -34737,10 +35408,10 @@ class OperatorApp(App[None]):
         not happened. The message then rides the next boundary, which is the
         behaviour the user had before they pressed Esc.
         """
-        # Function-local like every other `session.remote` import in this file:
+        # Function-local like every other `session.attached` import in this file:
         # the module imports the TUI's own types, so a top-level import here is
         # a cycle.
-        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+        from local_operator.session.attached import UNIDENTIFIED_STEER_ID
 
         session = self._session
         if session is None or not self._held_steer_blocks:
@@ -34865,7 +35536,7 @@ class OperatorApp(App[None]):
             # REACHABLE, and no longer merely defensive. That claim held while
             # the only host was the in-process `Session`, where this handler
             # runs on the session's own loop and nothing can drain the queue
-            # between the snapshot above and here. A `RemoteSession` reads a
+            # between the snapshot above and here. A `AttachedSession` reads a
             # REPLICATED `frontend_state` that the socket pump may have last
             # written arbitrarily long ago, so a False here is an ordinary
             # stale-snapshot outcome — and it is also how a viewer with no
@@ -34929,7 +35600,7 @@ class OperatorApp(App[None]):
     def _on_recall_rejected(self, session: Any, command_id: str) -> None:
         """The owner did not honour a recall this app already committed.
 
-        A follower's recall is optimistic (`RemoteSession.recall_steering`):
+        A follower's recall is optimistic (`AttachedSession.recall_steering`):
         the composer has the text and the steer's rows have left the
         transcript before the owner answers. When the answer is a refusal —
         the drain took the message first — the message really was delivered
@@ -34975,7 +35646,7 @@ class OperatorApp(App[None]):
         if session is not self._session:
             logger.debug("dropped a recall refusal for a session that is no longer current")
             return
-        logger.debug("session owner refused the recall of steer %s", command_id)
+        logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
     def _settle_queued_steer_notices_unsent(self) -> None:
@@ -35345,7 +36016,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     """Whether this session is a VIEWER, and narrow it to the viewer surface.
 
     The one place the TUI decides "may I reach the viewer members on this
-    object". Sixteen sites asked it as ``isinstance(session, RemoteSession)``,
+    object". Sixteen sites asked it as ``isinstance(session, AttachedSession)``,
     which coupled the front end to a concrete class, and a further seventeen
     asked ``getattr(session, "is_remote", False)`` — an undeclared attribute
     whose ``False`` default silently meant "in-process".
@@ -35357,7 +36028,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     an arm64 host, CPython 3.12.13, min-of-seven over 2,000 iterations:
 
     ==============================================  ===============
-    ``isinstance(viewer, RemoteSession)``            0.014-0.015 us
+    ``isinstance(viewer, AttachedSession)``            0.014-0.015 us
     ``isinstance(viewer, ViewerSessionProtocol)``      55-58 us
     ``not session.owns_runtime``                     0.021-0.024 us
     ==============================================  ===============
@@ -35368,7 +36039,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     mostly timing-loop overhead (one host measured its empty-lambda floor at 34%
     of the reading). Quote the microseconds and treat the ratio as ~10^3x, which
     is all the decision needs. Re-measuring needs a fully constructed
-    ``RemoteSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
+    ``AttachedSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
     NOT a positive and times the cheap negative path instead, which is how the
     same row has now been "re-measured" to three different values. See
     ``ViewerSessionProtocol`` for the method, the table of what each stand-in
@@ -35385,7 +36056,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **What makes it sound.** ``owns_runtime`` is DECLARED on ``SessionProtocol``
     and implemented as a constant on both classes (``Session`` True,
-    ``RemoteSession`` False), so pyright checks the read and the two classes
+    ``AttachedSession`` False), so pyright checks the read and the two classes
     partition exactly — asserted as a pair by
     ``tests/unit/session/test_viewer_protocol.py``. The ``TypeGuard`` return is
     what keeps the viewer members statically checked at all sixteen call sites:
@@ -35442,9 +36113,9 @@ def _session_subject(session: Any) -> str:
     byte-identical paragraphs, which reads as the app printing one line twice
     (design review round 1, D1).
     """
-    # GUARDED, not merely defaulted. On a real ``RemoteSession`` this property
+    # GUARDED, not merely defaulted. On a real ``AttachedSession`` this property
     # reads ``frontend_state``, which RAISES ``RuntimeError`` until the first
-    # sync completes (``session/remote.py``) \u2014 and the refresh callback calls
+    # sync completes (``session/attached.py``) \u2014 and the refresh callback calls
     # this BEFORE it re-engages, so a raise there costs the eager re-engage
     # this feature exists to provide and leaves the viewer cold until the next
     # keystroke. ``_go_cold``'s guard swallows the exception, which makes the

@@ -7,7 +7,7 @@ newest card still showed a time.
 WHAT IS BEING PROVEN
 --------------------
 A viewer attached over a runtime socket (what the SIDEBAR attaches to) keeps
-each completed tool result in ``RemoteSession._live_history``, built by
+each completed tool result in ``AttachedSession._live_history``, built by
 ``_remember_live`` via ``Message.tool_result(event.result)``. That constructor
 copies content/ids/is_error and NOT ``provider_payload`` — so the measured
 ``duration_s`` that rode the wire on ``event.result.duration_s`` is dropped.
@@ -25,8 +25,8 @@ The state this needs is a viewer that WATCHED TURNS RUN, so ``_live_history``
 is populated. A viewer attached to a QUIESCENT owner renders durations fine
 (nothing shadows the durable rows), and a cold local resume never builds a
 live row at all — those are the paths #823 was verified on. Reaching the bug
-therefore requires a real ``OwnedSessionHandle`` + ``RuntimeServer`` +
-``RemoteSession(display_window=True)`` executing a REAL tool, which is what
+therefore requires a real ``ServingSessionHandle`` + ``RuntimeServer`` +
+``AttachedSession(display_window=True)`` executing a REAL tool, which is what
 ``_live_runtime`` stands up: the duration here is MEASURED by the harness, not
 fixtured, so a test that fakes the payload cannot pass in its place.
 
@@ -45,13 +45,12 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import Message, TextContent
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tools.builtin import build_write_tool
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import TranscriptView
 from tests.e2e.harness import (
     ScriptedStream,
     build_session,
@@ -81,7 +80,17 @@ def isolated(tmp_path, monkeypatch):
 
 
 def _cells(app: OperatorApp) -> list[float | None]:
-    view = app.query_one(TranscriptView)
+    # ``_transcript_view()``, NOT ``query_one(TranscriptView)``. The divergence
+    # is real only on a genuine sidebar SWITCH to a different conversation:
+    # ``_select_sidebar_session(<other conversation>)`` leaves BOTH transcripts
+    # mounted, and ``query_one`` returns the first in DOM order — the OUTGOING
+    # conversation being left behind (measured: 22 blocks in the outgoing view
+    # against the adopted view's 11). This file's own gesture,
+    # ``_adopt_session(remote)`` on the same session, never diverges (one
+    # ``TranscriptView`` throughout, both accessors equal), so only a switch
+    # would expose it — and an assertion grading the wrong conversation is
+    # exactly the class of false green this file exists to prevent.
+    view = app._transcript_view()
     return [b._duration for b in view.blocks() if isinstance(b, ToolCard)]
 
 
@@ -126,10 +135,10 @@ async def _live_runtime(tmp_path: Path, n: int):
     session = build_session(
         directory, ScriptedStream(turns), tools=[build_write_tool()], cwd=tmp_path
     )
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,

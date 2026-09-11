@@ -86,7 +86,7 @@ async def main() -> int:
         CredentialManager(config_dir),
         AgentRegistry(config_dir),
     )
-    # create_session may hand back a RemoteSession when attaching to an owned
+    # create_session may hand back a AttachedSession when attaching to an owned
     # runtime; this sandbox never does, and the child builder needs the real
     # Session, so assert rather than silently proving nothing.
     assert isinstance(built, Session), f"expected a local Session, got {type(built).__name__}"

@@ -93,22 +93,22 @@ def app_with_clock(monkeypatch):
 
 
 def _make_remote(app, session_id, clock, parked_for, *, history=4, poison=False):
-    """Build a parked source whose session passes the RemoteSession check.
+    """Build a parked source whose session passes the AttachedSession check.
 
     A real subclass rather than a mock: the predicate's first clause is an
-    ``isinstance(..., RemoteSession)`` test, so a duck-typed stand-in would make
+    ``isinstance(..., AttachedSession)`` test, so a duck-typed stand-in would make
     every assertion here vacuously true.
 
     ``poison`` makes ``frontend_state`` raise the way the real property does
-    before its store syncs (``remote.py``), which is the reachable way a probe
+    before its store syncs (``attached.py``), which is the reachable way a probe
     can throw — the predicate reads it through ``retained_for_auto_work``.
     Declared on the class rather than assigned afterwards so the raise is part
     of the type, as it is in production.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
-    class _ParkedRemote(RemoteSession):
-        def __init__(self) -> None:  # deliberately not RemoteSession.__init__
+    class _ParkedRemote(AttachedSession):
+        def __init__(self) -> None:  # deliberately not AttachedSession.__init__
             self._session_id = session_id
             self.disposed = 0
 
@@ -314,7 +314,7 @@ def test_one_raising_source_does_not_starve_the_healthy_ones_behind_it(app_with_
 
     The raise is planted on `frontend_state`, which is the reachable shape:
     `retained_for_auto_work` reads it via `getattr` BEFORE the predicate's
-    `isinstance(..., RemoteSession)` guard, and `getattr` does not swallow an
+    `isinstance(..., AttachedSession)` guard, and `getattr` does not swallow an
     exception raised by a property — only a missing attribute.
     """
     app, clock = app_with_clock

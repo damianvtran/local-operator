@@ -1,6 +1,6 @@
 """A sidebar connect never publishes a session it did not actually bind.
 
-THE DEFECT THESE PIN. ``RemoteSession._ensure_bound`` has three outcomes and
+THE DEFECT THESE PIN. ``AttachedSession._ensure_bound`` has three outcomes and
 only two of them are distinguishable at the call site: it binds, it raises, or
 — while the facade is ``_recovering`` after an owner loss — it returns
 SILENTLY, without binding, leaving the session cold. ``_connect_sidebar_source``
@@ -22,7 +22,7 @@ load-bearing assertion in this file is therefore the postcondition:
 **after a connect commits, the session is not cold.**
 
 WHY THE DOUBLE IS A REAL SUBCLASS. ``_connect_sidebar_source`` opens with an
-``isinstance(session, RemoteSession)`` check and returns quietly for anything
+``isinstance(session, AttachedSession)`` check and returns quietly for anything
 else, so a duck-typed stand-in would make every assertion here vacuously true
 by never reaching the code under test.
 
@@ -42,7 +42,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from local_operator.session.remote import COLD_FALLBACK_S, RemoteSession
+from local_operator.session.attached import COLD_FALLBACK_S, AttachedSession
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
@@ -77,16 +77,16 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(OperatorApp, "_start_herdr_reporter", lambda _self: None)
 
 
-class RecoveringRemote(RemoteSession):
+class RecoveringRemote(AttachedSession):
     """A viewer that reproduces the ``_recovering`` silent return.
 
     ``_ensure_bound`` returns without raising and without clearing ``is_cold``,
-    which is what the real method does at ``remote.py`` when the facade is
+    which is what the real method does at ``attached.py`` when the facade is
     mid-recovery. ``heals_after`` binds on the Nth call so the retry budget has
     something to succeed against, mirroring the real timeline where the facade
     stops being ``_recovering`` once ``COLD_FALLBACK_S`` elapses.
 
-    Deliberately does NOT call ``RemoteSession.__init__``: constructing a real
+    Deliberately does NOT call ``AttachedSession.__init__``: constructing a real
     one dials a runtime. Only the surface the connect path reads is provided.
     """
 
@@ -172,7 +172,7 @@ def _shipped_span_from(spent: int) -> float:
 
 
 async def _current_source(
-    app: OperatorApp, pilot: Any, session: RemoteSession
+    app: OperatorApp, pilot: Any, session: AttachedSession
 ) -> SessionInteraction:
     """Make ``session`` the app's current sidebar source, as a click would.
 

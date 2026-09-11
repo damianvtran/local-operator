@@ -4,7 +4,7 @@ WHAT THIS MEASURES, AND WHY IT IS THE RIGHT THING
 =================================================
 The user-visible complaint is that `/new` sits on "starting…" for a long
 time. That indicator is raised by `OperatorApp._set_starting(True)` in
-`_engage_runtime_eagerly` and lowered when `RemoteSession._ensure_bound()`
+`_engage_runtime_eagerly` and lowered when `AttachedSession._ensure_bound()`
 returns, so the number a user actually feels is exactly the wall time of
 `_ensure_bound`, which decomposes into:
 

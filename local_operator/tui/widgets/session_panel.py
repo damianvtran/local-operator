@@ -151,7 +151,7 @@ class SessionDiagnostics:
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
-        # The canonical frontend snapshot is already mirrored on RemoteSession.
+        # The canonical frontend snapshot is already mirrored on AttachedSession.
         # Reduced SDK facades need not have it; don't traverse private context or
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)
@@ -741,6 +741,7 @@ def build_session_report(
     width: int = _DEFAULT_CARD_WIDTH,
     *,
     metric: str = METRIC_TOKENS,
+    fallback_name: str = "",
 ) -> Text:
     """Render one session's diagnostics as charts, at ``width`` content cells.
 
@@ -749,6 +750,13 @@ def build_session_report(
     ``/analytics``, whose stated purpose is historical spend, this screen is
     read mid-session to answer "where did my context go", which is a token
     question.
+
+    ``fallback_name`` is the label to fall back to when ``runtime.name`` — the
+    store of record — is empty. It is resolved by the caller and not carried on
+    ``SessionDiagnostics``: that dataclass is a scalar snapshot of the SESSION
+    (see its docstring), while the stand-ins describe the host, and the
+    store-derived half of this one is only known after a disk read (see
+    :meth:`SessionScreen.set_disk_name`).
     """
     width = max(_MIN_CARD_WIDTH, width)
     body = _Body(width)
@@ -757,8 +765,28 @@ def build_session_report(
 
     # -- header: name, then the ID as a dim lookup key, not a headline --------
     head = Text()
-    head.append(runtime.name or "Untitled session", style=fg)
-    head.truncate(width, overflow="crop")
+    # The store of record first, then the display stand-ins every other surface
+    # already wears. ``runtime.name`` is ``session.conversation_name`` and stays
+    # empty until a generated title lands (or ``/rename``): the opener-derived
+    # excerpt lives on the HOST, deliberately never in that string, and a
+    # RESUMED conversation has no excerpt at all — which is how this header came
+    # to read "Untitled session" for a conversation the sidebar named. So
+    # ``fallback_name`` carries, in order, the provisional label (in memory at
+    # push time, so the FIRST frame names the conversation rather than flashing
+    # "Untitled" and correcting itself) and the store-derived name the sidebar
+    # and picker paint from the same transcript. "Untitled session" is the
+    # honest answer only when every one of those is empty.
+    head.append(runtime.name or fallback_name or "Untitled session", style=fg)
+    # ``ellipsis``, not the ``crop`` this row used when the only reachable string
+    # was ``runtime.name or "Untitled session"`` (17 cells). The label the header
+    # wears now is the sidebar's own — 47-64 cells — so ordinary narrow panes
+    # reach the cut, and ``crop`` deletes the label's OWN trailing "…" along with
+    # what follows it, leaving a mid-word fragment that reads as a string that ran
+    # out of buffer rather than as an excerpt (design D1). ``width`` is the
+    # MEASURED card, not a fitted guess: one cell wider and the row folds onto a
+    # second line, the "one record reads as two" fault these charts exist to
+    # remove (see :meth:`SessionScreen._card_width`).
+    head.truncate(width, overflow="ellipsis")
     body.lines.append(head)
     ident = Text()
     ident.append(f"  {runtime.session_id}", style=dim)
@@ -1528,7 +1556,13 @@ class SessionScreen(ModalScreen[None]):
         Binding("end", "scroll_end", "Bottom", show=False),
     ]
 
-    def __init__(self, report: SessionReport | None, runtime: SessionDiagnostics) -> None:
+    def __init__(
+        self,
+        report: SessionReport | None,
+        runtime: SessionDiagnostics,
+        *,
+        provisional_name: str = "",
+    ) -> None:
         super().__init__()
         self.report = report
         self.runtime = runtime
@@ -1537,6 +1571,29 @@ class SessionScreen(ModalScreen[None]):
         #: screen is read mid-session to answer "where did my context go", which
         #: is a token question, where ``/analytics`` answers a spend question.
         self._metric = METRIC_TOKENS
+        #: The host's opener-derived stand-in, handed in BEFORE the push. It is
+        #: already in memory, so the header can wear it on the first frame
+        #: instead of flashing "Untitled session" until the worker's disk read
+        #: lands. Empty on a RESUMED conversation, where the host cleared it and
+        #: the name comes from the transcript instead.
+        self._provisional_name = provisional_name
+        #: The store-derived label the sidebar and picker paint for this same
+        #: session, published by the worker. Read here on the paint path it
+        #: would be a blocking transcript probe on a keypress; it arrives empty
+        #: and ``""`` is also the honest answer for a session with no opener yet.
+        #:
+        #: So a RESUMED conversation with no stored title and no stand-in wears
+        #: "Untitled session" for the ONE worker hop before this lands — design
+        #: D2, accepted: measured 9.2 ms with an empty ledger and 26.3 ms behind
+        #: a 4,000-row one. That is sub-frame at 30 fps, and the hop is shared
+        #: with the ledger read the screen cannot start without. Both
+        #: alternatives cost more than the frames they buy: a read BEFORE the
+        #: push puts a transcript probe on the keypress path (the constraint this
+        #: screen is built around), and a neutral placeholder needs a THIRD
+        #: state — "not yet read" — distinct from "read and empty", so the
+        #: header would have to claim something about a transcript it has not
+        #: looked at rather than fall through the precedence it already has.
+        self._disk_name = ""
 
     def compose(self) -> ComposeResult:
         with Container(classes="analytics-panel"):
@@ -1583,6 +1640,36 @@ class SessionScreen(ModalScreen[None]):
         self.report = report
         self._repaint()
 
+    def set_disk_name(self, name: str) -> None:
+        """Publish the store-derived label the sidebar would paint for this session.
+
+        Same ownership rule as :meth:`set_report`, for the same reason: the read
+        happens off the event loop, so a ``/new`` or ``/resume`` landing while it
+        runs must not put the previous conversation's label on whatever the user
+        is looking at now. The caller owns the identity/epoch checks — this one
+        refuses to paint on a retired presentation at all.
+
+        Never written to the conversation store: a stand-in in
+        ``session.conversation_name`` would cancel the naming call it stands in
+        for (see ``OperatorApp._show_provisional_name``).
+        """
+        if self.presentation_cancelled:
+            return
+        self._disk_name = name
+        self._repaint()
+
+    def _fallback_name(self) -> str:
+        """The best label this session has when the store of record is empty.
+
+        The provisional label wins over the disk label because it is the one the
+        operator is watching on the status band and the terminal tab, and
+        because it is synchronous — it is present on the frame the worker has
+        not answered yet. The disk label is the fallback's fallback: the RESUMED
+        conversation that never got a generated title has no stand-in on the
+        host at all.
+        """
+        return self._provisional_name or self._disk_name
+
     def _card_width(self) -> int:
         """The content cells a report row may actually occupy.
 
@@ -1625,7 +1712,11 @@ class SessionScreen(ModalScreen[None]):
 
     def _report_text(self) -> Text:
         return build_session_report(
-            self.report, self.runtime, self._card_width(), metric=self._metric
+            self.report,
+            self.runtime,
+            self._card_width(),
+            metric=self._metric,
+            fallback_name=self._fallback_name(),
         )
 
     def _repaint(self) -> None:

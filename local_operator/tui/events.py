@@ -547,8 +547,8 @@ class EventController:
 
         WHY IT IS A MODE HERE, AND NOT A DEFERRED ``subscribe()``. The obvious
         fix -- do not subscribe a speculative source at all -- does not work,
-        and it fails silently. ``RemoteSession._emit_or_buffer`` does not DROP
-        an event when nobody is subscribed, it BUFFERS it (``remote.py``: ``if
+        and it fails silently. ``AttachedSession._emit_or_buffer`` does not DROP
+        an event when nobody is subscribed, it BUFFERS it (``attached.py``: ``if
         not self._ready_for_events or not self._handlers: ...append``). A
         parked source is ready-for-events with zero handlers, which is exactly
         that branch, so deferring the subscribe trades CPU for an unbounded
@@ -597,7 +597,7 @@ class EventController:
         completion acknowledgement.
         """
         from local_operator.harness.types import AgentStartEvent
-        from local_operator.session.remote import deserialize_event
+        from local_operator.session.attached import deserialize_event
 
         if not getattr(state, "streaming", False):
             return

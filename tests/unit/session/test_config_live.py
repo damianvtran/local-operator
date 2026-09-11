@@ -39,6 +39,7 @@ from local_operator.model.configure import (
     _anthropic_cache_ttl_1h_min_context_tokens,
     _openai_api_mode,
     _openai_use_max_context_window,
+    _openrouter_provider_preferences,
 )
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
@@ -253,6 +254,86 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "chat_completions",
         lambda s, w: _openai_api_mode(s.routing_settings),
     ),
+    # -- openrouter: the routing object the NEXT client build will send -------
+    # Same discipline as the two probes above: observed through the exact
+    # function ``SessionStreamFn._client_for`` calls
+    # (``_openrouter_provider_preferences``), never through the raw mapping —
+    # the resolver is what makes these keys live, so the resolver is what
+    # must move. The probe VALUES are the wire shape each key produces (a
+    # stored "false"/"true" ENUM string surfaces as the JSON bool the body
+    # carries; ``max_price`` is probed in its parsed-mapping form, the shape
+    # a PATCH route or hand-written YAML stores). Non-default in every case:
+    # the section's contract is that defaults resolve to NO ``provider``
+    # object at all.
+    "providers.openrouter.sort": (
+        "price",
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("sort"),
+    ),
+    # Deliberately NON-member slugs: the host lists are an open, upstream-
+    # owned namespace (review round 1, M1), and the probe is where that
+    # acceptance is enforced on the live path.
+    "providers.openrouter.order": (
+        ["deepinfra"],
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("order"),
+    ),
+    "providers.openrouter.only": (
+        ["google-vertex/us-east5"],
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("only"),
+    ),
+    "providers.openrouter.ignore": (
+        ["deepinfra/turbo"],
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("ignore"),
+    ),
+    "providers.openrouter.allow_fallbacks": (
+        False,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "allow_fallbacks"
+        ),
+    ),
+    "providers.openrouter.require_parameters": (
+        True,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "require_parameters"
+        ),
+    ),
+    "providers.openrouter.data_collection": (
+        "deny",
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "data_collection"
+        ),
+    ),
+    "providers.openrouter.zdr": (
+        True,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("zdr"),
+    ),
+    "providers.openrouter.enforce_distillable_text": (
+        True,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "enforce_distillable_text"
+        ),
+    ),
+    "providers.openrouter.quantizations": (
+        ["mxfp4"],
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "quantizations"
+        ),
+    ),
+    "providers.openrouter.max_price": (
+        {"prompt": 1},
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("max_price"),
+    ),
+    "providers.openrouter.preferred_min_throughput": (
+        12.5,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "preferred_min_throughput"
+        ),
+    ),
+    "providers.openrouter.preferred_max_latency": (
+        2.5,
+        lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get(
+            "preferred_max_latency"
+        ),
+    ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on
     # the auth STORE, not the mapping, because the store holds its own copy.
@@ -341,8 +422,8 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: ``display.*``/``tui.theme``; covered in the TUI suite).
 #:
 #: ``approvals`` is here because the approval MODE lives in the host's gate,
-#: not in the ``Session``: the runtime's ``OwnedSessionHandle._auto_approve``
-#: (``tests/unit/session/runtime/test_owned_approvals_live.py``) and the
+#: not in the ``Session``: the runtime's ``ServingSessionHandle._auto_approve``
+#: (``tests/unit/session/runtime/test_serving_approvals_live.py``) and the
 #: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
 #: The session only holds whatever gate closure the host installed.
 #:

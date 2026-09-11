@@ -124,7 +124,13 @@ def _chat_sse(chunks):
 @pytest.mark.asyncio
 async def test_chat_dispatch_adds_header_without_changing_body():
     """End to end on the chat path xai actually uses: header on the wire,
-    body untouched by the routing key."""
+    and the chat body carries ``prompt_cache_key``.
+
+    xAI lists ``prompt_cache_key`` as a first-class chat-completions field
+    plumbed to ``x-grok-conv-id``, so the stamp that every cache-capable
+    openai-compat client now sends is expected here too — the routing header
+    is additive, not a substitute for the body field.
+    """
     wire: list[httpx.Request] = []
 
     def respond(request):
@@ -145,8 +151,8 @@ async def test_chat_dispatch_adds_header_without_changing_body():
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         client = OpenAICompatClient(XAI_BASE, http_client=http)
         request = _request()
-        # The stream computes the same scope from the credential; assert the
-        # routing header changed nothing about the body.
+        # The stream computes the same scope from the credential; the routing
+        # header is additive — the body still carries prompt_cache_key.
         expected_body = client._build_body(request, scope=credential_scope("synthetic-key"))
         for _ in range(2):  # retry/resume keeps the same conv id
             async for _event in client.stream(request, "synthetic-key"):
@@ -158,7 +164,7 @@ async def test_chat_dispatch_adds_header_without_changing_body():
         assert json.loads(sent.content) == expected_body
         ids.add(sent.headers["x-grok-conv-id"])
     assert len(ids) == 1
-    assert "prompt_cache_key" not in json.loads(wire[0].content)
+    assert json.loads(wire[0].content)["prompt_cache_key"] == "lineage"
 
 
 @pytest.mark.asyncio

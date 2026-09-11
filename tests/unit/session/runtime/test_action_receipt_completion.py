@@ -38,10 +38,10 @@ from typing import Any, AsyncIterator
 import pytest
 
 from local_operator.harness.types import ImageContent
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import SLASH_ACTION_RECEIPTS
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
-from tests.unit.session.runtime.test_owned import FakeSession, make_handle
+from tests.unit.session.runtime.test_serving import FakeSession, make_handle
 
 
 class _Receipt:
@@ -50,7 +50,7 @@ class _Receipt:
     A stand-in rather than the real pydantic model so a test can produce a
     receipt shape directly without routing a whole slash command through the
     session — the completion predicate is what is under test here, not the
-    ``/team`` grammar (``test_owned.py`` and the e2e stage cover that end).
+    ``/team`` grammar (``test_serving.py`` and the e2e stage cover that end).
     ``model_copy`` is reproduced because the failure path uses it.
     """
 
@@ -68,7 +68,7 @@ class _Receipt:
 
 
 def _attach_receipt(receipt_type: str = "team_attached", request: str = "do the thing") -> _Receipt:
-    """The exact shape ``owned.py::_team_attach_slash`` returns on attach."""
+    """The exact shape ``serving.py::_team_attach_slash`` returns on attach."""
     return _Receipt(
         kind="notice",
         text="sending to lopdev. manager is coordinating.",
@@ -106,10 +106,10 @@ class _TeamSession(FakeSession):
 
 
 @contextlib.asynccontextmanager
-async def _team_handle() -> AsyncIterator[tuple[OwnedSessionHandle, _TeamSession]]:
+async def _team_handle() -> AsyncIterator[tuple[ServingSessionHandle, _TeamSession]]:
     """A handle over a session that really can attach ``lopdev``."""
     session = _TeamSession()
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
     with tempfile.TemporaryDirectory() as tmp:
         registry = TeamRegistry(Path(tmp))
         registry.create_team(
@@ -461,7 +461,7 @@ class _SlowDrainSession(FakeSession):
         self.started: list[str] = []
 
     # ``message_id``/``admitted`` are load-bearing on this double, not
-    # decoration. The handle probes for ``message_id`` (``owned.py``'s
+    # decoration. The handle probes for ``message_id`` (``serving.py``'s
     # ``legacy_prompt`` check) and, when it is ABSENT, resolves the admission
     # immediately as a compatibility shim for pre-durable sessions — so a
     # double without it never exercises the durable path and cannot reproduce
@@ -500,7 +500,7 @@ async def test_the_receipt_returns_without_waiting_for_a_queued_turn() -> None:
     the clock).
     """
     session = _SlowDrainSession()
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
 
     result = await handle._complete_unconsumed_action(_attach_receipt(), None, None)
 

@@ -36,16 +36,18 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.transcript import Transcript
 from tests.unit.session.runtime.test_server import FakeHandle
 from tests.unit.session.test_remote import _never_take_over, _wait_record
 
 
-def _bare_remote(tmp_path: Path) -> RemoteSession:
+def _bare_remote(tmp_path: Path) -> AttachedSession:
     """A connected-shape facade without the socket, for wire-event unit tests."""
-    remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over)
+    remote = AttachedSession(
+        config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over
+    )
     remote._ready_for_events = True
     return remote
 
@@ -170,7 +172,7 @@ async def test_reconnect_paints_rows_that_became_durable_during_the_gap(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -253,7 +255,7 @@ async def test_failed_cancel_resolution_preserves_failure_sentinel(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         resolved: list[int] = []
@@ -286,7 +288,7 @@ async def test_partial_and_successful_cancel_counts_resolve_authoritatively(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         # The fake owner confirms 2 — a PARTIAL stop relative to any larger
@@ -322,7 +324,7 @@ async def test_reconnect_replays_each_gap_row_once_even_across_two_cycles(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -423,7 +425,7 @@ async def test_reconnect_gap_delta_preserves_every_native_row_shape(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -522,7 +524,7 @@ async def test_routed_slash_during_recovery_refuses_in_user_language(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         registrant.close()
@@ -563,7 +565,7 @@ async def test_prompt_during_recovery_still_queues_and_delivers(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         registrant.close()
@@ -617,7 +619,7 @@ async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_pars
     release_parse = asyncio.Event()
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -641,9 +643,9 @@ async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_pars
         # Instrument the threaded parse so a live relay frame lands AFTER the
         # socket is up and BEFORE the delta is emitted — the exact window
         # MAJOR-1 reproduced through the production recovery path.
-        real_read = RemoteSession._read_transcript
+        real_read = AttachedSession._read_transcript
 
-        async def gated_read(self_inner: RemoteSession) -> Any:
+        async def gated_read(self_inner: AttachedSession) -> Any:
             if self_inner is not remote or parse_opened.is_set():
                 return await real_read(self_inner)
             parse_opened.set()
@@ -656,7 +658,7 @@ async def test_reconnect_delivers_gap_delta_before_live_frames_buffered_mid_pars
         try:
             from unittest.mock import patch as _patch
 
-            with _patch.object(RemoteSession, "_read_transcript", gated_read):
+            with _patch.object(AttachedSession, "_read_transcript", gated_read):
                 # The replacement owner is mid-turn (streaming generation 3)
                 # and emits one live frame the moment the follower's reader
                 # task is attached but the parse has not finished.
@@ -716,7 +718,7 @@ async def test_reconnect_tool_result_only_gap_settles_painted_card(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -797,7 +799,7 @@ async def test_compact_now_during_recovery_refuses_in_user_language(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         registrant.close()
@@ -840,7 +842,7 @@ async def test_follower_prompt_carries_a_caller_supplied_message_id() -> None:
     """A follower TUI correlates its optimistic echo by id like the owner does.
 
     The TUI probes ``prompt`` for a ``message_id`` keyword and registers the id
-    it supplies, matching the announcement against it. ``RemoteSession.prompt``
+    it supplies, matching the announcement against it. ``AttachedSession.prompt``
     had no such keyword -- it minted its own via ``ContinuationCommand.create``
     -- so on an attached follower the probe failed, the entry registered
     id-less, and a DISTINCT message whose words collided was still swallowed

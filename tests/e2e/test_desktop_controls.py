@@ -15,8 +15,8 @@ import uvicorn
 
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.slash_commands import SLASH_COMMANDS
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
@@ -113,7 +113,14 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             assert {row["name"] for row in catalog} == offered
             assert withheld == {"mobile", "info"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
-            assert sum(len(row["aliases"]) for row in catalog) == 8
+            # The literal is DELIBERATE, unlike its three neighbours. The
+            # catalogue's `aliases` are copied straight off `spec.aliases`
+            # (`desktop_commands.py:39`), so deriving this bound from
+            # SLASH_COMMANDS would compare the registry with itself and pass for
+            # any alias added or dropped — the one thing this line exists to
+            # notice. Update the number when you intend to change the offered
+            # alias surface; a diff here is the review prompt.
+            assert sum(len(row["aliases"]) for row in catalog) == 9
             created = await client.post(
                 "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
             )
@@ -133,7 +140,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
             manager = McpManager(str(workspace))
             session.mcp_manager = manager
-            handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
             runtime = RuntimeServer(handle, kind="daemon")
             await runtime.start_in_process()
             (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))

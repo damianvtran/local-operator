@@ -16,6 +16,7 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
+from local_operator.session.attached import AttachedSession
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
     DisplayHistoryWindow,
@@ -24,9 +25,9 @@ from local_operator.session.history_window import (
     display_window,
     wire_payload,
 )
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import (
     ENTRY_COMPACTION,
     Transcript,
@@ -182,6 +183,73 @@ async def test_the_wire_keeps_the_old_epoch_key_and_reads_both(
 
 
 @pytest.mark.asyncio
+async def test_a_page_carrying_both_epoch_aliases_still_validates(tmp_path: Path) -> None:
+    """Tolerate the transitional payload that carries BOTH epoch keys.
+
+    ``AliasChoices`` consumes only the FIRST match and this DTO forbids extras,
+    so a payload with ``owner_epoch`` AND ``runtime_epoch`` used to raise
+    ``extra_forbidden`` on the second key. That is the one shape a producer
+    mid-rename can emit — the old key for viewers that have not flipped, the
+    new key for those that have — so it has to validate rather than kill the
+    attach. ``runtime_epoch`` wins when both are present: the payload carrying
+    it came from the newer producer. The emit stays ``owner_epoch`` alone, or
+    a pre-rename viewer's ``extra="forbid"`` DTO rejects our pages.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    base = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+    }
+
+    old_only = DisplayHistoryWindow.model_validate({**base, "owner_epoch": "e"})
+    assert old_only.owner_epoch == "e"
+
+    new_only = DisplayHistoryWindow.model_validate({**base, "runtime_epoch": "e"})
+    assert new_only.owner_epoch == "e"
+    assert new_only.runtime_epoch == "e"
+
+    both = DisplayHistoryWindow.model_validate(
+        {**base, "owner_epoch": "stale", "runtime_epoch": "e"}
+    )
+    assert both.owner_epoch == "e"
+    assert both.runtime_epoch == "e"
+
+    emitted = window(transcript).model_dump(mode="json")
+    assert "runtime_epoch" not in emitted
+    assert emitted["owner_epoch"] == "synthetic-epoch"
+
+
+def test_the_alias_collapse_does_not_mutate_the_callers_dict() -> None:
+    """The ``mode="before"`` validator must not write through its input.
+
+    A before-validator is handed the caller's OWN object — not a pydantic-owned
+    copy — so the pop/assign that collapses the aliases used to rewrite the
+    dict passed to ``model_validate`` in place: the caller lost
+    ``runtime_epoch`` and had ``owner_epoch`` overwritten with the new value.
+    Today's sole caller passes a fresh dict, so nothing observable broke, but
+    the next caller that reuses a payload (validating one dict against two
+    models, or logging it after validation) would be silently corrupted. Hold
+    the caller's dict to its snapshot across the call.
+    """
+    payload = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+        "owner_epoch": "stale",
+        "runtime_epoch": "fresh",
+    }
+    snapshot = dict(payload)
+
+    validated = DisplayHistoryWindow.model_validate(payload)
+
+    assert validated.owner_epoch == "fresh"
+    assert validated.runtime_epoch == "fresh"
+    assert payload == snapshot
+
+
+@pytest.mark.asyncio
 async def test_a_pre_rename_viewer_still_accepts_the_wire_page(tmp_path: Path) -> None:
     """The exact attach break round 1 flagged, held shut by a fixture viewer.
 
@@ -254,7 +322,7 @@ async def test_real_attach_pages_without_viewer_journal_parse_and_records_shell_
     messages = [Message.user(f"canonical {index}") for index in range(250)]
     await seed_transcript(directory, messages)
     session = build_session(directory, ScriptedStream([text_turn("owner reply")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     remote = None
     await server.start_in_process()
@@ -263,8 +331,8 @@ async def test_real_attach_pages_without_viewer_journal_parse_and_records_shell_
         async def forbidden(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
             raise AssertionError("window attach must not parse the viewer journal")
 
-        monkeypatch.setattr(RemoteSession, "_read_transcript", forbidden)
-        remote = await RemoteSession.connect(
+        monkeypatch.setattr(AttachedSession, "_read_transcript", forbidden)
+        remote = await AttachedSession.connect(
             server._record,
             "window-test",
             config_dir=config,
@@ -327,13 +395,13 @@ async def test_live_replay_mutations_refresh_without_replacing_the_connection(
     messages = [Message.user(f"canonical {index}") for index in range(250)]
     await seed_transcript(directory, messages)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     assert server._record is not None
     remote = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             server._record,
             "window-live",
             config_dir=config,
@@ -383,6 +451,78 @@ async def test_live_replay_mutations_refresh_without_replacing_the_connection(
 
 
 @pytest.mark.asyncio
+async def test_peer_row_received_while_hidden_advances_the_viewer_count(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A `lop send` landing on a HIDDEN session must move the freshness count.
+
+    Regression for the missing-receipt resume: a peer CustomMessage is persisted
+    by the owner BEFORE it emits the ``PeerMessageDeliveredEvent``, and it bumps
+    neither ``history_generation`` (compaction/prune only) nor any
+    ``_MESSAGE_PHASE`` lifecycle (a settled row, not a streaming beat). Without
+    the ``_remember_live`` branch the hidden viewer's ``history_message_count``
+    stays frozen — so on reveal neither the stale-presentation guard rejects the
+    cache nor the ``total > history_size`` delta fires, and the inbound row is
+    never projected until a full reload. This drives a real owner + viewer over
+    the production socket and asserts the count advances exactly once and the
+    settled row is surfaced to the next display window.
+    """
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    directory = config / "sessions" / "peer-count"
+    messages = [Message.user("initial"), Message.assistant("seeded answer")]
+    await seed_transcript(directory, messages)
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    remote = None
+    try:
+        remote = await AttachedSession.connect(
+            server._record,
+            "peer-count",
+            config_dir=config,
+            takeover_factory=_never_take_over,
+            display_window=True,
+        )
+        baseline = remote.history_message_count
+        await session.receive_peer_message(
+            "gates are green",
+            sender={"pid": 4242, "conversation_name": "peer-send"},
+        )
+        # The receipt crosses the socket asynchronously; wait for the settled
+        # row to land in the viewer's live history, then assert the count moved.
+        peer_row = None
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            peer_row = next(
+                (
+                    row
+                    for row in remote._live_history.values()
+                    if getattr(row, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+                ),
+                None,
+            )
+            if peer_row is not None:
+                break
+        assert peer_row is not None, "the hidden viewer never filed the settled peer row"
+        assert remote.history_message_count == baseline + 1
+        # The marker carries the PERSISTED entry id, so the next display window
+        # (and the TUI's replay dedup) match on it — and the viewer hands the
+        # row to the next prepared replay.
+        assert peer_row.id in remote._durable_seed_ids
+        assert any(
+            getattr(row, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE
+            for row in remote.display_history_window()
+        )
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        server.close()
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
 async def test_prompt_and_wait_does_not_complete_on_admission(tmp_path, monkeypatch):
     config = tmp_path / "config"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
@@ -406,14 +546,14 @@ async def test_prompt_and_wait_does_not_complete_on_admission(tmp_path, monkeypa
             yield event
 
     session = build_session(directory, stream, cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     assert server._record is not None
     remote = None
     task = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             server._record,
             "window-loop",
             config_dir=config,
@@ -782,7 +922,7 @@ async def test_full_required_hands_back_an_audit_cursor_and_the_reader_adopts_it
     assert page.before_token, "the escalation dropped the audit cursor"
 
     # The reader's half: adopting that cursor must leave the chain live.
-    remote = RemoteSession.__new__(RemoteSession)
+    remote = AttachedSession.__new__(AttachedSession)
     remote._display_history = page
     # The state a reader is REALLY in at this moment, not a convenient one:
     # ``materialize_history`` has just replayed the model's history in full, so

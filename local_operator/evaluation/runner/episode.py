@@ -67,6 +67,7 @@ from local_operator.evaluation.adapters.supervisor import (
 )
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
+    AgentStopPayload,
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
@@ -652,8 +653,42 @@ class EpisodeRunner:
         try:
             await self._reset_and_observe()
             await self._step_loop()
+        except _AskUnanswered as stop:
+            # An unanswered ask after environment work is an agent stop, not a
+            # cancellation: the steps already bought are gradable state, and
+            # voiding them because no human answered would throw away paid
+            # work exactly like the decision-exhaustion case below. Before any
+            # step there is nothing to grade, so the pre-existing cancellation
+            # path stands (nothing was paid for except model calls).
+            if self._steps_taken > 0:
+                return await self._finalize_agent_stop(
+                    handshake,
+                    reason="ask_unanswered",
+                    observation_id=stop.observation_id,
+                    attempts=1,
+                    detail=f"ask-user was not answered (ask {stop.ask_id})",
+                    failure_kind=None,
+                )
+            return await self._finalize_cancelled(str(stop) or "cancelled")
         except _Cancelled as cancel:
             return await self._finalize_cancelled(str(cancel) or "cancelled")
+        except _ModelFailure as failure:
+            # Between-steps model exhaustion after environment work: the
+            # session is still alive and the state reached is gradable, so the
+            # episode scores like a truncation instead of sealing unscored and
+            # voiding every step it already paid for. At zero steps there is
+            # no environment work to grade, so the unscored model-failure
+            # path is the honest outcome.
+            if self._steps_taken > 0:
+                return await self._finalize_agent_stop(
+                    handshake,
+                    reason="model_failure",
+                    observation_id=failure.observation_id,
+                    attempts=failure.attempts,
+                    detail=_diagnostic(failure, self._redactions),
+                    failure_kind="model",
+                )
+            return await self._finalize_failure(failure)
         except _EvidenceFailure:
             raise
         except EvidenceError as error:
@@ -786,7 +821,9 @@ class EpisodeRunner:
                 if rejections > self._config.max_decision_retries:
                     raise _ModelFailure(
                         f"model produced no usable decision after {rejections} attempt(s): "
-                        f"{rejection.diagnostic}"
+                        f"{rejection.diagnostic}",
+                        observation_id=observation.observation_id,
+                        attempts=rejections,
                     ) from rejection
 
     async def _decide_once(self, observation: Observation) -> Any:
@@ -1252,7 +1289,7 @@ class EpisodeRunner:
         else:
             answer = await self._responder.ask(prompt, self._config.ask_deadline_ms)
             if answer is None:
-                raise _Cancelled("ask-user was not answered")
+                raise _AskUnanswered(batch.observation_id, ask_id)
             finish = AskUserExchangeParams(
                 operation_id=f"ask-finish-{ask_id}",
                 episode_id=begin.episode_id,
@@ -1263,8 +1300,13 @@ class EpisodeRunner:
             result = await session.finish_ask(finish, timeout=self._config.step_timeout)
         # Refusal is a clean, unscored cancellation, never permission to publish
         # a host substitute or a synthetic empty answer into the model history.
-        if not result.accepted or answer is None:
-            raise _Cancelled("ask-user was not answered")
+        # Only a genuinely UNanswered ask (no answer at all, from either side of
+        # the adapter boundary) is an agent stop: a refusal is the harness
+        # declining on policy, which scores nothing.
+        if answer is None:
+            raise _AskUnanswered(batch.observation_id, ask_id)
+        if not result.accepted:
+            raise _Cancelled("ask-user answer was refused")
         request_artifact = self._publish(prompt.encode("utf-8"), media_type="text/plain")
         response_artifact = self._publish(answer.encode("utf-8"), media_type="text/plain")
         exchange_id = ask_id
@@ -1296,7 +1338,55 @@ class EpisodeRunner:
     # Terminal paths
     # ------------------------------------------------------------------
 
-    async def _finalize_scored(self, handshake: Handshake) -> EpisodeOutcome:
+    async def _finalize_agent_stop(
+        self,
+        handshake: Handshake,
+        *,
+        reason: Literal["model_failure", "ask_unanswered"],
+        observation_id: str,
+        attempts: int,
+        detail: str,
+        failure_kind: str | None,
+    ) -> EpisodeOutcome:
+        """Record the between-steps stop, then score the state reached.
+
+        The session is still alive on both call paths (the provider answered
+        every call; only the agent stopped acting), so unlike
+        ``_finalize_failure`` this scores rather than sealing unscored -- the
+        exact treatment a truncation gets. No ``action_batch`` is written for
+        the stopped observation: the verifier's one-batch-per-observation rule
+        means that observation never receives one, and the ``agent_stop`` event
+        is what records why the rollout ended. ``failure_kind`` is kept
+        ("model") on the decision-exhaustion path so the terminal snapshot
+        still tells an auditor the score grades a floundering run, not a
+        finished one; the verifier requires it to agree with the stop reason.
+        """
+
+        detail_artifact = None
+        try:
+            detail_artifact = self._publish(detail.encode("utf-8"), media_type="text/plain")
+        except (_EvidenceFailure, OSError):
+            # Best-effort like the fatal-error detail: this runs on a stop
+            # path whose whole point is preserving a score, and an
+            # unpublishable diagnostic must not cost the bundle its terminal.
+            # (A publish that poisoned the writer fails the append below and
+            # abandons honestly.)
+            detail_artifact = None
+        self._append(
+            "agent_stop",
+            AgentStopPayload(
+                stop_id=f"stop-{uuid.uuid4().hex[:12]}",
+                reason=reason,
+                observation_id=observation_id,
+                attempts=attempts,
+                detail_artifact=detail_artifact,
+            ),
+        )
+        return await self._finalize_scored(handshake, failure_kind=failure_kind)
+
+    async def _finalize_scored(
+        self, handshake: Handshake, *, failure_kind: str | None = None
+    ) -> EpisodeOutcome:
         session = self._require_session()
         intent = FinalizationIntent(
             kind="score",
@@ -1344,7 +1434,10 @@ class EpisodeRunner:
             # fail verification/publication. Rescue first, then abandon with the
             # existing finalization authority; ordinary failure intent is too late.
             return await self._abandon_after_scoring_failure(error)
-        return await self._close_out(score, failure_kind=None, cancelled=False)
+        # ``failure_kind`` is None on every deliberate ending and "model" on
+        # the agent-stop exhaustion path, where the verifier's laundering
+        # guard requires the terminal kind to agree with the stop reason.
+        return await self._close_out(score, failure_kind=failure_kind, cancelled=False)
 
     async def _finalize_failure(self, error: BaseException) -> EpisodeOutcome:
         """Finalize unscored after a mid-episode failure.
@@ -1954,7 +2047,33 @@ class _ModelFailure(Exception):
     billed: the provider worked, the agent under test did not. The bundle
     seals ``category="model"`` / ``reason="model_failure"`` so a run that
     ended this way is never counted as an infrastructure outage.
+
+    Carries the observation the model was deciding on and the billed attempt
+    count so the between-steps ``agent_stop`` event can name exactly where
+    and after how many attempts the episode stopped.
     """
+
+    def __init__(self, message: str, *, observation_id: str, attempts: int) -> None:
+        super().__init__(message)
+        self.observation_id = observation_id
+        self.attempts = attempts
+
+
+class _AskUnanswered(_Cancelled):
+    """An ask went unanswered: no answer exists and none may be invented.
+
+    Subclasses ``_Cancelled`` because the invariant is the same -- a host
+    substitute or synthetic empty answer must never reach the model history
+    -- but carries the observation the asking batch was decided on so the
+    runner can record a scored ``agent_stop`` when the episode already has
+    gradable state. A REFUSED answer stays a plain ``_Cancelled``: refusal is
+    the harness declining on policy, not a human who does not exist.
+    """
+
+    def __init__(self, observation_id: str, ask_id: str) -> None:
+        super().__init__("ask-user was not answered")
+        self.observation_id = observation_id
+        self.ask_id = ask_id
 
 
 def _reportability_label(

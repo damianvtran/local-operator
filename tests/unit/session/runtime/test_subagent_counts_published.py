@@ -32,13 +32,13 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 
-async def _rig(directory: Path) -> tuple[Any, OwnedSessionHandle, RuntimeServer]:
+async def _rig(directory: Path) -> tuple[Any, ServingSessionHandle, RuntimeServer]:
     """A real Session under the production handle and server.
 
     The same rig as ``test_busy_settles`` and ``test_activity_vs_residency``:
@@ -47,7 +47,7 @@ async def _rig(directory: Path) -> tuple[Any, OwnedSessionHandle, RuntimeServer]
     """
     directory.mkdir(parents=True, exist_ok=True)
     session = build_session(directory, ScriptedStream([text_turn("reply")]))
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     handle.subscribe(server._schedule_push)
     return session, handle, server

@@ -1074,10 +1074,11 @@ class TestTheForkInheritsItsParentsCacheKey:
     def test_the_key_reaches_the_openai_wire_body(self, tmp_path: Path) -> None:
         """The inherited id is only worth anything if it is actually SENT.
 
-        ``_build_responses_body`` is the sole place the key reaches the wire,
-        gated on ``supports_prompt_cache``; the chat-completions body never
-        carries it. This drives the real builder rather than asserting on
-        source, so a change to the gate or the field name fails here.
+        Both ``_build_body`` (chat-completions; OpenRouter sticky routing) and
+        ``_build_responses_body`` stamp ``prompt_cache_key``, gated on
+        ``supports_prompt_cache``. This drives the real builders rather than
+        asserting on source, so a change to the gate or the field name fails
+        here.
         """
         from local_operator.harness.types import ChatRequest, Message
         from local_operator.model.configure import build_model_spec
@@ -1092,15 +1093,16 @@ class TestTheForkInheritsItsParentsCacheKey:
         assert spec.supports_prompt_cache, "the gate this key rides on is off for gpt-5.4"
 
         client = OpenAICompatClient(base_url="https://api.openai.com/v1", openai_api="responses")
-        body = client._build_responses_body(
-            ChatRequest(
-                model=spec,
-                system_blocks=["stable prefix"],
-                messages=[Message.user("go")],
-                prompt_cache_key=lineage,
-            )
+        request = ChatRequest(
+            model=spec,
+            system_blocks=["stable prefix"],
+            messages=[Message.user("go")],
+            prompt_cache_key=lineage,
         )
+        chat_body = client._build_body(request)
+        assert chat_body["prompt_cache_key"] == PARENT_ID
 
+        body = client._build_responses_body(request)
         assert body["prompt_cache_key"] == PARENT_ID
         assert body["prompt_cache_retention"] == "24h"
 

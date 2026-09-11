@@ -162,7 +162,7 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #:
 #: Lives here, beside the record fields it defines the meaning of, because two
 #: modules must agree on it and a divergence is invisible: the runtime publishes
-#: ``subagents_running`` from this set (``owned.OwnedSessionHandle``) and
+#: ``subagents_running`` from this set (``serving.ServingSessionHandle``) and
 #: ``/info`` tallies this session's own tree from it (``info.collect``). If they
 #: drifted, the fleet total and the tree drawn directly beneath it on the same
 #: card would disagree, which is the one error that section must never make.
@@ -263,7 +263,7 @@ class SessionRecord:
     # and for the same reason: PROTOCOL_VERSION deliberately does NOT move.
     # It gates SOCKET FRAME compatibility and is read as a pre-dial CAPABILITY
     # ASSERTION by peers already running — ``attach_client`` refuses below 2,
-    # ``session_factory`` and the TUI's takeover path below 4, ``remote``'s
+    # ``session_factory`` and the TUI's takeover path below 4, ``attached``'s
     # canonical attach below 5. Those readers take a HIGHER number as a promise
     # that every frame through v5 is understood. Two JSON integers that touch
     # no frame do not make that promise different, so bumping would spend the

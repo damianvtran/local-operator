@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from local_operator.reexec import REEXEC_CODE, take_plan
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tools.builtin import build_write_tool
 from local_operator.tui.app import OperatorApp
 from local_operator.update import MobileRefresh, VersionCheck
@@ -35,7 +35,7 @@ async def test_relaunch_preserves_owner_turn_and_gate(
     headless_tui_env: Path, workspace: Path, monkeypatch, command: str, approval: bool | str
 ) -> None:
     config = headless_tui_env
-    monkeypatch.setattr(OwnedSessionHandle, "_maybe_name_conversation", lambda *_: None)
+    monkeypatch.setattr(ServingSessionHandle, "_maybe_name_conversation", lambda *_: None)
     monkeypatch.setattr(
         "local_operator.update.check_latest",
         lambda **_: VersionCheck(installed="0.1.0", latest="0.2.0", behind=True),
@@ -79,13 +79,13 @@ async def test_relaunch_preserves_owner_turn_and_gate(
     )
     owner = build_session(directory, stream, tools=[tool], cwd=workspace)
     owner._yolo = not approval
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     viewers = []
 
     async def factory():
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             server._record,
             owner.session_id,
             config_dir=config,

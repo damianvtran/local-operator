@@ -46,11 +46,11 @@ forever" — later PRs in this series give this package public entry points
 **importing this package must never pull the heavy graph**:
 :mod:`.types` and :mod:`.registry` are stdlib-only because the runtime
 publishes its record on the CLI startup path, where dragging in
-:mod:`.server` (asyncio) or :mod:`.owned` (the composition root) is paid by
+:mod:`.server` (asyncio) or :mod:`.serving` (the composition root) is paid by
 every ``lop`` invocation including ``--version``.
 
 So an entry point added here must resolve its heavy dependencies lazily
-(function-local imports), exactly as :func:`.owned.spawn_owned_session`
+(function-local imports), exactly as :func:`.serving.spawn_owned_session`
 already does with ``session_factory``. ``tests/unit/test_import_graph.py``
 is the guard that will catch the alternative.
 """
