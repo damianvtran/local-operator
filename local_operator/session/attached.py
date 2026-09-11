@@ -5542,6 +5542,30 @@ class AttachedSession:
             return {"ok": False, "reason": "disconnected"}
         return answer if isinstance(answer, dict) else {"ok": False, "reason": "unavailable"}
 
+    async def register_secret_redaction(self, value: str) -> None:
+        """Hand one §6 value to the owner so IT registers it for redaction.
+
+        The viewer's registration is the broker's fallback for a runtime that
+        registered nothing (``ServingSessionHandle`` skips its own registration
+        when no store existed at its boot, §13). The ``VariableStore`` the notice
+        must reach lives in the owner's process — the one whose bash and eval
+        redactors read it — so this is a forward, not a local write.
+
+        It RAISES rather than reporting an "unavailable" result when the owner
+        cannot be reached, REFUSES, or does not answer inside the forward budget:
+        the caller is a §6 sink, and a sink that cannot register the value must
+        not acknowledge, so the broker fails closed and denies the child instead
+        of serving a value nothing can scrub. A silent success here would BE that
+        leak. The value is never logged, journalled, announced or streamed on
+        either side; this method only carries it.
+        """
+        client = self._client
+        if client is None or self._recovering or not client.connected:
+            raise ConnectionError(
+                "the runtime is not attached, so it cannot register this redaction"
+            )
+        await client.register_secret_redaction(value)
+
     def cancel_subagents(self, reason: str = "interrupted") -> int:
         """Optimistic cancel: returns the running count the offer promised.
 
