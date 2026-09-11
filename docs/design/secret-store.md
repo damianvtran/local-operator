@@ -568,7 +568,10 @@ has authenticated to session `S`, it notifies `S` over the same socket
 (`retrieved: {id, value}` on the session's own registration connection). The
 session registers the value with its redactor **before** the child's output can
 be read, because the broker's reply to the child and the notification to the
-session are both written before the child can print anything. The existing
+session are both written before the child can print anything. **`S` is the
+process that OWNS the filter, which in the attached architecture is the session
+runtime rather than the terminal a human is looking at** — see §13's amendment
+on registrants for the defect that distinction caused. The existing
 `_PipeRedactor` (`builtin.py:1298`) then scrubs the stream bytes, including a
 secret split across two reads, which it already handles.
 
@@ -1104,10 +1107,26 @@ lifeline — it is consulted per retrieval. So:
 >   audited and cost a geometric backoff (0.25 s → 8 s), since this verb is now
 >   reachable without lineage and scrypt's ~180 ms alone is a thin defence
 >   against an online oracle.
-> - **Interactive sessions register themselves** (`local_operator/secrets/
->   session.py`, wired into `run_tui`). Without this, authenticating `register`
->   would have converted the bypass into a permanent lockout. Closing the
->   channel deregisters, which is what revokes descendants promptly.
+> - **Sessions register themselves** (`local_operator/secrets/
+>   session.py`). Without this, authenticating `register` would have converted
+>   the bypass into a permanent lockout. Closing the channel deregisters, which
+>   is what revokes descendants promptly.
+>
+>   **Amended (runtime registration): the REGISTRANT is the process that owns
+>   the `VariableStore`, which is not always the terminal.** The original wiring
+>   registered inside `run_tui`, which was correct while the TUI process ran an
+>   in-process `Session`. Once the attached facade landed (#937) an interactive
+>   TUI held only an `AttachedSession` view over a separate runtime process, so
+>   its sink had no store to scrub through, every notice went unacked, and the
+>   fail-closed rule below denied EVERY descendant retrieval in EVERY attached
+>   session. The runtime now registers from its own handle
+>   (`ServingSessionHandle`, `session/runtime/serving.py`), the single seam
+>   behind both `spawn_owned_session` (phone and TUI runtime spawn) and `lop
+>   exec --control`, and deregisters on the handle's disposal and on the exec
+>   control surface's own teardown. `run_tui` keeps its registration for the
+>   case it is actually right for — a TUI that OWNS the session, where the
+>   store really is in that process. A registration is also skipped when no
+>   store exists yet, since there is nothing a descendant could be served.
 > - **Unlocking grants the operator's terminal standing for this boot.** `lop
 >   secret get` typed at a prompt has no lop session among its ancestors and is
 >   denied by construction — in `keyfile` mode the key-file fallback hides

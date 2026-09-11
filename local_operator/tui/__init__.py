@@ -7,14 +7,27 @@ Import hygiene: ``cli.py`` imports this module ONLY in interactive mode, and
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Awaitable, Callable
 
 from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
 
+logger = logging.getLogger(__name__)
+
 
 def _register_secret_session(app: Any) -> Any:
     """Register this process with the secret broker; ``None`` when there is none.
+
+    **This covers the TUI only when the TUI OWNS the session.** With an
+    in-process ``Session`` this process holds the ``VariableStore`` the §6
+    notice has to reach, so this registration is the one that answers it. An
+    ATTACHED TUI — the interactive default, where ``app._session`` is an
+    ``AttachedSession`` facade over a separate runtime process — has no store
+    at all, and the registration that matters there is the RUNTIME's own
+    (``ServingSessionHandle``), made in the process whose bash and eval
+    redactors read the store. Do not "fix" the sink below by reaching for the
+    viewer's session state looking for a store: there is nothing to reach.
 
     The redaction sink is resolved LAZILY, per notice, rather than captured
     here: the session is constructed inside the app after this runs, so its
@@ -29,6 +42,16 @@ def _register_secret_session(app: Any) -> Any:
         session = getattr(app, "_session", None)
         variables = getattr(session, "variables", None) if session is not None else None
         if variables is None:
+            # The LAST-RESORT fail-closed path, not the primary one. An attached
+            # viewer has no store to redact through, so the runtime's own
+            # registration is what should have answered this notice; reach here
+            # only when there is genuinely no filter in this process. Logged
+            # because a silent denial is invisible in the agent's transcript.
+            logger.warning(
+                "%r could not be registered for redaction: no variable store in this "
+                "process, so the retrieval is denied rather than served unscrubbed",
+                name,
+            )
             raise RuntimeError("no variable store is available to redact through yet")
         variables.register_redaction(value.decode("utf-8", errors="replace"))
 
@@ -74,14 +97,17 @@ async def run_tui(
             warm_session_imports=warm_session_imports,
         )
         # Register THIS process as a live lop session with the secret broker.
-        # Interactive TUI processes are the sessions the broker's ancestry
-        # check is about — an agent's `bash` and the eval worker are their
-        # descendants — and nothing in shipping code registered one before
-        # (QA Q2), which left the broker's session table permanently empty and
-        # `lop secret harden` unable to unlock its own store. Registration is
-        # deliberately best-effort: `register` returns None when no broker can
-        # be started, and the store is an optional capability rather than a
-        # boot dependency (§13).
+        # It covers the session the TUI OWNS: an in-process session's `bash`
+        # and eval workers are this process's descendants, and its
+        # `VariableStore` is here, so this registration is the one the §6
+        # notice must reach (QA Q2 — nothing in shipping code registered a
+        # session before, which left the broker's table permanently empty and
+        # `lop secret harden` unable to unlock its own store). An ATTACHED TUI
+        # is covered by the RUNTIME's registration instead (serving.py), since
+        # its `app._session` facade holds no store this sink could scrub
+        # through. Registration is deliberately best-effort: `register` returns
+        # None when no broker can be started, and the store is an optional
+        # capability rather than a boot dependency (§13).
         registration = _register_secret_session(app)
         try:
             await app.run_async()
