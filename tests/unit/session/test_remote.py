@@ -14,8 +14,13 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
 )
 from local_operator.mobile.types import AskOptionWire, PendingRequest
-from local_operator.session.attached import FRONTEND_SYNC_FOREGROUND_S, AttachedSession
-from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+from local_operator.session.attached import (
+    FRONTEND_SYNC_FOREGROUND_S,
+    AttachedSession,
+    _ask_question_from_pending,
+    _pending_request,
+)
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY, PendingGateState
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -449,3 +454,138 @@ async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
         assert viewer._frontend_future is None, "the abandoned sync wait must not survive"
     finally:
         await viewer.dispose()
+
+
+def test_the_terminal_gate_rebuild_carries_the_recommendation_not_only_the_phone_one() -> None:
+    """`_pending_request` is the SECOND rebuild, and the one the picker sees.
+
+    There are two paths a parked ask takes out of the owner and they are not
+    the same one. The phone reads the projection fold, rebuilt by
+    `_projection_from_json`. A terminal viewer reads
+    `Session.frontend_state.pending_gate`, and `_maybe_start_gate` rebuilds
+    THAT through `_pending_request` before handing it to `_run_ask`.
+
+    This rebuild enumerates its fields, so a field carried perfectly by the
+    projection is still dropped here — which is exactly how the badge went
+    missing on the default detached topology while every projection-based test
+    stayed green. `PendingGateState` is `extra="allow"`, so the two keys ride
+    the frontend-state contract as extras and only this enumeration has to
+    name them.
+    """
+    state = PendingGateState(
+        **{
+            "request_id": "stale",
+            "kind": "ask",
+            "title": "What should happen to the stale rows?",
+            "detail": "",
+            "options": [
+                {"label": "Dual-write", "description": "safest"},
+                {"label": "Drop them", "description": "nothing reads the column"},
+            ],
+            "secret": False,
+            "question_index": 0,
+            "question_total": 1,
+            "recommended": 0,
+            "persist": False,
+        }
+    )
+
+    pending = _pending_request(state)
+
+    assert pending is not None
+    assert pending.recommended == 0
+    assert pending.persist is False
+    # And the rebuilt question the picker actually reads.
+    assert _ask_question_from_pending(pending).recommended == 0
+
+
+def test_an_older_owners_gate_state_without_the_new_keys_still_rebuilds() -> None:
+    """The old-owner direction: neither key present, no crash, defaults apply."""
+    state = PendingGateState(
+        **{
+            "request_id": "stale",
+            "kind": "ask",
+            "title": "Which migration?",
+            "detail": "",
+            "options": [{"label": "Beta", "description": "second"}],
+            "secret": False,
+            "question_index": 0,
+            "question_total": 1,
+        }
+    )
+
+    pending = _pending_request(state)
+
+    assert pending is not None
+    assert pending.recommended is None
+    assert pending.persist is False
+
+
+def test_a_card_the_wire_permits_but_the_model_rejects_still_mounts() -> None:
+    """The tolerant wire accepts shapes the strict model refuses.
+
+    `_projection_from_json` builds `AskOptionWire(label=str(opt.get("label", "")))`
+    with no minimum length, while `AskOption.label` is `min_length=1`. So an
+    owner that projects an option with no label produces a card that cannot be
+    rebuilt — and since `ValidationError` is a `ValueError`, which `_run_ask`
+    does not catch, the escape is not a missing badge but an unretrieved-task
+    traceback and a question that NEVER MOUNTS.
+
+    The unlabelled row is named by position rather than dropped: the answer
+    travels by LABEL, so removing the row would silently change which choice
+    the user's tap resolves to.
+    """
+    pending = PendingRequest(
+        request_id="skewed",
+        kind="ask",
+        title="Which migration?",
+        options=[
+            AskOptionWire(label="", description="the owner sent no label"),
+            AskOptionWire(label="Gamma", description="third"),
+        ],
+    )
+
+    question = _ask_question_from_pending(pending)
+
+    assert [option.label for option in question.options] == ["Option 1", "Gamma"]
+    # The description still rides, so the row is readable even unlabelled.
+    assert question.options[0].description == "the owner sent no label"
+
+
+def test_a_card_beyond_repair_does_not_escape_as_a_traceback() -> None:
+    """A shape neither the guard nor the model accepts is bounded, not fatal.
+
+    A single-option picker is the clearest example: the model requires two
+    answers, and inventing a second would put a choice on screen the agent
+    never offered. `_ask_question_from_pending` therefore re-raises, and
+    `_run_ask`'s `ValueError` arm is what keeps that from becoming "Task
+    exception was never retrieved" with no card and no explanation.
+    """
+    pending = PendingRequest(
+        request_id="skewed",
+        kind="ask",
+        title="Which migration?",
+        options=[AskOptionWire(label="Beta", description="only one")],
+    )
+
+    with pytest.raises(ValueError):
+        _ask_question_from_pending(pending)
+
+
+def test_the_happy_path_is_untouched_by_the_repair_guard() -> None:
+    """The repair must never fire on a well-formed card."""
+    pending = PendingRequest(
+        request_id="fine",
+        kind="ask",
+        title="Which migration?",
+        options=[
+            AskOptionWire(label="Beta", description="second"),
+            AskOptionWire(label="Gamma", description="third"),
+        ],
+        recommended=0,
+    )
+
+    question = _ask_question_from_pending(pending)
+
+    assert [option.label for option in question.options] == ["Beta", "Gamma"]
+    assert question.recommended == 0
