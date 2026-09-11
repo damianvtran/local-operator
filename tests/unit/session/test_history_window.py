@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.harness.types import (
     CustomMessage,
     Message,
@@ -16,6 +17,7 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
+from local_operator.incidents import format_model_switch_message
 from local_operator.session.attached import AttachedSession
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
@@ -987,3 +989,44 @@ async def test_an_empty_kept_suffix_pages_the_audit_tail_and_terminates(tmp_path
     assert pages[-1].before_token is None, "the chain did not terminate"
     delivered = {row.id for row in walked}
     assert delivered >= {row.id for row in rows}, "audit tail paging lost rows"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_skips_a_harness_injected_first_row(tmp_path):
+    """The opener TITLES the conversation, so it must be a row a person wrote.
+
+    A transcript an older build wrote can begin with a leaked failover notice —
+    the rendered copy of a live-only ``CustomMessage``, stamped
+    ``harness_injected``. Taking it as the opener names the session "[model
+    switch] You are now running as …", which is the user-visible form of the
+    leak. The scan therefore keys on the stamp, not on the role alone, through
+    the shared decision in ``harness/rows.py`` — the same helper the TUI's own
+    provisional-name scan uses, so the two cannot disagree.
+    """
+    transcript = Transcript(tmp_path / "s")
+    notice = format_model_switch_message(
+        "zai/glm-5.3",
+        "anthropic/claude-opus-5",
+        reason="anthropic quota exhausted (0% remaining)",
+        transient=True,
+    )
+    await transcript.append_message(
+        Message(
+            role="user",
+            content=[TextContent(text=notice)],
+            provider_payload={RENDERED_INJECTION_KEY: True},
+        )
+    )
+    await transcript.append_message(Message.user("fix the login redirect loop"))
+
+    page = window(transcript)
+    assert page.opener_text == "fix the login redirect loop"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_still_takes_a_real_first_row(tmp_path):
+    """Negative control: with nothing injected, the opener is the first row."""
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_message(Message.user("fix the login redirect loop"))
+
+    assert window(transcript).opener_text == "fix the login redirect loop"
