@@ -1259,24 +1259,47 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
-        # Try to convert to int
-        try:
-            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                value = int(value)
-            # Try to convert to float
-            elif value.replace(".", "", 1).isdigit() or (
-                value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
-            ):
-                value = float(value)
-            # Try to convert to boolean
-            elif value.lower() in ("true", "false"):
-                value = value.lower() == "true"
-            # Handle null/None values
-            elif value.lower() in ("null", "none"):
-                value = None
-        except (ValueError, AttributeError):
-            # Keep as string if conversion fails
-            pass
+        # An ENUM's displayed LABEL is not always its stored VALUE (D11).
+        # `model_effort auto` means the stored ``""``, and the guessed parse
+        # below would hand the literal string ``auto`` to ``validate`` and have
+        # it rejected — a documented choice unreachable from the documented
+        # command. A label is matched case-insensitively and, when it matches,
+        # wins OUTRIGHT: the chain below is skipped, which matters because it
+        # converts the literal word ``none`` to Python ``None`` and ``none`` is
+        # a real rung of ``EFFORT_ORDER``. Values matching no label fall through
+        # to the existing parse unchanged, so no other kind's behaviour moves.
+        matched_choice: settings_io.Choice | None = None
+        if setting.kind is settings_io.Kind.ENUM:
+            typed = str(value).strip().lower()
+            matched_choice = next(
+                (
+                    choice
+                    for choice in setting.resolved_choices
+                    if str(choice.label).strip().lower() == typed
+                ),
+                None,
+            )
+        if matched_choice is not None:
+            value = matched_choice.value
+        else:
+            # Try to convert to int
+            try:
+                if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                    value = int(value)
+                # Try to convert to float
+                elif value.replace(".", "", 1).isdigit() or (
+                    value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
+                ):
+                    value = float(value)
+                # Try to convert to boolean
+                elif value.lower() in ("true", "false"):
+                    value = value.lower() == "true"
+                # Handle null/None values
+                elif value.lower() in ("null", "none"):
+                    value = None
+            except (ValueError, AttributeError):
+                # Keep as string if conversion fails
+                pass
 
         # Through the facade rather than ``update_config``: a dotted key needs
         # the merge-into-existing-sub-mapping rule (a whole-mapping write drops

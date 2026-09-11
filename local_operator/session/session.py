@@ -11622,7 +11622,7 @@ class Session:
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
                 self._web_tools_dirty = True
-        if "hosting" in changed or "model_name" in changed:
+        if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
             self._on_configured_model_changed(values, local=source == "local")
 
     def _rebuild_effort_tier_tools(self) -> None:
@@ -11711,14 +11711,32 @@ class Session:
         per-tick coalescing of the notice, which a source flag cannot express.
         The fix is scoped to ``local`` because ``source`` identifies that
         writer set exactly, not because tearing is impossible elsewhere.
+
+        ``model_effort`` is part of the SAME predicate, for the reason the pair
+        is: it is the third key of the same ``model`` section, it governs the
+        same birth defaults, and the TUI's own listener skips the whole
+        ``model`` section (a local write is the author's own receipt). Without
+        it an effort-only edit from ANOTHER process would change new sessions'
+        default with no signal anywhere — the one member of the section that
+        moved silently. The notice's advice is now literally true: ``/model
+        saved`` adopts the configured effort here, so naming the change is
+        naming the thing the user can act on. Compared NORMALISED (``str(...)
+        or ""``) because the spec's effort is a level or ``None`` while the
+        stored value is always a string, and ``None``/``""`` both mean "no
+        configured level".
         """
         if self._job_id is not None:
             return
         if local:
             return
-        if (values.get("hosting"), values.get("model_name")) == (
+        if (
+            values.get("hosting"),
+            values.get("model_name"),
+            str(values.get("model_effort") or ""),
+        ) == (
             self.model.provider,
             self.model.model_id,
+            self.model.reasoning_effort or "",
         ):
             return
         self._spawn_background(

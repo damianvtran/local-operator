@@ -142,6 +142,17 @@ DEFAULT_CONFIG = Config(
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
+            # The BIRTH-default reasoning effort for new conversations, alongside
+            # the model pair above. ``""`` means "no opinion" — the model's own
+            # documented default stands. Read at session build
+            # (``session_factory._prepare``, ``bootstrap.resolve_model_configuration``)
+            # and clamped to the chosen model's own ladder there: a rung the
+            # model cannot express lands on its nearest rung rather than reaching
+            # the wire, so a stored ``xhigh`` beside a model that stops at
+            # ``high`` is survivable and re-applies ``xhigh`` on a later switch
+            # back to a wider ladder. A BIRTH default only — a resumed
+            # conversation's own stored selection outranks it.
+            "model_effort": "",
             "auto_save_conversation": False,
             # The tool-approval mode a NEW interactive session opens in, written
             # by ``/approvals default <mode>`` and read by the TUI at mount.

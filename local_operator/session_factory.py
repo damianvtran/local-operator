@@ -1859,11 +1859,33 @@ async def _prepare(
     # first so /new or /resume cannot retarget an in-flight factory at the await.
     args = argparse.Namespace(**vars(args))
 
+    # The configured birth-default effort (``model_effort``). Imported here, in
+    # the same local style as ``configure_model`` below, because this module is
+    # on the startup import path that ``test_import_graph`` guards and the
+    # reader is only needed once per session build.
+    from local_operator.model.effort import configured_effort
+
     def resolve_birth():
         agent = resolve_agent(args, agent_registry)
-        return agent, resolve_hosting_model_with_source(agent, args, config_manager)
+        hosting, model_name, model_source = resolve_hosting_model_with_source(
+            agent, args, config_manager
+        )
+        # Read in the same OFF-LOOP thread as the model resolution (a config read
+        # is cheap, but there is no reason to hop back to the loop for it). This
+        # is a BIRTH default only: the journal restore in ``Session.__init__``
+        # runs after the spec is built and re-derives it (clamping), so a
+        # conversation resumed on a stored selection outranks this value by
+        # design — ``model_effort`` must not fight the per-conversation journal
+        # (design §0.1).
+        return (
+            agent,
+            (hosting, model_name, model_source),
+            configured_effort(config_manager),
+        )
 
-    agent, (hosting, model_name, model_source) = await asyncio.to_thread(resolve_birth)
+    agent, (hosting, model_name, model_source), effort_default = await asyncio.to_thread(
+        resolve_birth
+    )
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
@@ -1937,6 +1959,12 @@ async def _prepare(
             model_name=model_name,
             credential_manager=credential_manager,
             env_config=get_env_config(),
+            # The standing config effort, CLAMPED inside ``configure_model``
+            # against this spec's own ladder. Carried unconditionally, even when
+            # ``model_source`` is ``"flag"``: a ``--model`` flag chooses a
+            # MODEL, not an effort, and the clamp makes it safe to keep the
+            # configured level across that choice (design D3).
+            reasoning_effort=effort_default,
             **chat_kwargs,
         )
     )
