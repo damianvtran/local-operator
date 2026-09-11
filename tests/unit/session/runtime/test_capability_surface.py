@@ -263,13 +263,13 @@ async def test_a_routed_alias_reaches_the_same_handler_as_its_primary_name(
     literal list, so the test keeps its meaning as commands gain and lose them.
     """
     from local_operator.session.frontend_state import SlashResult
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.slash_commands import slash_command_for
 
     entry = slash_command_for(f"/{spelling}")
     assert entry is not None and spelling != entry.name, f"{spelling} is not an alias"
 
-    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
     handle._session = None  # type: ignore[attr-defined]
     aliased = await handle._slash_result(spelling, "", SlashResult)
     primary = await handle._slash_result(entry.name, "", SlashResult)

@@ -581,7 +581,7 @@ async def test_the_routed_path_uses_the_tighter_deadline() -> None:
     title and still report a lost connection."""
     assert naming.ROUTED_TITLE_TIMEOUT_S < naming.TITLE_TIMEOUT_S
 
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     seen: dict[str, float] = {}
     real = naming.refresh_title
@@ -599,7 +599,7 @@ async def test_the_routed_path_uses_the_tighter_deadline() -> None:
     session.complete_once = answer  # type: ignore[method-assign]
     session._history = _turns("fix the login redirect loop", "done")
 
-    runtime = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    runtime = ServingSessionHandle.__new__(ServingSessionHandle)
     runtime._publish_name = lambda: None  # type: ignore[method-assign]
 
     naming.refresh_title = spy  # type: ignore[assignment]
@@ -626,9 +626,9 @@ class _SlashResult:
 async def test_the_routed_path_agrees_with_the_tui_on_what_a_refresh_does() -> None:
     """Two surfaces, one release rule: a phone and a terminal cannot drift on
     whether a refresh reopens the latch."""
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
-    runtime = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    runtime = ServingSessionHandle.__new__(ServingSessionHandle)
     runtime._publish_name = lambda: None  # type: ignore[method-assign]
 
     # Unchanged: the latch stays.
@@ -664,9 +664,9 @@ async def test_a_rename_landing_mid_call_outranks_the_ROUTED_refresh_too() -> No
     the owning terminal while a phone's refresh is in flight must not be
     overwritten, and its latch must survive.
     """
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
-    runtime = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    runtime = ServingSessionHandle.__new__(ServingSessionHandle)
     runtime._publish_name = lambda: None  # type: ignore[method-assign]
 
     session = FakeSession()
@@ -700,9 +700,9 @@ async def test_a_rename_landing_mid_call_outranks_the_ROUTED_refresh_too() -> No
 async def test_the_routed_rename_branch_refuses_an_unknown_flag() -> None:
     """The raising parser reaches the detached runtime too — an unknown flag must
     be refused there rather than stored as a title on a phone."""
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
-    runtime = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    runtime = ServingSessionHandle.__new__(ServingSessionHandle)
     session = FakeSession()
     result = await runtime._rename_slash(session, "---refresh", _SlashResult)
     assert result.style == "warning"
