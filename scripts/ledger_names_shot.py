@@ -15,6 +15,9 @@ one event moved it for some rows and left the others where they were:
                        read as "nothing to do".
     reveal             an older page carrying a longer MCP tool name paged in
                        above rows already on screen.
+    promote            a call that STARTS: a row dictated under its announce name
+                       is promoted to `running` with the execution's name, which
+                       is the moment its name starts counting towards the spine.
 
 The fixture is the SAME in both cases, so the two frames differ in the event and
 not in the data. Every row is a settled receipt, and the names are chosen so the
@@ -50,6 +53,7 @@ from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 isolate_capture()
 
 from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.glyphs import display_name  # noqa: E402
 from local_operator.tui.widgets.tool_card import ToolCard  # noqa: E402
 from local_operator.tui.widgets.transcript import TranscriptView  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
@@ -71,6 +75,10 @@ OLDER_WIDE_ROW = ("old2", "mcp__linear_create_initiative", "release window", "cr
 
 #: The newcomer. `list_variables` is longer than every name above it.
 APPENDED_ROW = ("t3", "list_variables", "list_variables {}", "4 variables")
+
+#: The promoted row of the `promote` case: dictated as `list_variables` while it
+#: was composing, then started. Its summary is the one the execution carries.
+PROMOTED_ROW = ("live", "list_variables", "list them")
 
 
 def _tool(app: OperatorApp, rows: list[tuple[str, str, str, str]]) -> list[ToolCard]:
@@ -95,7 +103,30 @@ SUMMARIES = {
     OLDER_SHORT_ROW[0]: OLDER_SHORT_ROW[2],
     OLDER_WIDE_ROW[0]: OLDER_WIDE_ROW[2],
     APPENDED_ROW[0]: APPENDED_ROW[2],
+    PROMOTED_ROW[0]: PROMOTED_ROW[2],
 }
+
+
+def _summary_column(row: str, label: str, marker: str) -> str:
+    """Where this row's summary starts, measured off the frame's own text.
+
+    The marker is the direct answer while the frame is wide enough to paint it.
+    A narrower frame clips the summary — and that frame is exactly what this
+    script exists to document, so raising there wrote no frame at all. The
+    fallback measures the same number off the NAME field instead: the label
+    ends and the padding that follows belongs to the name column, so the first
+    cell of the summary is the first non-space after the label. A row narrow
+    enough to clip the label as well is reported as exactly that, rather than as
+    a number nothing backs.
+    """
+    at = row.find(marker)
+    if at >= 0:
+        return f"summary@{at}"
+    name_at = row.find(label)
+    if name_at < 0:
+        return f"name clipped at this width (neither {marker!r} nor {label!r} painted)"
+    tail = row[name_at + len(label) :]
+    return f"summary@{name_at + len(label) + len(tail) - len(tail.lstrip(' '))}"
 
 
 def _report_geometry(app: OperatorApp, view: TranscriptView) -> None:
@@ -108,8 +139,9 @@ def _report_geometry(app: OperatorApp, view: TranscriptView) -> None:
         marker = SUMMARIES.get(call_id)
         if marker is None:
             continue
-        row = strips[block.region.y].text
-        print(f"  {call_id:>6} summary@{row.index(marker)}", file=sys.stderr)
+        label = display_name(getattr(block, "tool_name", ""))
+        column = _summary_column(strips[block.region.y].text, label, marker)
+        print(f"  {call_id:>6} {column}", file=sys.stderr)
 
 
 async def main() -> None:
@@ -135,6 +167,15 @@ async def main() -> None:
             for block, result in zip(blocks, (OLDER_SHORT_ROW[3], OLDER_WIDE_ROW[3])):
                 block.mark_done(result)
             view.insert_blocks(0, blocks)
+        elif case == "promote":
+            # Dictate first, then start: the two events a real turn produces, in
+            # the order that moves the column on the SECOND one.
+            call_id, name, summary = PROMOTED_ROW
+            live = ToolCard(call_id, "bash", {})
+            view.append_block(live)
+            live.set_composing(12, name)
+            await pilot.pause()
+            live.begin_running(name, {"command": summary}, None)
         else:
             # Page one older block in, then append the longer-named row: the
             # column is invalidated by the page and moved by the append.

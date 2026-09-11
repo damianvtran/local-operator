@@ -21,6 +21,12 @@ In every case hovering a row repaired that row alone (``on_enter`` →
 ``refresh_row``), so the ledger visibly re-aligned under the pointer one row at
 a time. The assertions here are on the frame the compositor painted, with no
 pointer anywhere in the sequence.
+
+What is asserted is the COLUMN, never frame bytes or whole-row text: hover
+legitimately rewrites a row's own text (``_build_row`` lights the ``⟨expand⟩``
+offer when the row is hovered), so "the frame is unchanged" is the wrong
+instrument even where the alignment is right. The shared column is what must not
+move under any of these transitions.
 """
 
 from __future__ import annotations
@@ -30,7 +36,11 @@ from rich.text import Text
 from textual.app import App
 
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import TranscriptBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    TOOL_NAME_COL,
+    TranscriptBlock,
+    TranscriptView,
+)
 from tests.unit.tui.conftest import StyledTranscriptApp
 
 #: A name long enough to widen the column past the floor. It renders through
@@ -232,3 +242,117 @@ async def test_a_row_scrolled_out_of_view_is_repainted_too() -> None:
         off_frame = composed_row(first).index("echo step0")
         assert off_frame > narrow
         assert off_frame == composed_row(rest[-1]).index("echo step13")
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_starts_earns_the_column_for_its_row() -> None:
+    """The promotion out of ``composing`` is a path that moves the column.
+
+    ``contributes_name`` is False while a call is still being dictated and True
+    once the call it names has started, so a row's name begins counting towards
+    the spine at exactly this transition — the inverse of entering ``composing``,
+    which already invalidates the column. Without it the ledger stays on the
+    floor and the live row paints its own name truncated (``list_va…``), and
+    neither settling nor hovering repairs that: hover re-fits the row at the
+    stale column, so only some unrelated later resync would.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        settled = _bash("c1", "echo alpha")
+        view.append_block(settled)
+        await _settle(pilot)
+        narrow = summary_col(app, settled, "echo alpha")
+
+        live = ToolCard("live", "bash", {})
+        view.append_block(live)
+        live.set_composing(12, LONGER_TOOL)
+        await _settle(pilot)
+        # Dictated, not started: the name may not move the ledger's column yet.
+        assert summary_col(app, settled, "echo alpha") == narrow
+
+        live.begin_running(LONGER_TOOL, {"command": "list them"}, None)
+        await _settle(pilot)
+
+        shared = summary_col(app, live, "list them")
+        assert shared > narrow
+        assert summary_col(app, settled, "echo alpha") == shared
+        # The row the column grew FOR is painted in full, not ellipsised into a
+        # column that would have fitted it.
+        assert LONGER_TOOL in painted_row(app, live)
+
+
+@pytest.mark.asyncio
+async def test_removing_the_widest_row_brings_the_spine_back_down() -> None:
+    """The shrink half of the funnel: only a re-scan can say how far.
+
+    Growth can be answered by the newcomer's own name; a removal cannot, so it
+    keeps the full re-derivation — and the rows LEFT BEHIND are the ones that
+    have to be told, which is what dropping the cache alone failed to do.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = _bash("c1", "echo alpha")
+        second = _bash("c2", "echo beta")
+        view.append_block(first)
+        view.append_block(second)
+        await _settle(pilot)
+        floor = summary_col(app, first, "echo alpha")
+
+        wide = ToolCard("wide", WIDE_TOOL, {"command": "wide row"}, "")
+        view.append_block(wide)
+        await _settle(pilot)
+        grown = summary_col(app, wide, "wide row")
+        assert grown > floor
+        assert summary_col(app, first, "echo alpha") == grown
+        assert summary_col(app, second, "echo beta") == grown
+
+        view.remove_block(wide)
+        await _settle(pilot)
+
+        assert summary_col(app, first, "echo alpha") == floor
+        assert summary_col(app, second, "echo beta") == floor
+        assert view.tool_name_col == TOOL_NAME_COL
+
+
+@pytest.mark.asyncio
+async def test_every_row_agrees_on_the_column_rung_at_narrow_widths() -> None:
+    """Across the narrow threshold no row may diverge from its neighbours.
+
+    ``tool_name_col`` is the DERIVED column; what a row paints with is that value
+    clamped by the row's OWN frame — ``ToolCard._name_col`` answers the floor
+    below ``NAME_GROWTH_MIN_ROW``, and ``name_budget`` shrinks it further — so
+    the derived value and the painted one legitimately disagree there. The
+    property that has to hold is the one this file is about: at every rung all
+    rows agree, in both directions across the threshold. A rung where one row
+    disagrees is the tear, not the clamp.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = _bash("c1", "echo alpha")
+        second = _bash("c2", "echo beta")
+        wide = ToolCard("wide", WIDE_TOOL, {"command": "wide row"}, "")
+        for card in (first, second, wide):
+            view.append_block(card)
+        await _settle(pilot)
+
+        def rung(summary: str) -> int:
+            return summary_col(app, first, "echo alpha")
+
+        at_full_width = rung("echo alpha")
+        assert summary_col(app, wide, "wide row") == at_full_width
+
+        for width in (68, 50):
+            await pilot.resize_terminal(width, 24)
+            await _settle(pilot)
+            narrowed = rung("echo alpha")
+            assert narrowed < at_full_width, "the row clamp has to bite below the threshold"
+            assert summary_col(app, second, "echo beta") == narrowed
+            assert summary_col(app, wide, "wide row") == narrowed
+
+        await pilot.resize_terminal(100, 24)
+        await _settle(pilot)
+        assert rung("echo alpha") == at_full_width
+        assert summary_col(app, wide, "wide row") == at_full_width
