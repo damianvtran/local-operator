@@ -23,6 +23,13 @@ FRAME is one of:
                  observation, so the ``mount-*`` frames show a displaced paint
                  as though it never happened. Pre-fix, ``paint-1`` sits a page
                  below ``paint-0``; post-fix every paint is identical.
+    wedged       the head notice after a page whose insert settle was DROPPED
+                 and five subsequent clicks. ``call_after_refresh`` is
+                 ``post_message``, which returns False on a closing pump, so a
+                 view removed under an in-flight page left its paging lease
+                 mounted and unreleasable. Pre-fix this frame is frozen — the
+                 row still reads "older messages above" and the five clicks
+                 moved nothing; post-fix the gate reopens and the clicks page.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 isolate_capture()
 
 from local_operator.tui.app import OperatorApp  # noqa: E402
+from local_operator.tui.session_presentation import OlderHistoryNotice  # noqa: E402
 from local_operator.tui.widgets.transcript import TranscriptView  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
@@ -49,7 +57,14 @@ FRAMES = [
     "scrolled",
     *[f"mount-{i}" for i in range(4)],
     *[f"paint-{i}" for i in range(4)],
+    "wedged",
 ]
+
+#: How many times the ``wedged`` frame activates the head notice before the
+#: capture. The operator's report was "clicked it and nothing happened", so
+#: one click would not distinguish a slow page from a dead control; five
+#: establishes that no number of asks recovers the pre-fix state.
+_WEDGED_CLICKS = 5
 
 
 def _history(steps: int = 200, followups: int = 1) -> list[Any]:
@@ -152,6 +167,42 @@ async def capture(path: Path, frame: str, size: tuple[int, int]) -> None:
         view = app.query_one(TranscriptView)
 
         if frame == "scrolled":
+            view.note_user_scroll()
+            view.scroll_home(animate=False)
+            for _ in range(12):
+                await pilot.pause()
+        elif frame == "wedged":
+            # Refuse EXACTLY the settle `insert_blocks` schedules, once. That
+            # is not a contrivance: it is the same False Textual's
+            # `post_message` returns when `_release_sidebar_preparation`
+            # removes a transcript under a page that has already flagged its
+            # lease mounted. Arming it this way keeps the capture in one
+            # process and off the sidebar's whole navigation path.
+            real = view.call_after_refresh
+            armed = {"hit": False}
+
+            def refuse(callback, *callback_args, **callback_kwargs):
+                name = getattr(callback, "__name__", "")
+                if not armed["hit"] and name == "settle_then_restore":
+                    armed["hit"] = True
+                    return False
+                return real(callback, *callback_args, **callback_kwargs)
+
+            view.call_after_refresh = refuse  # type: ignore[method-assign]
+            app._mount_older_resume_page()
+            view.call_after_refresh = real  # type: ignore[method-assign]
+            for _ in range(60):
+                await pilot.pause()
+            if not armed["hit"]:
+                raise SystemExit("the settle was never refused; the hazard was not armed")
+            notice = app._resume_head_notice
+            for _ in range(_WEDGED_CLICKS):
+                if isinstance(notice, OlderHistoryNotice):
+                    notice.post_message(OlderHistoryNotice.Requested(notice))
+                for _ in range(60):
+                    await pilot.pause()
+            # At the top, where the notice is, so the frame shows the row the
+            # reader was clicking rather than the tail they never left.
             view.note_user_scroll()
             view.scroll_home(animate=False)
             for _ in range(12):
