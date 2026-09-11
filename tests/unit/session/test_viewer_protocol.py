@@ -31,18 +31,29 @@ members escaped typing in the first place.
 **What the derivation reaches, stated precisely — it is not "every access".**
 It sees ``<expr>.member`` and a two-or-more-argument call to any name in
 ``_PROBE_CALLS`` (``getattr``, ``hasattr``, and ``info/collect.py``'s ``_attr``
-wrapper) whose member name is a literal string, a variable bound by a
-``for probe in ("a", "b")`` loop, or a module-level string constant — where
-``<expr>`` is one of the bindings registered for that file in ``_SCANNED`` or a
-single-level local ALIAS of one (``session = source.session``, followed inside
-the scope that binds it and no further). It is blind to:
+wrapper) whose member name is any of:
+
+* a literal string;
+* a name bound by a ``for probe in ("a", "b")`` loop, INCLUDING a tuple-unpack
+target (``for probe, default in (("a", None),)``), which is read
+positionally off the literal rows;
+* a module-level string constant OR a local one bound to the same literal shape
+in the scope that reads it;
+
+where ``<expr>`` is one of the bindings registered for that file in ``_SCANNED``
+or a single-level local ALIAS of one (``session = source.session``). An alias is
+followed only while it is LIVE — from the binding that makes it a session to the
+next binding of the same name in the same scope — which is what stops a
+same-scope reuse (``previous = source.session`` … ``previous = rows[-1]``) from
+attributing the row's members to a session. It is blind to:
 
 * an alias chased through a second hop (``a = self._session; b = a``);
+* an alias read from a scope other than the one that binds it;
 * any other attribute or helper return holding a session
   (``self._current_session().member``);
-* a probe name computed at runtime by neither route — a dict lookup, a list
-  built incrementally, an f-string. ``_session_is_busy`` was the canonical
-  instance of the SHAPE this now covers: it looped
+* a probe name computed at runtime by none of the literal routes above — a dict
+  lookup, a list built incrementally, an f-string. ``_session_is_busy`` was the
+  canonical instance of the SHAPE this now covers: it looped
   ``for probe in ("is_busy", "busy")``, neither name exists on either class, so
   it returned a hard-coded ``False`` and its ``/loop stop`` caller took a dead
   branch. That loop is now recognized — and was removed rather than declared
@@ -105,11 +116,16 @@ _ROOT = Path(local_operator.__file__).resolve().parent
 #:
 #: These are the ROOT bindings, matched literally. A single-level local alias
 #: of one of them (``session = source.session``, then ``session.member``) IS
-#: followed — inside the scope that binds it and no further, which is the part
-#: that keeps it safe: resolving assignments ACROSS scopes is where the false
-#: positives that nearly killed this probe come from. See ``_scope_aliases``
-#: and ``_scope_nodes`` for the boundary. This list stays the thing to extend
-#: when a new root binding appears; a new alias needs no edit here.
+#: followed, but only while it is LIVE: inside the scope that binds it, from the
+#: statement that binds it to the next statement in that scope that rebinds the
+#: same name to something else. Both halves of that boundary are load-bearing.
+#: Resolving assignments ACROSS scopes is where the false positives that nearly
+#: killed this probe come from, and so is treating a name as an alias for the
+#: rest of the scope after it has been reused for a row or a widget — the same
+#: ``previous``/``current``/``remote`` reuse, one binding later. See
+#: ``_scope_bindings`` and ``_alias_live_at`` for the liveness rule. This list
+#: stays the thing to extend when a new root binding appears; a new alias needs
+#: no edit here.
 _SESSION_EXPRS = frozenset(
     {
         "self._session",
@@ -397,15 +413,21 @@ def _string_names(node: ast.AST | None) -> frozenset[str]:
     constructor is how a module probe set is usually written, and reading
     through the wrapper costs nothing while missing it would leave the shape
     half-covered — the exact "it looks watched" gap this file exists to avoid.
+
+    Nested sequences FLATTEN: ``(("a", None), ("b", None))`` reads as
+    ``{"a", "b"}``. That is the shape a loop unpacks positionally (see
+    ``_loop_probe_names``), and flattening is what makes the same literal
+    readable both as a whole set and row by row. Only string literals are ever
+    returned, so a row's non-name slots (the ``None`` default above) contribute
+    nothing.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return frozenset({node.value})
     if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return frozenset(
-            elt.value
-            for elt in node.elts
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-        )
+        names: set[str] = set()
+        for elt in node.elts:
+            names |= _string_names(elt)
+        return frozenset(names)
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -414,6 +436,26 @@ def _string_names(node: ast.AST | None) -> frozenset[str]:
     ):
         return _string_names(node.args[0])
     return frozenset()
+
+
+def _union_probe_names(bound: dict[str, frozenset[str]], name: str, names: frozenset[str]) -> None:
+    """Add ``names`` to whatever ``name`` already resolves to in this scope.
+
+    Deliberately a UNION rather than a replacement. One scope may reuse a single
+    variable across two probe loops (a bare ``for probe in (...)`` and later a
+    ``for probe, default in (...)``), and last-writer-wins silently dropped
+    whichever set came first — a coverage loss with no symptom, because the
+    guard then simply reads fewer names off the later ``getattr``. Measured, not
+    theoretical: a planted host with both shapes derived the loop names and
+    MISSED the unpacked ones entirely until this was a union.
+
+    Over-attributing a member NAME is the harmless direction here: the name
+    reached a ``getattr(session, …)``, so it is a probe name wherever it was
+    bound, and the names it is unioned with are all names some probe call in
+    this scope computes.
+    """
+    if names:
+        bound[name] = bound.get(name, frozenset()) | names
 
 
 def _module_probe_constants(tree: ast.Module) -> dict[str, frozenset[str]]:
@@ -436,8 +478,8 @@ def _module_probe_constants(tree: ast.Module) -> dict[str, frozenset[str]]:
             continue
         names = _string_names(value)
         for target in targets:
-            if isinstance(target, ast.Name) and names:
-                constants[target.id] = names
+            if isinstance(target, ast.Name):
+                _union_probe_names(constants, target.id, names)
     return constants
 
 
@@ -451,40 +493,174 @@ def _loop_probe_names(
     derivation recorded nothing — two names that exist on neither class stayed
     invisible behind a green guard while the function returned a hard-coded
     ``False``.
+
+    The tuple-unpack spelling of the same idea (``for probe, default in
+    (("is_busy", None),)``) is covered too, positionally, because the old
+    reader skipped every target that was not a bare ``Name`` and that is exactly
+    how a probe set with defaults is written.
     """
     bound: dict[str, frozenset[str]] = {}
     for node in _scope_nodes(scope):
-        if not (isinstance(node, ast.For) and isinstance(node.target, ast.Name)):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
             continue
         names = _string_names(node.iter)
         if not names and isinstance(node.iter, ast.Name):
             names = constants.get(node.iter.id, frozenset())
-        if names:
-            bound[node.target.id] = names
+        target = node.target
+        if isinstance(target, ast.Name):
+            _union_probe_names(bound, target.id, names)
+            continue
+        # The tuple-unpack target: `for probe, default in (("a", None),)`. Read
+        # POSITIONALLY off literal rows when the iterable is one — the target at
+        # index i takes the string at index i of each row — and otherwise give
+        # every name in the target the whole flattened set, which can only ever
+        # over-attribute a member NAME and never miss one.
+        if not isinstance(target, (ast.Tuple, ast.List)):
+            continue
+        rows: list[ast.expr] = []
+        if isinstance(node.iter, (ast.Tuple, ast.List)):
+            rows = list(node.iter.elts)
+        for index, elt in enumerate(target.elts):
+            if not isinstance(elt, ast.Name):
+                continue
+            collected: set[str] = set()
+            for row in rows:
+                if isinstance(row, (ast.Tuple, ast.List)) and index < len(row.elts):
+                    collected |= _string_names(row.elts[index])
+            collected |= names if not rows else set()
+            _union_probe_names(bound, elt.id, frozenset(collected))
     return bound
 
 
-def _scope_aliases(scope: ast.AST, exprs: frozenset[str]) -> frozenset[str]:
-    """Names this scope binds to a watched session expression.
+def _target_names(target: ast.AST) -> list[str]:
+    """Every ``Name`` a binding target introduces, unpacking tuples/lists.
 
-    ONE level, by construction: only an assignment whose VALUE is already a
-    watched expression qualifies, so an alias of an alias is not chased and an
-    expression that merely shares a spelling never becomes a session.
+    A tuple-unpack target binds more than one name, and the probe reader has to
+    see all of them: ``for probe, default in (...): getattr(session, probe,
+    default)`` was invisible to the old reader because it bailed on any target
+    that was not a bare ``Name``.
     """
-    aliases: set[str] = set()
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for elt in target.elts:
+            names.extend(_target_names(elt))
+        return names
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    return []
+
+
+def _scope_bindings(scope: ast.AST, exprs: frozenset[str]) -> dict[str, list[tuple[int, bool]]]:
+    """Per name, the line-ordered points at which this scope makes it (not) a session.
+
+    WHY a sequence of points rather than a set of names. The earlier
+    ``_scope_aliases`` collected a name once it had been assigned a watched
+    expression and then treated it as an alias for the WHOLE scope. A same-scope
+    reassignment to an ordinary value therefore kept the name attributed, and
+    ``previous``/``current``/``remote`` — the exact names the TUI reuses for
+    rows, widgets and strings — are the false-positive class that nearly had
+    this probe deleted. Reproduced on the old rule: a scope binding
+    ``previous = source.session``, reading ``previous.session_id``, then
+    rebinding ``previous = rows[-1]`` and reading ``previous.label`` derived
+    ``{'label': [5], 'session_id': [3]}``, where ``label`` is a row's member.
+
+    Only the shapes an ordinary reassignment is written in are listed. A name
+    bound here is a session again only if the new value IS a watched expression,
+    so ``session = session`` and ``session = source.session`` both keep it live.
+    """
+    events: dict[str, list[tuple[int, bool]]] = {}
+
+    def bind(name: str, line: int, value: ast.expr | None) -> None:
+        events.setdefault(name, []).append((line, value is not None and _unparse(value) in exprs))
+
     for node in _scope_nodes(scope):
-        if isinstance(node, ast.Assign) and _unparse(node.value) in exprs:
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    aliases.add(target.id)
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and node.value is not None
-            and isinstance(node.target, ast.Name)
-            and _unparse(node.value) in exprs
-        ):
-            aliases.add(node.target.id)
-    return frozenset(aliases)
+                for name in _target_names(target):
+                    bind(name, line, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            for name in _target_names(node.target):
+                bind(name, line, node.value)
+        elif isinstance(node, ast.AugAssign):
+            # `x += ...` only changes the VALUE; it cannot reintroduce a session.
+            for name in _target_names(node.target):
+                bind(name, line, None)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            # The target is bound from the iterable, so `for previous in rows`
+            # ends an alias the moment the loop's body starts.
+            for name in _target_names(node.target):
+                bind(name, line, node.iter)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    for name in _target_names(item.optional_vars):
+                        bind(name, line, item.context_expr)
+        elif isinstance(node, ast.NamedExpr):
+            for name in _target_names(node.target):
+                bind(name, line, node.value)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bind(node.name, line, None)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name != "*":
+                    bind(alias.asname or alias.name.split(".")[0], line, None)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                for name in _target_names(target):
+                    bind(name, line, None)
+    # A rebinding on the SAME line as the binding it shadows sorts LAST, so the
+    # read below is not credited: when one statement both reads an alias and
+    # rebinds the name, the conservative answer is "no longer a session".
+    return {
+        name: sorted(lines, key=lambda evt: (evt[0], not evt[1])) for name, lines in events.items()
+    }
+
+
+def _alias_live_at(events: list[tuple[int, bool]], line: int) -> bool:
+    """Whether a name still holds a session at ``line``.
+
+    The LAST binding at or before ``line`` decides. Read before the name is
+    bound at all, it is not a session (the caller has the scope's own root
+    expressions for those reads).
+    """
+    live = False
+    for bind_line, is_session in events:
+        if bind_line > line:
+            break
+        live = is_session
+    return live
+
+
+def _local_probe_names(scope: ast.AST) -> dict[str, frozenset[str]]:
+    """Names this scope binds to a literal probe-name string.
+
+    ``name = "x"`` followed by ``getattr(session, name, None)`` is the same
+    computation as the module-constant shape one scope down, and it was the one
+    shape left invisible beside the loop form the guard had just learned to read
+    (QA round 1, Q1). Scope-wide like ``_module_probe_constants`` and
+    ``_loop_probe_names``: a local that a probe name reaches through
+    ``getattr`` IS a probe name, which is why a same-scope reuse needs no
+    liveness rule the way an alias does — the wrong answer here would be a
+    member name, not an unrelated read.
+    """
+    bound: dict[str, frozenset[str]] = {}
+    for node in _scope_nodes(scope):
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        names = _string_names(value)
+        for target in targets:
+            for name in _target_names(target):
+                _union_probe_names(bound, name, names)
+    return bound
 
 
 def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, list[int]]:
@@ -493,24 +669,29 @@ def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, li
     ``exprs`` is per-file because the binding that holds a session differs by
     host: the TUI has ``self._session``, the desktop bridge has ``self.remote``.
 
-    Three resolutions beyond the registered binding itself, each of which used
+    Four resolutions beyond the registered binding itself, each of which used
     to hide a member completely — the ceiling the class docstring used to
     record as permanent:
 
     * a local ALIAS of a watched expression (``session = source.session``),
-      followed for exactly one level and only inside the scope that binds it;
+      followed for exactly one level, inside the scope that binds it, and only
+      for as long as it stays LIVE (see ``_scope_bindings``);
     * a probe whose member name is a LOOP VARIABLE (``for probe in ("is_busy",
-      "busy")``), the shape that shipped ``_session_is_busy``;
+      "busy")``, or the tuple-unpack spelling), the shape that shipped
+      ``_session_is_busy``;
     * a probe whose member name is a MODULE CONSTANT (``getattr(session,
-      _PROBES, None)``).
+      _PROBES, None)``);
+    * a probe whose member name is a LOCAL NAME bound to a literal string
+      (``name = "x"; getattr(session, name, None)``).
 
-    Two limits are deliberate and stay. An alias is not chased through a
-    second hop, and a name computed at runtime that is neither a bound loop
-    variable nor a module-level string constant — a dict lookup, an f-string —
-    is still invisible. The probe strings reached by neither are also the ones
-    no rename can silently break, so the residual gap is the one that is
-    defensible; widening it is a change to THIS function, never to the
-    protocols it checks.
+    Limits that are deliberate and stay. An alias is not chased through a
+    second hop, nor read outside the scope that binds it, nor kept past the
+    statement that rebinds it. A name computed at runtime by none of the
+    literal routes above — a dict lookup, an f-string, a list built
+    incrementally — is still invisible. The probe strings reached by none of
+    them are also the ones no rename can silently break, so the residual gap is
+    the one that is defensible; widening it is a change to THIS function, never
+    to the protocols it checks.
     """
     tree = ast.parse(source)
     constants = _module_probe_constants(tree)
@@ -520,10 +701,18 @@ def _session_members_touched(source: str, exprs: frozenset[str]) -> dict[str, li
         touched.setdefault(name, []).append(line)
 
     for scope in _scopes(tree):
-        watch = exprs | _scope_aliases(scope, exprs)
+        bindings = _scope_bindings(scope, exprs)
         computed = dict(constants)
         computed.update(_loop_probe_names(scope, constants))
+        computed.update(_local_probe_names(scope))
         for node in _scope_nodes(scope):
+            # The scope's own root expressions are always a session; an alias is
+            # one only where its live range says so (R3's same-scope reuse).
+            watch = exprs | {
+                name
+                for name, events in bindings.items()
+                if _alias_live_at(events, getattr(node, "lineno", 0))
+            }
             # session.member / self._session.member, aliases included.
             if isinstance(node, ast.Attribute) and _unparse(node.value) in watch:
                 record(node.attr, node.lineno)
@@ -652,8 +841,13 @@ def test_every_session_member_a_host_touches_is_declared() -> None:
         + ", ".join(f"{name} ({', '.join(sites)})" for name, sites in sorted(offenders.items()))
         + ". A duck-typed member is invisible to pyright, so a rename or a typo "
         "in the probe string degrades it to a silent None instead of an error. "
-        "Declare it on SessionProtocol (both kinds of session have it) or on "
-        "ViewerSessionProtocol (only an attached facade has it). A name that "
+        "Declare it on ViewerSessionProtocol when every host that reads it "
+        "through a DUCK-TYPED binding holds an attached facade (the usual "
+        "case, and it covers a member BOTH classes implement); declare it on "
+        "SessionProtocol only when such a host may hold EITHER kind of "
+        "session and needs the member on both. An owner-side reader that "
+        "holds the concrete ``Session`` is checked by pyright against the real "
+        "class and needs no declaration either way. A name that "
         "reaches here from a local ALIAS (``session = source.session`` then "
         "``session.member``) or from a COMPUTED probe (``for probe in (...): "
         "getattr(session, probe, None)``, or a module-constant name) is a real "
@@ -682,11 +876,12 @@ def test_remote_session_satisfies_the_viewer_protocol_at_runtime() -> None:
 
     Four of the eight arrived with the engine-state block: declaring ``jobs``,
     ``wake_scheduler``, ``mcp_manager`` and ``mcp_startup`` on
-    ``SessionProtocol`` makes them contract members, and the contract is checked
-    HERE, on an instance, not only by pyright — a Protocol member that an
-    instance lacks fails ``isinstance`` even when the annotation is perfect.
-    They are built with the same no-argument snapshot constructors ``__init__``
-    uses, so the assignment states what production holds rather than a stand-in.
+    ``ViewerSessionProtocol`` makes them contract members of THAT protocol, and
+    the contract is checked HERE, on an instance, not only by pyright — a
+    Protocol member that an instance lacks fails ``isinstance`` even when the
+    annotation is perfect. They are built with the same no-argument snapshot
+    constructors ``__init__`` uses, so the assignment states what production
+    holds rather than a stand-in.
     """
     from local_operator.session.frontend_state import (
         SnapshotJobs,
@@ -1401,3 +1596,103 @@ def test_an_alias_is_not_followed_out_of_its_own_scope() -> None:
     exprs = frozenset({"source.session"})
     assert _derived_undeclared(source, exprs) == set()
     assert "label" not in _session_members_touched(source, exprs)
+
+
+def test_a_reassigned_alias_stops_being_a_session() -> None:
+    """An alias dies at the statement that rebinds the same name to a row.
+
+    The alias route was scope-WIDE: once a name had been bound to a watched
+    expression it stayed an alias until the scope ended, so a reuse of the same
+    spelling — ``previous = rows[-1]`` below — attributed the ROW's member to
+    the session. ``previous``/``current``/``remote`` are the names the TUI
+    reuses for rows, widgets and strings, so this was one refactor away from the
+    cry-wolf failure that nearly had this probe deleted (review round 1, R3).
+
+    Reproduced verbatim: the old rule derived ``{'label': [5], 'session_id':
+    [3]}`` here, where ``label`` is the row's member and not a session member.
+    """
+    source = (
+        "def view(source, rows):\n"
+        "    previous = source.session\n"
+        "    _ = previous.session_id\n"
+        "    previous = rows[-1]\n"
+        "    return previous.label\n"
+    )
+    exprs = frozenset({"source.session"})
+    touched = _session_members_touched(source, exprs)
+    # The alias's own read is still credited — the fix bounds the range, it does
+    # not abandon the route.
+    assert touched.get("session_id") == [3]
+    assert "label" not in touched
+    assert _derived_undeclared(source, exprs) == set()
+
+
+def test_an_alias_rebound_to_a_session_again_is_credited_again() -> None:
+    """The other side of the live range, so the rule is not "first binding wins".
+
+    ``previous = rows[-1]`` then ``previous = source.session`` makes the name a
+    session again: the liveness rule is about the LAST binding at or before the
+    read, not about the first one.
+    """
+    source = (
+        "def view(source, rows):\n"
+        "    previous = rows[-1]\n"
+        "    previous = source.session\n"
+        "    return previous.no_such_member\n"
+    )
+    assert _derived_undeclared(source, frozenset({"source.session"})) == {"no_such_member"}
+
+
+def test_the_guard_sees_a_locally_bound_literal_probe_name() -> None:
+    """``name = "x"; getattr(session, name, None)`` must fail as well.
+
+    The module-CONSTANT route covered a probe set declared at module scope, but
+    the same computation one scope down — an ordinary in-scope assignment of the
+    literal — derived ``set()``, so a probe written that way was invisible while
+    its loop spelling was covered (QA round 1, Q1).
+    """
+    source = (
+        "def probe(session):\n"
+        '    name = "qa_local_name"\n'
+        "    return getattr(session, name, None)\n"
+    )
+    assert _derived_undeclared(source, frozenset({"session"})) == {"qa_local_name"}
+
+
+def test_the_guard_sees_a_tuple_unpacked_loop_probe_name() -> None:
+    """``for probe, default in ((\"x\", None),)`` must fail as well.
+
+    The loop reader required ``isinstance(node.target, ast.Name)`` and skipped
+    every other target, so the spelling a probe set with defaults is written in
+    stayed invisible even after the bare-name loop form was covered (QA round 1,
+    Q1). The member name is read POSITIONALLY off each literal row.
+    """
+    source = (
+        "def probe(session):\n"
+        '    for probe, default in (("qa_unpack", None),):\n'
+        "        getattr(session, probe, default)\n"
+    )
+    assert _derived_undeclared(source, frozenset({"session"})) == {"qa_unpack"}
+
+
+def test_two_probe_loops_sharing_one_variable_keep_both_sets() -> None:
+    """A reused loop variable must not drop the first loop's names.
+
+    The probe-name tables are keyed by variable name, so a bare loop and a
+    tuple-unpack loop binding the SAME name in one scope used to overwrite each
+    other and only one set of members stayed derived. Reproduced against a real
+    scanned host before this was a union: the unpacked names were derived as
+    nothing at all. Which loop won depended on the traversal order, so the loss
+    was silent rather than stable.
+    """
+    source = (
+        "def probe(session):\n"
+        "    for entry in ('planted_loop_a',):\n"
+        "        getattr(session, entry, None)\n"
+        "    for entry, default in (('planted_unpack_b', None),):\n"
+        "        getattr(session, entry, default)\n"
+    )
+    assert _derived_undeclared(source, frozenset({"session"})) == {
+        "planted_loop_a",
+        "planted_unpack_b",
+    }
