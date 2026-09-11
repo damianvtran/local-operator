@@ -38,6 +38,7 @@ from local_operator.harness.types import (
     AskUserFn,
     CompactionEndEvent,
     CompactionStartEvent,
+    CustomMessage,
     EventHandler,
     HistoryDeltaEvent,
     ImageContent,
@@ -93,6 +94,7 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,
@@ -3454,6 +3456,55 @@ class RemoteSession:
             result = Message.tool_result(event.result)
             result.id = f"live-tool:{event.tool_call_id}"
             self._live_history[result.id] = result
+        if isinstance(event, PeerMessageDeliveredEvent):
+            # A peer `lop send` persists its CustomMessage BEFORE it emits this
+            # receipt, so the row is SETTLED — a single durable row with no
+            # start/update/end lifecycle, which is why it is NOT in
+            # ``_MESSAGE_PHASE`` (that machinery orders the streaming beats of a
+            # turn; a phase rank is a category error for one settled append).
+            #
+            # The row is invisible to every viewer freshness signal without
+            # this branch: ``history_generation`` bumps only on compaction /
+            # prune, so a plain peer append never invalidates the display
+            # window, and the receipt carries no ``message`` payload for the
+            # generic path below to claim. The hidden session then keeps a
+            # stale ``history_message_count`` — so on reveal neither
+            # ``_sidebar_presentation_current``'s count guard rejects the stale
+            # cached presentation, nor ``_commit_sidebar_session``'s
+            # ``total > incoming.history_size`` delta fires, and the inbound
+            # row is never projected until a full reload. Recording the settled
+            # row here grows the count by exactly one, which is what makes both
+            # signals move.
+            #
+            # Painting stays with the existing replay/delta paths and their
+            # ``_live_peer_receipts`` / ``_resume_mounted_ids`` dedup guards:
+            # this branch stores the row for COUNT and durability, and adds the
+            # id to ``_durable_seed_ids`` so the next sync treats it as durable
+            # rather than re-painting it — it mounts nothing itself.
+            #
+            # Deliberately NOT gated on ``peer_id not in self._history_ids``.
+            # The owner persists the row BEFORE emitting this receipt, so a sync
+            # that raced the append may already carry the id in ``_history_ids``
+            # — yet the receipt is the authoritative "a new row landed" beat the
+            # count still has to advance for, or the reveal misses exactly the
+            # row the sync failed to surface. Each ``peer_id`` is delivered at
+            # most once, so recording it here cannot double-count; a re-delivery
+            # would collide on the dict key and keep the count at one. Skipped
+            # only when the receipt carries no id (an older/leaner sender),
+            # since an id-less row can neither be counted once nor deduped.
+            peer_id = str(getattr(event, "message_id", "") or "")
+            if peer_id:
+                peer_row = CustomMessage(
+                    custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                    attribution="user",
+                    details={"body": event.body, "sender": dict(event.sender)},
+                )
+                # The marker must carry the PERSISTED entry id so the next sync
+                # and the replay dedup both match on it.
+                peer_row.id = peer_id
+                self._live_history[peer_id] = peer_row
+                self._durable_seed_ids.add(peer_id)
+            return
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
