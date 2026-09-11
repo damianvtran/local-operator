@@ -139,3 +139,45 @@ async def test_appending_a_longer_name_repaints_the_rows_already_painted() -> No
         assert expected > narrow
         assert summary_col(app, first, "echo alpha") == expected
         assert summary_col(app, second, "echo beta") == expected
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_does_not_move_the_column_repaints_nothing() -> None:
+    """The repaint is driven by the WIDTH moving, not by the event happening.
+
+    A reveal must be able to hand the ledger a page without walking every row it
+    already painted, and the O(1) append fast path must stay O(1) — otherwise
+    this fix would have bought alignment with a per-event rescan, which is the
+    cost the ledger's growth path exists to avoid. Asserted as call COUNTS
+    rather than a duration: a threshold calibrated on this machine is not a
+    threshold on CI, and "how many rows were re-rendered" is a fact about work
+    rather than about the clock.
+    """
+    app = StyledTranscriptApp()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TranscriptView)
+        first = _bash("c1", "echo alpha")
+        second = _bash("c2", "echo beta")
+        view.append_block(first)
+        view.append_block(second)
+        await _settle(pilot)
+
+        repaints: list[str] = []
+        for card in (first, second):
+            original = card.refresh_row
+
+            def counting(card=card, original=original) -> None:
+                repaints.append(card.tool_call_id)
+                original()
+
+            card.refresh_row = counting  # type: ignore[method-assign]
+
+        # A page the column already fits: one derivation, no repaints.
+        view.insert_blocks(0, [_bash("old1", "echo old")])
+        await _settle(pilot)
+        assert repaints == []
+
+        # A page carrying a longer name: every row behind it re-renders, once.
+        view.insert_blocks(0, [ToolCard("old2", LONGER_TOOL, {"command": "list them"}, "")])
+        await _settle(pilot)
+        assert sorted(repaints) == ["c1", "c2"]
