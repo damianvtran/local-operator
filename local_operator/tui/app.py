@@ -9092,12 +9092,32 @@ class OperatorApp(App[None]):
                         # when the turn dies instead of returning a result.
                         live_cards[block.tool_call_id] = block
 
-    def _project_settled_rows(
-        self, history: list[Any], *, bound: int | None = None, fold_width: int = 0
-    ) -> bool:
+    def _project_settled_rows(self, history: list[Any], *, bound: int | None = None) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
+        # The width every block this pass builds is about to be GIVEN, asked of
+        # the view they are about to be mounted into.
+        #
+        # Derived HERE rather than at each call site because every caller of
+        # this method projects into the live transcript — cold resume's tail
+        # (`:8512`), the reconnect gap replay (`on_history_rows_settled`), the
+        # sidebar commit's top-up (`:6113`/`:6127`) and the older-page collect —
+        # so the destination is one question with one answer, and a caller left
+        # to remember it is a caller that can forget it. It is also knowable
+        # HERE: the transcript is laid out before the first block is built, so
+        # this is the eventual destination and not a pre-layout zero (measured
+        # at 100x30 during the boot projection: `transcript_cw=142` against
+        # `fold_width=0`).
+        #
+        # Without it the whole tail projection is folded at the 80-column
+        # fallback and the FIRST PAINT of a resumed conversation is a narrow
+        # one: prose wrapped at 78 cells inside a 96-cell pane, with blank space
+        # to its right — the operator's reported frame, and the reason the
+        # paging fix alone did not close the report. Measured on `87240c118` at
+        # 100x30: one paint carrying 80 blocks at `box=96 built=80`, rows ending
+        # at cell 81 of 96 (QA round 1, Q1). The same paint on this branch
+        # carries no fallback-authored block.
         # Snapshot the in-flight calls BEFORE the fold: the answer can change
         # mid-projection, and replay reads only this set. The seed is the
         # gate-free set (`live_projection_call_ids` documents the pending
@@ -9105,6 +9125,7 @@ class OperatorApp(App[None]):
         # `_mark_pending_tool_rows` below; the fold's own fallback re-asks the
         # same subtracted question for a target that never seeded.
         self._projection_live_call_ids = live_projection_call_ids(session)
+        fold_width = self._transcript_view().scrollable_content_region.width
         try:
             projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
             # The visible transcript, so the app's own registry is the right
@@ -9860,20 +9881,18 @@ class OperatorApp(App[None]):
         collected: list[Any] = []
         self._block_sink = collected
         try:
-            # The width this page's blocks are about to be given. These rows
-            # are built DETACHED — nothing is mounted until `insert_blocks` —
-            # so without this every one of them folds at the 80-column
-            # fallback and pins that fold as its height, and `insert_blocks`'
-            # own hint arrived too late to be read: the block authors its rows
-            # before it is handed over. Corrected by the first layout's resize,
-            # which costs a second build per block and paints one frame of
-            # narrow rows — and it is the frame right after the page mounts,
-            # the one the reader is looking at when they scroll up into it.
-            # Measured at 150x40: 192 of 288 folds in three page mounts were at
-            # the fallback. Supplying it here, where the destination is known,
-            # is what makes the fold right the first time (PR #971).
-            transcript = self._transcript_view()
-            self._project_settled_rows(page, fold_width=transcript.scrollable_content_region.width)
+            # The width these blocks are about to be given is NOT passed here:
+            # `_project_settled_rows` asks the live transcript for it, so the
+            # page and the tail cannot disagree about the destination, and the
+            # hint reaches each block before it authors its rows — the half
+            # `insert_blocks` cannot do for rows that already exist. Measured at
+            # 150x40 over three wheel-driven page mounts on `633baf258`:
+            # `scripts/resume_paging_probe.py fold ordinary 150x40` reported 108
+            # authoring folds with 72 of them at the 80-column fallback, and 6
+            # painted frames with a fallback-folded block inside the viewport;
+            # on this branch the same command reports 72 folds, 0 at the
+            # fallback, 0 frames.
+            self._project_settled_rows(page)
         finally:
             self._block_sink = None
             # A page can end on a bang user row whose assistant lives in the
