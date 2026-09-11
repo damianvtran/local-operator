@@ -89,13 +89,15 @@ def _ragged_columns_agg() -> UsageAggregate:
 
 
 def _styled(line: Text) -> tuple[str, tuple[tuple[int, int, str], ...]]:
-    """A row's text AND its styling.
+    """A row's text AND its styling, as a comparable pair.
 
-    ``rich.Text.__eq__`` compares the plain text and the base style but NOT the
-    spans, so comparing ``Text`` objects would pass for a row that lost its
-    hover ground, or one whose column styles moved — the two things a patch can
-    plausibly get wrong. Comparing the spans is what makes this a byte-level
-    comparison of the painted row.
+    ``rich.Text.__eq__`` compares the plain text and the span list, so a plain
+    ``Text == Text`` would in fact catch a lost hover ground — what this adds is
+    the SPANS IN READABLE FORM, so a failure prints ``(plain, spans)`` instead of
+    a bare ``False``, and the assertion below can compare one row at a time
+    without building a second composition to diff against. (It also makes the
+    comparison explicit about what "the same row" means, which the width-trap
+    test leans on.)
     """
     return (line.plain, tuple((span.start, span.end, str(span.style)) for span in line.spans))
 
@@ -164,7 +166,7 @@ def test_a_hover_crossing_does_not_recompose_the_report(monkeypatch):
 
 
 def test_a_hover_crossing_converts_only_the_lines_that_changed(monkeypatch):
-    """One crossing converts a handful of lines, not the whole report.
+    """One crossing converts a handful of lines, and goes through the PATCH path.
 
     Counted at ``Visual.to_strips`` — the call that IS the cost (measured at
     1,850 ms of the 3,006 ms a 12-step crossing run spent on the stock tree).
@@ -172,6 +174,17 @@ def test_a_hover_crossing_converts_only_the_lines_that_changed(monkeypatch):
     expected and four allows for a line being built twice (a cache miss after a
     scroll, say). The stock tree spends 846 per crossing, so this cannot pass
     without the fix.
+
+    **The strip budget alone does not prove the patch path ran**, and saying so
+    here matters more than the assertion: ``set_lines`` reuses the strips of
+    lines that came back byte-identical, so a full ``_repaint()`` also converts
+    about two lines and this budget passes under an always-``_repaint`` mutant.
+    What the budget catches is a body that renders every line again (the
+    virtualize-only shape: 31 conversions per crossing). The patch path itself
+    is asserted below by the call that distinguishes them — a crossing must call
+    ``set_line`` and must NOT call ``set_lines`` — and by
+    ``test_a_hover_crossing_does_not_recompose_the_report``, which counts the
+    renderer.
     """
 
     async def run():
@@ -183,6 +196,10 @@ def test_a_hover_crossing_converts_only_the_lines_that_changed(monkeypatch):
 
             seen: list[tuple[Any, int]] = []
             real = Visual.to_strips
+            body = screen._body
+            sets: list[tuple[str, int]] = []
+            real_set_lines = type(body).set_lines
+            real_set_line = type(body).set_line
 
             def counting(  # type: ignore[no-untyped-def]
                 cls, widget, visual, width, height, style, **kwargs
@@ -190,13 +207,31 @@ def test_a_hover_crossing_converts_only_the_lines_that_changed(monkeypatch):
                 seen.append((widget, height or 0))
                 return real(widget, visual, width, height, style, **kwargs)
 
+            def counting_set_lines(self, *args: Any, **kwargs: Any) -> None:
+                sets.append(("set_lines", len(args[0]) if args else -1))
+                return real_set_lines(self, *args, **kwargs)
+
+            def counting_set_line(self, *args: Any, **kwargs: Any) -> None:
+                sets.append(("set_line", args[0] if args else -1))
+                return real_set_line(self, *args, **kwargs)
+
             monkeypatch.setattr(Visual, "to_strips", classmethod(counting))
+            monkeypatch.setattr(type(body), "set_lines", counting_set_lines)
+            monkeypatch.setattr(type(body), "set_line", counting_set_line)
             await pilot.hover(screen, offset=(_row_x(screen), _row_y(screen, 0)))
             await pilot.pause()
             seen.clear()
+            sets.clear()
 
             await pilot.hover(screen, offset=(_row_x(screen), _row_y(screen, 1)))
             await pilot.pause()
+
+            assert [kind for kind, _ in sets].count(
+                "set_lines"
+            ) == 0, f"the crossing rebuilt the whole body instead of patching rows: {sets}"
+            assert [kind for kind, _ in sets].count(
+                "set_line"
+            ) == 2, f"the crossing did not repaint exactly the two rows involved: {sets}"
 
             body_lines = sum(height for widget, height in seen if widget is screen._body)
             assert body_lines <= 4, (
@@ -338,5 +373,72 @@ def test_entering_and_leaving_the_table_touch_one_row_each(monkeypatch):
             cleared = _styled(_body_lines(screen)[first + 1])
             assert calls == [], "leaving the table recomposed the whole report"
             assert tinted[1] != cleared[1], "the highlight was not cleared from the row"
+
+    asyncio.run(run())
+
+
+def test_a_style_update_drops_the_cached_strips():
+    """A cached strip pins the style it was rendered with, so styles must clear it.
+
+    Two halves, both of which the widget owns: the cache is DROPPED (or the next
+    frame pins the old ramp — a mixed-ramp body the moment anything restyles the
+    app while this screen is up) and the body actually repaints from the new
+    styles (a cache nobody reads from would be no bug at all). ``RichLog`` and
+    ``OptionList`` clear their line caches on the same hook for the same reason.
+    """
+
+    async def run():
+        app = _app()
+        async with app.run_test(size=(110, 40)) as pilot:
+            screen = await _push(pilot, app, _tall_report_agg())
+            _show_table(screen)
+            await pilot.pause()
+            body = screen._body
+            # Render a frame first, so there is a cache to drop.
+            strips = [body.render_line(y) for y in range(4)]
+            assert body._strips, "nothing was cached, so this test would prove nothing"
+            stale = [id(strip) for strip in strips]
+
+            body.notify_style_update()
+            assert not body._strips, "a style update left the stale strips in the cache"
+            await pilot.pause()
+            assert [
+                id(strip) for strip in (body.render_line(y) for y in range(4))
+            ] != stale, "the body repainted the same strip objects after a style update"
+
+    asyncio.run(run())
+
+
+def test_a_live_resize_republishes_the_width_it_composed_for():
+    """What the body claims to be as wide as must survive a live resize.
+
+    ``set_lines`` sizes the content from the lines, the width they were composed
+    for and the content box — and the box is read BEFORE layout settles on a
+    resize, so the pre-resize width would stay published (measured: 101 kept
+    after 120x45 -> 90x40, where a fresh open at 90x40 reports 86). No frame
+    difference was found for it, and it is asserted anyway: a stale published
+    width is a wrong claim about the widget that anything reading
+    ``virtual_size`` — a scroll extent, a later feature — would act on.
+    """
+
+    async def run():
+        async def width_after(size: tuple[int, int], resize: tuple[int, int] | None) -> int:
+            app = _app()
+            async with app.run_test(size=size) as pilot:
+                screen = await _push(pilot, app, _tall_report_agg())
+                _show_table(screen)
+                await pilot.pause()
+                if resize is not None:
+                    await pilot.resize_terminal(*resize)
+                    await pilot.pause()
+                    await pilot.pause()
+                return int(screen._body.virtual_size.width)
+
+        fresh = await width_after((90, 40), None)
+        resized = await width_after((120, 45), (90, 40))
+        assert resized == fresh, (
+            f"a live resize to 90x40 published content width {resized}, "
+            f"where a fresh open at the same size publishes {fresh}"
+        )
 
     asyncio.run(run())

@@ -2032,8 +2032,12 @@ MovePickerScreen .move-picker {
  * with Esc — and giving diagnostics their own visual language would make one
  * more screen look like a different app. It differs in one structural way:
  * the body can be long (a per-session table grows without bound), so the card
- * pins a title and a hint and puts the report itself in a VerticalScroll
- * between them, rather than sizing to content the way the picker does. */
+ * pins a title and a hint and gives the report a scrolling body between them,
+ * rather than sizing to content the way the picker does. `/usage`'s body and
+ * `/info`'s are a `Static` in a `VerticalScroll`; `/analytics`'s is a
+ * `ReportView`, which paints its own lines and is its own scroller — the rule
+ * (`#analytics-scroll`) and the reason (it repaints per mouse event, not per
+ * key) are below. */
 AnalyticsScreen, SessionScreen, InfoScreen {
     align: center middle;
     background: $lo-sunken;

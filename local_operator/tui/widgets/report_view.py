@@ -43,6 +43,14 @@ Two rules matter for a caller:
 * **A line index is only meaningful at the width it was composed for.** The
   strip cache is dropped when the widget's own width changes, because a
   ``Strip`` is cut to the width it was built at.
+
+Selection is NOT free here, and that is easy to miss when swapping a ``Static``
+for a line-API widget: ``Widget.get_selection`` extracts text only from a
+``Text``/``Content`` returned by ``_render()``, and this widget returns neither,
+so without the overrides below a drag over the report selected nothing, painted
+nothing and handed ``ctrl+c`` an empty string — a silent loss of an affordance
+that exists on the ``Static`` body it replaces. ``RichLog`` carries the same two
+overrides for the same reason: the text, and the per-line highlight.
 """
 
 from __future__ import annotations
@@ -51,10 +59,31 @@ from typing import Any
 
 from rich.cells import cell_len
 from rich.text import Text
+from textual import events
 from textual.geometry import Size
 from textual.scroll_view import ScrollView
+from textual.selection import Selection
 from textual.strip import Strip
 from textual.visual import Visual, visualize
+
+
+def _cell_to_char(plain: str, cells: int) -> int:
+    """Character index at cell column ``cells`` of ``plain``.
+
+    Selection offsets arrive in CELLS (a terminal address by column) while
+    ``Text.stylize`` spans are CHARACTER indices, and the two only agree while
+    every glyph is one cell wide. This report's labels are free text — a session
+    name can carry CJK or an emoji — so the conversion is done rather than
+    assumed; without it the highlight drifts a cell per wide glyph before the
+    selection start. Iterative on purpose: it runs once per selected line, per
+    repaint, and only while a drag is live.
+    """
+    column = 0
+    for index, char in enumerate(plain):
+        if column >= cells:
+            return index
+        column += cell_len(char)
+    return len(plain)
 
 
 class ReportView(ScrollView):
@@ -81,11 +110,42 @@ class ReportView(ScrollView):
         super().__init__(**kwargs)
         self._lines: list[Text] = []
         self._strips: dict[int, Strip] = {}
+        #: Width the caller COMPOSED the lines for — the one input the resize
+        #: handler cannot recover from the widget, since it survives a resize.
+        self._composed_width: int = 0
         #: Width the cached strips were built at. A ``Strip`` is cut to the
         #: width it was built at, so a width change invalidates the whole cache
         #: — see ``render_line``. Zero until the first render, which is why the
         #: first comparison is against the live ``self.size.width``.
         self._strip_width: int = 0
+
+    # -- selection -----------------------------------------------------------
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The text under a drag selection — the affordance a line API loses.
+
+        This is `RichLog.get_selection`'s shape, joined over the same model the
+        strips are built from, so what is copied is exactly what is painted.
+        """
+        return selection.extract("\n".join(line.plain for line in self._lines)), "\n"
+
+    def selection_updated(self, selection: Selection | None) -> None:
+        """Repaint: the cached strips were built without the new selection."""
+        self._strips.clear()
+        self.refresh()
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def notify_style_update(self) -> None:
+        """Drop cached strips, which hold the OLD resolved styles.
+
+        A strip bakes in the component style it was rendered with, so a theme or
+        stylesheet change leaves every cached line pinning the previous ramp
+        (`RichLog` and `OptionList` clear their caches here for the same reason).
+        """
+        super().notify_style_update()
+        self._strips.clear()
+        self.refresh()
 
     # -- model ---------------------------------------------------------------
 
@@ -124,14 +184,36 @@ class ReportView(ScrollView):
                 and lines[index] == self._lines[index]
             }
         self._lines = lines
-        widest = max((cell_len(line.plain) for line in lines), default=0)
-        # At least the box, at least the width the lines were composed for, at
-        # least the widest line: the ``width: auto`` body this replaces sized
-        # itself to the content it was given and stretched to its container,
-        # and the geometry a reader can see (the scroll extent) should not move
-        # because the widget changed shape underneath it.
-        self._resize_virtual(max(width, widest, self.scrollable_content_region.width), len(lines))
+        self._composed_width = width
+        self._publish_virtual_size()
         self.refresh()
+
+    def _publish_virtual_size(self) -> None:
+        """Publish the content size from the lines, the caller's width and the box.
+
+        At least the box, at least the width the lines were composed for, at
+        least the widest line: the ``width: auto`` body this replaces sized
+        itself to the content it was given and stretched to its container, and
+        the geometry a reader can see (the scroll extent) should not move
+        because the widget changed shape underneath it.
+
+        Called again from ``on_resize`` because the box term is only correct
+        once layout has settled: a resize-triggered ``set_lines`` reads the
+        region BEFORE layout, so it republishes the pre-resize width and the
+        content stays that wide until something else repaints it (measured: 101
+        kept after a live 120x45 -> 90x40, where a fresh open at 90x40 reports
+        86). No visible effect was found for it — the box clips and horizontal
+        scrolling is off — but a stale published width is a wrong claim about
+        the widget, and it is fixed at the one place that knows better.
+        """
+        widest = max((cell_len(line.plain) for line in self._lines), default=0)
+        self._resize_virtual(
+            max(self._composed_width, widest, self.scrollable_content_region.width),
+            len(self._lines),
+        )
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._publish_virtual_size()
 
     def set_line(self, index: int, line: Text) -> None:
         """Replace ONE line and repaint only it.
@@ -178,6 +260,16 @@ class ReportView(ScrollView):
         paint — so the body line is the scroll offset plus ``y``. This is the
         whole point of the widget: the report's other 800-odd lines are never
         converted at all.
+
+        ``apply_offsets`` is not decoration, and it is the one thing a line-API
+        widget must remember for a drag selection to work: the compositor
+        recovers the CONTENT offset under the pointer from a ``"offset"`` style
+        meta on the segments it renders (``_compositor.get_widget_and_offset_at``),
+        so a strip returned without it resolves the pointer's line to nothing —
+        the drag then has a start and no end, which textually means "select to
+        the end of everything". ``RichLog`` stamps its strips for exactly this
+        reason; the base ``Static`` body got the same meta from Textual's own
+        render path.
         """
         width = self.size.width
         if width != self._strip_width:
@@ -188,7 +280,7 @@ class ReportView(ScrollView):
         if strip is None:
             strip = self._make_strip(index, width)
             self._strips[index] = strip
-        return strip
+        return strip.apply_offsets(int(self.scroll_offset.x), index)
 
     def _make_strip(self, index: int, width: int) -> Strip:
         if not 0 <= index < len(self._lines):
@@ -197,6 +289,14 @@ class ReportView(ScrollView):
             # painted with segments missing their background.
             return Strip.blank(width, self.visual_style.rich_style)
         line = self._lines[index]
+        span = self._selection_span(index)
+        if span is not None:
+            # COPY before styling: ``self._lines`` are the screen's own Text
+            # objects, reused by the next ``set_lines`` equality check and by
+            # ``build_report`` recomposes, so a paint concern must not mutate
+            # them.
+            line = line.copy()
+            line.stylize(self.screen.get_component_rich_style("screen--selection"), *span)
         # A line wider than the widget is stripped at its OWN width and left for
         # the compositor to crop. Stripping it at the widget width instead would
         # wrap it and return line 1 — the tail of the row silently missing from
@@ -213,3 +313,22 @@ class ReportView(ScrollView):
             1,
             self.visual_style,
         )[0]
+
+    def _selection_span(self, index: int) -> tuple[int, int] | None:
+        """Character span of the live selection on body line ``index``.
+
+        ``Selection.get_span`` answers in the widget's own content coordinates,
+        which for this widget are body line indices — the same numbering
+        ``set_line`` and the report's layout use. ``-1`` means "to the end of the
+        line", which is resolved here because only the line knows its length.
+        """
+        selection = self.text_selection
+        if selection is None:
+            return None
+        span = selection.get_span(index)
+        if span is None:
+            return None
+        start_cells, end_cells = span
+        plain = self._lines[index].plain
+        end_cells = cell_len(plain) if end_cells == -1 else end_cells
+        return _cell_to_char(plain, start_cells), _cell_to_char(plain, end_cells)

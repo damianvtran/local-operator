@@ -1864,9 +1864,9 @@ def test_the_cursor_is_scrolled_into_view_when_it_moves():
 
 
 def test_the_row_keys_work_on_a_report_too_tall_to_fit():
-    """Focus sits on the inner ``VerticalScroll``, which eats the arrows while it
-    can still scroll — so a non-priority binding reaches the screen only at the
-    ends of the travel.
+    """Focus sits on the scrolling body (``ReportView``, a ``ScrollView``), which
+    eats the arrows while it can still scroll — so a non-priority binding reaches
+    the screen only at the ends of the travel.
 
     Pinned at two heights because the symptom is invisible at one: the cursor
     moved fine at 110x40, where the body fits, and never at 110x20, where it does
