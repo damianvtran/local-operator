@@ -2648,7 +2648,11 @@ async def test_selecting_a_row_keeps_its_attached_explanation_on_screen(
         # measures the selected row alone has no reason to move and strands the
         # warning one line below the fold.
         wanted = cascade + 1
-        for height in range(40, 8, -1):
+        # The ceiling is generous, not tight: sections added above the cascade
+        # (the OpenRouter routing section, design round 1 D1) push the
+        # discovered height up, and the contract being pinned is about the
+        # scroll model, not about any one era's row count.
+        for height in range(48, 8, -1):
             await pilot.resize_terminal(120, height)
             await pilot.pause()
             if view._body_rows() == wanted:
@@ -4258,6 +4262,106 @@ async def test_a_gated_child_at_non_default_keeps_its_help_at_110_cols(tmp_path:
         assert "Keep N newest /resume sessions" in detail, detail
         assert "default: 0" in detail, detail
         assert cell_len(detail) <= view._detail_width(), (cell_len(detail), detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 44), (100, 30), (80, 24)])
+async def test_the_order_warning_survives_the_off_default_clause(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """QA round 1, Q1 / design round 1, D2: the HARD `order` consequence is on
+    the detail line in danger ink in EVERY state the row can be in.
+
+    The finding: at 120×44 the warning was visible only while the row was at
+    default, and the off-default clause (`default: —`) crowded it out exactly
+    when the dangerous value was stored. The warning is therefore pinned into
+    every rung of the shed ladder, ahead of the help, in the danger ink (the
+    one the page uses for capture refusals), while the SOFT how-to help stays
+    faint — the two ranks must not be confusable.
+    """
+    from local_operator.tui.theme import semantic_color
+
+    warning = settings_io.BY_KEY["providers.openrouter.order"].warning
+    danger = semantic_color("danger")
+
+    def spans_by_color(text: Any) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for span in text.spans:
+            if span.style is None or span.style.color is None:
+                continue
+            # Normalize to the hex both sides agree on: `str(Color)` is a
+            # repr (`Color('#ef8078', ColorType.TRUECOLOR, …)`), not the hex.
+            hex_color = span.style.color.get_truecolor().hex
+            out.setdefault(hex_color, []).append(text.plain[span.start : span.end])
+        return out
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        # At default: the warning leads, in danger ink, and the SOFT how-to
+        # help (when it fits) never shares that ink.
+        _select(view, "providers.openrouter.order")
+        await pilot.pause()
+        assert warning in view._detail_text.plain, view._detail_text.plain
+        assert warning in spans_by_color(view._detail_text).get(
+            danger, []
+        ), f"the warning is not in danger ink ({danger}): {view._detail_text.spans}"
+        assert "sticky routing stays" not in spans_by_color(view._detail_text).get(danger, [])
+
+        # Off-default — commit a host order, the state that makes the warning
+        # TRUE: the clause appears AND the warning survives beside it.
+        await pilot.press("enter")
+        await pilot.pause()
+        for char in "deepseek, groq":
+            await pilot.press(char)
+        await pilot.press("enter")
+        await pilot.pause()
+        detail = view.render_lines_for_test()[-1]
+        assert warning in detail, f"warning gone off-default at {size}: {detail!r}"
+        assert "default: —" in detail, detail
+        assert warning in spans_by_color(view._detail_text).get(danger, [])
+
+
+@pytest.mark.asyncio
+async def test_the_empty_editor_ghosts_the_placeholder(tmp_path: Path) -> None:
+    """Design round 1, D3/D4: an empty LIST/JSON editor shows WHAT TO TYPE.
+
+    The empty editor used to be a bare caret: the open host lists' vocabulary
+    existed only as a reject list, and `max_price`'s JSON shape lived only in
+    help. The placeholder is painted faint beside the caret — never part of
+    the buffer, so it cannot be committed — and disappears on the first
+    keystroke.
+    """
+
+    def editor_row(view: SettingsView) -> str:
+        rows = view.render_lines_for_test()
+        return next(row for row in rows if "enter saves" in row)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 44)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+
+        _select(view, "providers.openrouter.ignore")
+        await pilot.press("enter")
+        await pilot.pause()
+        row = editor_row(view)
+        assert "deepseek, groq, mistral, …" in row, row
+        assert view._buffer == "", "the ghost must not enter the buffer"
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert "deepseek, groq, mistral, …" not in editor_row(view)
+        await pilot.press("escape")
+
+        _select(view, "providers.openrouter.max_price")
+        await pilot.press("enter")
+        await pilot.pause()
+        row = editor_row(view)
+        assert '{"prompt": 1, "completion": 2}' in row, row
+        await pilot.press("escape")
 
 
 # ---------------------------------------------------------------------------
