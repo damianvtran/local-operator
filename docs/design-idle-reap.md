@@ -125,7 +125,7 @@ in `_handle_client`'s request loop (`server.py:1345`, immediately before
 `_on_request`), so for a viewer that sends nothing it is the attach time and
 never moves. The task's 12-second spy on `_on_request` measuring zero ops is
 consistent with the code: I found no periodic op from an attach client —
-`remote.py` has no `set_interval`/keepalive, and the only recurring wire op
+`attached.py` has no `set_interval`/keepalive, and the only recurring wire op
 in the tree is the desktop host's `desktop_watch` lease
 (`desktop_sessions.py:354-376`), which is not a terminal TUI.
 
@@ -146,8 +146,8 @@ on the adopted session (`app.py:6039-6041`). `_on_runtime_refreshed`
 band would show the cold state until the user typed"). The `retiring` frame
 (`server.py:849-880`) lands as `RETIRING_REASON`
 (`attach_client.py:398-404`), which `_on_disconnected` routes to
-`_go_cold(refresh=True)` (`remote.py:3375-3384`), which fires that callback
-(`remote.py:3651`).
+`_go_cold(refresh=True)` (`attached.py`), which fires that callback
+(`attached.py`).
 
 Therefore a runtime that idle-reaps itself and announces `retiring` to the
 current TUI gets a **brand-new runtime spawned within ~1 s**: exit → spawn →
@@ -159,18 +159,18 @@ two, and both are wrong for an idle reap of a displayed session:
 
 | frame | viewer behaviour | verdict for idle-reap |
 |---|---|---|
-| `retiring` | `_go_cold(refresh=True)` → eager re-engage (`remote.py:3383`) | **churn loop** |
-| bare EOF | `_on_disconnected` → `_recovering = True` → `_recover_owner` (`remote.py:3400-3407`) | **worse** — see below |
+| `retiring` | `_go_cold(refresh=True)` → eager re-engage (`attached.py`) | **churn loop** |
+| bare EOF | `_on_disconnected` → `_recovering = True` → `_recover_owner` (`attached.py`) | **worse** — see below |
 | `stopping` | parks in the stopped state, tells the user `/resume` (`server.py:854-857`) | lies; the session did not end |
 
 Bare EOF is worse than it looks for exactly the sources we care about.
-`_can_go_cold` is set from `surface == "desktop"` (`remote.py:485`), and
+`_can_go_cold` is set from `surface == "desktop"` (`attached.py`), and
 `_lease_sidebar_source` calls `AttachedSession.connect` (`app.py:4056-4062`)
 without a `surface` argument, so it defaults to `"terminal"`
-(`remote.py:782`) and `_can_go_cold` is **False**. A parked source that sees
+(`attached.py`) and `_can_go_cold` is **False**. A parked source that sees
 EOF therefore enters runtime-death recovery and, per
-`remote.py:3768-3798`, chases a record for `COLD_FALLBACK_S = 8.0`
-(`remote.py:129`) and then — because it cannot go cold — keeps retrying
+`attached.py`, chases a record for `COLD_FALLBACK_S = 8.0`
+(`attached.py`) and then — because it cannot go cold — keeps retrying
 forever while the legacy contract tries to **take over** the session
 (`no_takeover` raises by construction, `app.py:4040-4043`, so it loops).
 A runtime-initiated EOF against a parked sidebar source is a redial storm.
@@ -182,7 +182,7 @@ I verified the parent's suspicion. `_lease_sidebar_source`
 frontend watch (4080) and **nothing else**. The three lifecycle callbacks —
 `set_takeover_callback`, `set_stopped_callback`, `set_refresh_callback` — are
 installed only in `_adopt_session` (`app.py:6025-6041`), for the CURRENT
-session. `set_went_cold_callback` is defined (`remote.py:3711`) but has no
+session. `set_went_cold_callback` is defined (`attached.py`) but has no
 caller anywhere in `local_operator/`.
 
 So a parked source has no refresh path (no churn loop) but also no cold path
@@ -204,7 +204,7 @@ what the two caches were always supposed to mean.
 Teardown is already correct for this. `_release_sidebar_source`
 (`app.py:4648-4679`) saves the draft, unsubscribes the frontend, disposes the
 controller and calls `session.dispose()` — which closes the client socket
-(`remote.py:4978-4983`, inside `dispose` at 4964) and nothing else. The runtime
+(`attached.py`, inside `dispose` at 4964) and nothing else. The runtime
 then sees a client disappear, `attach_clients()` drops to 0, and **the
 existing 3-second drain reaps it** (`process.py:341-359`). No new wire op, no
 new frame, no protocol change, and the runtime keeps full authority over its
@@ -391,7 +391,7 @@ post-broadcast re-check at 1930-1948).
 Question 5: **yes, it needs one thing beyond calling the existing op — but
 the op itself needs no change.**
 
-`retire_if_unused` (`remote.py:4927-4962`) is called from exactly three
+`retire_if_unused` (`attached.py`) is called from exactly three
 places, all of which ABANDON the *current* session: `/resume` onto a saved
 session (`app.py:8291`), `/resume` onto a live one (`app.py:9496`), and
 unmount/quit (`app.py:17642`). **No sidebar-leave path calls it.** So a user
@@ -408,7 +408,7 @@ Nothing else is required: the op already refuses when another viewer is
 attached (`server.py:1743-1745`) or anything durable exists
 (`is_pristine`, `serving.py:809-894`, every probe failing closed), and its
 failure mode is "the runtime stays up and the drain gets it"
-(`remote.py:4941-4944`).
+(`attached.py`).
 
 Strictly speaking §3.1 alone makes the empty case work — the socket drops and
 the drain reaps in 3 s. Adding the offer makes it *immediate* rather than

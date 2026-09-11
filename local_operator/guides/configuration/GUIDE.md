@@ -131,7 +131,7 @@ For a **new conversation**, resolution precedence is agent profile, then CLI fla
 
 Resume and fork retain the conversation's saved selection, even after defaults or the previously bound agent profile change. A deliberate `--hosting`/`--model` on resume overrides that selection: `--model` alone retains the saved provider; `--hosting` alone uses that provider's default model. Subagents inherit their launching conversation's selection unless an explicit role/tier selection overrides it. Provider failover remains a separate effective route, not a replacement global default.
 
-Older transcripts recover the latest usable primary-model observation from their selection journal or frontend checkpoint. If none exists, the owner samples the current default once and announces that recovery; it cannot reconstruct an unrecorded historical model. Selections become durable when the owner admits real work, so merely opening and abandoning an empty draft does not create a conversation on disk.
+Older transcripts recover the latest usable primary-model observation from their selection journal or frontend checkpoint. If none exists, the runtime samples the current default once and announces that recovery; it cannot reconstruct an unrecorded historical model. Selections become durable when the runtime admits real work, so merely opening and abandoning an empty draft does not create a conversation on disk.
 
 Manage secrets separately; never place API keys in `config.yml`:
 

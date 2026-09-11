@@ -1557,7 +1557,7 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
         assert "MCP servers" in listing
         assert "linear" in listing
         assert not any(
-            "not available from this session's owner" in (b.text() or "")
+            "not available from this session's runtime" in (b.text() or "")
             for b in app.query(NoticeBlock)
         )
         assert routed == []
@@ -1616,7 +1616,7 @@ async def test_unadvertised_shared_slash_refuses_instead_of_running_locally() ->
         for _ in range(60):
             await pilot.pause()
             if any(
-                "not available from this session's owner" in (b.text() or "")
+                "not available from this session's runtime" in (b.text() or "")
                 for b in app.query(NoticeBlock)
             ):
                 break
@@ -1624,7 +1624,7 @@ async def test_unadvertised_shared_slash_refuses_instead_of_running_locally() ->
         # owner never advertised it) and it did not run locally (the
         # follower's goal is untouched).
         assert any(
-            "not available from this session's owner" in (b.text() or "")
+            "not available from this session's runtime" in (b.text() or "")
             for b in app.query(NoticeBlock)
         )
         assert routed == []

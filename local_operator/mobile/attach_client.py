@@ -151,9 +151,10 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     """The owner is alive; it did not answer THIS request in time.
 
     Both bases are load-bearing. ``ConnectionError`` preserves every existing
-    caller: ``session/remote.py:5183`` and ``:5192`` catch ``ConnectionError``
-    ALONE, so a plain ``TimeoutError`` would escape ``compact_now`` as a raw
-    exception instead of a ``CompactionOutcome``. ``TimeoutError`` lets code
+    caller: ``session/attached.py``'s ``route_shared_slash`` and ``compact_now``
+    catch ``ConnectionError`` ALONE, so a plain ``TimeoutError`` would escape
+    ``compact_now`` as a raw exception instead of a ``CompactionOutcome``.
+    ``TimeoutError`` lets code
     that wants to tell a slow owner from a dead one ask, rather than parse the
     message. See docs/design-aside-deadline.md §2.
     """

@@ -263,7 +263,7 @@ class SessionRecord:
     # and for the same reason: PROTOCOL_VERSION deliberately does NOT move.
     # It gates SOCKET FRAME compatibility and is read as a pre-dial CAPABILITY
     # ASSERTION by peers already running — ``attach_client`` refuses below 2,
-    # ``session_factory`` and the TUI's takeover path below 4, ``remote``'s
+    # ``session_factory`` and the TUI's takeover path below 4, ``attached``'s
     # canonical attach below 5. Those readers take a HIGHER number as a promise
     # that every frame through v5 is understood. Two JSON integers that touch
     # no frame do not make that promise different, so bumping would spend the

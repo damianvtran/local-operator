@@ -51,7 +51,6 @@ from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tools.builtin import build_write_tool
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import TranscriptView
 from tests.e2e.harness import (
     ScriptedStream,
     build_session,
@@ -81,7 +80,13 @@ def isolated(tmp_path, monkeypatch):
 
 
 def _cells(app: OperatorApp) -> list[float | None]:
-    view = app.query_one(TranscriptView)
+    # ``_transcript_view()``, NOT ``query_one(TranscriptView)``. The sidebar
+    # gesture this file exercises leaves the OUTGOING conversation's view in
+    # the DOM beside the adopted one, and ``query_one`` returns the first in
+    # DOM order — the transcript being left behind. The assertion would then
+    # silently grade the wrong conversation, which is exactly the class of
+    # false green this file exists to prevent.
+    view = app._transcript_view()
     return [b._duration for b in view.blocks() if isinstance(b, ToolCard)]
 
 

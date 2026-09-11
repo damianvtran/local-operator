@@ -134,7 +134,7 @@ class SessionProtocol(Protocol):
     # Three predicates that name what hosts actually need to know about the
     # relationship between this process and the session's runtime. They exist
     # because an undeclared ``is_remote`` attribute conflated them: it was
-    # written in exactly one place (``remote.py``), was never declared on this
+    # written in exactly one place (``attached.py``), was never declared on this
     # protocol, and was read through ``getattr(session, "is_remote", False)`` at
     # every call site, where the default silently meant "in-process" and a typo
     # in the string was invisible to pyright.
