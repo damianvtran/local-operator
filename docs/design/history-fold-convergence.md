@@ -1,11 +1,64 @@
 # Converging the duplicated history folds — scope, divergences, design
 
+> ## STATUS: HISTORICAL DESIGN RECORD — NOT A DESCRIPTION OF THE TREE
+>
+> **Read this before acting on any present-tense claim below.** This analysis was
+> written against `origin/main` @ `a8f98be3b` (2026-09-09) and is landed
+> unchanged, because its §6 recommendation and the reasoning behind it are the
+> record for how the folds were converged. Its findings are stated in the
+> present tense of **that** base; the divergences it calls live were fixed
+> before this file's own PR base, so a reader who sizes work from §0, §3 or §7
+> will be sizing a bug that no longer exists.
+>
+> **What has landed since, and what it means for each claim:**
+>
+> * **The §3 divergences are FIXED**, by #864 (`51c71ff6f`, `fix(mobile): stop
+>   the phone dropping refusals, failures and gate timeouts`), which is an
+>   **ancestor of this file's PR base `633baf258`** — i.e. the present-tense
+>   claims were already stale when the file was tracked. The worst case below
+>   (a hub/parent steer rendering as a clean `parent_message` card on a
+>   scrolled-up history page and as a raw `<parent-message>` XML envelope on
+>   attach) no longer reproduces: both phone folds emit the parent's own words,
+>   including on the live echo-reconcile path
+>   (`mobile/projection.py`, `ProjectionFold.absorb_user_event`), and
+>   `tests/unit/mobile/test_fold_parity.py` asserts row-for-row agreement between
+>   the two folds.
+> * **§6's recommendation is IMPLEMENTED.** "Converge the semantics into
+>   host-free shared helpers" is `local_operator/harness/rows.py`, which both
+>   folds now import (`mobile/projection.py` for the phone fold,
+>   `tui/session_presentation.py` for the TUI fold). The differential harness §6
+>   asks for as Stage 0 is `tests/unit/mobile/test_fold_parity.py`. §6's premise
+>   ("the phone silently omits refusals, failed turns, gate timeouts …") is now
+>   a list of passing parity assertions.
+> * **§0's own count contradicts §3 and §7 and is wrong.** §0 says "Nine
+>   divergence classes are enumerated in §3" while §3 enumerates D1–D12 and §7
+>   records "12 found, 11 real, 8 user-visible today". Twelve were found; those
+>   are the twelve the parity test now pins as AGREEING.
+> * **Every `file:line` anchor in §2.1 is stale against head.** They are
+>   line numbers on `a8f98be3b`, and the refactors in between moved them: e.g.
+>   `fold_messages_to_entries` is now at `mobile/projection.py:607` (not `:567`),
+>   `ProjectionFold.fold_history` at `:924` (not `:746`), and
+>   `session/history_window.py`'s `display_window` at `:254` (not `:46`), with
+>   `tui/session_presentation.py`'s two entries likewise moved. Treat them as
+>   pointers into the base; only the `mobile/durable.py` anchors still resolve.
+>
+> **What the file is still good for.** §1's pager-vs-fold correction, §5's
+> measured superset, §6's design and the "one fold, two renderers" decision are
+> the reasoning the code was written from, and four production comments cite
+> this file as the authority for those ( `harness/rows.py`,
+> `tui/session_presentation.py`, `mobile/projection.py`,
+> `tests/unit/mobile/test_fold_parity.py`). That citation is about the ROWS,
+> which is still current. Nothing below should be read as "these defects are
+> live today".
+
 **Author:** architect (lopdev team), task `arch-fold-convergence`
 **Date:** 2026-09-09
 **Base:** `origin/main` @ `a8f98be3b` (moved past the briefed `0cd3a9434` during
 this analysis), fresh worktree `/tmp/arch-fold/wt`, own venv
-**Status:** analysis and plan only. **No production code written.** Every probe
-below runs outside the worktree and is re-runnable.
+**Status:** analysis and plan only, as of the base above. **No production code
+was written by this analysis.** Every probe below runs outside the worktree and
+is re-runnable. See the banner at the top of this file: the defects it reports
+have since been fixed and the §2.1 anchors have moved.
 **Builds on:** `/tmp/arch2/wt/docs/design/session-unification-adjudication.md`
 §6 item 3 and §9, which established that the folds duplicate a contract and
 explicitly declined to size it.

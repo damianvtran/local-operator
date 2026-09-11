@@ -1024,12 +1024,23 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     # The MCP status segment and its menus, the subagent and job views, the
     # sidebar's gate identity, the wake panel, the ``/agent`` and ``/team``
     # listings, and the saved-usage band. These live on THIS protocol rather
-    # than on ``SessionProtocol`` because that is the honest claim. BOTH
+    # than on ``SessionProtocol`` because that is where the duck-typed readers
+    # land. BOTH
     # classes implement them — the owner exposes the live manager, scheduler or
-    # registry, and a viewer a read-only SNAPSHOT the runtime published — but
-    # every host that reads them (the TUI, the desktop routes,
-    # ``info/collect.py``) holds an attached facade, so the viewer is where a
-    # reader actually lands.
+    # registry, and a viewer a read-only SNAPSHOT the runtime published — and
+    # every host that reaches them through a DUCK-TYPED binding holds an
+    # attached facade: the TUI's ``self._session`` / ``source.session``, the
+    # desktop routes' ``bridge.remote``, and ``info/collect.py``'s ``session``
+    # parameter.
+    #
+    # The OWNER-side readers of these same members are NOT an exception to that,
+    # because they hold the concrete class: ``harness/subagent.py`` types its
+    # ``parent_session`` as ``Session`` and reads ``mcp_manager`` /
+    # ``mcp_startup`` / ``jobs`` off it, and ``session/runtime/serving.py`` reads
+    # ``self._session.jobs`` on the owner. Those reads are already checked by
+    # pyright against the real class, so a protocol declaration would buy them
+    # nothing — which is why the placement is a claim about the DUCK-TYPED
+    # population and not the claim "only a viewer has these".
     #
     # Declaring them is deliberately NOT the same as making them safe for any
     # host to read. A snapshot member answers from the last sync, so a caller
@@ -1040,12 +1051,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     # ``None`` that shipped a fabricated zero-subagent ``/info``.
     #
     # The wider-protocol claim is not hypothetical: declaring these on
-    # ``SessionProtocol`` put the whole ``tests/unit/tui`` double population off
-    # conformance (measured: 213 pyright errors across 19 files, from ~10 local
-    # ``FakeSession`` classes alone; 1996 when every member of the old exclusion
-    # list went there). A double that has to grow an MCP manager to keep
-    # compiling is a double describing an object the hosts never read. The
-    # viewer protocol is the narrower, true claim and costs the doubles nothing.
+    # ``SessionProtocol`` would add only conformance obligations — the duck-typed
+    # hosts read the same members either way — and it put the whole
+    # ``tests/unit/tui`` double population off conformance (measured: 213
+    # pyright errors across 19 files, from ~10 reduced local ``FakeSession``
+    # classes alone; 1996 when every member of the old exclusion list went
+    # there). A double that has to grow an MCP manager to keep compiling is a
+    # double describing an object the hosts never read. The viewer protocol is
+    # the narrower claim, it is true of every duck-typed reader above, and it
+    # costs the doubles nothing.
 
     # Job, wake and subagent plumbing. Read by the subagent view, the wake
     # panel and ``/fork``'s "cannot leave work running" check.

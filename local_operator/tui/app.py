@@ -4728,6 +4728,52 @@ class OperatorApp(App[None]):
         self._exit_hint = None
         self._superseded_steer_controllers.clear()
 
+    async def _preview_cwd(self, directory: Path, session_id: str) -> str:
+        """Where the conversation about to be PREVIEWED was working, or ``""``.
+
+        The previewed ``session_id`` is a DIFFERENT conversation from the one
+        this terminal is attached to, so the value has to come from that
+        conversation's own record — never from ``self._session``. Handing over
+        the current session's directory made the preview band advertise one
+        conversation's project as another's, and it did not stay a label: the
+        connect leg binds a runtime in that directory.
+
+        Two honest sources, in the order of how much each knows: the live
+        runtime's discovery record (it is running, so its recorded ``cwd`` is
+        current), then the wake index, which keeps a ``cwd`` for a session no
+        process has open. This is the ladder ``tui/resume_click.py``'s
+        ``_session_cwd`` already uses, deliberately minus its ``~`` fallback:
+        a notification may put a user in a plausible default, but the band's
+        ``cwd`` rung renders as the conversation's own identity field, where a
+        guess cannot be told apart from a recorded fact.
+
+        ``""`` is the last resort, and it is deliberately the SAME value the
+        dead probe used to return: the band then shows its own unrecorded
+        placeholder, which reads as a placeholder. What it must never be is
+        this terminal's directory, which reads as an answer about a
+        conversation that was never in it.
+
+        ``find_runtime_record`` (not ``registry.scan``) is the reader for the
+        live half: it resolves the OWNER of this exact id, so a stale or
+        unrelated record cannot supply a third session's directory.
+        """
+        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.wakes import store as wake_store
+
+        try:
+            record, _owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
+            if record is not None and record.cwd:
+                return str(record.cwd)
+        except Exception:  # noqa: BLE001 — an unreadable registry is an ordinary "unknown"
+            logger.debug("could not read the previewed session's record", exc_info=True)
+        try:
+            entry = await asyncio.to_thread(wake_store.read_entry, directory, session_id) or {}
+        except Exception:  # noqa: BLE001 — same: absent is the answer, not an error
+            logger.debug("could not read the previewed session's wake entry", exc_info=True)
+            return ""
+        cwd = entry.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else ""
+
     async def _lease_sidebar_source(
         self, session_id: str, *, speculative: bool
     ) -> SessionInteraction:
@@ -4747,19 +4793,10 @@ class OperatorApp(App[None]):
             raise RuntimeError("a sidebar viewer never takes over a session")
 
         if not speculative:
-            # The fallback working directory a saved preview uses when its own
-            # journal records none: this session's REAL cwd, read through the
-            # declared ``frontend_state`` accessor. It used to be
-            # ``getattr(self._session, "cwd", "")`` — a name that exists on
-            # neither session class, so the fallback was always the empty
-            # string and a preview with no recorded cwd opened at the process
-            # default instead of the session's directory.
-            current = self._session
-            fallback_cwd = current.frontend_state.cwd if _is_viewer(current) else ""
             remote = await AttachedSession.saved_preview(
                 session_id,
                 config_dir=directory,
-                cwd=fallback_cwd,
+                cwd=await self._preview_cwd(directory, session_id),
                 takeover_factory=no_takeover,
             )
         else:
@@ -11374,27 +11411,6 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — unprovable means "do not persist"
             logger.debug("could not decide whether the runtime is local", exc_info=True)
             return True
-
-    def _session_is_busy(self) -> bool:
-        """Whether the session is mid-turn, however that turn was started.
-
-        Deliberately asks the SESSION rather than this viewer's own state: the
-        turn may have been submitted by another terminal, or by the phone, and
-        the answer is still "yes, work is happening".
-
-        ``is_streaming`` is the declared predicate for exactly that question:
-        an owner holds it for the whole of ``_run_turn`` — tool execution
-        included — and clears it when the turn ends, and a viewer mirrors the
-        runtime's own ``streaming`` flag. It replaces a probe for
-        ``is_busy``/``busy``, names that exist on NEITHER class, so this always
-        returned ``False`` and the ``/loop stop`` notice that calls it was
-        unreachable code. ``runtime_idle`` would also fold in a running job and
-        a parked gate, but it is viewer-only (the app types its session as
-        ``SessionProtocol``) and it reads a COLD viewer as "not idle", which
-        would report an empty session as busy.
-        """
-        session = self._session
-        return session is not None and session.is_streaming
 
     def _overlay_live_state(self, rows: list[Any]) -> list[Any]:
         from local_operator.paths import config_dir
@@ -27998,24 +28014,33 @@ class OperatorApp(App[None]):
             if self._loop_running:
                 self._loop_cancelled = True
                 notice("loop will stop after the current turn")
-            elif self._session_is_busy():
+            else:
+                # Say only what THIS terminal knows, and nothing more.
+                #
                 # A loop DRIVES the session from the terminal that started it:
                 # each iteration is an ordinary turn submitted over the socket,
                 # which is what keeps it bounded, interruptible and visible in
                 # the transcript. So a second viewer of the same session has no
-                # loop to cancel even though it can see the turns arriving, and
-                # "no loop is running" would be a flat contradiction of what is
-                # on its screen.
+                # loop of its own to cancel even while it watches turns arrive,
+                # and it CANNOT tell a loop's turn from a plain prompt's —
+                # `_loop_running` is app-local state the owner never publishes.
                 #
-                # Say where the control actually is, and name the tool that
-                # works from here: `/stop` ends the runtime from any viewer.
-                notice(
-                    "no loop is running in THIS terminal — a loop is cancelled "
-                    "where it was started, or use /stop to end the session",
-                    "warning",
-                )
-            else:
-                notice("no loop is running")
+                # Two predecessors of this line were each wrong in a different
+                # direction, which is why the branch is one flat sentence now:
+                # a bare "no loop is running" reads as a flat contradiction of
+                # a viewer's own screen, while "a loop is cancelled where it
+                # was started, or use /stop to end the session" (guarded by the
+                # `_session_is_busy` probe) asserted a loop elsewhere and
+                # offered a SESSION-ENDING action as the remedy for a no-op —
+                # and fired in the owner's own terminal during an ordinary turn,
+                # where no loop exists at all. The scoped sentence is true in
+                # every one of those states: this terminal is not running a
+                # loop, and this terminal cannot answer for another one.
+                #
+                # The tint is the plain notice, not `warning`: the request is
+                # legitimate, the answer is an explanation, and nothing here
+                # says the user did anything wrong.
+                notice("no loop is running in THIS terminal")
             return
         if session is None:
             # A rejected command changed nothing, so the conversation has not
@@ -33122,9 +33147,13 @@ class OperatorApp(App[None]):
         The loop drives provider turns through the session, which lives here;
         a follower-local loop would either drive nothing (its own facade has
         no loop worker worth running — each iteration's prompt must cross the
-        socket anyway) or double-drive the session. Every stop/validation
-        branch mirrors ``_cmd_loop`` so the two UIs answer identically; only
-        the transport of the receipt differs.
+        socket anyway) or double-drive the session. The stop and validation
+        branches mirror ``_cmd_loop`` in SUBSTANCE but not word for word: this
+        path answers from the runtime's own published loop state, so it can
+        name what the loop is doing, while the local path may only speak for
+        its own terminal (see ``_cmd_loop``'s stop branch). Only the transport
+        of the receipt differs for the branches that DO agree — the launch and
+        validation notices.
         """
         session = self._session
         if arg.lower() in ("stop", "cancel", "abort"):
