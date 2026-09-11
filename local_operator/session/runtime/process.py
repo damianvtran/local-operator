@@ -180,6 +180,18 @@ def _build_changed(boot: "BuildStamp | None") -> "BuildStamp | None":
     return on_disk
 
 
+def _build_pair(boot: "BuildStamp | None", newer: "BuildStamp") -> str:
+    """``" (old → new)"`` for the cut-off reason, or ``""`` without a boot stamp.
+
+    The build pair is what makes a retirement self-explaining to whoever reads
+    the reason later: "the runtime retired" is only actionable when it names
+    which build it left for.
+    """
+    if boot is None:
+        return ""
+    return f" ({boot.label()} → {newer.label()})"
+
+
 def _should_refresh(handle: object, boot: "BuildStamp | None") -> "BuildStamp | None":
     """Retire so the next engage spawns from the build now on disk?
 
@@ -284,13 +296,27 @@ def _should_exit(handle: object, runtime: object) -> bool:
     return True
 
 
-async def _clean_exit(handle: object, runtime: object) -> None:
+async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-exit") -> None:
     """Dispose the quiescent session, then unpublish its owner record.
 
     The reaper reaches this only after ordinary gate timeouts and all resumed
     work have drained, so injecting a shutdown denial here would violate the
     same no-interruption invariant that selected this state.
+
+    ``reason`` names WHY this runtime is leaving, and it is logged here rather
+    than by the caller because this is the one place every planned exit
+    converges. That line is not decoration: the reference investigation could
+    not tell a refresh retirement from a SIGTERM from a torn install, because an
+    exiting runtime logged nothing about itself and no exit record survived
+    (design §1.6/§5.3).
     """
+    boot = getattr(runtime, "_boot_build", None)
+    logger.info(
+        "session runtime: exiting (%s, pid %d, %s)",
+        reason,
+        os.getpid(),
+        boot.label() if boot is not None else "<unknown>",
+    )
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -341,6 +367,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         if stop.is_set() or not _should_exit(handle, runtime):
             continue
         deadline = time.monotonic() + grace_s
+        drained = False
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
@@ -348,15 +375,30 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
         else:
-            logger.info(
-                "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
-                "exiting cleanly",
-                grace_s,
-                WARM_WINDOW_S,
-            )
-            await _clean_exit(handle, runtime)
-            stop.set()  # amain's wait() returns; exit code stays 0
-            return
+            drained = True
+        if not drained:
+            continue
+        # The LAST instant before the exit, and the reason it is a latch rather
+        # than another ``_should_exit`` sample: the grace loop's condition can
+        # go false on the same tick that a ``prompt`` or ``peer_message`` opens
+        # a turn, and this branch then disposes without re-reading the
+        # predicate — aborting work it had just refused to wait for. The latch
+        # commits the runtime to leaving in the same synchronous step that
+        # checks it, so from here the admissions REFUSE and the claim is true by
+        # construction (design §5.1).
+        begin_retire = getattr(handle, "begin_retire", None)
+        if callable(begin_retire) and not begin_retire("idle-exit"):
+            logger.info("session runtime: work arrived as the idle drain closed; keeping")
+            continue
+        logger.info(
+            "session runtime: idle for %.1fs (no work, no viewer, no wake within %.0fs); "
+            "exiting cleanly",
+            grace_s,
+            WARM_WINDOW_S,
+        )
+        await _clean_exit(handle, runtime, reason="idle-exit")
+        stop.set()  # amain's wait() returns; exit code stays 0
+        return
 
 
 async def _refresh_for(
@@ -406,14 +448,26 @@ async def _refresh_for(
             logger.debug("retiring announcement failed", exc_info=True)
     if stop.is_set():
         return False
-    if _should_refresh(handle, boot) is None:
+    # The final check is the LATCH, not another sample: a retirement that acted
+    # on a sampled "idle" and then met a turn during the announce would abort
+    # work it had just decided not to disturb. ``begin_retire`` commits the
+    # runtime to leaving in one synchronous step, and from that instant the
+    # admission paths refuse, so no turn can open between here and the dispose.
+    begin_retire = getattr(handle, "begin_retire", None)
+    if callable(begin_retire):
+        if not begin_retire("runtime-retired", _build_pair(boot, newer)):
+            logger.info("session runtime: work arrived while retiring was announced; keeping")
+            return False
+    elif _should_refresh(handle, boot) is None:
+        # A handle without the latch (an older or reduced host, e.g. the tests'
+        # stub handles): keep today's re-check rather than retiring unguarded.
         # Refusing AFTER announcing is safe for the same reason it is for
         # ``stopping``: ``retiring`` only latches the disconnect REASON in an
         # attach client, and does nothing unless the socket then closes.
         logger.info("session runtime: work arrived while retiring was announced; keeping")
         return False
     logger.info("session runtime: retiring for %s", newer.label())
-    await _clean_exit(handle, runtime)
+    await _clean_exit(handle, runtime, reason="retiring for " + newer.label())
     stop.set()
     return True
 
@@ -557,8 +611,25 @@ async def amain() -> int:
     await runtime.start_in_process()
 
     stop = asyncio.Event()
+    # What ASKED this runtime to leave. Named because the exit itself is the one
+    # event the reference investigation could not attribute: a refresh, a
+    # SIGTERM and a torn install all ended the process with nothing written
+    # about which it was (design §1.6/§5.3). The reaper and the retire path log
+    # their own reason from ``_clean_exit``; this covers the two triggers that
+    # dispose directly.
+    trigger: dict[str, str] = {}
+
+    def _on_signal(sig: signal.Signals) -> None:
+        trigger.setdefault("why", sig.name)
+        stop.set()
+
+    def _on_socket_stop() -> None:
+        """The graceful ``stop`` op (``ServingSessionHandle.request_stop``)."""
+        trigger.setdefault("why", "socket-stop")
+        stop.set()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+        loop.add_signal_handler(sig, _on_signal, sig)
     if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1":
         # SIGUSR1 prints every asyncio task's stack to the child log. The
         # child has no terminal and no attached debugger, and a wedged turn
@@ -613,7 +684,7 @@ async def amain() -> int:
     # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
     # converge on the same event, so the deny → dispose → aclose ordering
     # below runs once, identically, for both triggers.
-    handle.on_stop_requested = stop.set
+    handle.on_stop_requested = _on_socket_stop
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
@@ -627,6 +698,15 @@ async def amain() -> int:
         # ordering. A signal-initiated stop still owes it.
         reaper_ran_clean_exit = True
     if not reaper_ran_clean_exit:
+        # The reaper logs its own line from ``_clean_exit``; these are the
+        # direct-dispose triggers (a signal, or the graceful ``stop`` op).
+        boot = getattr(runtime, "_boot_build", None)
+        logger.info(
+            "session runtime: exiting (%s, pid %d, %s)",
+            trigger.get("why") or "unknown",
+            os.getpid(),
+            boot.label() if boot is not None else "<unknown>",
+        )
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed

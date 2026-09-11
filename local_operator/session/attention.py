@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -112,6 +113,25 @@ def provisional_anchor(token: str) -> str:
     return f"{_PROVISIONAL_PREFIX}{token}"
 
 
+def _optional_column(row: sqlite3.Row, name: str) -> str:
+    """One ADDITIVE column's value, ``""`` when a pre-taxonomy row lacks it.
+
+    The read-only readers must not migrate: ``state_many`` opens the database
+    ``mode=ro`` precisely so a frontend list can never write, while the schema
+    migration lives on the WRITE path (``_connect``). An established database
+    that no build of this version has written yet therefore genuinely has no
+    ``reason``/``cause`` column, and a bare ``row[name]`` raises ``IndexError``
+    on it — a sidebar crash on exactly the machine that has not restarted yet.
+    Naming the absence here keeps the two readers in step without teaching
+    either one to alter a schema it is only reading.
+    """
+    try:
+        value = row[name]
+    except IndexError:
+        return ""
+    return str(value or "")
+
+
 def _supersedes_provisional(
     existing: Any,
     conversation: str,
@@ -136,18 +156,26 @@ def _supersedes_provisional(
     identity), which is why the guard is cheap rather than elaborate: an
     incoming provisional anchor is legitimate only when it belongs to the token
     being published.
+
+    THE STORED KIND IS NO LONGER PART OF THE SHAPE. It used to have to read
+    `interrupted`, which was the only kind a provisional record could carry when
+    "no outcome" was published as an interruption. The taxonomy change makes
+    "no outcome" an `error`, and a provisional record published as `error` still
+    has to be superseded by the same token's real `complete` — otherwise the
+    change bricks exactly the session the docstring at :meth:`publish`
+    describes. The ANCHOR, not the kind, is the "replaceable" signal: a record
+    still wearing `completion-<token>` has no viewable result behind it and its
+    only legitimate successor is the same token's real outcome.
     """
-    stored_conversation, stored_anchor, stored_kind = tuple(existing)
+    stored_conversation, stored_anchor = tuple(existing)[:2]
     if anchor.startswith(_PROVISIONAL_PREFIX) and anchor != provisional_anchor(token):
         return False
-    return (
-        stored_conversation == conversation
-        and stored_kind == "interrupted"
-        and stored_anchor == provisional_anchor(token)
-    )
+    return stored_conversation == conversation and stored_anchor == provisional_anchor(token)
 
 
-def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -> None:
+def bootstrap_transcript(
+    transcript: Any, store: AttentionStore | None = None
+) -> tuple[str, str, str, str] | None:
     """Import a conversation's durable outcome; NEVER fatal to the caller.
 
     Both call sites are boot paths that must survive a bad conversation:
@@ -162,9 +190,14 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
 
     The failure is logged with the identity and the exception so a swallowed
     problem is still diagnosable from the log rather than silently invisible.
+
+    Returns whatever :func:`_import_transcript_outcome` published for an
+    orphaned run (or ``None``), so the caller that owns a ``Session`` can
+    journal the cut-off once. A failure also returns ``None``: a swallowed
+    problem journals nothing rather than half-narrating one.
     """
     try:
-        _import_transcript_outcome(transcript, store)
+        return _import_transcript_outcome(transcript, store)
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
         # `getattr` so the handler cannot itself raise on a transcript that
         # never grew a `.directory` (a stub, a partially constructed instance)
@@ -189,8 +222,159 @@ def bootstrap_transcript(transcript: Any, store: AttentionStore | None = None) -
         )
 
 
-def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = None) -> None:
+def _config_root_for(directory: Path) -> Path:
+    """The config root that owns ``directory``.
+
+    Derived from the transcript path rather than read from the ambient
+    environment, because this classification must agree with the STORE it
+    writes into: an isolated run redirects ``HOME`` (or
+    ``LOCAL_OPERATOR_CONFIG_DIR``) and a store under one root must not be
+    classified against another root's run records. ``sessions/<id>`` and
+    ``agents/<id>`` are the only two layouts (``conversation_identity`` knows
+    the same two), so anything else falls back to the ambient root, which is
+    what a unit test's ``tmp_path`` transcript wants.
+    """
+    parent = directory.parent
+    if parent.name in ("sessions", "agents"):
+        return parent.parent
+    return config_dir()
+
+
+def _run_record_evidence(directory: Path) -> tuple[Any, Any]:
+    """``(live_foreign_owner, dead_owner)`` for this conversation's records.
+
+    Read RAW rather than through ``registry.scan``, and in ONE pass that returns
+    both facts, because ``scan`` UNLINKS every stale record it meets: a scan
+    performed first would destroy exactly the dead-owner evidence this
+    classification depends on (the daemon's own sweep is a scan, so the ordering
+    is not hypothetical).
+
+    ``live_foreign_owner`` is a live pid that is NOT this process. Excluding
+    ourselves is load-bearing rather than tidiness: a successor runtime publishes
+    its own record BEFORE it constructs its ``Session``, so counting our own pid
+    as a live owner would make every orphaned run unclassifiable — precisely the
+    bug this change fixes.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+
+    run = _config_root_for(directory) / RUN_DIRNAME
+    live: Any = None
+    dead: Any = None
+    try:
+        if not run.is_dir():
+            return None, None
+        paths = sorted(run.glob("*.json"))
+    except OSError:
+        return None, None
+    for path in paths:
+        try:
+            record = SessionRecord.from_json(json.loads(path.read_text()))
+        except (OSError, ValueError, TypeError):
+            continue
+        if record.session_id != directory.name:
+            continue
+        # The zombie probe costs a `ps` fork, and boot is not a hot path — and a
+        # zombie is NOT a live owner, which is the whole point of asking.
+        if not registry.pid_alive(record.pid, check_zombie=True):
+            if dead is None or record.started_at >= dead.started_at:
+                dead = record
+            continue
+        if record.pid != os.getpid() and (live is None or record.started_at >= live.started_at):
+            live = record
+    return live, dead
+
+
+def _stopped_marker(directory: Path) -> bool:
+    """Whether this conversation's wake index carries a recorded STOP.
+
+    ``stopped_at`` is stamped by the stop path (``control._mark_wakes_dormant``)
+    and cleared on the session's next open, so it is a durable, transcript-derived
+    positive marker of a user's own cancel — the one cause a cut-off must not
+    report as an error. A schedule-less session has no entry at all, which is why
+    the deliberate stop is ALSO carried in the outcome marker itself; this is
+    corroboration for the case where the runtime wrote no marker, not the only
+    evidence.
+    """
+    from local_operator.wakes import store as wake_store
+
+    try:
+        entry = wake_store.read_entry(_config_root_for(directory), directory.name)
+    except Exception:  # noqa: BLE001 — an unreadable index is not a stop
+        return False
+    return bool(isinstance(entry, dict) and entry.get("stopped_at"))
+
+
+def _record_detail(record: Any) -> str:
+    """A parenthetical naming the record that outlived its process, or ``""``.
+
+    Kept to the record's own facts (build, pid, started-at) rather than prose,
+    because these are the fields a reader would otherwise have to reconstruct
+    from the log to answer "which runtime was this".
+    """
+    build = str(getattr(record, "version", "") or "")
+    ref = str(getattr(record, "source_ref", "") or "")
+    stamp = f"{build}@{ref}" if build and ref else build or ref
+    started = getattr(record, "started_at", None)
+    when = ""
+    if isinstance(started, (int, float)) and not isinstance(started, bool) and started:
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+    parts = [
+        part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
+    ]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
+    """``(kind, cause, reason)`` for a started run whose owner is gone.
+
+    The taxonomy's default flips here: "no evidence" used to mean
+    ``interrupted`` and now means ``error``, because a cut-off we cannot explain
+    is not a stop. Only POSITIVE evidence of a deliberate act records an
+    interruption. Evidence, in order:
+
+    * a recorded stop marker → ``interrupted`` / ``user-stop``;
+    * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
+      the record's build, pid and start time as the detail — this is the case
+      study's shape, and the one that used to read as a user cancel;
+    * nothing at all → ``error`` / ``runtime-killed``, saying plainly that the
+      cause could not be determined.
+    """
+    from local_operator.incidents import render_cut_off_reason
+
+    if _stopped_marker(directory):
+        return "interrupted", "user-stop", render_cut_off_reason("user-stop")
+    _, dead = _run_record_evidence(directory)
+    if dead is not None:
+        return (
+            "error",
+            "runtime-killed",
+            render_cut_off_reason("runtime-killed", detail=_record_detail(dead)),
+        )
+    return (
+        "error",
+        "runtime-killed",
+        render_cut_off_reason("runtime-killed", detail=" (the cause could not be determined)"),
+    )
+
+
+def _import_transcript_outcome(
+    transcript: Any, store: AttentionStore | None = None
+) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
+
+    Returns the ``(kind, cause, reason, token)`` this call PUBLISHED for an
+    orphaned in-flight run, or ``None`` when it published nothing new. The
+    caller that owns a ``Session`` (and can therefore journal) uses it to
+    narrate the cut-off once per token; the daemon sweep, which has no session,
+    ignores it.
+
+    An in-flight ``attention_started`` with no matching outcome means a process
+    died mid-turn — or is STILL RUNNING it. The two are told apart by the run
+    registry, and only the second may publish nothing: a provisional marker
+    written for a healthy run would be a wrong ``error`` row that every
+    surface's ``busy`` suppression HIDES rather than corrects, so the guard
+    removes the class instead of relying on every front end's suppression.
 
     Old baselines were memory-only. Unknown historical work keeps that no-flood
     baseline, while a persisted seen stamp older than the actual final assistant
@@ -206,30 +390,47 @@ def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = N
         and (not isinstance(saved, dict) or saved.get("token") != started.get("token"))
     ):
         token = started["token"]
-        # Provisional by construction: the turn may still be in flight, so this
-        # marker is explicitly the kind `publish` will let the real outcome
-        # supersede once the journal proves how the run actually ended.
-        store.publish(identity, token, provisional_anchor(token), "interrupted")
-        return
+        live_owner, _ = _run_record_evidence(transcript.directory)
+        if live_owner is not None:
+            # In flight. Publish NOTHING: the live runtime will publish the real
+            # outcome when the turn ends, and a marker written here would be a
+            # provisional row it then has to supersede — or, worse, a row no
+            # later writer ever corrects if the turn completes with an anchor
+            # this classifier did not predict.
+            return None
+        kind, cause, reason = _classify_orphaned_run(transcript.directory)
+        store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
+        return kind, cause, reason, str(token)
     if isinstance(saved, dict) and saved.get("conversation_id") == identity:
         if saved.get("eligible", True):
-            store.publish(identity, saved["token"], saved["anchor"], saved["kind"])
-        return
+            # The dying runtime's own marker, replayed VERBATIM — including its
+            # kind, cause and reason. This is the one path that can report a
+            # deliberate stop as `interrupted` after the process is gone, so
+            # nothing here may re-derive the kind from the absence of evidence.
+            store.publish(
+                identity,
+                saved["token"],
+                saved["anchor"],
+                saved["kind"],
+                reason=str(saved.get("reason") or ""),
+                cause=str(saved.get("cause") or ""),
+            )
+        return None
     if store.state(identity)["completion_token"]:
-        return
+        return None
     history = transcript.build_llm_history()
     if not history:
-        return
+        return None
     final = history[-1]
     if (
         getattr(final, "role", None) != "assistant"
         or not getattr(final, "text", "")
         or getattr(final, "tool_calls", None)
     ):
-        return
+        return None
     entry = next((row for row in reversed(transcript.entries()) if row.id == final.id), None)
     if entry is None:
-        return
+        return None
     seen = None
     try:
         raw = json.loads((store.path.parent / "mobile-seen.json").read_text())
@@ -242,6 +443,7 @@ def _import_transcript_outcome(transcript: Any, store: AttentionStore | None = N
     store.publish(
         identity, token, final.id, "complete", baseline_seen=seen is None or seen >= entry.ts
     )
+    return None
 
 
 class AttentionStore:
@@ -267,7 +469,8 @@ class AttentionStore:
                         "CREATE TABLE completions ("
                         "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
                         "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
-                        "anchor TEXT NOT NULL, kind TEXT NOT NULL)"
+                        "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
+                        "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '')"
                     )
                     conn.execute(
                         "CREATE INDEX completion_conversation "
@@ -332,6 +535,26 @@ class AttentionStore:
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
                     ).fetchone():
                         conn.execute(_CREATE_MUTATIONS)
+                    # ``reason``/``cause`` are ADDITIVE and stay out of the probe
+                    # above for the reason the two tables do: every database
+                    # written before the cut-off taxonomy legitimately lacks
+                    # them, and naming them in the probe would read all of them
+                    # as corrupt. ``DEFAULT ''`` rather than a nullable column
+                    # keeps the readers one shape: an old row's reason is the
+                    # empty string, i.e. "no reason was recorded", which is
+                    # exactly what it is — never a claim that there was none to
+                    # record.
+                    columns = {
+                        str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")
+                    }
+                    if "reason" not in columns:
+                        conn.execute(
+                            "ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+                        )
+                    if "cause" not in columns:
+                        conn.execute(
+                            "ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''"
+                        )
             return conn
         except BaseException:
             conn.close()
@@ -362,6 +585,12 @@ class AttentionStore:
             "completion_token": row["token"] if row else None,
             "anchor_id": row["anchor"] if row else None,
             "kind": row["kind"] if row else None,
+            # Why, in the operator's words, plus the machine token. Both empty
+            # for a completion and for any record written before the cut-off
+            # taxonomy; a surface that wants to append the cause must treat ""
+            # as "nothing to say" rather than as an empty sentence.
+            "reason": (row["reason"] or "") if row else "",
+            "cause": (row["cause"] or "") if row else "",
             "unseen": bool(row and row["sequence"] > acknowledged),
             "revision": [row["sequence"] if row else 0, acknowledged],
         }
@@ -380,6 +609,8 @@ class AttentionStore:
                 "completion_token": None,
                 "anchor_id": None,
                 "kind": None,
+                "reason": "",
+                "cause": "",
                 "unseen": False,
                 "revision": [0, 0],
             }
@@ -411,6 +642,8 @@ class AttentionStore:
                         "completion_token": row["token"],
                         "anchor_id": row["anchor"],
                         "kind": row["kind"],
+                        "reason": _optional_column(row, "reason"),
+                        "cause": _optional_column(row, "cause"),
                         "unseen": row["sequence"] > row["acknowledged"],
                         "revision": [row["sequence"], row["acknowledged"]],
                     }
@@ -427,6 +660,8 @@ class AttentionStore:
         kind: str,
         *,
         baseline_seen: bool | None = None,
+        reason: str = "",
+        cause: str = "",
     ) -> dict[str, Any]:
         """Import a durable outcome idempotently, including after runtime restart.
 
@@ -444,13 +679,14 @@ class AttentionStore:
 
         Supersession is deliberately narrow: same conversation, and the stored
         record must still wear the provisional shape — anchor
-        ``completion-<token>`` with kind ``interrupted``. Two refusals it does
-        NOT relax. A token appearing under a DIFFERENT conversation stays an
-        error, which is the integrity property this check exists for: a forked
-        transcript carrying its parent's journal must not capture the parent's
-        receipt. And a record already anchored to a real entry is never
-        replaced, so a late bootstrap racing a finished turn cannot drag a real
-        outcome back to a synthetic one.
+        ``completion-<token>``. (The stored KIND is no longer part of that shape:
+        see ``_supersedes_provisional`` for why requiring ``interrupted`` would
+        now be the bug.) Two refusals it does NOT relax. A token appearing under
+        a DIFFERENT conversation stays an error, which is the integrity property
+        this check exists for: a forked transcript carrying its parent's journal
+        must not capture the parent's receipt. And a record already anchored to
+        a real entry is never replaced, so a late bootstrap racing a finished
+        turn cannot drag a real outcome back to a synthetic one.
 
         A genuinely interrupted turn is stored in that same provisional shape,
         and that is intended rather than an ambiguity to resolve: the only
@@ -502,8 +738,8 @@ class AttentionStore:
                 if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
-                    "UPDATE completions SET anchor=?, kind=? WHERE token=?",
-                    (anchor, kind, token),
+                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=? WHERE token=?",
+                    (anchor, kind, reason, cause, token),
                 )
                 # Inside the SAME transaction as the UPDATE: a reader must
                 # never observe a healed row whose change the detector has not
@@ -511,8 +747,9 @@ class AttentionStore:
                 # revision and then ignore the next real change.
                 conn.execute(_BUMP_SUPERSEDES)
             conn.execute(
-                "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
-                (conversation, token, anchor, kind),
+                "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind,reason,cause) "
+                "VALUES(?,?,?,?,?,?)",
+                (conversation, token, anchor, kind, reason, cause),
             )
             if baseline_seen:
                 sequence = conn.execute(

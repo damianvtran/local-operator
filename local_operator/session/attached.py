@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -66,6 +67,7 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     RETIRING_REASON,
     STOPPED_REASON,
@@ -102,7 +104,10 @@ from local_operator.session.protocol import (
 )
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
+    ENTRY_MESSAGE,
+    TRANSCRIPT_FILENAME,
     Transcript,
+    TranscriptEntry,
     read_replay_suffix,
     replay_entries,
 )
@@ -487,7 +492,134 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     return cls.model_validate(data)
 
 
-def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
+#: Outcomes a roster RECORD can carry that already settle a child's state. Any
+#: other value (``None``, or a token a newer runtime invented) means "the
+#: record did not settle it" and the row falls through to the child's own
+#: transcript.
+_SETTLED_RECORD_OUTCOMES = frozenset({"completed", "failed", "error", "interrupted"})
+
+#: How much of a child transcript's TAIL the cold restore reads to decide whether
+#: the child was still working. Bounded because rule 2 runs per unsettled child
+#: and a 50 MB journal must not be parsed to answer one question; the shape
+#: examined is structural (what the LAST row is), so a sliced tail is enough.
+_CHILD_TAIL_BYTES = 256 * 1024
+
+
+def _record_field(record: Any, name: str, default: Any = None) -> Any:
+    """One field off a roster record, which is a raw sidecar DICT.
+
+    The sidecar stores ``records`` as plain JSON objects (``SubagentComms.snapshot``
+    output), while ``jobs`` come back as ``JobState`` models — so the one reader
+    that consults both cannot assume either shape. Kept as a named helper rather
+    than a ``getattr``/``[]`` dance at each call site so the dict-vs-model
+    distinction is stated once.
+    """
+    if isinstance(record, Mapping):
+        return record.get(name, default)
+    return getattr(record, name, default)
+
+
+def _child_tail_state(session_dir: Any) -> str:
+    """``"mid-turn"`` / ``"finished"`` / ``"unknown"`` for one child's journal.
+
+    Structural, never semantic — the only question is what the child's LAST
+    message row is:
+
+    * a ``tool`` result, or an assistant message whose ``tool_calls`` have no
+      rows after them → the child was CUT OFF MID-TURN;
+    * an assistant message with no pending tool call → the child actually
+      FINISHED and only its parent's record was lost.
+
+    Anything else, or anything unreadable, answers ``"unknown"`` so the row
+    keeps today's ``interrupted`` spelling instead of inventing an outcome. A
+    bounded tail read is deliberate: the journal is append-mostly, so the last
+    256 KiB is the part that carries the answer.
+    """
+    if not session_dir:
+        return "unknown"
+    try:
+        path = Path(session_dir) / TRANSCRIPT_FILENAME
+        if not path.exists():
+            return "unknown"
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - _CHILD_TAIL_BYTES)
+            handle.seek(start)
+            blob = handle.read()
+        lines = blob.split(b"\n")
+        if start > 0:
+            # The first line is the tail of a row whose head is before the
+            # window; it cannot be parsed as a whole row.
+            lines = lines[1:]
+        last_payload: dict[str, Any] | None = None
+        for raw in lines:
+            if not raw.strip():
+                continue
+            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+            if entry is not None and entry.type == ENTRY_MESSAGE:
+                last_payload = entry.payload
+    except (OSError, ValueError):
+        return "unknown"
+    if last_payload is None:
+        return "unknown"
+    role = str(last_payload.get("role") or "")
+    if role == "tool":
+        return "mid-turn"
+    if role == "assistant":
+        return "mid-turn" if last_payload.get("tool_calls") else "finished"
+    return "unknown"
+
+
+def _restored_job_row(job: Any, record: Any | None) -> Any:
+    """One non-terminal job row, resolved against the record and the child.
+
+    Resolution order (design §4), because each step is stronger evidence than
+    the next:
+
+    1. **The record settled it.** ``records[].outcome`` names how the child
+       ended, and that is a fact, not an inference — a row restored as a bare
+       ``interrupted`` beside a record reading ``completed`` was the D3 defect.
+    2. **The record did not, so the child's own transcript decides** — the
+       mid-turn / finished question above. The reason goes on the row so the
+       panel can say WHY rather than only that it stopped.
+    3. **No record and no transcript** → today's ``interrupted``, now naming
+       ``owner-lost`` rather than carrying no cause at all.
+    """
+    record_outcome = ""
+    if record is not None:
+        record_outcome = str(_record_field(record, "outcome") or "")
+    if record_outcome in _SETTLED_RECORD_OUTCOMES:
+        return job.model_copy(
+            update={"status": record_outcome, "restored": True, "cut_off_cause": ""}
+        )
+    tail = _child_tail_state(_record_field(record, "session_dir") if record is not None else None)
+    if tail == "finished":
+        # The child produced a settled answer; only its parent's record of that
+        # was lost. Reporting the child as cut off would be a lie the panel then
+        # offers to resume.
+        return job.model_copy(update={"status": "completed", "restored": True, "cut_off_cause": ""})
+    if tail == "mid-turn":
+        return job.model_copy(
+            update={"status": "interrupted", "restored": True, "cut_off_cause": "owner-lost"}
+        )
+    return job.model_copy(
+        update={"status": "interrupted", "restored": True, "cut_off_cause": "owner-lost"}
+    )
+
+
+def _roster_records(payload: Mapping[str, Any]) -> Sequence[Any]:
+    """The sidecar's ``records`` list, or an empty sequence when it has none.
+
+    Typed here rather than inline so the ``Any`` coming out of a raw JSON dict
+    is narrowed once: the caller passes it straight into ``_restored_job_rows``,
+    whose ``records`` parameter is a ``Sequence``.
+    """
+    records = payload.get("records")
+    return records if isinstance(records, list) else ()
+
+
+def _restored_job_rows(jobs: Sequence[Any], records: Sequence[Any] = ()) -> list[Any]:
     """Roster rows as they must appear with NO runtime alive.
 
     The persisted roster records what each job's state WAS when it was
@@ -513,14 +645,24 @@ def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
     Anything already terminal is untouched: ``completed``/``failed``/
     ``cancelled`` are facts the last runtime settled and this process must not
     relitigate.
+
+    ``records`` is the roster sidecar's ``records`` list, whose ``outcome`` and
+    ``session_dir`` are what make a restored row diagnosable rather than a
+    blanket ``interrupted``. It is optional so an older sidecar (or a caller
+    that has none) keeps today's behaviour exactly.
     """
+    by_id: dict[str, Any] = {}
+    for record in records:
+        job_id = str(_record_field(record, "job_id") or "")
+        if job_id:
+            by_id[job_id] = record
     rows: list[Any] = []
     for job in jobs:
         status = str(getattr(job, "status", "") or "")
         if status == "running":
             if bool(getattr(job, "queued", False)):
                 continue
-            rows.append(job.model_copy(update={"status": "interrupted", "restored": True}))
+            rows.append(_restored_job_row(job, by_id.get(str(getattr(job, "id", "") or ""))))
             continue
         rows.append(job.model_copy(update={"restored": True}))
     return rows
@@ -1352,7 +1494,14 @@ class AttachedSession:
             or {}
         )
         changes: dict[str, Any] = {
-            "jobs": _restored_job_rows(self._durable_roster(state, payload=payload))
+            # The RECORDS go in with the rows: a record's ``outcome`` settles a
+            # child the row's persisted status cannot, and its ``session_dir``
+            # is the only route to the child's own transcript when the record
+            # does not settle it. Without them every non-terminal row came back
+            # as a blanket ``interrupted``" (design §4, D3).
+            "jobs": _restored_job_rows(
+                self._durable_roster(state, payload=payload), records=_roster_records(payload)
+            )
         }
         if isinstance(payload.get("accounting"), list):
             try:
@@ -4182,8 +4331,14 @@ class AttachedSession:
         owner: a killed owner factually aborted the turn, a stopped one ended
         the whole session under it, and a viewer going cold has no runtime
         left to hear from. Marked through the normal event path so no
-        card/banner or attach vocabulary appears — the transcript reads as an
-        ordinary aborted turn, which is what it is.
+        card/banner or attach vocabulary appears.
+
+        ``aborted``/``error`` are the CALLER's verdict, and the cut-off work
+        makes that explicit rather than leaving the default to speak for every
+        case: a deliberate stop or a kill keeps ``aborted=True, error=None``
+        (the shape a user's Esc produces), while a confirmed owner death passes
+        ``aborted=False, error=<cut-off notice>`` so the app paints a named
+        failure instead of a cancel it cannot explain.
 
         ``direct`` bypasses the sync buffer and hands the end straight to the
         subscribed handlers (dropping it when there are none). The go-cold
@@ -4254,12 +4409,14 @@ class AttachedSession:
           from ``last_turn_outcome`` (additive; ``""`` from an old runtime
           keeps today's aborted synthesis).
 
-        The ``error`` case synthesises the placeholder ``"turn failed"``.
-        ``last_turn_outcome`` is a four-value enum that deliberately carries
-        no message — transporting the owner's error text would mean a second,
-        unbounded field on every snapshot — so that string is a CLASS marker,
-        never the owner's actual diagnostic, and nothing downstream should
-        read it as authoritative (review round 1, MINOR-2).
+        The ``error`` case synthesises ``last_turn_cut_off`` when the owner
+        published one — the harness-authored reason sentence for a cut-off — and
+        falls back to the placeholder ``"turn failed"`` otherwise. The
+        placeholder is a CLASS marker, never the owner's actual diagnostic
+        (review round 1, MINOR-2); the cut-off reason is different in kind: it
+        is a short, bounded, harness-authored sentence, so carrying it on the
+        snapshot costs one line and buys the viewer a real cause instead of
+        a shrug.
         """
         suspect = self._suspect_generation
         self._suspect_generation = None
@@ -4271,16 +4428,18 @@ class AttachedSession:
             self._same_live_turn = True
             return
         outcome = ""
+        cut_off = ""
         store = self._frontend_store
         if store is not None:
             outcome = str(getattr(store.state, "last_turn_outcome", "") or "")
+            cut_off = str(getattr(store.state, "last_turn_cut_off", "") or "")
         # ``force`` because ``_apply_frontend_facades`` already cleared
         # ``_streaming`` when the snapshot says the turn ended, and the
         # usual early-return would swallow the synthesised end.
         self._end_turn_locally(
             direct=True,
             aborted=outcome in ("aborted", ""),
-            error="turn failed" if outcome == "error" else None,
+            error=(cut_off or "turn failed") if outcome == "error" else None,
             force=True,
         )
         # A successor turn may already be live (generation moved). The
@@ -4401,8 +4560,24 @@ class AttachedSession:
             # is the honest repair, and ``_settle_suspect_turn`` decides on
             # rebind exactly as it does after a transient drop.
         else:
+            # OWNER DEATH, and the end must say so. Synthesising the bare
+            # abort (``aborted=True, error=None``) is the exact shape a user's
+            # Esc produces, so a runtime that died mid-turn painted the same
+            # "interrupted" the operator's own cancel does — the bug this
+            # change exists to fix, and the reason this branch names a cause
+            # rather than leaving a class marker.
+            #
+            # Reached ONLY for a runtime the recovery loop has confirmed gone
+            # (a deliberate stop returns above, and ``refresh=True`` never
+            # ends a turn), so this cannot paint an error over a healthy
+            # session that merely dropped a socket — the autorefresh design's
+            # invariant, kept.
             try:
-                self._end_turn_locally(direct=True)
+                self._end_turn_locally(
+                    direct=True,
+                    aborted=False,
+                    error=format_cut_off_notice("owner-lost"),
+                )
             except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
                 logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
             # Belt for the case ``_end_turn_locally`` early-returns on

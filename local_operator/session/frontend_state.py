@@ -1343,6 +1343,12 @@ class JobState(BaseModel):
     latest_details: dict[str, Any] | str | None = None
     error_text: str = ""
     result_text: str = ""
+    #: Why a restored row reads ``interrupted`` — added with the cut-off
+    #: taxonomy (design §4, D3) so the subagent panel can say what stopped the
+    #: child rather than only that it stopped. Additive with a ``""`` default,
+    #: so an older runtime's row validates and the panel's existing spellings
+    #: stay valid; the value is a token from ``incidents.CUT_OFF_CAUSES``.
+    cut_off_cause: str = ""
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
@@ -1631,6 +1637,14 @@ class FrontendSessionState(BaseModel):
     #: value — treat as aborted. Additive; extra="allow" keeps older readers
     #: tolerant. One value per user prompt, not per compaction continuation.
     last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+    #: The rendered reason for a cut-off last turn, mirrored beside
+    #: ``last_turn_outcome`` for the same reason that field exists: a viewer
+    #: that dropped mid-turn rebinds after the real end is gone from
+    #: ``live_events``, and without this it can only synthesise the CLASS
+    #: placeholder ``"turn failed"`` (or blame the user for a cancel they never
+    #: made). Additive; ``""`` is the old-runtime value and means "no reason
+    #: was recorded", which is exactly what it is.
+    last_turn_cut_off: str = ""
     activity_started_at: float | None = None
     #: Which kind of work the working line is naming, and when that kind began.
     #:
@@ -3402,6 +3416,7 @@ class FrontendStateStore:
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
+            last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
                 current.activity_started_at
                 if bool(getattr(session, "is_streaming", False))
@@ -3712,6 +3727,9 @@ class FrontendStateStore:
                 activity_started_at=None,
                 active_duration_s=duration,
                 last_turn_outcome=outcome,
+                # Empty for every non-cut-off end, which is what clears a
+                # previous turn's reason as the new outcome lands.
+                last_turn_cut_off=str(getattr(event, "cut_off", "") or ""),
             )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
@@ -4191,6 +4209,20 @@ def _last_turn_outcome_from(session: Any, current: str) -> str:
         return current if current in ("completed", "aborted", "error") else ""
     raw = str(getattr(session, "_last_turn_outcome", "") or "")
     return raw if raw in ("completed", "aborted", "error") else ""
+
+
+def _last_turn_cut_off_from(session: Any, current: str) -> str:
+    """The session's published cut-off reason, or the store's, or ``""``.
+
+    The twin of :func:`_last_turn_outcome_from`, and needed for the same reason:
+    ``refresh_from_session`` copies the session's fields over the store, and a
+    reduced test double (or an older runtime) without the attribute would
+    otherwise wipe a reason ``observe_event`` had just written — leaving a
+    rebinding viewer to synthesise a cause it could have named.
+    """
+    if not hasattr(session, "_last_turn_cut_off"):
+        return current
+    return str(getattr(session, "_last_turn_cut_off", "") or "")
 
 
 def _label(spec: Any) -> str:

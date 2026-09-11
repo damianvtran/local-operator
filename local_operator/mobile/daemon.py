@@ -107,13 +107,67 @@ def _durable_fold_cache():
     use get a cache keyed by THEIR directories."""
     global _DURABLE_FOLD_CACHE
     if _DURABLE_FOLD_CACHE is None:
-        from local_operator.mobile.durable import DurableFoldCache
-
+        try:
+            from local_operator.mobile.durable import DurableFoldCache
+        except ImportError as exc:
+            # The daemon's own lazy import is a seam that sees a torn install
+            # directly (``durable`` pulls ``_journal_injection_ids`` at module
+            # scope). Log it NAMED, then re-raise: the fold cannot run without
+            # the module, and swallowing the import would turn a diagnosable
+            # install race into "no projection" with no cause anywhere.
+            _log_import_failure(exc, "local_operator.mobile.durable", where="durable fold cache")
+            raise
         _DURABLE_FOLD_CACHE = DurableFoldCache()
     return _DURABLE_FOLD_CACHE
 
 
 _DURABLE_FOLD_CACHE: Any = None
+
+#: The build this DAEMON PROCESS loaded, stamped once at construction. Compared
+#: against the install on disk by ``update.classify_import_failure``, which is
+#: the only way to tell a lazy import that lost a name to a HALF-REPLACED
+#: install from a genuine packaging bug (design §5.2). ``None`` means "not
+#: stamped yet", which classifies nothing rather than guessing.
+_BOOT_BUILD: Any = None
+_BOOT_BUILD_STAMPED = False
+
+
+def _boot_build() -> Any:
+    """This daemon's boot build, memoised on first read.
+
+    Called from ``MobileDaemon.__init__`` so the normal case stamps at process
+    start, before any install can replace the tree. A seam that somehow runs
+    first stamps there and then, which can only ever make the comparison MORE
+    conservative (a stamp taken after the swap equals the install, so the
+    failure stays an ordinary traceback).
+    """
+    global _BOOT_BUILD, _BOOT_BUILD_STAMPED
+    if not _BOOT_BUILD_STAMPED:
+        _BOOT_BUILD_STAMPED = True
+        try:
+            from local_operator.update import installed_build
+
+            _BOOT_BUILD = installed_build()
+        except Exception:  # noqa: BLE001 — an unreadable stamp classifies nothing
+            _BOOT_BUILD = None
+    return _BOOT_BUILD
+
+
+def _log_import_failure(exc: BaseException, module: str, *, where: str) -> None:
+    """Log a lazy-import failure, naming it when the install moved under us.
+
+    One logger call for the daemon's two lazy-import seams, so the 605-occurrence
+    ``durable fold failed for session X`` traceback becomes a sentence that says
+    WHAT happened and WHY, and the cause can be fed to the next turn's cut-off
+    vocabulary.
+    """
+    from local_operator.update import classify_import_failure
+
+    reason = classify_import_failure(exc, module, boot=_boot_build())
+    if reason is None:
+        logger.error("%s failed while importing %s", where, module, exc_info=exc)
+        return
+    logger.error("%s failed: %s (%s)", where, reason, module, exc_info=exc)
 
 
 def _custom_snapshot_cache():
@@ -535,8 +589,10 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         state = _durable_fold_cache().load(directory)
     except FileNotFoundError:
         return None
-    except Exception:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
-        logger.exception("durable fold failed for session %s", session_id)
+    except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
+        _log_import_failure(
+            exc, "local_operator.mobile.durable", where=f"durable fold for {session_id}"
+        )
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -870,12 +926,21 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     attention = projection.attention
     data["attention"] = attention
     if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+        # The reason rides the sentence when the outcome carries one (a cut-off
+        # names its cause; a provider error already names itself). The
+        # suppression above is unchanged and still correct: a LIVE mid-turn
+        # session banners nothing, regardless of the last outcome.
+        reason = str(attention.get("reason") or "")
+        if attention["kind"] == "error":
+            text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
+        else:
+            text = "Interrupted"
         data["transcript"] = [
             *data["transcript"],
             TranscriptEntry(
                 id=attention["anchor_id"],
                 kind="notice",
-                text="Stopped with an error" if attention["kind"] == "error" else "Interrupted",
+                text=text,
             ).to_json(),
         ]
     if degraded:
@@ -1025,6 +1090,10 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # Stamp the build THIS process loaded, before any lazy import can meet a
+        # replaced tree: every later comparison in ``_log_import_failure`` is
+        # against this value.
+        _boot_build()
         # False makes this daemon a READ-ONLY observer of the record directory:
         # it lists sessions and serves durable folds, but never dials a
         # registrant's control socket and never reaps a stale claim. A second
