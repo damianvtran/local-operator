@@ -162,6 +162,11 @@ def sidebar_content_width(terminal_width: int) -> int:
 #: the other surfaces read that one and are not paying this cost.
 SIDEBAR_SPINNER_INTERVAL_S = 0.15
 
+#: Section key (``_section_of``) to the name its header row carries. One
+#: mapping so `_display_rows` and `render` can never disagree about which
+#: sections exist.
+_SECTION_NAMES = {0: "pinned", 1: "active", 2: "previous", 3: "subagent"}
+
 
 class SessionSidebar(Widget, can_focus=True):
     #: Textual re-renders a widget on every pointer move to look for link
@@ -183,6 +188,15 @@ class SessionSidebar(Widget, can_focus=True):
         Binding("end", "edge(True)", show=False),
         Binding("enter", "select", show=False),
         Binding("escape", "leave", show=False),
+        # Sidebar-scoped on purpose. `ctrl+a` and `ctrl+o` are BOTH in
+        # `keymap.COMPOSER_KEYS` (keymap.py:212, :210) — `ctrl+a` is the
+        # composer's line-start and `ctrl+o` expands a collapsed paste. They are
+        # safe HERE because in F9 mode the sidebar owns the focus chain and the
+        # composer is not in it. Promoted to app level, non-priority, they would
+        # silently lose to TextArea and the chord would look broken. NEVER
+        # promote them.
+        Binding("ctrl+a", "toggle_subagents", show=False),
+        Binding("ctrl+o", "jump_to_subagents", show=False),
     ]
 
     class Selected(Message):
@@ -192,6 +206,18 @@ class SessionSidebar(Widget, can_focus=True):
 
     class Dismissed(Message):
         pass
+
+    class SubagentLayerToggled(Message):
+        """``ctrl+a`` flipped the ⌥ layer for this session.
+
+        Carries the new value so the app can re-poll the catalog with the flag.
+        The widget cannot load the catalog itself — that is worker-thread work
+        the app owns.
+        """
+
+        def __init__(self, show_subagents: bool) -> None:
+            super().__init__()
+            self.show_subagents = show_subagents
 
     def __init__(self) -> None:
         super().__init__(id="session-sidebar")
@@ -223,6 +249,16 @@ class SessionSidebar(Widget, can_focus=True):
         #: the description only once Textual's own show delay has elapsed
         #: since then, so it never appears earlier than Textual would show it.
         self._hover_since: float | None = None
+        #: Pinned ids, newest pin first, handed in by the app's poll. Display
+        #: only: pins lift rows into their own SECTION in `_display_rows` and
+        #: never touch `rank_entries`, which is the partition the mobile relay
+        #: shares.
+        self._pins: tuple[str, ...] = ()
+        #: Startup default from `tui.sidebar_show_subagents`; flipped by
+        #: `ctrl+a` for THIS session only, never written back to config.
+        self.show_subagents: bool = False
+        #: Hidden-population size for the footer chip, from `subagent_population`.
+        self._subagent_total: int = 0
         self.display = False
 
     @property
@@ -267,7 +303,7 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not self.entries:
             return 0
-        tiers = {0 if entry.active else 1 for entry in self.entries}
+        tiers = {self._section_of(entry) for entry in self.entries}
         # Per section: its heading and the blank beneath it, plus a blank
         # above every heading after the first. The outer "Sessions" title is
         # not counted — it is not drawn at all once any header is (`render`).
@@ -276,6 +312,45 @@ class SessionSidebar(Widget, can_focus=True):
     @property
     def visible_entries(self) -> tuple[CatalogEntry, ...]:
         return self.entries[self._offset : self._offset + self.page_size]
+
+    def _special_mark(self, entry: CatalogEntry) -> tuple[str, str] | None:
+        """``(glyph, ink)`` for a row whose mark is NOT its live state, else None.
+
+        Two rows do not own a state glyph. A pinned row draws ``★`` because
+        being pinned is the fact the section it sits in is about, and a
+        subagent row draws ``⌥`` because it carries no live state at all by
+        construction — the hidden population is never polled for one.
+
+        One helper, consulted by BOTH ``render`` and ``_advance_spinner``, so
+        the full frame and the 150 ms mark-cell patch cannot disagree about who
+        owns column 2. They did disagree in the first cut: a pinned BUSY row
+        painted ``★`` on a full frame and then had a spinner frame patched over
+        it on the very next tick, so the mark flickered between the two at
+        7 Hz.
+        """
+        if entry.id in self._pins:
+            return "★", "accent"
+        if entry.subagent:
+            return "⌥", "muted"
+        return None
+
+    def _section_of(self, entry: CatalogEntry) -> int:
+        """0 pinned, 1 active, 2 previous, 3 subagent.
+
+        A THREE-way key over ``active``, not a widening of it:
+        ``CatalogEntry.active`` is ``pending or unseen or live_state``, and the
+        attention store keys on conversation identity so it answers for
+        subagent ids too — 45% of them carry an unseen receipt. Ranking them by
+        ``active`` alone would put agent runs above the user's own work.
+
+        Pinned outranks subagent, which is what makes a pinned subagent row
+        appear in ``★ Pinned`` even while the layer is off.
+        """
+        if entry.id in self._pins:
+            return 0
+        if entry.subagent:
+            return 3
+        return 1 if entry.active else 2
 
     @staticmethod
     def _draws_section_headers(rows: tuple[tuple[str, CatalogEntry | None], ...]) -> bool:
@@ -298,19 +373,35 @@ class SessionSidebar(Widget, can_focus=True):
         presentational is also what makes keyboard traversal cross a boundary
         as an ordinary step, with no stall and no skip.
 
-        The boundary is ``CatalogEntry.active``, i.e. the tier
-        ``session_category`` assigns — 0 pending, 1 unseen-complete, 2 error,
-        3 interrupted, 4 busy and 5 live are active; 6 previous is not — which
-        is the same partition the mobile relay draws, so the two surfaces agree
-        without a new field. Ordering carries one further key than the tier (an
-        armed wake floats within PREVIOUS, where every row is cold), but it never
-        crosses this boundary and never applies above it. An empty section
-        contributes no header.
+        The boundary is ``_section_of``: pinned, then ``CatalogEntry.active``
+        — i.e. the tier ``session_category`` assigns, 0 pending, 1
+        unseen-complete, 2 error, 3 interrupted, 4 busy and 5 live are active;
+        6 previous is not — then the hidden subagent population. The
+        active/previous split is the same partition the mobile relay draws, so
+        the two surfaces agree without a new field; pins and sub rows are
+        DISPLAY-only lifts on top of it and never reach ``rank_entries``.
+        Ordering carries one further key than the tier (an armed wake floats
+        within PREVIOUS, where every row is cold), but it never crosses this
+        boundary and never applies above it. An empty section contributes no
+        header.
         """
         rows: list[tuple[str, CatalogEntry | None]] = []
         section: str | None = None
-        for entry in self.visible_entries:
-            current = "active" if entry.active else "previous"
+        # Sections must be CONTIGUOUS, and a pinned row can come from anywhere
+        # in the ranking. Sort the window's rows by section key alone, stably,
+        # so the catalog's own order survives inside each section.
+        # `self.entries` itself is NOT resorted and `visible_entries` is NOT
+        # widened: `action_move`, `_cursor_index` and `_switch_session_from`
+        # all index `entries` and must keep seeing the ranking's order. A
+        # consequence, accepted: a pinned row ranked below the window is not
+        # visible until the user pages to it — the same as any other row
+        # outside the window, and what keeps `page_size`/`action_move`/
+        # `_entry_at` on one geometry.
+        ordered = sorted(
+            enumerate(self.visible_entries), key=lambda pair: (self._section_of(pair[1]), pair[0])
+        )
+        for _index, entry in ordered:
+            current = _SECTION_NAMES[self._section_of(entry)]
             if current != section:
                 # A blank ABOVE every heading but the first, and one BELOW
                 # every heading. The ask was "an active sessions header and
@@ -355,6 +446,35 @@ class SessionSidebar(Widget, can_focus=True):
         # and Textual's compositor every two seconds in every open terminal.
         if self._paint_state() != self._painted_state:
             self.refresh()
+
+    def set_pins(self, ids: Sequence[str]) -> None:
+        """Replace the pinned-id set. Display-only; see `_display_rows`.
+
+        Refreshes only on an actual change: this runs on every catalog poll,
+        and an unconditional repaint here would re-ink the list every 2 s in
+        every open terminal.
+        """
+        pins = tuple(ids)
+        if pins == self._pins:
+            return
+        self._pins = pins
+        self.refresh()
+
+    def set_subagent_total(self, total: int) -> None:
+        """How many hidden subagent runs the store holds — the footer chip."""
+        if total == self._subagent_total:
+            return
+        self._subagent_total = total
+        self.refresh()
+
+    @property
+    def hovered_id(self) -> str:
+        """The row under the pointer, or "".
+
+        Public because the app's pin chord resolves its target from hover
+        first, and must not reach into `_hover_id`.
+        """
+        return self._hover_id
 
     def show_error(self, message: str) -> None:
         # A refresh error does not erase the last usable catalog.
@@ -443,6 +563,14 @@ class SessionSidebar(Widget, can_focus=True):
             self._catalog_loading,
             self.size,
             tuple(self._age(entry) for entry in self.visible_entries),
+            # Sectioning and the footer chip are paint inputs that do NOT live
+            # in `entries`. Omit them and either the ctrl+a toggle does not
+            # repaint, or `set_entries`' equality check passes on a frame whose
+            # pins changed and the lift is invisible until something else
+            # invalidates.
+            self._pins,
+            self.show_subagents,
+            self._subagent_total,
         )
 
     def refresh(
@@ -489,6 +617,9 @@ class SessionSidebar(Widget, can_focus=True):
             if entry is None:
                 continue
             requested = entry.id == self._requested_id and entry.id != self.current_id
+            if self._special_mark(entry) is not None:
+                # Its mark column is not a spinner's to patch (`_special_mark`).
+                continue
             if (requested and self._requested_spinning()) or (
                 entry.row.live_state == "busy"
                 and not entry.row.pending
@@ -544,6 +675,30 @@ class SessionSidebar(Widget, can_focus=True):
 
     def action_leave(self) -> None:
         self.post_message(self.Dismissed())
+
+    def action_toggle_subagents(self) -> None:
+        """Flip the ⌥ layer for THIS session. Never writes the setting.
+
+        A `write_setting` here would fan out through `ConfigWatcher` to every
+        running `lop` process and flip another terminal's sidebar. The same
+        rule `ctrl+g` follows for dock density.
+        """
+        self.show_subagents = not self.show_subagents
+        self.refresh()
+        # The widget cannot load the catalog itself: `load_catalog` is I/O and
+        # belongs on the app's worker thread. Announce the flip and let the
+        # app re-poll with it.
+        self.post_message(self.SubagentLayerToggled(self.show_subagents))
+
+    def action_jump_to_subagents(self) -> None:
+        """Move the cursor to the first subagent row, revealing it."""
+        if not self.show_subagents:
+            return
+        target = next((entry for entry in self.entries if entry.subagent), None)
+        if target is None:
+            return
+        self.cursor_id = target.id
+        self._reveal()
 
     def _entry_at(self, y: int) -> CatalogEntry | None:
         # Against the DISPLAY rows, not the entries: a header and its blank
@@ -780,7 +935,12 @@ class SessionSidebar(Widget, can_focus=True):
                 result.append(" " * width)
                 continue
             if kind.startswith("header:"):
-                label = "Active Sessions" if kind == "header:active" else "Previous Sessions"
+                label = {
+                    "header:pinned": "★ Pinned",
+                    "header:active": "Active Sessions",
+                    "header:previous": "Previous Sessions",
+                    "header:subagent": "⌥ Subagent Runs",
+                }[kind]
                 # Same treatment as the "Sessions" title above: `muted`, no
                 # rule, no new palette entry. Mirrors the mobile relay's two
                 # headings so the surfaces read the same.
@@ -829,7 +989,13 @@ class SessionSidebar(Widget, can_focus=True):
             # the user is waiting on.
             line.append("» " if requested else "› " if cursor else "  ")
             mark, ink = row_state_mark(entry.row, self._frame)
-            if requested and self._requested_spinning():
+            special = self._special_mark(entry)
+            if special is not None:
+                # Pinned and subagent rows own their mark column outright; see
+                # `_special_mark`. Checked FIRST so neither the requested
+                # spinner nor a completion glyph can displace it.
+                mark, ink = special
+            elif requested and self._requested_spinning():
                 # Same ink a busy row's spinner uses (``row_state_mark``), so one
                 # spinner means one thing everywhere in the list.
                 # Only after the delay: a switch that is taking long enough to
@@ -857,7 +1023,12 @@ class SessionSidebar(Widget, can_focus=True):
             line.append(f"{mark or ' '} ", style=theme_mod.semantic_color(ink))
             age = self._age(entry)
             title_width = max(1, width - 4 - (len(age) + 1 if age else 0))
-            title = truncate_cells(entry.row.name or "Untitled conversation", title_width)
+            # A subagent row is identified by what it was delegated to do
+            # ("label · role"), not by the session name the runtime generated
+            # for it. `sub_title` already degrades to either half alone, and
+            # to `row.name` when it has neither.
+            name = entry.sub_title if entry.subagent else entry.row.name
+            title = truncate_cells(name or "Untitled conversation", title_width)
             line.append(title)
             line.pad_right(max(0, width - line.cell_len - len(age)))
             line.append(age, style=theme_mod.semantic_color("dim"))
@@ -879,6 +1050,16 @@ class SessionSidebar(Widget, can_focus=True):
         if len(self.entries) > self.page_size:
             last = min(len(self.entries), self._offset + self.page_size)
             hint = f"{self._offset + 1}–{last}/{len(self.entries)} · ctrl+b hide"
+        if self._subagent_total > 0:
+            # Merged onto the EXISTING footer line, never a second one: a
+            # second line would cost a session row at every terminal height,
+            # permanently. The `999+` cap is what keeps the width
+            # deterministic — `1–38/152 · ctrl+b hide · ⌥438` is 29 cells
+            # against the 30-cell floor, and an unbounded count would run over
+            # it. `truncate_cells` crops rather than wraps, so the worst case
+            # degrades to a clipped counter, not a broken frame.
+            count = "999+" if self._subagent_total > 999 else str(self._subagent_total)
+            hint = f"{hint} · ⌥{count}"
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
         result.append(
             "\n" + truncate_cells(footer, width),

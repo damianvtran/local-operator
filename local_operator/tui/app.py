@@ -1470,6 +1470,9 @@ def _set_transcript_parked(view: Widget, parked: bool) -> None:
 #: rows the eye lands on — without turning every poll into a prepare storm.
 PREWARM_PER_REFRESH = 2
 
+#: Polls between footer-chip population reads. 15 * 2 s = 30 s.
+SUBAGENT_POLL_EVERY = 15
+
 #: How long a parked sidebar source may keep its runtime attachment.
 #:
 #: THE TWO SIDEBAR CACHES ARE DIFFERENT RESOURCES, and conflating them is the
@@ -2534,6 +2537,15 @@ class OperatorApp(App[None]):
         Binding("f8", "aside", "Aside", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
+        # Pin/unpin the session under the pointer (else under the sidebar's
+        # cursor). A FUNCTION key, continuing f8/f9: `ctrl+p` is NOT free —
+        # Textual's App injects `Binding(COMMAND_PALETTE_BINDING, ...,
+        # priority=True)` and that constant is `ctrl+p` on textual 8.2.8, so an
+        # app binding there never fires and the palette opens instead (measured
+        # in a pilot; see docs/design/keymap.md §E.4 clause 5). Every
+        # `ctrl+<letter>` is claimed. Non-priority, so a focused picker keeps
+        # first refusal.
+        Binding("f10", "toggle_pin", "Pin session", show=False),
         # Chosen after auditing the table: `up`/`down`, `pageup`/`pagedown`,
         # `home`/`end` and `shift+up`/`shift+down` are TextArea cursor or
         # selection keys, `ctrl+u`/`ctrl+d` are destructive in the composer,
@@ -3797,6 +3809,17 @@ class OperatorApp(App[None]):
         self._startup_cleanup_timer: Timer | None = None
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
+        #: Polls since the footer chip's population count was last read.
+        #: `subagent_population` is a SECOND full `_scan_sessions` of the store
+        #: (resume.py:1351, not memoized) — measured +2.36 ms, +21% on the 2 s
+        #: poll with the layer OFF. The count answers "how many subagent runs
+        #: exist", which changes on the scale of a delegated run starting, not
+        #: on the scale of a repaint, so it is read on sidebar open and then
+        #: every SUBAGENT_POLL_EVERY polls. Never per poll — see the
+        #: CATALOG_SCAN_LIMIT and `in source` comment blocks in
+        #: session/catalog.py for why this file does not carry O(store) work
+        #: on the poll.
+        self._subagent_population_poll = 0
         self._sidebar_prefetch: Any = None
         self._sidebar_prior_workers: set[Any] = set()
         self._sidebar_settings_applied = False
@@ -6652,8 +6675,18 @@ class OperatorApp(App[None]):
         apply_visibility = (
             not self._sidebar_settings_applied or settings.visible != self._sidebar_settings.visible
         )
+        # Seed the layer from the setting on first application, and thereafter
+        # only when the STORED value actually moved. An unconditional write
+        # would let a `/settings` change to an unrelated key stomp a `ctrl+a`
+        # the user pressed this session.
+        apply_subagents = (
+            not self._sidebar_settings_applied
+            or settings.show_subagents != self._sidebar_settings.show_subagents
+        )
         self._sidebar_settings = settings
         self._sidebar_settings_applied = True
+        if apply_subagents:
+            self._session_sidebar.show_subagents = settings.show_subagents
         if apply_visibility:
             self._set_sidebar_open(settings.visible)
         else:
@@ -6753,8 +6786,18 @@ class OperatorApp(App[None]):
         def collect() -> list[CatalogEntry]:
             from local_operator.paths import config_dir
             from local_operator.tui.session_catalog import load_catalog
+            from local_operator.tui.sidebar_pins import read_pins
 
-            return load_catalog(config_dir())
+            root = config_dir()
+            # Sectioning needs both, so a closed-list switch traverses the
+            # same ranking an open one shows. The population count does NOT
+            # belong here: this runs with the list closed, so there is no
+            # footer to draw it in.
+            return load_catalog(
+                root,
+                include_subagents=self._session_sidebar.show_subagents,
+                pinned_hidden_ids=tuple(read_pins(root)),
+            )
 
         try:
             entries = await asyncio.to_thread(collect)
@@ -6774,6 +6817,47 @@ class OperatorApp(App[None]):
         self._session_sidebar.set_entries(entries)
         self._switch_session_from(self._session_sidebar.entries, delta)
 
+    def action_toggle_pin(self) -> None:
+        """Pin or unpin the row under the pointer, else the sidebar's cursor.
+
+        Hover WINS over the cursor: hover exists only while the pointer is
+        physically resting on a row, which is an unambiguous statement of
+        which session is meant. The cursor persists invisibly when the sidebar
+        is unfocused, so honouring it under a pointer that is elsewhere would
+        pin a row the user is not looking at.
+        """
+        if self.screen is not self.screen_stack[0]:
+            # A pushed modal (the /resume picker, a settings sheet) owns the
+            # keyboard, exactly as `action_switch_session` refuses there.
+            return
+        sidebar = self._session_sidebar
+        if not sidebar.display:
+            # A closed list has no row to pin. A clean no-op that steals
+            # nothing: the binding is non-priority, so the key only reaches
+            # here if nothing focused claimed it, and the composer's draft and
+            # caret are untouched.
+            return
+        target = sidebar.hovered_id or (sidebar.cursor_id if sidebar.has_focus else "")
+        if not target:
+            return
+
+        async def pin() -> None:
+            try:
+                from local_operator.paths import config_dir
+                from local_operator.tui.sidebar_pins import read_pins, toggle_pin
+
+                root = config_dir()
+                # `toggle_pin` writes a file, so it is worker-thread work — the
+                # same shape `_switch_session_cold` uses. The UI thread must
+                # not do I/O.
+                await asyncio.to_thread(toggle_pin, root, target)
+                pins = await asyncio.to_thread(read_pins, root)
+                sidebar.set_pins(pins)
+            except Exception:
+                logger.debug("sidebar pin toggle failed", exc_info=True)
+
+        self.run_worker(pin(), group="sidebar-pin")
+
     def action_toggle_sidebar(self) -> None:
         if not self._session_sidebar.display:
             self._close_subagent_view()
@@ -6791,6 +6875,9 @@ class OperatorApp(App[None]):
         if self._sidebar_timer is not None:
             if opened:
                 self._sidebar_timer.resume()
+                # Opening always takes a fresh population count, so the chip
+                # is never up to 30 s stale on a list the user just opened.
+                self._subagent_population_poll = 0
                 self._refresh_sidebar()
             else:
                 self._sidebar_timer.pause()
@@ -6874,15 +6961,35 @@ class OperatorApp(App[None]):
         generation = self._sidebar_refresh_generation
         self._sidebar_refresh_pending = True
 
-        def collect() -> list[CatalogEntry]:
+        def collect() -> tuple[list[CatalogEntry], list[str], int | None]:
             from local_operator.paths import config_dir
-            from local_operator.tui.session_catalog import load_catalog
+            from local_operator.tui.session_catalog import (
+                load_catalog,
+                subagent_population,
+            )
+            from local_operator.tui.sidebar_pins import read_pins
 
-            return load_catalog(config_dir())
+            root = config_dir()
+            pins = read_pins(root)
+            entries = load_catalog(
+                root,
+                include_subagents=self._session_sidebar.show_subagents,
+                pinned_hidden_ids=tuple(pins),
+            )
+            # Read on a SLOW cadence, never per poll: `subagent_population` is
+            # a second whole-store scan (+2.36 ms, +21% measured with the layer
+            # off) and the count it answers changes when a delegated run
+            # starts, not when the list repaints. `None` means "unchanged",
+            # which is not the same as zero.
+            total: int | None = None
+            if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
+                total = subagent_population(root)
+            self._subagent_population_poll += 1
+            return entries, pins, total
 
         async def refresh() -> None:
             try:
-                entries = await asyncio.to_thread(collect)
+                entries, pins, total = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
@@ -6891,6 +6998,9 @@ class OperatorApp(App[None]):
                 session = self._session
                 self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
                 self._session_sidebar.set_entries(entries)
+                self._session_sidebar.set_pins(pins)
+                if total is not None:
+                    self._session_sidebar.set_subagent_total(total)
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
             except Exception:
                 if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
@@ -7016,6 +7126,19 @@ class OperatorApp(App[None]):
     def on_session_sidebar_dismissed(self, message: SessionSidebar.Dismissed) -> None:
         message.stop()
         self._set_sidebar_open(False)
+
+    def on_session_sidebar_subagent_layer_toggled(
+        self, message: SessionSidebar.SubagentLayerToggled
+    ) -> None:
+        """Re-poll the catalog so the ⌥ layer's rows arrive (or leave).
+
+        Nothing is written to config. `ctrl+g` cycles the dock density without
+        writing `display.dock` for the same reason: a `write_setting` here
+        would fan out through `ConfigWatcher` to every running `lop` process
+        and flip another terminal's sidebar.
+        """
+        message.stop()
+        self._refresh_sidebar()
 
     # -- composition --------------------------------------------------------
     def get_default_screen(self) -> Screen[None]:
@@ -23012,7 +23135,11 @@ class OperatorApp(App[None]):
         try:
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
-            elif message.key in ("tui.sidebar_visible", "tui.sidebar_position"):
+            elif message.key in (
+                "tui.sidebar_visible",
+                "tui.sidebar_position",
+                "tui.sidebar_show_subagents",
+            ):
                 self._apply_sidebar_settings()
             elif message.key == "display.comfortable_rows":
                 # Layout, not ink: the padding lives in the stylesheet behind
@@ -32007,6 +32134,12 @@ class OperatorApp(App[None]):
         # user learns what "next" means, and the one-press switch is otherwise
         # undiscoverable (UX round 3, U5).
         lines.append(_key_row("ctrl+shift+↑/↓", "switch to the previous/next conversation"))
+        # Sidebar block, and adjacent to F8/F9 so the function keys stay
+        # together. 63 composed cells against the 74-cell ceiling. The two
+        # sidebar-SCOPED chords (ctrl+a, ctrl+o) get no row here: /help lists
+        # app-wide keys, and a row for a chord that only fires in F9 mode
+        # would be a lie. They live in the footer chip and the docs.
+        lines.append(_key_row("F10", "pin or unpin the session under the pointer"))
         lines.append(_key_row("F8", "open an aside; ctrl+f forks it in"))
         # Directly under `F8`, because it is only meaningful once an aside
         # is open. ONE row for the pair rather than two: the partner chord fits

@@ -117,6 +117,26 @@ UNSEEN_ROWS = [
 ]
 
 
+#: Hidden-population rows for the ⌥ layer. `(id, label, role, age)` — a sub row
+#: is identified by what it was delegated to do, never by the session name its
+#: runtime generated, so these carry no `name` at all. The third has an EMPTY
+#: label so the frame also shows the degraded `role only` form.
+SUBAGENT_ROWS = [
+    ("aaaaaaaaaad1", "section the sidebar", "coder", 4),
+    ("aaaaaaaaaad2", "audit the poll cost", "reviewer", 11),
+    ("aaaaaaaaaad3", "", "scout", 19),
+]
+
+#: Pinned in the capture. One ACTIVE row, to show that a pin LIFTS a row out of
+#: the section it ranked into, and one SUBAGENT row, to show a pinned agent run
+#: staying visible in ★ Pinned while the layer itself is off.
+PINNED_IDS = ("aaaaaaaaaaa3", "aaaaaaaaaad2")
+
+#: What the footer chip reports. Larger than the seeded rows on purpose: the
+#: chip counts the whole hidden population, not the capped slice on screen.
+SUBAGENT_TOTAL = 438
+
+
 def _entries() -> list[CatalogEntry]:
     entries = [
         CatalogEntry(
@@ -139,6 +159,15 @@ def _entries() -> list[CatalogEntry]:
             completion_kind=kind,
         )
         for session_id, name, age, state, kind in UNSEEN_ROWS
+    ]
+    entries += [
+        CatalogEntry(
+            SessionRow(id=session_id, mtime=NOW - age * 60, name=""),
+            subagent=True,
+            label=label,
+            agent=agent,
+        )
+        for session_id, label, agent, age in SUBAGENT_ROWS
     ]
     return entries
 
@@ -170,6 +199,12 @@ async def main() -> None:
         await pilot.press("ctrl+b")
         await pilot.pause()
         sidebar = app._session_sidebar
+        # The ⌥ layer ON, so the capture shows all four sections at once. The
+        # rows are handed in directly (as every other row here is) rather than
+        # loaded, so this never touches the developer's real store.
+        sidebar.show_subagents = True
+        sidebar.set_pins(PINNED_IDS)
+        sidebar.set_subagent_total(SUBAGENT_TOTAL)
         sidebar.set_entries(_entries())
         sidebar.current_id = "aaaaaaaaaaa1"
         sidebar.cursor_id = "aaaaaaaaaaa1"

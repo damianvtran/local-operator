@@ -716,6 +716,69 @@ Whatever the scout recommends must satisfy all of:
    draft is unchanged — the measurement shape `app.py:1963-1976` already
    established for the aside chords.
 
+### E.4a Shipped: the sidebar's three chords
+
+These are **implemented**, unlike the proposals above. They are plain
+`Binding`s with **no `keymap.*` id** — matching `ctrl+b` and `f9` — so they are
+not remappable and do not enter the three-way keymap identity. Registering an
+id would make it persisted user data and pull in the identity test for chords
+nobody asked to remap.
+
+| Chord | Scope | Action |
+|---|---|---|
+| `f10` | app (`OperatorApp.BINDINGS`) | pin/unpin the session under the pointer, else the focused list's cursor |
+| `ctrl+a` | **sidebar widget only** | toggle the ⌥ subagent layer for this session |
+| `ctrl+o` | **sidebar widget only** | jump the cursor to the first subagent row |
+
+#### Why `f10` and not `ctrl+p`
+
+**`ctrl+p` is not available, and a grep of `local_operator/` will not tell you
+that.** Textual's `App.__init__` injects
+`Binding(self.COMMAND_PALETTE_BINDING, "command_palette", ..., priority=True)`
+whenever `ENABLE_COMMAND_PALETTE` is true. `OperatorApp` never disables it, and
+`COMMAND_PALETTE_BINDING` is `ctrl+p` on textual 8.2.8. The binding is injected
+at runtime, so it appears in no source file in this repository.
+
+Measured on the real `OperatorApp`, per §E.4 clause 5:
+
+```
+ctrl+p  resolved on app: [('probe_pin', False), ('command_palette', True)]
+ctrl+p  pressed:         CommandPalette pushed; the app action NEVER fired
+ctrl+p  sidebar focused: same result — a widget-scoped binding loses to the
+                         palette's priority binding too
+```
+
+`f10`, by the same method:
+
+```
+f10  composer focused: fired=True  draft_intact=True  caret_intact=True
+f10  sidebar focused:  fired=True
+f10  resolved on app:  [('probe_pin', False)]      # sole claimant, non-priority
+```
+
+`f10` continues the series this app already uses for app-level surfaces that
+must survive a focused composer: `f8` = aside, `f9` = focus sessions. Every
+`ctrl+<letter>` is claimed — 24 of 26 by `OperatorApp`, `Editor`/`TextArea` or
+the reserved set, and the two that look free (`ctrl+p`, `ctrl+q`) are Textual's
+own priority bindings. `ctrl+shift+p` and `alt+p` both fire but are refused by
+§E.4 clause 4: `ctrl+shift+*` is not reliably emitted by Terminal.app, and on a
+legacy terminal `ctrl+shift+<letter>` arrives as the same byte as
+`ctrl+<letter>` — which here would misfire into the command palette.
+
+Relocating the command palette (`COMMAND_PALETTE_BINDING = "ctrl+shift+p"`) was
+probed and does free `ctrl+p` cleanly. It is still refused: it changes a key the
+user may already know, for a gesture that has a free key available.
+
+#### Never promote `ctrl+a` or `ctrl+o` to app level
+
+Both are in `keymap.COMPOSER_KEYS` — `ctrl+a` is the composer's line-start and
+`ctrl+o` expands a collapsed paste. They are safe as **sidebar-scoped** bindings
+precisely because in F9 mode the sidebar owns the focus chain and the composer
+is not in it. At app level, non-priority, they would silently lose to `TextArea`
+and the chord would look broken; at priority they would take the composer's keys
+away. Verified: `ctrl+a` still reaches `cursor_line_start` when the Editor has
+focus.
+
 ### E.5 A leader key is an extension point, not scope
 
 The app has burned 9 of ~12 comfortable `ctrl+<letter>` slots (§C.1). A leader

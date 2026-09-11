@@ -11569,6 +11569,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+t",
             "ctrl+g",
             "ctrl+b",
+            "F10",
             "ctrl+pageup",
             "ctrl+r",
             "esc",
@@ -11600,6 +11601,7 @@ async def test_help_documents_shell_mode_and_the_composer_chords() -> None:
             "ctrl+t",
             "ctrl+g",
             "ctrl+b",
+            "F10",
             "ctrl+pageup",
             "ctrl+r",
             "esc",
@@ -12438,3 +12440,305 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
         # The projection's own placeholder still counts when no manager exists.
         assert band_for(("github", "failed")).failed is True
         assert band_for(("github", "connected")).failed is False
+
+
+# -- f10 pins, the ⌥ layer and the sidebar's settings seam --------------------
+
+
+def _pin_entries(ids=("alpha", "beta", "gamma")):
+    """Plain catalog rows, ranked ACTIVE so they land in one section."""
+    import time as _time
+
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import CatalogEntry
+
+    now = _time.time()
+    return [
+        CatalogEntry(SessionRow(sid, now - 60 * (i + 1), f"Session {sid}", live_state="busy"))
+        for i, sid in enumerate(ids)
+    ]
+
+
+def _seed_session_dirs(config_dir, ids=("alpha", "beta", "gamma")) -> None:
+    """Give each row a real ``sessions/<id>`` directory.
+
+    ``read_pins`` PRUNES against the session store — an id whose directory is
+    gone is dropped rather than rendered as a broken row, which is how a pin to
+    a deleted session disappears without `session/cleanup.py` knowing pins
+    exist. A fixture that skips this gets its pins pruned on the way back out
+    and the round trip silently reads empty.
+    """
+    for sid in ids:
+        (config_dir / "sessions" / sid).mkdir(parents=True, exist_ok=True)
+
+
+async def _open_quiesced_sidebar(pilot, app, entries=None):
+    """Open the list with the real catalog polls stopped, holding OUR rows."""
+    sidebar = app._session_sidebar
+    app._set_sidebar_open(True)
+    await pilot.pause()
+    if app._sidebar_timer is not None:
+        app._sidebar_timer.pause()
+    app._sidebar_refresh_generation += 1
+    sidebar.set_entries(entries if entries is not None else _pin_entries())
+    await pilot.pause()
+    return sidebar
+
+
+@pytest.mark.asyncio
+async def test_f10_pins_the_hovered_row(tmp_path, monkeypatch) -> None:
+    """Hover WINS over the cursor: the pointer resting on a row is an
+    unambiguous statement of which session is meant."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    from local_operator.tui.sidebar_pins import read_pins
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.focus()
+        await pilot.pause()
+        sidebar.cursor_id = "alpha"
+        sidebar._hover_id = "gamma"
+        assert sidebar.hovered_id == "gamma"
+
+        await pilot.press("f10")
+        for _ in range(40):
+            await pilot.pause()
+            if read_pins(tmp_path):
+                break
+        assert read_pins(tmp_path) == ["gamma"], "hover must outrank the cursor"
+        assert sidebar._pins == ("gamma",), "the widget was not handed the new pins"
+
+
+@pytest.mark.asyncio
+async def test_f10_falls_back_to_the_cursor_when_focused(tmp_path, monkeypatch) -> None:
+    """No pointer on the list: the focused cursor is the target."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    from local_operator.tui.sidebar_pins import read_pins
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.focus()
+        for _ in range(20):
+            await pilot.pause()
+            if sidebar.has_focus:
+                break
+        sidebar._hover_id = ""
+        sidebar.cursor_id = "beta"
+
+        await pilot.press("f10")
+        for _ in range(40):
+            await pilot.pause()
+            if read_pins(tmp_path):
+                break
+        assert read_pins(tmp_path) == ["beta"]
+
+
+@pytest.mark.asyncio
+async def test_f10_is_a_no_op_with_the_sidebar_closed(tmp_path, monkeypatch) -> None:
+    """Closed, the chord does nothing AND steals nothing.
+
+    The reason it bubbles rather than sitting at `priority`: with no list on
+    screen there is no row to pin, and the composer must keep the keystroke's
+    effect on its own draft (which is none).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.sidebar_pins import PINS_FILE, read_pins
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.load_text("still typing")
+        await pilot.pause()
+        caret_before = editor.cursor_location
+        assert not app._session_sidebar.display
+
+        await pilot.press("f10")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert editor.text == "still typing"
+        assert editor.cursor_location == caret_before
+        assert app.screen.focused is editor
+        assert read_pins(tmp_path) == []
+        assert not (tmp_path / PINS_FILE).exists(), "a closed list wrote a pin file"
+
+
+@pytest.mark.asyncio
+async def test_f10_does_not_fire_through_a_pushed_modal(tmp_path, monkeypatch) -> None:
+    """A pushed picker owns the keyboard, the `action_switch_session`
+    precedent. Pinning underneath the very list the user is choosing from
+    would be a change they cannot see."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    import time as _time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.sidebar_pins import read_pins
+    from local_operator.tui.widgets.session_picker import SessionPickerScreen
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.focus()
+        await pilot.pause()
+        sidebar.cursor_id = "alpha"
+
+        # Pushed directly rather than through `/resume`: the command reads the
+        # real store, and this tmp config has no sessions to offer, so the
+        # command is a no-op here. What this test is about is the GUARD — a
+        # pushed screen owning the keyboard — not how it came to be pushed.
+        app.push_screen(
+            SessionPickerScreen([SessionRow("alpha", _time.time(), "Session alpha")], _time.time())
+        )
+        for _ in range(40):
+            await pilot.pause()
+            if isinstance(app.screen, SessionPickerScreen):
+                break
+        assert isinstance(app.screen, SessionPickerScreen)
+
+        await pilot.press("f10")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert read_pins(tmp_path) == [], "f10 fired through a pushed modal"
+        assert isinstance(app.screen, SessionPickerScreen), "the picker lost the keyboard"
+
+
+@pytest.mark.asyncio
+async def test_f10_unpins_a_pinned_row(tmp_path, monkeypatch) -> None:
+    """The chord is a TOGGLE; a second press takes the row back out."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    from local_operator.tui.sidebar_pins import read_pins
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.focus()
+        await pilot.pause()
+        sidebar._hover_id = "beta"
+
+        await pilot.press("f10")
+        for _ in range(40):
+            await pilot.pause()
+            if read_pins(tmp_path):
+                break
+        assert read_pins(tmp_path) == ["beta"]
+
+        await pilot.press("f10")
+        for _ in range(40):
+            await pilot.pause()
+            if not read_pins(tmp_path):
+                break
+        assert read_pins(tmp_path) == []
+        assert sidebar._pins == ()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_shift_down_traverses_subagent_rows_when_the_layer_is_on() -> None:
+    """The one behaviour change worth stating loudly.
+
+    `ctrl+shift+↑/↓` walks `self.entries`, whose documented contract is "the
+    list's own ranking, so what the user sees is what they traverse". With the
+    layer ON, subagent rows are in that list and therefore in the traversal.
+    """
+    import time as _time
+
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import CatalogEntry
+
+    now = _time.time()
+    with_layer = [
+        CatalogEntry(SessionRow("mine", now, "Mine", live_state="busy")),
+        CatalogEntry(
+            SessionRow("run1", now - 10, "untitled"), subagent=True, label="audit", agent="reviewer"
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app, with_layer)
+        sidebar.show_subagents = True
+        await pilot.pause()
+        assert any(entry.subagent for entry in sidebar.entries)
+        switched: list[str] = []
+
+        def record(entries, delta):
+            switched.append(entries[delta % len(entries)].id)
+
+        app._switch_session_from = record  # type: ignore[method-assign]
+        app._session_sidebar.current_id = "mine"
+        app.action_switch_session(1)
+        await pilot.pause()
+        assert switched, "the traversal never ran"
+
+        # Layer OFF: the catalog simply does not carry those rows, so the
+        # traversal cannot reach one.
+        sidebar.show_subagents = False
+        sidebar.set_entries([entry for entry in with_layer if not entry.subagent])
+        await pilot.pause()
+        assert not any(entry.subagent for entry in sidebar.entries)
+
+
+@pytest.mark.asyncio
+async def test_a_settings_change_applies_to_a_painted_sidebar(tmp_path, monkeypatch) -> None:
+    """`/settings` must reach a sidebar that is already on screen."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.widgets.settings_view import SettingsChanged
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        assert sidebar.show_subagents is False
+
+        with patch("local_operator.tui.session_catalog.SidebarSettings.from_values") as from_values:
+            from local_operator.tui.session_catalog import SidebarSettings
+
+            from_values.return_value = SidebarSettings(
+                visible=True, position="left", show_subagents=True
+            )
+            app.on_settings_changed(SettingsChanged("tui.sidebar_show_subagents", True))
+            await pilot.pause()
+
+        assert sidebar.show_subagents is True, "a live sidebar ignored the setting"
+
+
+@pytest.mark.asyncio
+async def test_a_settings_write_does_not_stomp_a_session_toggle(tmp_path, monkeypatch) -> None:
+    """`ctrl+a` is a THIS-SESSION flip. An unrelated `/settings` write must not
+    silently revert it — the stored value has not moved, so nothing reapplies."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.widgets.settings_view import SettingsChanged
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.focus()
+        for _ in range(20):
+            await pilot.pause()
+            if sidebar.has_focus:
+                break
+        await pilot.press("ctrl+a")
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "ctrl+a did not flip the layer"
+
+        # An UNRELATED key, whose branch still calls `_apply_sidebar_settings`.
+        app.on_settings_changed(SettingsChanged("tui.sidebar_position", "left"))
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "an unrelated write stomped the session toggle"

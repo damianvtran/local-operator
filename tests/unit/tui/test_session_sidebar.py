@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import os
 import threading
 import time
@@ -2488,3 +2489,416 @@ async def test_a_speculatively_leased_source_is_parked_and_stays_subscribed():
         assert source.controller is not None
         assert source.controller.parked, "a speculative lease must not paint deltas"
         assert handlers, "a parked source must stay subscribed or its owner's stream buffers"
+
+
+# -- pins, the subagent layer and the four-way sectioning ---------------------
+#
+# The seam these exercise (``CatalogEntry.subagent``/``agent``/``label``,
+# ``sub_title``) is the session layer's; this file only ever reads it.
+
+
+def _sub(sid: str, *, label: str = "", agent: str = "", **kwargs) -> CatalogEntry:
+    """A hidden-population row, as ``load_catalog(include_subagents=True)`` yields it."""
+    now = time.time()
+    return CatalogEntry(
+        SessionRow(sid, kwargs.pop("mtime", now), kwargs.pop("name", f"Session {sid}")),
+        subagent=True,
+        label=label,
+        agent=agent,
+        **kwargs,
+    )
+
+
+def _plain(sid: str, *, active: bool = False, name: str = "") -> CatalogEntry:
+    now = time.time()
+    return CatalogEntry(
+        SessionRow(sid, now, name or f"Session {sid}", live_state="busy" if active else "")
+    )
+
+
+def _section_of_line(lines: list[str], needle: str) -> str:
+    """The heading above the first line containing ``needle``.
+
+    Reads the rendered frame rather than ``_display_rows`` so the assertion is
+    about what the user sees, which is the thing the sectioning rule is about.
+    """
+    headings = {"★ Pinned", "Active Sessions", "Previous Sessions", "⌥ Subagent Runs"}
+    current = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped in headings:
+            current = stripped
+        elif needle in line:
+            return current
+    raise AssertionError(f"{needle!r} not in any section:\n" + "\n".join(lines))
+
+
+async def _sidebar_with(pilot, app, entries, *, pins=(), show_subagents=False, total=0):
+    sidebar = app._session_sidebar
+    sidebar.set_open(True)
+    if app._sidebar_timer is not None:
+        app._sidebar_timer.pause()
+    app._sidebar_refresh_generation += 1
+    sidebar.show_subagents = show_subagents
+    sidebar.set_pins(pins)
+    sidebar.set_subagent_total(total)
+    sidebar.set_entries(entries)
+    await pilot.pause()
+    return sidebar
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_row_leaves_its_old_section():
+    """A pin LIFTS a row out of the tier it ranked into; it never reorders the
+    catalog. ``rank_entries`` is the partition the mobile relay shares."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("keep", active=True), _plain("pinme", active=True), _plain("old")]
+        sidebar = await _sidebar_with(pilot, app, entries, pins=("pinme",))
+        lines = sidebar.render().plain.splitlines()
+        assert _section_of_line(lines, "Session pinme") == "★ Pinned"
+        assert _section_of_line(lines, "Session keep") == "Active Sessions"
+        # The lift is display-only: the ranked tuple is untouched, because
+        # `action_move` and `_switch_session_from` both index it.
+        assert [entry.id for entry in sidebar.entries] == ["keep", "pinme", "old"]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_subagent_shows_with_the_layer_off():
+    """Pinned outranks subagent, so an explicitly pinned agent run stays
+    reachable even when the ⌥ layer is collapsed."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("mine", active=True), _sub("run1", label="ship it", agent="coder")]
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("run1",), show_subagents=False, total=12
+        )
+        lines = sidebar.render().plain.splitlines()
+        assert _section_of_line(lines, "ship it") == "★ Pinned"
+        assert not any("⌥ Subagent Runs" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_row_never_lands_in_active():
+    """THE SECTIONING REGRESSION GUARD.
+
+    `CatalogEntry.active` is `pending or unseen or live_state`, and the
+    attention store keys on conversation identity — so it answers True for
+    subagent ids too (45% of them carry an unseen receipt). Sectioning on
+    `active` alone therefore ranks agent runs above the user's own work. This
+    is the exact shape that breaks: subagent AND unseen.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        noisy = _sub("run1", label="audit", agent="reviewer", unseen=True)
+        assert noisy.active, "fixture must carry the shape the guard is about"
+        entries = [_plain("mine", active=True), noisy]
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
+        lines = sidebar.render().plain.splitlines()
+        assert _section_of_line(lines, "audit") == "⌥ Subagent Runs"
+        assert _section_of_line(lines, "Session mine") == "Active Sessions"
+
+
+@pytest.mark.asyncio
+async def test_the_four_sections_are_contiguous():
+    """Sections are blocks, not a scatter: the display sort is stable on the
+    section key so the catalog's order survives INSIDE each one."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        entries = [
+            _plain("a1", active=True),
+            _sub("s1", label="one", agent="scout"),
+            _plain("p1"),
+            _plain("pin1", active=True),
+            _plain("a2", active=True),
+            _sub("s2", label="two", agent="qa"),
+            _plain("p2"),
+            _plain("pin2"),
+        ]
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("pin1", "pin2"), show_subagents=True
+        )
+        rows = sidebar._display_rows()
+        sections = [sidebar._section_of(entry) for _kind, entry in rows if entry is not None]
+        assert sections == sorted(sections), f"sections interleaved: {sections}"
+        # Every section present, each appearing as ONE run.
+        assert [key for key, _ in itertools.groupby(sections)] == [0, 1, 2, 3]
+        # Stable within a section: pin1 ranked before pin2 and stays there.
+        pinned = [
+            entry.id for _k, entry in rows if entry is not None and entry.id.startswith("pin")
+        ]
+        assert pinned == ["pin1", "pin2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [20, 30, 40])
+async def test_page_size_accounts_for_four_headers(height):
+    """Four headings cost more chrome than two, and `page_size` must shrink by
+    exactly that or the frame overflows its own height."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        entries = (
+            [_plain(f"p{i}") for i in range(6)]
+            + [_plain(f"a{i}", active=True) for i in range(6)]
+            + [_sub(f"s{i}", label=f"run {i}", agent="coder") for i in range(6)]
+        )
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("p0", "p1"), show_subagents=True, total=99
+        )
+        lines = sidebar.render().plain.splitlines()
+        assert len(lines) <= sidebar.size.height
+        assert len(sidebar.visible_entries) <= sidebar.page_size
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_row_draws_its_label_and_role():
+    """A sub row is identified by what it was delegated to do, not by the name
+    the runtime generated for it, and carries ⌥ where a state glyph would be."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entry = _sub("run1", label="fix the poll", agent="coder", name="untitled-7")
+        sidebar = await _sidebar_with(pilot, app, [entry], show_subagents=True)
+        lines = sidebar.render().plain.splitlines()
+        row = next(line for line in lines if "fix the poll" in line)
+        assert "coder" in row
+        assert "untitled-7" not in row
+        # The 4-cell prefix is "» "/"› "/"  " then the mark then a space, so
+        # the mark is column 2 — the same cell `_advance_spinner` patches.
+        assert row[2] == "⌥"
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_row_with_only_a_role_degrades():
+    """No label: the role alone, with no stray separator left behind."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entry = _sub("run1", label="", agent="reviewer")
+        sidebar = await _sidebar_with(pilot, app, [entry], show_subagents=True)
+        row = next(line for line in sidebar.render().plain.splitlines() if "reviewer" in line)
+        assert "·" not in row
+
+
+@pytest.mark.asyncio
+async def test_the_footer_chip_carries_the_hidden_count():
+    """The count of what the layer is hiding rides the EXISTING footer line."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=438)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.endswith("· ⌥438")
+        assert cell_len(footer) <= sidebar.size.width
+
+
+@pytest.mark.asyncio
+async def test_the_footer_chip_caps_at_999():
+    """An unbounded counter would grow the footer without limit; the cap is
+    what makes its width deterministic.
+
+    Asserted at a terminal wide enough to paint the capped chip in full (120
+    cells of terminal is 34 of list), because the narrow floor cannot: the
+    list's rendered content is **29** cells, not the 30 ``SIDEBAR_WIDTH``
+    advertises — ``_sync_sidebar_layout`` docks `content_width + gutter` and
+    then spends one more cell on the left padding, which
+    ``sidebar_content_width`` does not reserve. That is pre-existing and not
+    this change's to fix; the companion assertion below pins the documented
+    consequence, which is that an overflowing chip is CROPPED rather than
+    wrapped.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "⌥999+" in footer
+        assert cell_len(footer) <= sidebar.size.width
+
+
+@pytest.mark.asyncio
+async def test_an_overflowing_chip_crops_rather_than_breaking_the_frame():
+    """At the narrow floor the capped chip does not fit. It must lose its tail,
+    never a line: a wrapped footer would silently eat a session row."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain(f"a{i}", active=True) for i in range(20)]
+        sidebar = await _sidebar_with(pilot, app, entries, total=0)
+        baseline_rows = len(sidebar.render().plain.splitlines())
+        sidebar.set_subagent_total(1520)
+        await pilot.pause()
+        lines = sidebar.render().plain.splitlines()
+        assert len(lines) == baseline_rows, "the chip wrapped and cost a row"
+        assert cell_len(lines[-1]) <= sidebar.size.width
+        assert "⌥" in lines[-1], "the counter vanished entirely instead of cropping"
+
+
+@pytest.mark.asyncio
+async def test_no_chip_without_a_hidden_population():
+    """Nothing hidden, nothing said: byte-identical to the footer before this
+    change, which is what keeps the existing footer assertions honest."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=0)
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "⌥" not in footer
+        assert footer.strip() == "f9 focus · ctrl+b hide"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_is_one_line():
+    """The chip costs no session row. A second footer line would cost one at
+    every terminal height, permanently."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain(f"a{i}", active=True) for i in range(20)]
+        sidebar = await _sidebar_with(pilot, app, entries, total=0)
+        without = sidebar.page_size
+        without_lines = len(sidebar.render().plain.splitlines())
+        sidebar.set_subagent_total(438)
+        await pilot.pause()
+        assert sidebar.page_size == without
+        assert len(sidebar.render().plain.splitlines()) == without_lines
+
+
+@pytest.mark.asyncio
+async def test_the_paint_state_notices_a_pin():
+    """Sectioning and chip inputs do NOT live in `entries`, so `_paint_state`
+    has to carry them or a toggle paints nothing."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True), _plain("b")])
+        before = sidebar._paint_state()
+        sidebar.set_pins(("a",))
+        after_pin = sidebar._paint_state()
+        assert after_pin != before
+        sidebar.show_subagents = True
+        after_layer = sidebar._paint_state()
+        assert after_layer != after_pin
+        sidebar.set_subagent_total(7)
+        assert sidebar._paint_state() != after_layer
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_poll_does_not_repaint():
+    """The setters run on every 2 s poll. An unconditional refresh here would
+    re-ink the list forever in every open terminal."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], pins=("a",))
+        state = sidebar._paint_state()
+        with patch.object(sidebar, "refresh") as refresh:
+            sidebar.set_pins(("a",))
+            sidebar.set_subagent_total(0)
+            assert not refresh.called, "an unchanged poll forced a repaint"
+        assert sidebar._paint_state() == state
+
+
+@pytest.mark.asyncio
+async def test_ctrl_a_toggles_the_layer_only_when_focused():
+    """`ctrl+a` is SIDEBAR-scoped on purpose: it is also the composer's
+    line-start (`keymap.COMPOSER_KEYS`). In F9 mode the sidebar owns the focus
+    chain; with the Editor focused the caret must win."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_sub("s1", label="one", agent="scout")])
+        posted: list[object] = []
+
+        def note_refresh(*_args, **_kwargs):
+            posted.append("refresh")
+
+        app._refresh_sidebar = note_refresh  # type: ignore[method-assign]
+        await _focus_settled(pilot, sidebar)
+        assert sidebar.show_subagents is False
+        await pilot.press("ctrl+a")
+        await pilot.pause()
+        assert sidebar.show_subagents is True
+        assert posted, "the toggle must ask the app to re-poll with the flag"
+
+        editor = app.query_one(Editor)
+        editor.focus()
+        for _ in range(20):
+            await pilot.pause()
+            if editor.has_focus:
+                break
+        editor.text = "hello world"
+        editor.cursor_location = (0, 5)
+        was = sidebar.show_subagents
+        await pilot.press("ctrl+a")
+        await pilot.pause()
+        assert sidebar.show_subagents is was, "ctrl+a reached the sidebar past the composer"
+        assert editor.cursor_location == (0, 0), "ctrl+a must still be the caret's line-start"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_jumps_to_the_first_subagent_row():
+    """The layer can sit below the fold; the jump is how it is reachable
+    without paging. A no-op when there is nothing to jump to."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("a1", active=True), _plain("p1"), _sub("s1", label="one", agent="qa")]
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=False)
+        await _focus_settled(pilot, sidebar)
+        sidebar.cursor_id = "a1"
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert sidebar.cursor_id == "a1", "the layer is off; there is nothing to reveal"
+
+        sidebar.show_subagents = True
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert sidebar.cursor_id == "s1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [20, 30, 40])
+async def test_a_click_lands_on_the_row_it_looks_like(height):
+    """THE SILENT-DESTRUCTIVE GUARD.
+
+    `page_size`, `_header_lines`, `_display_rows` and `_entry_at` share one
+    geometry. Move one without the others and `_entry_at` resolves a click to
+    a different session than the one painted on that line — which switches the
+    user's conversation with no error and no way to notice. Asserted across
+    EVERY painted row with all four sections drawn, not one sampled row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        entries = (
+            [_plain(f"pin{i}", active=True) for i in range(2)]
+            + [_plain(f"a{i}", active=True) for i in range(3)]
+            + [_plain(f"p{i}") for i in range(3)]
+            + [_sub(f"s{i}", label=f"run {i}", agent="coder") for i in range(3)]
+        )
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("pin0", "pin1"), show_subagents=True, total=40
+        )
+        lines = sidebar.render().plain.splitlines()
+        rows = sidebar._display_rows()
+        title = 0 if sidebar._draws_section_headers(rows) else 1
+        painted = 0
+        for y, (_kind, entry) in enumerate(rows, title):
+            hit = sidebar._entry_at(y)
+            if entry is None:
+                assert hit is None, f"y={y} is chrome but resolved to {hit and hit.id}"
+                continue
+            assert hit is not None and hit.id == entry.id, (
+                f"y={y} paints {entry.id!r} but a click there resolves " f"{hit and hit.id!r}"
+            )
+            name = entry.sub_title if entry.subagent else entry.row.name
+            assert name.split(" · ")[0] in lines[y], f"y={y} does not paint {entry.id!r}"
+            painted += 1
+        assert painted, "no entry rows were drawn"
