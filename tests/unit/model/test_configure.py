@@ -3630,15 +3630,33 @@ def test_openrouter_provider_preferences_defaults_emit_nothing() -> None:
                         "order": [],
                         "only": [],
                         "ignore": [],
-                        "allow_fallbacks": True,
-                        "require_parameters": False,
+                        "allow_fallbacks": "",
+                        "require_parameters": "",
                         "data_collection": "",
-                        "zdr": False,
-                        "enforce_distillable_text": False,
+                        "zdr": "",
+                        "enforce_distillable_text": "",
                         "quantizations": [],
                         "max_price": "",
                         "preferred_min_throughput": 0.0,
                         "preferred_max_latency": 0.0,
+                    }
+                }
+            }
+        )
+        is None
+    )
+    # The BOOL-shaped block an earlier build of this feature wrote (and a
+    # hand-edited YAML still produces) reads as the same all-clear: the
+    # resolver tolerates both stored forms so no config ever breaks builds.
+    assert (
+        read(
+            {
+                "providers": {
+                    "openrouter": {
+                        "allow_fallbacks": True,
+                        "require_parameters": False,
+                        "zdr": False,
+                        "enforce_distillable_text": False,
                     }
                 }
             }
@@ -3674,11 +3692,11 @@ def test_openrouter_provider_preferences_full_surface() -> None:
                     "order": ["deepseek", "google-ai-studio"],
                     "only": ["deepseek"],
                     "ignore": ["groq"],
-                    "allow_fallbacks": False,
-                    "require_parameters": True,
+                    "allow_fallbacks": "false",
+                    "require_parameters": "true",
                     "data_collection": "deny",
-                    "zdr": True,
-                    "enforce_distillable_text": True,
+                    "zdr": "true",
+                    "enforce_distillable_text": "true",
                     "quantizations": ["fp8", "int8"],
                     "max_price": {"prompt": 1, "completion": 2},
                     "preferred_min_throughput": 40.0,
@@ -3704,14 +3722,26 @@ def test_openrouter_provider_preferences_full_surface() -> None:
     }
 
 
-def test_openrouter_provider_preferences_tri_state_booleans() -> None:
-    """False means "unset" for the three off-by-default booleans; only an
-    explicit True is sent. `allow_fallbacks` inverts: only False is sent."""
+def test_openrouter_provider_preferences_tri_state_switches() -> None:
+    """The four switches are tri-state at the wire: "" (the registry's ENUM
+    default) means "unset" and sends nothing; the explicit opt-in/out — a
+    "true"/"false" string from the settings page, or the bool a hand-edited
+    YAML parses to — is the only thing sent. `allow_fallbacks` inverts the
+    sense: OpenRouter's own default is "fall through", so only OFF is sent."""
     from local_operator.model.configure import _openrouter_provider_preferences as read
 
-    assert read({"providers": {"openrouter": {"zdr": False}}}) is None
+    for unset in ("", None, False):
+        assert read({"providers": {"openrouter": {"zdr": unset}}}) is None, unset
+    assert read({"providers": {"openrouter": {"zdr": "true"}}}) == {"zdr": True}
     assert read({"providers": {"openrouter": {"zdr": True}}}) == {"zdr": True}
-    assert read({"providers": {"openrouter": {"allow_fallbacks": True}}}) is None
+    # Neither "on" (a label the registry never stores) nor junk is sent.
+    assert read({"providers": {"openrouter": {"zdr": "on"}}}) is None
+
+    for unset in ("", None, True):
+        assert read({"providers": {"openrouter": {"allow_fallbacks": unset}}}) is None, unset
+    assert read({"providers": {"openrouter": {"allow_fallbacks": "false"}}}) == {
+        "allow_fallbacks": False
+    }
     assert read({"providers": {"openrouter": {"allow_fallbacks": False}}}) == {
         "allow_fallbacks": False
     }

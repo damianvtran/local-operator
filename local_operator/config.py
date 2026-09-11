@@ -187,11 +187,16 @@ DEFAULT_CONFIG = Config(
                     "order": [],
                     "only": [],
                     "ignore": [],
-                    "allow_fallbacks": True,
-                    "require_parameters": False,
+                    # The four switches are stored as ENUM strings, "" being
+                    # "no opinion" — the same vocabulary as `sort`. The
+                    # resolver still tolerates the bool a hand-edited YAML
+                    # produces (`zdr: true`), so a config written by an older
+                    # build of this branch keeps meaning what it said.
+                    "allow_fallbacks": "",
+                    "require_parameters": "",
                     "data_collection": "",
-                    "zdr": False,
-                    "enforce_distillable_text": False,
+                    "zdr": "",
+                    "enforce_distillable_text": "",
                     "quantizations": [],
                     "max_price": "",
                     "preferred_min_throughput": 0.0,
