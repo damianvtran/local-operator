@@ -89,7 +89,8 @@ release matters to users.
 durable. Adds `OWNER_REFUSED` and four `owner_*` methods to `protocol.gen.ts`.
 - **#782** (`be2546ec0`) — release tooling only: the store script surfaces the
 store's own rejection reason instead of a bare `curl: (22)`. Not shipped in the
-store package (the thirteen zipped files below do not include `scripts/`).
+store package (it is absent from the `extension/store-package-files.txt`
+allowlist, which is what defines the thirteen zipped files).
 - **#907** (`7ad53a5e1`) — the version bump itself, plus the store-publishing
 guidance now carried in `AGENTS.md`.
 
@@ -106,10 +107,21 @@ altered, which is why the automated path applied without a dashboard step. The
 standing rule in `submission-checklist.md` sends any permission-adding package to
 a human, because the Chrome Web Store API cannot set permission justifications.
 
-**Review duration.** Submitted 2026-09-10 14:31 UTC, approved 2026-09-11 — about
-24 hours, against ~4.5 days for v0.1.8. Both are ordinary for an extension
-carrying `debugger` plus broad host access; do not read the difference as a trend
-from two samples.
+**Review duration: bounded to a ~12-hour window, not measured.** The store
+reports no approval time in either workflow log, so this is bounded from run
+history the same way the v0.1.7 entry below is:
+
+- Submitted 2026-09-10T14:31Z (run 34489484307).
+- A promote attempted 2026-09-11T02:35Z, ~12 hours later, **failed** with
+  `Chrome Web Store publish failed: only an approved STAGED revision can be
+  promoted` (run 34555183445) — so the revision was still unapproved then.
+- The promote succeeded 2026-09-11T14:34Z (run 34610983340), so it was approved
+  by then.
+
+Approval therefore landed between 2026-09-11T02:35Z and 2026-09-11T14:34Z —
+between ~12 and ~24 hours after submission, against ~4.5 days for v0.1.8. Both
+are ordinary for an extension carrying `debugger` plus broad host access; do not
+read the difference as a trend from two samples.
 
 ---
 
