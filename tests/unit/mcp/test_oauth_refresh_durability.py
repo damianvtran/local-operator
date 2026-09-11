@@ -680,7 +680,11 @@ async def test_a_connect_phase_failure_leaves_no_marker(
     )
 
     assert calls["n"] == 1
-    assert outcome == "failed"
+    # Its OWN outcome, not "failed": nothing was presented, so nothing could
+    # have been refused. The split is what lets the user-visible text say "could
+    # not be reached" instead of reporting a rejection by a server that was
+    # never contacted (review round 2, minor 1).
+    assert outcome == "unreachable"
     assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in store.rows[0].data
     assert storage.send_unconfirmed() is False
 
@@ -740,3 +744,147 @@ async def test_an_unresolved_marker_expires(tmp_path: Any, monkeypatch: pytest.M
         storage.send_unconfirmed() is False
     ), "an expired marker must not keep suppressing the refresh path"
     assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in store.rows[0].data
+
+
+@pytest.mark.asyncio
+async def test_a_5xx_after_the_rotation_keeps_the_marker_and_blocks_the_next_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An answer that proves NOTHING about our token must not clear the marker.
+
+    Review round 2, minor 2. Every non-200 used to resolve the send marker, on
+    the premise that "the server answered, so it either rotated-and-told-us or
+    refused without rotating". The first half of that is false for a provider
+    that COMMITS the rotation and then fails the response (a proxy in front of a
+    rotating issuer is enough): the row is left holding a spent token, the
+    marker is gone, and the next connect re-presents it — the reuse-detecting
+    POST this whole mechanism exists to prevent, with the family as the cost.
+
+    The fix is a rule, not a status-code tweak: clear only for an answer that
+    settles the question (a parsed 200, or a parsed ``invalid_grant``). The
+    fixture here rotates and THEN answers 500, so both halves are measured —
+    the rotation really happened, and the marker survives it.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(commit_then_fail_status=500) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        endpoints = _endpoints_for(endpoint.token_endpoint)
+
+        first = await auth_mod._refresh_oauth_token_locked(SERVER_URL, storage, endpoints)
+
+        assert first == "failed"
+        assert endpoint.rotation_count == 1, "the fixture must have committed the rotation"
+        assert endpoint.reuse_attempts == 0
+        assert (
+            storage.send_unconfirmed() is True
+        ), "a 5xx is an unknown outcome: the presented token may already be spent"
+
+        # The next refresh is the one that would replay the possibly-spent token.
+        async with auth_mod._oauth_refresh_lock(SERVER_URL) as lock:
+            second = await auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, storage, endpoints, lock=lock
+            )
+
+        assert second == "unacknowledged"
+    assert len(endpoint.requests) == 1, "the possibly-spent token was presented again"
+    assert endpoint.reuse_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_4xx_that_is_not_invalid_grant_also_keeps_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rule is "proves it was not consumed", not "is a 5xx".
+
+    A 403 from a bot filter is a refusal we cannot read as a statement about
+    our token — it says nothing about whether the exchange was performed — so it
+    takes the same conservative path. The counter-case (a definitive 400
+    ``invalid_grant`` clears the marker, because the tombstone that follows IS
+    the recorded outcome) is covered by the tombstone tests above.
+    """
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(commit_then_fail_status=403) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        outcome = await auth_mod._refresh_oauth_token_locked(
+            SERVER_URL, storage, _endpoints_for(endpoint.token_endpoint)
+        )
+
+    assert outcome == "failed"
+    assert storage.send_unconfirmed() is True
+    assert endpoint.reuse_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_logout_during_an_in_flight_exchange_is_not_undone(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A removed row stays removed: the two writers now agree (QA round 2, Q6).
+
+    ``store_refresh_result`` used to re-create a row it found absent, reasoning
+    that "absence is not evidence that somebody replaced the grant", while its
+    sibling ``mark_grant_dead`` declined to write on the same absent row for the
+    opposite reason. So a ``/mcp logout`` landing inside the detached-exchange
+    grace was silently undone by a refresh that was already on the wire, and the
+    re-created row holds a live rotation — the next boot re-authorizes a server
+    the user asked us to forget.
+
+    An absent row is now treated as the deliberate removal it is (the
+    three-valued ``has_stored_row`` keeps "the store could not be read"
+    distinct), and the drop is logged at INFO naming the writer, so support can
+    read the loss out of the log.
+    """
+    caplog.set_level(logging.INFO, logger="local_operator.mcp.auth")
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(response_delay_s=0.3) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        exchange = asyncio.ensure_future(
+            auth_mod._perform_refresh_exchange(
+                SERVER_URL, storage, _endpoints_for(endpoint.token_endpoint)
+            )
+        )
+        await asyncio.wait_for(endpoint.rotation_applied.wait(), 5)
+        # The user asks us to forget this server while the response is in flight.
+        assert storage.clear() is True
+        assert store.rows == []
+        assert await _until(lambda: _resolved(exchange)) is True
+        outcome = await exchange
+
+    assert outcome == "refreshed"  # the exchange itself completed and rotated
+    assert store.rows == [], "a logout was silently undone by an in-flight refresh"
+    assert await storage.get_tokens() is None
+    assert any(
+        "store_refresh_result" in record.getMessage()
+        and "removed while this exchange was in flight" in record.getMessage()
+        for record in caplog.records
+    ), "a dropped rotation must be logged at INFO, naming its writer and the reason"
+
+
+@pytest.mark.asyncio
+async def test_a_first_grant_still_creates_its_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The removal rule must not stop the ordinary creation path.
+
+    ``store_refresh_result`` never creates a grant — a refresh can only run
+    against a row that already held the token it presented — so the only writer
+    that may create one is ``set_tokens``, which is what a completed interactive
+    login calls. Pinned here because the Q6 fix is a change to a WRITE path, and
+    the cheap way to get it wrong is to make absence fatal everywhere.
+    """
+    from mcp.shared.auth import OAuthToken
+
+    store = FakeAuthStore()
+    storage = McpTokenStorage(SERVER_URL, store)
+    assert await storage.get_tokens() is None
+
+    await storage.set_tokens(OAuthToken(access_token="acc", refresh_token="ref", expires_in=60))
+
+    tokens = await storage.get_tokens()
+    assert tokens is not None and tokens.refresh_token == "ref"

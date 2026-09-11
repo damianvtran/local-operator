@@ -12819,11 +12819,18 @@ class OperatorApp(App[None]):
             # case for HTTP servers) or mid-session never reached the boot
             # toast, so raise a fresh one here. Hop onto the Textual thread:
             # this fires from the manager's connect/reconnect task.
+            #
+            # ``server_name`` is deliberately unused: every message this sink is
+            # handed (``_auth_required_text`` and ``_auth_challenge_text``) already
+            # names its server — the auth line does so inside its command — so
+            # prefixing the name here rendered it BEFORE the command and left
+            # ``notion run /mcp reauth`` with no separator between the two (design
+            # review D8). The command leads because the message leads.
             def _show() -> None:
                 from local_operator.tui.widgets.toast import TOAST_FAILURE_MS, Toast
 
                 toast = self.query_one(Toast)
-                toast.show(f"{ICON_MCP} MCP {server_name} {message}", duration_ms=TOAST_FAILURE_MS)
+                toast.show(f"{ICON_MCP} MCP {message}", duration_ms=TOAST_FAILURE_MS)
 
             self.call_later(_show)
 
@@ -12992,7 +12999,12 @@ class OperatorApp(App[None]):
         :attr:`_mcp_failure_notices`. It also names ``/mcp``, because the toast
         is now one-shot and the standing answer needs signposting at the moment
         the failure is read (U4); the pointer goes on the durable line, where
-        there is room, and not on the width-budgeted toast.
+        there is room, and not on the width-budgeted toast. It is omitted when
+        the failure text ALREADY names ``/mcp`` (an auth requirement leads with
+        its own ``/mcp reauth`` command): appending it there produced two
+        em-dashes in one sentence against the house one-dash rule and pushed the
+        line past 100 cells, which is where the tail wrapped and orphaned
+        "— /mcp for details" onto a row of its own (design review D5).
         """
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
@@ -13082,14 +13094,27 @@ class OperatorApp(App[None]):
             return
         # No "server" in the wording: one failure key is ``discovery`` (the
         # config layer itself), and "MCP server discovery failed" would name a
-        # server that does not exist. `/mcp` is named because it is the standing
-        # answer and this is the durable surface with room to point at it.
+        # server that does not exist. ``/mcp`` is named on the durable line
+        # because it is the standing answer and this is the surface with room to
+        # point at it — except when the failure text is already a ``/mcp``
+        # command, where the pointer is skipped instead of doubling the dash
+        # (design review D5).
         for name, error in sorted(outcome.failures.items()):
             notice_key = (session_key, name, str(error))
             if notice_key in self._mcp_failure_notices:
                 continue
             self._mcp_failure_notices.add(notice_key)
-            self._system_notice(f"MCP {name} failed: {error} — /mcp for details", "error")
+            # The pointer is appended ONLY when the line does not already name
+            # ``/mcp`` itself. The auth requirement leads with its own
+            # ``/mcp reauth`` command, so appending "— /mcp for details" gave the
+            # composed sentence TWO dashes (against the house one-dash rule) and
+            # pushed the tail past a 100-cell line, where a wrapped continuation
+            # is what orphaned "— /mcp for details" onto a row of its own (design
+            # review D5). The pointer is for failures whose text is a diagnostic
+            # rather than an instruction; when the text is already the command,
+            # the reader has the answer.
+            pointer = "" if "/mcp" in str(error) else " — /mcp for details"
+            self._system_notice(f"MCP {name} failed: {error}{pointer}", "error")
 
     def on_toast_evicted(self, message: Toast.Evicted) -> None:
         """Un-record the MCP announce when its card was thrown away unread.
