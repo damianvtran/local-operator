@@ -1,6 +1,6 @@
 """The operator's exact command, on a cold-booted viewer, in the real TUI.
 
-Drives ``OperatorApp`` over a production ``RemoteSession`` attached to a
+Drives ``OperatorApp`` over a production ``AttachedSession`` attached to a
 production runtime, types ``/team lopdev <request>`` the way a user does, and
 reports what reached the transcript and whether a turn actually started.
 
@@ -27,8 +27,8 @@ CONFIG = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
 CONFIG.mkdir(parents=True, exist_ok=True)
 
 from local_operator.session.runtime import registry  # noqa: E402
-from local_operator.session.runtime.owned import OwnedSessionHandle  # noqa: E402
 from local_operator.session.runtime.server import RuntimeServer  # noqa: E402
+from local_operator.session.runtime.serving import ServingSessionHandle  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.e2e.harness import ScriptedStream, build_session, text_turn  # noqa: E402
 
@@ -49,7 +49,7 @@ async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 1
 
 
 async def main() -> None:
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     reg = TeamRegistry(CONFIG)
@@ -71,14 +71,14 @@ async def main() -> None:
     stream = ScriptedStream([text_turn("On it — coder is picking this up.")] * 4)
     session = build_session(directory, stream)
     session.team_registry = reg
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
 
     viewer = None
     try:
         record = await _wait_for_record(CONFIG, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=CONFIG,

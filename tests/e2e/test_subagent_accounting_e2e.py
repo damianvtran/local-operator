@@ -15,9 +15,9 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     Usage,
 )
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR, Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.widgets.subagent_panel import job_stats
@@ -90,7 +90,7 @@ async def test_background_bills_survive_failure_resume_sweep_and_restart(
         )
 
     owner = build()
-    handle = OwnedSessionHandle(
+    handle = ServingSessionHandle(
         owner, asyncio.get_running_loop(), cwd=str(workspace), auto_approve=True
     )
     server = RuntimeServer(handle, kind="daemon")
@@ -98,7 +98,7 @@ async def test_background_bills_survive_failure_resume_sweep_and_restart(
     await server.start_in_process()
     try:
         record = await _wait_for_record(headless_tui_env, owner.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record, owner.session_id, config_dir=headless_tui_env, takeover_factory=_never_take_over
         )
         job_id = owner._launch_subagent("accounted", "BILLING_CHILD")

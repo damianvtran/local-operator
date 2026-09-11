@@ -19,6 +19,7 @@ retryable/auth flags for the failover layer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import email.utils
 import json
 import logging
@@ -1944,8 +1945,25 @@ class OpenAICompatClient:
         timeout: float = 600.0,
         openai_api: str | None = None,
         oauth_base_url: str | None = None,
+        openrouter_provider_preferences: Mapping[str, Any] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        # The OpenRouter `provider` routing object, resolved by the CALLER from
+        # settings (this class is deliberately settings-free) and stored as a
+        # private copy: `_build_body` assigns it onto the request body
+        # verbatim, so a caller mutating its dict afterwards must not leak
+        # into requests. DEEP, not `dict(...)`: the object nests (`max_price`
+        # is a mapping), and a shallow copy shared the nested dict — mutating
+        # the caller's `max_price` reached later bodies (review round 1, m1).
+        # None (the default) means no preference was configured and the body
+        # carries no `provider` key at all — OpenRouter's sticky routing, which
+        # keeps a long conversation's prompt cache warm on one host, is left
+        # untouched.
+        self._openrouter_provider_preferences = (
+            copy.deepcopy(openrouter_provider_preferences)
+            if openrouter_provider_preferences
+            else None
+        )
         # Some providers serve subscription OAuth and pay-as-you-go API keys
         # from different hosts (see ``ProviderDefinition.oauth_base_url``). The
         # client is built before the credential is resolved -- failover may
@@ -2145,6 +2163,36 @@ class OpenAICompatClient:
             body["service_tier"] = fast.value
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
+        if request.model.supports_prompt_cache and request.prompt_cache_key:
+            # OpenRouter provider sticky routing expires after 10 minutes of
+            # inactivity (https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+            # After expiry the next request can land on a different upstream
+            # endpoint where the provider's disk cache is cold. DeepSeek's cache
+            # requires a FULL prefix-unit match from token 0
+            # (https://api-docs.deepseek.com/guides/kv_cache/), which the
+            # harness's append-only history already satisfies. OpenRouter falls
+            # back to the OpenAI-style `prompt_cache_key` request field as the
+            # sticky key when no `session_id` is set, and this is the same wire
+            # field the Responses path already sends. We intentionally do NOT
+            # send `session_id`: unknown top-level fields on strict
+            # OpenAI-compatible endpoints could 400, and `prompt_cache_key`
+            # alone is the safe minimum that OpenRouter honours. Forks
+            # intentionally inherit the parent's key (`cache_lineage_id`) so a
+            # fork replays into the parent's warm prefix.
+            body["prompt_cache_key"] = request.prompt_cache_key
+        if self._openrouter_provider_preferences:
+            # ASSIGNS one top-level key onto the existing body dict — not a
+            # merge into an existing `body["provider"]` (there is none). The
+            # `prompt_cache_key` stamp above writes a SIBLING key on this same
+            # dict, and the two must coexist rather than clobber: the cache
+            # key asks for sticky routing while a `provider` object expresses
+            # routing preferences that may override it, so a body can carry
+            # both and OpenRouter reconciles them. The dict() copy keeps a
+            # caller mutating its preferences mapping after construction from
+            # leaking into later request bodies. None (the constructor
+            # default) means this branch is skipped entirely — OpenRouter
+            # sticky routing stays on.
+            body["provider"] = dict(self._openrouter_provider_preferences)
         return body
 
     @staticmethod
@@ -3922,6 +3970,7 @@ def client_for_spec(
     http_client: httpx.AsyncClient | None = None,
     openai_api: str = "responses",
     anthropic_cache_ttl_1h_min_context_tokens: int = 0,
+    openrouter_provider_preferences: Mapping[str, Any] | None = None,
 ) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
 
@@ -3931,7 +3980,10 @@ def client_for_spec(
     ``anthropic_cache_ttl_1h_min_context_tokens`` is the configured
     ``providers.anthropic.cache_ttl_1h_min_context_tokens`` (see
     ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire.
-    Like ``openai_api`` it is a per-provider setting resolved by the caller
+    ``openrouter_provider_preferences`` is the resolved ``providers.openrouter``
+    routing block (see ``model.configure._openrouter_provider_preferences``);
+    it only reaches clients serving an OpenRouter-routed spec. Like
+    ``openai_api`` both are per-provider settings resolved by the caller
     (``SessionStreamFn._client_for``) so this function stays settings-free.
     """
     from local_operator.providers.registry import get_provider_definition
@@ -3967,11 +4019,20 @@ def client_for_spec(
         from local_operator.providers.oauth.kimi import kimi_common_headers
 
         extra_headers = kimi_common_headers()
+    # Radient fronts OpenRouter, so the same routing object applies to both;
+    # every other compat provider gets None and its body never grows a
+    # `provider` key it would not understand.
+    routed_preferences = (
+        openrouter_provider_preferences
+        if spec.provider in ("openrouter", "radient", "radient-key")
+        else None
+    )
     return OpenAICompatClient(
         base_url=base,
         http_client=http_client,
         extra_headers=extra_headers,
         openai_api=openai_api if spec.provider == "openai" else "chat_completions",
+        openrouter_provider_preferences=routed_preferences,
         # Suppressed only when the spec names a base the registry did NOT
         # supply, which is a deliberate endpoint override (a gateway, a proxy)
         # and must not be second-guessed per credential. `build_model_spec`

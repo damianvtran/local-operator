@@ -227,7 +227,7 @@ async def test_is_pristine_reads_the_attachment_sidecar(tmp_path: Path, monkeypa
     what a resume re-stamps the team from; it is as durable as a row.
     """
     from local_operator.resume import ATTACHMENT_SIDECAR_NAME
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.session.transcript import Transcript
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -274,7 +274,7 @@ async def test_is_pristine_reads_the_attachment_sidecar(tmp_path: Path, monkeypa
                 self.variables, getattr(self, "journal_credential_change", None), action, key, value
             )
 
-    handle = object.__new__(OwnedSessionHandle)
+    handle = object.__new__(ServingSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
     object.__setattr__(handle, "is_busy", lambda: False)
 
@@ -295,7 +295,7 @@ async def test_is_pristine_reads_durable_rows_not_the_model_window(
     compaction shrinks.
     """
     from local_operator.harness.types import Message
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.session.transcript import Transcript
 
     directory = tmp_path / "sessions" / "s1"
@@ -341,7 +341,7 @@ async def test_is_pristine_reads_durable_rows_not_the_model_window(
                 self.variables, getattr(self, "journal_credential_change", None), action, key, value
             )
 
-    handle = object.__new__(OwnedSessionHandle)
+    handle = object.__new__(ServingSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
 
     # is_busy is stubbed: the point here is the DURABLE probe, and the real
@@ -366,7 +366,7 @@ async def test_the_tui_engages_a_runtime_without_any_input(tmp_path: Path, monke
 
     _configure_provider(tmp_path)
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     engaged = asyncio.Event()
@@ -382,7 +382,7 @@ async def test_the_tui_engages_a_runtime_without_any_input(tmp_path: Path, monke
     async def _never():
         raise AssertionError("takeover was not expected")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
 
@@ -400,10 +400,10 @@ async def test_the_tui_engages_a_runtime_without_any_input(tmp_path: Path, monke
 
 @pytest.mark.asyncio
 async def test_leaving_a_session_offers_its_runtime_back(tmp_path: Path) -> None:
-    """``RemoteSession.retire_if_unused`` asks, and reports what it was told."""
-    from local_operator.session.remote import RemoteSession
+    """``AttachedSession.retire_if_unused`` asks, and reports what it was told."""
+    from local_operator.session.attached import AttachedSession
 
-    viewer = object.__new__(RemoteSession)
+    viewer = object.__new__(AttachedSession)
     viewer._snapshot_clients = {}
 
     class _Client:
@@ -426,9 +426,9 @@ async def test_leaving_a_session_offers_its_runtime_back(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_a_cold_viewer_has_no_runtime_to_offer_back() -> None:
     """Quitting a viewer that never engaged must not raise on the way out."""
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
-    viewer = object.__new__(RemoteSession)
+    viewer = object.__new__(AttachedSession)
     viewer._snapshot_clients = {}
     viewer._client = None  # type: ignore[attr-defined]
 
@@ -438,9 +438,9 @@ async def test_a_cold_viewer_has_no_runtime_to_offer_back() -> None:
 @pytest.mark.asyncio
 async def test_a_failed_offer_is_swallowed_on_the_way_out() -> None:
     """Teardown must not fail over a courtesy the residency drain also covers."""
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
-    viewer = object.__new__(RemoteSession)
+    viewer = object.__new__(AttachedSession)
     viewer._snapshot_clients = {}
 
     class _Client:
@@ -466,7 +466,7 @@ async def test_an_engage_that_lands_after_dispose_does_not_bind(
     old runtime stays resident for the life of the process and never gets a
     retire offer. The facade must refuse to bind once disposed.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -492,7 +492,7 @@ async def test_an_engage_that_lands_after_dispose_does_not_bind(
     async def _never():
         raise AssertionError
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     engage = asyncio.ensure_future(viewer._ensure_bound())
@@ -520,7 +520,7 @@ async def test_a_session_swap_cancels_the_engage_in_flight(tmp_path: Path, monke
 
     _configure_provider(tmp_path)
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     parked = asyncio.Event()
@@ -542,7 +542,7 @@ async def test_a_session_swap_cancels_the_engage_in_flight(tmp_path: Path, monke
         raise AssertionError
 
     async def make(session_id: str):
-        return await RemoteSession.cold(
+        return await AttachedSession.cold(
             session_id, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
 
@@ -582,7 +582,7 @@ async def test_no_provider_configured_skips_the_mount_engage(tmp_path: Path, mon
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions").mkdir(parents=True)
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     engaged = False
@@ -600,7 +600,7 @@ async def test_no_provider_configured_skips_the_mount_engage(tmp_path: Path, mon
         raise AssertionError
 
     # An EMPTY config dir: the cold state synthesises an empty model spec.
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     assert viewer.frontend_state.effective_model is not None
@@ -627,7 +627,7 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Review round 1, MINOR-4: a wake row on disk alone makes a session real."""
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.session.transcript import Transcript
     from local_operator.wakes.store import write_entry
 
@@ -683,7 +683,7 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
                 self.variables, getattr(self, "journal_credential_change", None), action, key, value
             )
 
-    handle = object.__new__(OwnedSessionHandle)
+    handle = object.__new__(ServingSessionHandle)
     handle._session = _Session()  # type: ignore[attr-defined]
     object.__setattr__(handle, "is_busy", lambda: False)
 
@@ -700,7 +700,7 @@ async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, mon
     resolver rather than regress that config to never engaging.
     """
     from local_operator.config import ConfigManager
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -721,7 +721,7 @@ async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, mon
     async def _never():
         raise AssertionError
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     assert viewer.frontend_state.effective_model is not None

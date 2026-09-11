@@ -18,9 +18,9 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import Message
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tools.builtin import build_write_tool
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import (
@@ -109,7 +109,7 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
     monkeypatch.setattr(subprocess, "run", intercept_native)
     # Naming is a separate provider call and would consume this finite model
     # script before the actual tool turn. It is not part of fork admission.
-    monkeypatch.setattr(OwnedSessionHandle, "_maybe_name_conversation", lambda *_: None)
+    monkeypatch.setattr(ServingSessionHandle, "_maybe_name_conversation", lambda *_: None)
     config = headless_tui_env
     (config / "config.yml").write_text("values:\n  runtime:\n    background_on_resume: false\n")
     parent_dir = config / "sessions" / "forkparent01"
@@ -178,7 +178,7 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
     job = owner.jobs.get(child_job)
     assert job is not None
     owner.subscribe(lambda event: finished.set() if event.type == "agent_end" else None)
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     runtimes = {owner.session_id: (owner, handle, server)}
@@ -188,14 +188,14 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
     async def resume(sid):
         if sid not in runtimes:
             branch = build_session(config / "sessions" / sid, branch_stream, cwd=workspace)
-            branch_handle = OwnedSessionHandle(
+            branch_handle = ServingSessionHandle(
                 branch, asyncio.get_running_loop(), cwd=str(workspace)
             )
             branch_server = RuntimeServer(branch_handle, kind="daemon")
             await branch_server.start_in_process()
             runtimes[sid] = branch, branch_handle, branch_server
         current, _, runtime = runtimes[sid]
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             runtime._record, sid, config_dir=config, takeover_factory=_never_take_over
         )
         viewers.append(viewer)
@@ -365,10 +365,10 @@ async def test_owner_snapshot_rejects_foreign_or_path_selecting_requests(
     directory = headless_tui_env / "sessions" / "forkscope001"
     await seed_transcript(directory, [user_message("owner only")])
     owner = build_session(directory, ScriptedStream([]))
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    viewer = await RemoteSession.connect(
+    viewer = await AttachedSession.connect(
         server._record,
         owner.session_id,
         config_dir=headless_tui_env,
@@ -376,11 +376,18 @@ async def test_owner_snapshot_rejects_foreign_or_path_selecting_requests(
     )
     try:
         assert isinstance(viewer._client, AttachClient)
-        for payload in (
+        # Annotated, not inferred: ``_request_payload`` now takes a named
+        # ``deadline_s: float`` beside its ``**fields``, so pyright must prove
+        # no splatted key can land on it. Inferred as ``dict[str, int | str]``
+        # these literals cannot satisfy that, and the call fails the type gate
+        # while remaining perfectly valid at runtime. ``Any`` restores the
+        # pre-deadline behaviour of the splat. Do not remove.
+        payloads: tuple[dict[str, Any], ...] = (
             {"message": 42},
             {"message": "", "parent_id": "someone-else"},
             {"message": "", "config_dir": "/tmp"},
-        ):
+        )
+        for payload in payloads:
             with pytest.raises(RuntimeError):
                 await viewer._client._request_payload("fork_snapshot", **payload)
         with pytest.raises(ValueError, match="session's machine"):

@@ -1,4 +1,4 @@
-"""RemoteSession over the production loopback registrant socket (protocol v4)."""
+"""AttachedSession over the production loopback registrant socket (protocol v4)."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
 )
 from local_operator.mobile.types import AskOptionWire, PendingRequest
-from local_operator.session.frontend_state import FRONTEND_CAPABILITY, PendingGateState
-from local_operator.session.remote import (
+from local_operator.session.attached import (
     FRONTEND_SYNC_FOREGROUND_S,
-    RemoteSession,
+    AttachedSession,
     _ask_question_from_pending,
     _pending_request,
 )
+from local_operator.session.frontend_state import FRONTEND_CAPABILITY, PendingGateState
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -64,7 +64,7 @@ async def test_remote_session_rehydrates_seed_then_streams_concrete_events(
             )
         )
         await asyncio.sleep(0.05)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -107,10 +107,10 @@ async def test_multi_question_ask_advances_same_request_across_two_followers(
     never = asyncio.Event()
     try:
         record = await _wait_record(tmp_path)
-        first_remote = await RemoteSession.connect(
+        first_remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
-        second_remote = await RemoteSession.connect(
+        second_remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
 
@@ -189,7 +189,7 @@ async def test_remote_aside_runs_on_owner_without_joining_transcript(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         deltas: list[str] = []
@@ -217,7 +217,7 @@ async def test_remote_prompt_steer_and_approval_route_to_owner(tmp_path: Path, m
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -283,7 +283,7 @@ async def test_remote_slash_returns_typed_result_rendered_by_invoker(
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         outcome = await remote.route_shared_slash("goal", "ship it")
@@ -310,7 +310,7 @@ async def test_remote_adopt_aside_and_cancel_route_to_owner(tmp_path: Path, monk
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         # /btw Ctrl+F: the fork routes the pair to the owner's adopt_aside.
@@ -367,12 +367,12 @@ async def test_a_refused_sync_leaves_the_viewer_cold_and_holds_no_connection(
     try:
         record = await _wait_record(tmp_path)
         with pytest.raises(ConnectionError, match="belongs to another session"):
-            await RemoteSession.connect(
+            await AttachedSession.connect(
                 record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
             )
         # Cold path: the same refusal through ``_ensure_bound`` on a viewer
         # that will keep living (the TUI's mount engage).
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never_take_over
         )
         try:
@@ -420,7 +420,7 @@ async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never_take_over
     )
     try:
@@ -440,10 +440,10 @@ async def test_a_failed_redial_in_recovery_leaves_no_stale_runtime_identity(
         # Feed the loop that unreachable record instead of the registry, then
         # let it take a few passes and go cold on its own deadline.
         monkeypatch.setattr(
-            "local_operator.session.remote.find_runtime_record",
+            "local_operator.session.attached.find_runtime_record",
             lambda *_a, **_k: (dead, None),
         )
-        monkeypatch.setattr("local_operator.session.remote.COLD_FALLBACK_S", 0.4)
+        monkeypatch.setattr("local_operator.session.attached.COLD_FALLBACK_S", 0.4)
         await viewer._recover_runtime()
 
         assert viewer._client is None, "a failed dial installs no client"

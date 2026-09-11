@@ -4778,7 +4778,7 @@ async def test_follower_pages_durable_history_from_the_projected_session_dir(
             session_dir=str(directory) if shape == "wired" else None,
         )
         session = FakeSession()
-        # A VIEWER, as the production ``RemoteSession`` reports itself: this is
+        # A VIEWER, as the production ``AttachedSession`` reports itself: this is
         # what keeps the app from standing up an owner-side mobile registrant
         # over a fake, since publication rights follow runtime ownership.
         session.owns_runtime = False  # type: ignore[attr-defined]

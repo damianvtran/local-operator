@@ -187,7 +187,7 @@ def _should_refresh(handle: object, boot: "BuildStamp | None") -> "BuildStamp | 
     :func:`_should_exit`: that predicate answers "may I exit *quietly*", and a
     refresh must ANNOUNCE (the ``retiring`` frame) so a viewer re-engages
     rather than reading the exit as owner death. Only when the runtime is
-    doing NOTHING it would lose — ``OwnedSessionHandle.may_refresh`` is the
+    doing NOTHING it would lose — ``ServingSessionHandle.may_refresh`` is the
     one predicate for that, shared with the viewer-driven ``refresh_if_idle``
     op so both sides agree what idle means. An attached viewer does NOT hold
     (the operator's rule; the viewer re-engages on its own), and neither does
@@ -464,11 +464,11 @@ async def amain() -> int:
     # Deferred for startup cost, not to break a cycle: importing the owned
     # handle pulls the composition root, and `python -m` on this module must
     # not pay for it before the log file is configured in main().
-    from local_operator.session.runtime.owned import (
-        OwnedSessionHandle,
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import (
+        ServingSessionHandle,
         spawn_owned_session,
     )
-    from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session_lease import SessionLeaseHeldError
 
     cwd = os.environ.get("LOP_MOBILE_CHILD_CWD") or os.path.expanduser("~")
@@ -486,7 +486,7 @@ async def amain() -> int:
 
     loop = asyncio.get_running_loop()
     try:
-        handle: OwnedSessionHandle = await spawn_owned_session(
+        handle: ServingSessionHandle = await spawn_owned_session(
             loop,
             cwd=cwd,
             provider=provider,

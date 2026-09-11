@@ -333,7 +333,7 @@ class Message(BaseModel):
         That is not hypothetical. ``harness/loop.py::_append_results`` stamped
         the payload onto the message AFTER calling this, so the runtime's rows
         carried it and everyone else's did not — and
-        ``RemoteSession._remember_live`` builds the live row for a relayed
+        ``AttachedSession._remember_live`` builds the live row for a relayed
         ``tool_execution_end`` through exactly this constructor. The interval
         reached the viewer on the wire (``event.result.duration_s``) and was
         dropped the moment the row was built, so every tool card on a session
@@ -552,7 +552,7 @@ class PeerArrivalProtocol(Protocol):
 
     Threading: the session's implementation sets the event on the loop that
     owns the session, because every registrant path hops there first
-    (``mobile/tui_handle.py``, ``mobile/owned.py`` both use
+    (``mobile/tui_handle.py``, ``mobile/serving.py`` both use
     ``run_coroutine_threadsafe``). A future caller that invokes
     ``receive_peer_message`` from its own thread WITHOUT that hop would need
     ``loop.call_soon_threadsafe`` — ``asyncio.Event.set`` is not thread-safe.

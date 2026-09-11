@@ -88,7 +88,7 @@ class DisplayHistoryWindow(BaseModel):
     #: This page carries PRE-COMPACTION rows: real history the model can no
     #: longer see. Its ``start`` is a journal coordinate, not a position in the
     #: context replay, so a consumer must not compare the two (see
-    #: ``RemoteSession.load_older_display_page``, whose contiguity check is a
+    #: ``AttachedSession.load_older_display_page``, whose contiguity check is a
     #: context-coordinate assertion and is skipped for these pages).
     audit: bool = False
     #: Older rows exist behind the context cut and are reachable by paging.

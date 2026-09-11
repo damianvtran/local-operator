@@ -30,8 +30,8 @@ from local_operator.mobile.types import (
     ask_pending_request,
     validate_control_frame,
 )
+from local_operator.session.attached import _ask_question_from_pending, _pending_request
 from local_operator.session.frontend_state import PendingGateState
-from local_operator.session.remote import _ask_question_from_pending, _pending_request
 from local_operator.session.runtime.types import SessionRecord
 
 

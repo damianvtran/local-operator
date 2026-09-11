@@ -243,7 +243,7 @@ async def test_switch_never_refuses_the_readiness_gate() -> None:
     targets = [_conversation(f"target-{i}", 40) for i in range(3)]
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -281,7 +281,7 @@ async def test_the_composer_never_paints_a_height_neither_session_asked_for() ->
     draft = "first line of the draft\nsecond line\nthird line"
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -360,7 +360,7 @@ async def test_no_history_rows_mount_into_the_visible_view(size: tuple[int, int]
         return real_insert(self, index, blocks, **kwargs)
 
     with (
-        patch("local_operator.session.remote.RemoteSession", SidebarRemote),
+        patch("local_operator.session.attached.AttachedSession", SidebarRemote),
         patch.object(TranscriptView, "insert_blocks", insert_blocks),
     ):
         async with app.run_test(size=size) as pilot:
@@ -402,7 +402,7 @@ async def test_a_switch_paints_exactly_one_scroll_position() -> None:
     target = _conversation("tail-session", 60)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -448,7 +448,7 @@ async def test_leaving_at_tail_clears_the_saved_anchor() -> None:
     target = _conversation("anchor-session", 60)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -496,7 +496,7 @@ async def test_text_typed_during_a_transition_belongs_to_the_target() -> None:
     second = _conversation("attribution-b", 20)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -543,7 +543,7 @@ async def test_an_abandoned_transition_restores_the_draft_exactly_once() -> None
     first = _conversation("abandon-a", 20)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -587,7 +587,7 @@ async def test_a_click_burst_keeps_the_original_snapshot() -> None:
     first = _conversation("burst-a", 20)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -636,7 +636,7 @@ async def test_the_parked_view_stays_non_interactive() -> None:
     second = _conversation("park-b", 20)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -717,7 +717,7 @@ async def test_a_failed_pre_reveal_fill_does_not_invalidate_the_preparation() ->
     target = _conversation("raising-session", 60)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         async with app.run_test(size=(100, 30)) as pilot:
             for _ in range(20):
                 await pilot.pause()
@@ -812,7 +812,7 @@ async def test_no_painted_frame_shows_an_empty_conversation() -> None:
     target = _conversation("blank-frame-session", 60)
 
     app = OperatorApp(lambda: _factory(home))
-    with patch("local_operator.session.remote.RemoteSession", SidebarRemote):
+    with patch("local_operator.session.attached.AttachedSession", SidebarRemote):
         # 120x36, not the 100x30 the sibling tests use: with a 3-row outgoing
         # draft the smaller terminal leaves a 16-row viewport that the prepared
         # window ALREADY fills, so the pre-fill correctly early-returns and the

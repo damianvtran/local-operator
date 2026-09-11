@@ -5,7 +5,7 @@ The incident: booting `/new` on v0.51.6 printed
     ! could not start a runtime for this session: owner did not send frontend
       synchronization
 
-from the one ``TimeoutError`` arm of ``RemoteSession._await_frontend``, which
+from the one ``TimeoutError`` arm of ``AttachedSession._await_frontend``, which
 wrapped the sync future in ``asyncio.wait_for(..., timeout=15.0)``. Two
 mechanisms reach that line and neither is a broken runtime:
 
@@ -34,9 +34,9 @@ from pathlib import Path
 import pytest
 
 from local_operator.mobile.attach_client import AttachClient
-from local_operator.session import remote as remote_module
+from local_operator.session import attached as remote_module
+from local_operator.session.attached import FRONTEND_SYNC_SETTLE_TURNS, AttachedSession
 from local_operator.session.frontend_state import FrontendSync
-from local_operator.session.remote import FRONTEND_SYNC_SETTLE_TURNS, RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -70,14 +70,14 @@ def _claim(tmp_path: Path) -> None:
     (session / ".session.pid").write_text(str(os.getpid()), encoding="utf-8")
 
 
-def _viewer(tmp_path: Path) -> RemoteSession:
+def _viewer(tmp_path: Path) -> AttachedSession:
     """A bare facade, constructed without dialling anything.
 
     ``_await_frontend`` is a pure function of the future it is handed and the
     socket's liveness, so the wait can be exercised without a server for the
     cases that are about the WAIT rather than about the protocol.
     """
-    return RemoteSession(
+    return AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=_never,
@@ -95,7 +95,7 @@ def _sync() -> FrontendSync:
 
 
 async def _stalled_viewer_scenario(
-    viewer: RemoteSession | None,
+    viewer: AttachedSession | None,
     *,
     deadline: float,
 ) -> tuple[str, asyncio.Future[FrontendSync]]:
@@ -145,7 +145,7 @@ async def _stalled_viewer_scenario(
         await writer.drain()
 
         async def pump() -> None:
-            # AttachClient._pump -> RemoteSession._on_frontend_sync
+            # AttachClient._pump -> AttachedSession._on_frontend_sync
             await reader.readline()
             if not future.done():
                 future.set_result(expected)
@@ -335,7 +335,9 @@ async def test_an_unreadable_frame_over_a_real_socket_still_fails_fast(
     try:
         record = await _record(tmp_path)
         with pytest.raises(ConnectionError) as caught:
-            await RemoteSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never)
+            await AttachedSession.connect(
+                record, "s1", config_dir=tmp_path, takeover_factory=_never
+            )
         assert "too large" in str(caught.value)
     finally:
         server.close()
@@ -410,7 +412,7 @@ async def test_a_bind_that_fails_once_then_succeeds_leaves_one_connection(
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         # engage_runtime must not spawn anything: the record already exists.
@@ -472,7 +474,7 @@ async def test_a_disposed_facade_stops_retrying_immediately(tmp_path: Path, monk
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -516,7 +518,7 @@ async def test_a_vanished_record_does_not_discard_an_earlier_attempts_reason(
     server.start()
     try:
         record = await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -568,7 +570,7 @@ async def test_the_retry_rediscovers_the_record_each_attempt(tmp_path: Path, mon
     server.start()
     try:
         record = await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -672,7 +674,7 @@ async def test_a_foreground_bind_does_not_wait_out_an_in_flight_background_bind(
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -751,7 +753,7 @@ async def test_a_background_bind_alone_keeps_its_generous_envelope(
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -871,7 +873,7 @@ async def test_the_foreground_default_is_the_short_envelope(tmp_path: Path, monk
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr(
@@ -962,7 +964,7 @@ async def test_a_foreground_bind_preempts_a_background_engage(tmp_path: Path, mo
     server.start()
     try:
         await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         # An absurd background envelope: nothing here may pass because a clock
@@ -1185,7 +1187,7 @@ async def test_a_raw_bind_lock_acquisition_announces_itself(tmp_path: Path, monk
     server.start()
     try:
         record = await _record(tmp_path)
-        viewer = await RemoteSession.cold(
+        viewer = await AttachedSession.cold(
             "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
         monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _no_engage)

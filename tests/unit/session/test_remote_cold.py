@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -69,7 +69,7 @@ async def test_a_cold_viewer_creates_no_process_and_no_directory(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -97,7 +97,7 @@ async def test_a_cold_viewer_renders_durable_history_without_an_owner(
     await transcript.append_message(Message.user("what did we decide?"))
     await transcript.append_message(Message.assistant("we decided to ship it"))
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -135,7 +135,7 @@ async def test_a_cold_viewer_shows_scheduled_wakes_from_the_index(
         ],
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -184,7 +184,7 @@ async def test_the_first_prompt_binds_the_viewer_to_a_runtime(tmp_path: Path, mo
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -241,7 +241,7 @@ async def test_concurrent_first_writes_engage_exactly_one_runtime(
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -295,7 +295,7 @@ async def test_a_draft_warms_the_runtime_before_the_message_is_sent(
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
 
@@ -382,7 +382,7 @@ async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkey
 
     from local_operator.tui.app import OperatorApp
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
 
@@ -429,9 +429,9 @@ async def test_model_default_persists_for_a_local_runtime(tmp_path: Path, monkey
 async def test_a_viewer_defers_naming_to_the_runtime(tmp_path: Path, monkeypatch) -> None:
     """Naming belongs to the process that owns the provider.
 
-    `OwnedSessionHandle.prompt` calls its own `_maybe_name_conversation`, so
+    `ServingSessionHandle.prompt` calls its own `_maybe_name_conversation`, so
     the title is generated beside the transcript that stores it. A viewer must
-    not race that — and cannot: `RemoteSession.complete_once` raises by
+    not race that — and cannot: `AttachedSession.complete_once` raises by
     construction ("provider errands run on the session owner"), so leaving the
     viewer's naming worker enabled started a worker on every first message
     that could only ever fail.
@@ -445,7 +445,7 @@ async def test_a_viewer_defers_naming_to_the_runtime(tmp_path: Path, monkeypatch
 
     from local_operator.tui.app import OperatorApp
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
 
@@ -532,7 +532,7 @@ async def test_a_cold_viewer_restores_the_roster_and_todos_from_disk(
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -574,7 +574,7 @@ async def test_a_cold_viewer_opens_when_the_checkpoint_is_unreadable(
         FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": {"jobs": "not-a-list"}}
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -643,7 +643,7 @@ async def test_a_cold_viewer_prefers_the_live_wake_index_over_the_checkpoint(
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -701,7 +701,7 @@ async def test_a_restored_context_reading_keeps_the_window_it_was_measured_again
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -762,7 +762,7 @@ async def test_a_restored_reading_is_dropped_when_the_model_changed(
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID,
         config_dir=tmp_path,
         cwd=str(tmp_path),
@@ -823,7 +823,7 @@ async def test_a_cold_viewer_never_paints_a_job_as_running(tmp_path: Path, monke
         {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -872,8 +872,8 @@ async def test_an_unreadable_checkpoint_degrades_loudly(
         FRONTEND_CHECKPOINT_CUSTOM_TYPE, {"checkpoint_id": "c1", "state": {"jobs": "not-a-list"}}
     )
 
-    with caplog.at_level(logging.WARNING, logger="local_operator.session.remote"):
-        viewer = await RemoteSession.cold(
+    with caplog.at_level(logging.WARNING, logger="local_operator.session.attached"):
+        viewer = await AttachedSession.cold(
             SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
         )
     try:
@@ -950,7 +950,7 @@ async def test_the_restored_roster_unions_the_sidecar_and_the_checkpoint(
         encoding="utf-8",
     )
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
@@ -1002,7 +1002,7 @@ async def test_a_cold_fork_does_not_list_its_parents_children(tmp_path: Path, mo
         FRONTEND_CHECKPOINT_CUSTOM_TYPE,
         {"checkpoint_id": "cp-parent", "state": inherited.model_dump(mode="json")},
     )
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:

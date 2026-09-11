@@ -326,7 +326,7 @@ async def test_many_chats_same_profile_and_replayed_creation(api):
 async def test_unresolved_owner_rejects_before_model_work_and_allows_same_id_retry():
     from typing import Any, cast
 
-    from tests.unit.session.runtime.test_owned import make_handle
+    from tests.unit.session.runtime.test_serving import make_handle
 
     handle, session = make_handle()
     cast(Any, session)._unresolved_agent = "deleted-profile"

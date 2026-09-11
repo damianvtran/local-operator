@@ -43,8 +43,8 @@ import local_operator  # noqa: E402
 from local_operator.harness.types import Message  # noqa: E402
 from local_operator.mobile.attach_client import AttachClient  # noqa: E402
 from local_operator.session.history_window import display_window  # noqa: E402
-from local_operator.session.runtime.owned import OwnedSessionHandle  # noqa: E402
 from local_operator.session.runtime.server import RuntimeServer  # noqa: E402
+from local_operator.session.runtime.serving import ServingSessionHandle  # noqa: E402
 from local_operator.session.transcript import Transcript  # noqa: E402
 from tests.e2e.harness import ScriptedStream, build_session  # noqa: E402
 
@@ -147,7 +147,9 @@ async def main() -> None:
         subscribe()
         _, subscription_cost = measure(subscribe)
         record("actual_warm_subscribe", **subscription_cost)
-        handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(isolation.SANDBOX))
+        handle = ServingSessionHandle(
+            session, asyncio.get_running_loop(), cwd=str(isolation.SANDBOX)
+        )
         server = RuntimeServer(handle, kind="daemon")
         await server.start_in_process()
         established = AttachClient(lambda _: None, lambda _: None)

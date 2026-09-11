@@ -1,6 +1,6 @@
 """Full-fidelity remote session facade for a follower TUI (protocol v5).
 
-``RemoteSession`` implements the same :class:`SessionProtocol` the standard
+``AttachedSession`` implements the same :class:`SessionProtocol` the standard
 ``OperatorApp`` already consumes. Durable history comes from the transcript;
 live rendering comes from the owner's raw ``AgentEvent`` relay; every mutation
 goes back over the authenticated loopback control socket. The app therefore
@@ -38,6 +38,7 @@ from local_operator.harness.types import (
     AskUserFn,
     CompactionEndEvent,
     CompactionStartEvent,
+    CustomMessage,
     EventHandler,
     HistoryDeltaEvent,
     ImageContent,
@@ -93,7 +94,12 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.naming import ConversationName
-from local_operator.session.protocol import CompactionOutcome, RuntimeLocality
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.session.protocol import (
+    CompactionOutcome,
+    RuntimeLocality,
+    unanswered_tail_call_ids,
+)
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
@@ -109,7 +115,7 @@ logger = logging.getLogger(__name__)
 #: race the gap says the same thing — never the transport's ``not attached``.
 _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
 
-#: The id :meth:`RemoteSession.queued_steering` substitutes when a wire item
+#: The id :meth:`AttachedSession.queued_steering` substitutes when a wire item
 #: carries none — an owner too old to put ``id`` on its queued-steer rows.
 #:
 #: EXPORTED rather than inlined because it is not an identity, and consumers
@@ -645,7 +651,7 @@ def _validated_ask_question(pending: PendingRequest) -> AskQuestion:
     )
 
 
-class RemoteSession:
+class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
     Satisfies :class:`ViewerSessionProtocol`; hosts ask ``owns_runtime`` /
@@ -900,7 +906,7 @@ class RemoteSession:
         # This is the invariant that regressed in the viewer transition: the
         # TUI reads both registries off the SESSION object
         # (`_team_registry()`, `_agent_profile_rows()`), and `Session`
-        # supplied them while `RemoteSession` did not, so every `/team` and
+        # supplied them while `AttachedSession` did not, so every `/team` and
         # `/agent` surface silently answered "unavailable" once `lop` stopped
         # building a `Session`. Anything the TUI reads off the session has to
         # exist on BOTH implementations or it fails only on the viewer path.
@@ -1026,7 +1032,7 @@ class RemoteSession:
         takeover_factory: Callable[[], Any],
         display_window: bool = False,
         surface: str = "terminal",
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
                 f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs protocol >= 5"
@@ -1065,7 +1071,7 @@ class RemoteSession:
         config_dir: Path,
         cwd: str,
         takeover_factory: Callable[[], Any],
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         """Expose saved rows without waiting on a runtime or loading its journal.
 
         This is a display facade, not canonical input readiness. The sidebar
@@ -1124,7 +1130,7 @@ class RemoteSession:
         surface: str = "terminal",
         initial_model: ModelSpec | None = None,
         model_selection_override: bool = False,
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
         The state ``lop`` boots into. There is no process to attach to yet and
@@ -1535,7 +1541,7 @@ class RemoteSession:
             except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 logger.debug("cold state could not read the configured model", exc_info=True)
             if model is None:
-                # NEVER None. ``RemoteSession.model`` raises without a spec, and
+                # NEVER None. ``AttachedSession.model`` raises without a spec, and
                 # a cold viewer is exactly the state where config may be empty
                 # (a first run, before `/login`) — so the band would crash on
                 # the very screen that exists to help the user fix it. An empty
@@ -2763,22 +2769,11 @@ class RemoteSession:
 
         Shared by the two "this row is not finished" questions below, which
         differ only in what makes the call unfinished — a gate parked in front
-        of it, or the tool still executing. The scan itself is one rule and
-        belongs in one place: the latest call group after the latest user
-        boundary is the only eligible group, so old interrupted turns keep
-        their ``⊘`` and are never revived by a later turn's liveness.
+        of it, or the tool still executing. The scan is the one rule in
+        :func:`session.protocol.unanswered_tail_call_ids`, shared with the
+        local owner so both surfaces answer identically for the same tail.
         """
-        answered: set[str] = set()
-        for message in reversed(self.display_history_window()):
-            role = getattr(message, "role", "")
-            if role == "user":
-                break
-            if role == "tool":
-                answered.add(str(getattr(message, "tool_call_id", "")))
-            calls = getattr(message, "tool_calls", None)
-            if role == "assistant" and calls:
-                return {call.id for call in calls} - answered
-        return set()
+        return unanswered_tail_call_ids(self.display_history_window())
 
     def pending_display_tool_ids(self) -> set[str]:
         """Unanswered calls in the pending gate's current serialized user turn.
@@ -3586,6 +3581,55 @@ class RemoteSession:
             result = Message.tool_result(event.result)
             result.id = f"live-tool:{event.tool_call_id}"
             self._live_history[result.id] = result
+        if isinstance(event, PeerMessageDeliveredEvent):
+            # A peer `lop send` persists its CustomMessage BEFORE it emits this
+            # receipt, so the row is SETTLED — a single durable row with no
+            # start/update/end lifecycle, which is why it is NOT in
+            # ``_MESSAGE_PHASE`` (that machinery orders the streaming beats of a
+            # turn; a phase rank is a category error for one settled append).
+            #
+            # The row is invisible to every viewer freshness signal without
+            # this branch: ``history_generation`` bumps only on compaction /
+            # prune, so a plain peer append never invalidates the display
+            # window, and the receipt carries no ``message`` payload for the
+            # generic path below to claim. The hidden session then keeps a
+            # stale ``history_message_count`` — so on reveal neither
+            # ``_sidebar_presentation_current``'s count guard rejects the stale
+            # cached presentation, nor ``_commit_sidebar_session``'s
+            # ``total > incoming.history_size`` delta fires, and the inbound
+            # row is never projected until a full reload. Recording the settled
+            # row here grows the count by exactly one, which is what makes both
+            # signals move.
+            #
+            # Painting stays with the existing replay/delta paths and their
+            # ``_live_peer_receipts`` / ``_resume_mounted_ids`` dedup guards:
+            # this branch stores the row for COUNT and durability, and adds the
+            # id to ``_durable_seed_ids`` so the next sync treats it as durable
+            # rather than re-painting it — it mounts nothing itself.
+            #
+            # Deliberately NOT gated on ``peer_id not in self._history_ids``.
+            # The owner persists the row BEFORE emitting this receipt, so a sync
+            # that raced the append may already carry the id in ``_history_ids``
+            # — yet the receipt is the authoritative "a new row landed" beat the
+            # count still has to advance for, or the reveal misses exactly the
+            # row the sync failed to surface. Each ``peer_id`` is delivered at
+            # most once, so recording it here cannot double-count; a re-delivery
+            # would collide on the dict key and keep the count at one. Skipped
+            # only when the receipt carries no id (an older/leaner sender),
+            # since an id-less row can neither be counted once nor deduped.
+            peer_id = str(getattr(event, "message_id", "") or "")
+            if peer_id:
+                peer_row = CustomMessage(
+                    custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                    attribution="user",
+                    details={"body": event.body, "sender": dict(event.sender)},
+                )
+                # The marker must carry the PERSISTED entry id so the next sync
+                # and the replay dedup both match on it.
+                peer_row.id = peer_id
+                self._live_history[peer_id] = peer_row
+                self._durable_seed_ids.add(peer_id)
+            return
         message = getattr(event, "message", None)
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
@@ -4981,7 +5025,7 @@ class RemoteSession:
         #
         # No torn read despite the fallback: the store's property resolves
         # `effective_model or selected_model` against ONE `self._state`
-        # binding, exactly as `RemoteSession.effective_model` takes one
+        # binding, exactly as `AttachedSession.effective_model` takes one
         # snapshot for the same reason. That consistency is why the fallback
         # lives on the state model rather than being reassembled from two reads
         # here.
@@ -5008,7 +5052,7 @@ class RemoteSession:
         client = self._client
         if client is not None:
             # This protocol setter is metadata-only, unlike a user's /goal.
-            # RemoteSession declares goal_set as consumed at attachment, so a
+            # AttachedSession declares goal_set as consumed at attachment, so a
             # typed receipt leaves admission here; deliberately not rendering
             # it prevents a compatibility setter plus prompt from double-sending.
             # Bare /goal now means status on every owner, so clearing is explicit.

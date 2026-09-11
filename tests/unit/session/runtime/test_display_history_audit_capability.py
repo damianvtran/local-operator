@@ -30,8 +30,8 @@ from local_operator.session.history_window import (
     DisplayHistoryWindow,
     display_window,
 )
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import Transcript
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 
@@ -40,7 +40,7 @@ async def _server(tmp_path: Path, rows: list[Message]):
     directory = tmp_path / "sessions" / "audit-capability"
     await seed_transcript(directory, rows)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     return server

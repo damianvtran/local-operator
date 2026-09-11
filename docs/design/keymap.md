@@ -941,7 +941,7 @@ no relaunch (§D.0, §D.5). Two caveats worth stating on the row:
   (`config_watch.py:18-19`), so another pane picks it up within a couple of
   seconds, not instantly. That is what `Scope.LIVE` already promises
   (`settings_io.py:121-124`); no new copy needed.
-- A remote/follower session (`RemoteSession`) has no watcher of its own but the
+- A remote/follower session (`AttachedSession`) has no watcher of its own but the
   **app** subscribes through `process_watcher()` regardless
   (`app.py:18378-18382`), and the keymap is an app-level concern. So followers
   get it too. Worth a line in the implementation comment because it is

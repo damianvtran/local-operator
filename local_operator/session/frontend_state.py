@@ -637,7 +637,7 @@ def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     already serving (the grandparent's, observed in #573). The directory a
     session runs in is authoritative for who it is; a status row it inherited
     is not. Without this the fork's runtime served the parent's ``session_id``
-    in every ``frontend_sync``, ``RemoteSession._install_frontend`` refused
+    in every ``frontend_sync``, ``AttachedSession._install_frontend`` refused
     the frame ("frontend state belongs to another session"), and the fork was
     permanently un-attachable: the switched-to fork's own viewer never got a
     state install, so ``/model`` appeared to do nothing and the band never
@@ -747,7 +747,7 @@ _FRONTEND_LOCAL_SLASHES = {
     # over the dedicated ``credential`` op to the runtime's store.
     "credential",
     # The overlay is local UI; its provider request crosses the authoritative
-    # complete_aside operation on RemoteSession.
+    # complete_aside operation on AttachedSession.
     "btw",
     # The kill switch is the one session command that must act from THIS
     # process even on a follower: bare /stop ends the session the viewer is
@@ -1753,7 +1753,7 @@ class FrontendUpdate(BaseModel):
     a degraded one. The degrade path now labels its own frame, so the frame this
     validator rejects is one claiming to be a complete delta while carrying no
     body — which no correct runtime emits. The receiver refuses it and re-syncs
-    (``RemoteSession._on_frontend_update``), which is the recovery the transport
+    (``AttachedSession._on_frontend_update``), which is the recovery the transport
     already has for a gap. Staying loud is what keeps that recovery reachable.
     """
 
@@ -2878,7 +2878,7 @@ class FrontendStateStore:
         The sequence MUST still advance: the runtime consumed that number, and
         refusing it here would desynchronise this store from the transport's
         gap check and refuse every later delta. Recovering the shed fields is
-        the SUBSCRIBER's job — ``RemoteSession`` forces a fresh ``frontend_sync``
+        the SUBSCRIBER's job — ``AttachedSession`` forces a fresh ``frontend_sync``
         off the same flag — which is why the delta is still published below: an
         in-process subscriber and the resync path must see the same event, or
         the two disagree about whether state is trustworthy.

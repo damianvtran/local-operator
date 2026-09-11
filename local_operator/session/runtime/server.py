@@ -925,7 +925,7 @@ class RuntimeServer:
         in the stopped state and tells the user ``/resume`` reopens it, which
         is the wrong story for a runtime that retired only because
         ``lop-update`` ran. ``retiring`` says "a fresh runtime is owed; engage
-        one" and the viewer does so eagerly (``RemoteSession._go_cold(refresh=
+        one" and the viewer does so eagerly (``AttachedSession._go_cold(refresh=
         True)``). Additive on the wire: an old viewer ignores the unknown op,
         sees the EOF, and runs its ordinary recovery (cold after 8 s) — the
         pre-refresh behaviour, so no ``PROTOCOL_VERSION`` bump.
@@ -2020,7 +2020,7 @@ class RuntimeServer:
                 #   refuse itself.
                 # * NOT PRISTINE — something durable exists (a transcript row,
                 #   an armed wake, live work). ``is_busy`` is not enough here;
-                #   see ``OwnedSessionHandle.is_pristine`` for why a finished
+                #   see ``ServingSessionHandle.is_pristine`` for why a finished
                 #   conversation is idle but emphatically not disposable.
                 #
                 # Refusing is always safe: the runtime stays up and the
@@ -2062,7 +2062,7 @@ class RuntimeServer:
                 # wait ~15-40 s for the reaper, the viewer asks the runtime to
                 # retire NOW if it is idle, and re-engages a fresh one on the
                 # ``retiring`` frame. Same predicate as the reaper
-                # (``OwnedSessionHandle.may_refresh``), same announce, same
+                # (``ServingSessionHandle.may_refresh``), same announce, same
                 # re-check after it; no stagger, because one viewer asking for
                 # one runtime is not the sixteen-at-once storm the stagger
                 # bounds. Answers ``retiring`` or ``kept: <reason>``; the
@@ -2096,7 +2096,7 @@ class RuntimeServer:
                     # re-fired by a restarted supervisor). Acked, not executed:
                     # the caller's outcome is "delivered", which is true, and
                     # nothing is appended twice. See
-                    # ``OwnedSessionHandle.has_admitted_command``.
+                    # ``ServingSessionHandle.has_admitted_command``.
                     detail = "already admitted"
                 else:
                     detail = await self._dispatch(op, frame)
@@ -2211,7 +2211,7 @@ class RuntimeServer:
         # ``prompt`` can open a turn in that gap. So the probe is asked AGAIN
         # after it, from the same loop step as ``request_stop()``. A turn that
         # starts between this re-check and the stop is aborted by the stop
-        # itself (``OwnedSessionHandle.dispose`` aborts in-flight work and
+        # itself (``ServingSessionHandle.dispose`` aborts in-flight work and
         # flushes the transcript), which is exactly what a ``stop`` op or a
         # SIGTERM racing a turn already does; the message is not lost, it is
         # persisted and the sender's next engage starts a fresh runtime.
@@ -2476,7 +2476,7 @@ class RuntimeServer:
             # (session/runtime/control.py). The plan is deny parked gates →
             # abort/dispose the session → release the lease → unpublish the
             # record → exit, executed by the host's ``request_stop`` hook
-            # (OwnedSessionHandle.request_stop owns the ordering); all this
+            # (ServingSessionHandle.request_stop owns the ordering); all this
             # dispatch does is trigger it and ack, so the ack reaching the
             # caller means "the stop is underway", not "it finished" — the
             # ladder's timeout decides what a slow exit costs.
@@ -2667,7 +2667,7 @@ class RuntimeServer:
             try:
                 payload = sync_wire_payload(subscription.sync)
                 # The THIRD wire route, and the one an old viewer uses most:
-                # ``RemoteSession._refresh_display_history`` calls this op on
+                # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
                 # ``history_generation`` moves — i.e. as soon as a new owner
                 # appends a row. ``audit``/``audit_available`` are ordinary
@@ -3114,7 +3114,7 @@ class RuntimeServer:
 
         A client that declared ``events`` AND ``frontend_state`` is a full-TUI
         viewer: it consumes ``frontend_sync`` / ``frontend_update`` / ``event``
-        and discards projections (``RemoteSession._dial`` installs
+        and discards projections (``AttachedSession._dial`` installs
         ``lambda _projection: None``). Pushing 100–900 KB × ~20 Hz onto that
         socket is what filled the kernel buffer and tripped ``_SEND_TIMEOUT_S``.
         The welcome (``_push_to``) still goes to everyone — ``AttachClient.connect``

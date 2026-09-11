@@ -10,7 +10,7 @@ this control-plane rule "one implementation, three front ends"
 Import-light by contract, matching :mod:`.registry` and :mod:`.types`: `lop
 stop` runs on the CLI startup path, so nothing heavy may load at module
 import. asyncio is imported inside the functions that dial a socket, exactly
-as :func:`local_operator.session.runtime.owned.spawn_owned_session` defers
+as :func:`local_operator.session.runtime.serving.spawn_owned_session` defers
 its heavy imports. ``tests/unit/test_import_graph.py`` is the guard.
 
 **The escalation ladder** (see :data:`SIGTERM_GRACE_S` for each rung's
