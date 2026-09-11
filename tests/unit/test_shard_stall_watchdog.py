@@ -122,7 +122,10 @@ def test_the_report_names_the_test_and_its_elapsed_time(monkeypatch) -> None:
     report = sink.texts[0]
     assert "SHARD STALL" in report
     assert under_test in report
-    assert "42s" in report or "4" in report
+    # Deterministic: the in-flight entry was rewound 42.0s at :118, so the
+    # elapsed column reads exactly "42s". The earlier `or "4" in report`
+    # passed on any digit 4 anywhere in the text and asserted nothing.
+    assert "42s" in report
 
 
 def test_teardown_completes_a_test_and_resets_the_clock() -> None:
@@ -239,3 +242,202 @@ def test_the_workflow_enables_the_watchdog() -> None:
     env = jobs["test"].get("env") or {}
     assert env.get(watchdog.ENV_SECONDS), f"the test job does not set {watchdog.ENV_SECONDS}"
     assert float(env[watchdog.ENV_SECONDS]) > 0
+
+
+class _FakeFaulthandler:
+    """Stands in for :mod:`faulthandler` without touching the real module.
+
+    The C timer is the whole point of the worker half, and no unit test can make
+    a real one fire, so it is spied on instead: the assertions are that the timer
+    was armed for the running test, at the bound captured at install, and
+    cancelled only by that test's teardown.
+    """
+
+    def __init__(self) -> None:
+        self.armed: list[tuple[float, dict[str, object]]] = []
+        self.cancels = 0
+
+    def dump_traceback_later(self, seconds: float, **kwargs) -> None:
+        self.armed.append((seconds, kwargs))
+
+    def cancel_dump_traceback_later(self) -> None:
+        self.cancels += 1
+
+
+def _install_worker(monkeypatch, bound: str = "4") -> _FakeFaulthandler:
+    """Install the worker branch and return the C-timer spy it will call."""
+    monkeypatch.setenv(watchdog.ENV_SECONDS, bound)
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(watchdog, "faulthandler", fake)
+    watchdog.install(_FakeConfig(worker=True))
+    return fake
+
+
+def test_the_worker_arms_the_c_timer_and_writes_the_header(monkeypatch) -> None:
+    """The worker half produces the stacks; a no-op ``arm`` must fail a test.
+
+    ``arm`` is the only thing that starts the C timer, and the round-1 review
+    measured that turning it into an early ``return`` left all ten guards green
+    while no dump could ever be produced -- the reporter would name the test and
+    hand the reader no stacks at all.
+    """
+    fake = _install_worker(monkeypatch)
+    nodeid = "tests/unit/tui/test_x.py::test_a_long_one"
+
+    watchdog.note_start(nodeid)
+
+    worker = watchdog._WORKER
+    assert worker is not None and worker._armed
+    assert fake.armed == [(4.0, {"file": worker._handle, "repeat": True, "exit": False})]
+    assert f"{watchdog.ARM_MARKER}{nodeid} exceeded 4s" in worker._path.read_text(encoding="utf-8")
+
+
+def test_the_worker_timer_is_cancelled_only_by_teardown(monkeypatch) -> None:
+    """A call-phase report must not cancel the worker's timer.
+
+    This is the worker-side twin of the setup-phase defect the controller guard
+    already pins: cancelling on any report kills the timer for the rest of the
+    test body, so a stall there produces no dump. Two round-1 mutants survived
+    without it -- worker ``note_report`` disarming on any ``when``, and
+    ``disarm`` becoming a no-op -- and the assertions below kill both.
+    """
+    fake = _install_worker(monkeypatch)
+    nodeid = "tests/unit/tui/test_x.py::test_a_long_one"
+    watchdog.note_start(nodeid)
+    worker = watchdog._WORKER
+    assert worker is not None and worker._armed
+
+    for when in ("setup", "call"):
+        watchdog.note_report(_Report(nodeid, when))
+        assert worker._armed, f"a {when!r} report must not cancel the worker timer"
+        assert fake.cancels == 0
+
+    watchdog.note_report(_Report(nodeid, "teardown"))
+    assert worker._armed is False
+    assert fake.cancels == 1
+
+
+def test_the_worker_keeps_the_bound_it_was_installed_with(monkeypatch) -> None:
+    """Unsetting the variable after install must not raise inside the hook.
+
+    ``note_start`` used to re-read the bound and pass it on unguarded, so an
+    unset value reached ``dump_traceback_later(None)`` -> ``TypeError`` inside
+    ``pytest_runtest_logstart`` -> ``INTERNALERROR``. The bound is captured once,
+    at install, where it is known to be usable.
+    """
+    fake = _install_worker(monkeypatch)
+    monkeypatch.delenv(watchdog.ENV_SECONDS, raising=False)
+
+    watchdog.note_start("tests/unit/a.py::test_one")
+
+    assert fake.armed and fake.armed[0][0] == 4.0
+
+
+def test_an_unusable_dump_directory_disables_the_worker(monkeypatch, tmp_path) -> None:
+    """An unusable ``TMPDIR`` must disable the instrument, not fail the shard.
+
+    ``install`` runs from ``pytest_configure``, where an unguarded ``mkdir`` was
+    measured to raise ``NotADirectoryError`` (``TMPDIR=/dev/null/x``) and
+    ``FileExistsError`` (a file occupying the path) -- each an ``INTERNALERROR``
+    that failed the whole shard with ``no tests ran``. That is the one way this
+    diagnostic could turn a green run red, which its safety argument forbids.
+    """
+    occupied = tmp_path / "occupied"
+    occupied.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setattr(watchdog, "DUMP_DIR", occupied / "lo-shard-stall")
+    fake = _install_worker(monkeypatch)
+
+    worker = watchdog._WORKER
+    assert worker is not None
+    watchdog.note_start("tests/unit/a.py::test_one")  # must not raise either
+    assert worker._armed is False
+    assert worker._disabled
+    assert fake.armed == []
+
+
+def test_the_report_mode_prints_fired_stacks_and_labels_unfired_headers(tmp_path) -> None:
+    """The workflow step's output: evidence, plus honestly labelled noise.
+
+    This is the surface a cancelled job leaves behind, so it carries the module's
+    own FIRED_MARKER discipline rather than a raw ``cat``. An arm-time header is
+    a claim about a test that STARTED; a cancelled shard's files held thousands
+    of them (3088 measured), burying the one real timeout.
+    """
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    (dumps / "worker-1.log").write_text(
+        f"{watchdog.ARM_MARKER}tests/unit/a.py::test_fast exceeded 240s; every thread follows.\n"
+        f"{watchdog.FIRED_MARKER}0:04:00)!\n"
+        "Thread 0x1 (most recent call first):\n"
+        '  File "/repo/tests/unit/a.py", line 12 in test_fast\n',
+        encoding="utf-8",
+    )
+    (dumps / "worker-2.log").write_text(
+        "".join(
+            f"{watchdog.ARM_MARKER}tests/unit/a.py::test_{i} exceeded 240s; every thread follows.\n"
+            for i in range(3000)
+        ),
+        encoding="utf-8",
+    )
+
+    report = watchdog.report_dumps(dumps)
+
+    assert "fired" in report
+    assert "line 12 in test_fast" in report
+    assert "never fired" in report
+    assert "3000 tests started" in report
+    assert "in flight at cancel, not fired: tests/unit/a.py::test_2999" in report
+    # The defect: no arm-time header may be presented as a fired timeout.
+    assert "exceeded 240s" not in report
+    assert report.count(watchdog.FIRED_MARKER) == 1
+
+
+def test_the_report_mode_is_quiet_on_a_missing_directory(tmp_path, capsys) -> None:
+    """The step runs on every shard, including the ones with nothing to say.
+
+    The old step's ``for f in "$dir"/*.log`` ran once on the literal pattern when
+    no file matched and ``bash -e`` exited 1, and the directory does not exist at
+    all on a shard that never armed a timer. Neither may fail the step.
+    """
+    assert watchdog.main([str(tmp_path / "does-not-exist")]) == 0
+    assert "no shard stall report" in capsys.readouterr().out
+
+
+def test_the_workflow_reports_through_the_module_not_a_raw_cat() -> None:
+    """The step must not re-implement the fired/unfired rule in YAML.
+
+    Pinned against ``ci.yml`` because the failure mode is a workflow edit: a
+    ``cat`` of ``*.log`` is exactly what printed 3088 false "exceeded 240s"
+    claims on this PR's own cancelled shard while the one real timeout was lost
+    among them.
+    """
+    import yaml
+
+    repo = Path(__file__).resolve().parents[2]
+    jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    step = next(s for s in jobs["test"]["steps"] if s.get("name") == "Print the shard stall report")
+    assert "tests.shard_stall_watchdog" in step["run"]
+    assert "cat " not in step["run"]
+    assert "*.log" not in step["run"]
+
+
+def test_no_ci_job_runs_both_watchdogs_in_one_process() -> None:
+    """The two C-timer instruments never share a process in CI.
+
+    ``faulthandler``'s timer is process-global, so a ``tests.e2e.watchdog.bounded``
+    block inside a test body displaces an armed worker timer and leaves that test
+    with no stacks. That is latent only because the shard job (which sets
+    ENV_SECONDS, and deselects ``e2e`` via addopts) is the only job that arms a
+    worker, while the e2e stage runs ``-n0`` with no variable. Pin the invariant
+    rather than leaving it to prose.
+    """
+    import yaml
+
+    repo = Path(__file__).resolve().parents[2]
+    jobs = yaml.safe_load((repo / ".github" / "workflows" / "ci.yml").read_text())["jobs"]
+    for name, job in jobs.items():
+        if name == "test":
+            continue
+        assert not (job.get("env") or {}).get(
+            watchdog.ENV_SECONDS
+        ), f"{name} arms the shard watchdog; it must not also run the e2e C timer"
