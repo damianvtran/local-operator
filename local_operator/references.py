@@ -453,6 +453,14 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
 #: :func:`_already_expanded` reads it back to hold idempotence.
 _TYPED_ATTRIBUTE = 'typed="'
 
+#: A zero-width space, the character :func:`_defuse` splices into a block
+#: marker found in a reference's body. Invisible to a reader and harmless to
+#: the model's understanding of the text, while no longer being the literal
+#: sequence :func:`_block_spans` matches.
+_ZERO_WIDTH_SPACE = "\u200b"
+_DEFUSED_OPEN = REFERENCE_BLOCK_OPEN.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
+_DEFUSED_CLOSE = REFERENCE_BLOCK_CLOSE.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
+
 #: One sentence of framing inside the block. The model must be able to tell
 #: operator prose from file content, which is also why expansion APPENDS rather
 #: than substituting in place — inline substitution would lose the typed token
@@ -468,19 +476,55 @@ class _Token(NamedTuple):
 
 
 def _attribute(value: str) -> str:
-    """One attribute value, safe to round-trip.
+    """Escape a value for an XML-ish attribute, reversibly.
 
-    ``@"my file.txt"`` contains the delimiter, so an unescaped value would
-    truncate the attribute at the first inner quote and the recovery in
-    :func:`_already_expanded` would read back ``@`` — silently breaking
-    idempotence for exactly the quoted form that exists to carry spaces.
+    Character-for-character ``skills/invoke.py::_escape_attr`` (``:210-224``),
+    and the completeness is load-bearing rather than tidy. Escaping only ``"``
+    is not enough: a value carrying ``<`` and ``>`` can spell
+    ``</operator-references>`` inside the attribute, which terminates the block
+    EARLY for :func:`_block_spans`. Every ``typed=`` after the forgery then
+    falls outside the recovered span, :func:`_already_expanded` returns nothing
+    for it, and pass 2 re-expands — contract guarantee 3 broken, and a second
+    block appended to a message that is persisted and re-sent every turn.
+
+    Reachable two ways, and neither is theoretical. The marker contains ``/``,
+    a legal POSIX separator, so ``a</operator-references>b.txt`` is a REAL
+    filename (parent ``a<``, name ``operator-references>b.txt``) whose path
+    attribute would carry the marker verbatim. Reproduced before this fix: one
+    such reference beside an ordinary one made pass 2 return ``expanded=True``
+    and emit a second block.
+
+    ``@"my file.txt"`` is the case that motivated escaping ``"`` at all — the
+    quoted form exists to carry spaces, and an unescaped delimiter truncates
+    the attribute so the recovery reads back ``@``.
+
+    A newline becomes ``&#10;`` for ``invoke.py``'s stated reason: a multi-line
+    value must not break the single-line tag the scanner matches.
     """
-    return value.replace("&", "&amp;").replace('"', "&quot;")
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "&#10;")
+    )
 
 
 def _unattribute(value: str) -> str:
-    """:func:`_attribute` inverted."""
-    return value.replace("&quot;", '"').replace("&amp;", "&")
+    """Inverse of :func:`_attribute`; ``&amp;`` last so it cannot double-undo.
+
+    Reverse order is the whole correctness argument, and getting it wrong fails
+    silently: unescaping ``&amp;`` FIRST would turn a literal ``&amp;lt;`` back
+    into ``&lt;`` and then into ``<``, inventing a character the operator never
+    typed and breaking the round trip idempotence depends on.
+    """
+    return (
+        value.replace("&#10;", "\n")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", '"')
+        .replace("&amp;", "&")
+    )
 
 
 def _block_spans(text: str) -> list[tuple[int, int]]:
@@ -592,7 +636,7 @@ def _directory_payload(path: Path) -> tuple[str, dict[str, str]]:
     return body, {"entries": str(len(entries))}
 
 
-def _shaped_text(path: Path, text: str) -> tuple[str, dict[str, str]]:
+def _shaped_text(path: Path, text: str, shown: str) -> tuple[str, dict[str, str]]:
     """Head + heading outline for a file past the per-reference char cap.
 
     The shape mirrors ``_shape_internal_document``, but the POINTER it emits
@@ -615,21 +659,33 @@ def _shaped_text(path: Path, text: str) -> tuple[str, dict[str, str]]:
         if heading.end > head_lines
     ]
     outline = "\n".join(rows)
+    # ``shown``, not ``str(path)``: the footer must name the SAME path the
+    # element's ``path=`` attribute carries, or the model reads one address and
+    # is told to follow another. ``read`` resolves it through
+    # ``_resolve_workspace_path``, which joins a relative path onto cwd exactly
+    # as ``context_files``' index rows already rely on — pinned by
+    # ``test_the_read_pointer_in_a_shaped_file_still_resolves``, because a
+    # footer pointing at a path ``read`` cannot resolve is a dead pointer the
+    # model will follow.
     footer = (
         f"\n\n[shown: the first {head_lines} of {len(lines)} lines. "
-        f"Read any section with read(path={str(path)!r}, range='start-end').]"
+        f"Read any section with read(path={shown!r}, range='start-end').]"
     )
     if outline:
         footer = f"\n\nSections not shown:\n{outline}{footer}"
     return head + footer, {"lines": str(len(lines)), "shown": "head+outline"}
 
 
-def _file_payload(path: Path, size: int, limit: int) -> tuple[str, dict[str, str]]:
-    """One file's body and attributes, bounded, never bytes for a binary."""
+def _file_payload(path: Path, size: int, limit: int, shown: str) -> tuple[str, dict[str, str]]:
+    """One file's body and attributes, bounded, never bytes for a binary.
+
+    ``shown`` is the display path every pointer in the payload must quote; see
+    :func:`_shaped_text`'s footer comment for why it is not ``str(path)``.
+    """
     if size > READ_FILE_LIMIT_BYTES:
         return (
             f"[not included: {size} bytes exceeds the {READ_FILE_LIMIT_BYTES}-byte "
-            f"reference cap. Read a slice with read(path={str(path)!r}, range='start-end').]",
+            f"reference cap. Read a slice with read(path={shown!r}, range='start-end').]",
             {"bytes": str(size), "shown": "metadata"},
         )
     if sniff_image_file(str(path)) is not None:
@@ -638,7 +694,7 @@ def _file_payload(path: Path, size: int, limit: int) -> tuple[str, dict[str, str
         # Slice A codes against it; ``read`` already returns images to an agent
         # that asks for one.
         return (
-            f"[image, {size} bytes — not included. View it with read(path={str(path)!r}).]",
+            f"[image, {size} bytes — not included. View it with read(path={shown!r}).]",
             {"bytes": str(size), "kind": "image"},
         )
     data = path.read_bytes()
@@ -653,12 +709,57 @@ def _file_payload(path: Path, size: int, limit: int) -> tuple[str, dict[str, str
         )
     text = data.decode("utf-8", errors="replace")
     if len(text) > limit:
-        body, attributes = _shaped_text(path, text)
+        body, attributes = _shaped_text(path, text, shown)
         return body, {"bytes": str(size), **attributes}
     return text, {"bytes": str(size), "lines": str(len(text.splitlines()))}
 
 
-def _render(path: Path, typed: str, body: str, attributes: dict[str, str]) -> str:
+def _shown(path: Path, cwd: str) -> str:
+    """``path`` relative to ``cwd``, absolute only when it lies outside.
+
+    Mirrors ``context_files.py:591-593``, the established shape for this exact
+    element, and the design's §2.3 example (``path="src/app.py"``). Three
+    reasons, and the first is the one that compounds: this string is PERSISTED
+    and re-sent on every turn of the session, so an absolute path bills its
+    length forever — measured here at 79 chars against 28 relative, per
+    reference. It also writes the operator's home directory into a transcript
+    that gets shared and replayed, and a relative path is what the model
+    already sees everywhere else.
+
+    ``ValueError`` (outside the base) falls back to absolute, exactly as the
+    precedent does: for a path genuinely elsewhere the absolute form is the
+    only honest answer, and the approval gate has already been consulted about
+    it by the time this runs.
+    """
+    try:
+        return str(path.relative_to(Path(cwd).resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _defuse(body: str) -> str:
+    """Neutralize block markers appearing in a reference's BODY.
+
+    A referenced file whose CONTENT contains ``</operator-references>`` closes
+    the block early for :func:`_block_spans`, with the same consequence the
+    attribute escaping above prevents: the tokens after it fall outside the
+    recovered span and pass 2 re-expands them, reading files the operator never
+    referenced. Reproduced before this fix — a file containing the close marker
+    followed by ``@victim.txt`` made pass 2 pull in ``victim.txt``.
+
+    ONLY the two marker sequences are touched, and nothing else about the body
+    is stripped, reformatted or escaped. The model must read the file's content
+    verbatim — that is the entire point of the feature, and a body that arrives
+    HTML-escaped would be a worse defect than the one being fixed. A
+    zero-width space inside each marker is invisible to a reader, keeps the
+    text legible, and stops the literal sequence the scanner matches.
+    """
+    return body.replace(REFERENCE_BLOCK_CLOSE, _DEFUSED_CLOSE).replace(
+        REFERENCE_BLOCK_OPEN, _DEFUSED_OPEN
+    )
+
+
+def _render(path: Path, typed: str, body: str, attributes: dict[str, str], cwd: str) -> str:
     """One ``<reference>`` element.
 
     ``typed=`` carries the token EXACTLY as written, mirroring
@@ -666,12 +767,19 @@ def _render(path: Path, typed: str, body: str, attributes: dict[str, str]) -> st
     (``skills/invoke.py:198-201``) and for the same reason: the payload is what
     gets PERSISTED, so a resumed session replays this string and the surfaces
     recover the short row by reading the attribute back out of it.
+
+    Attributes are escaped and the body is defused, because BOTH are attacker
+    controlled — a path and a file's content are whatever is on disk. See
+    :func:`_attribute` and :func:`_defuse` for the vector each one closes.
     """
     rendered = " ".join(f'{key}="{_attribute(value)}"' for key, value in attributes.items())
-    head = f'<reference path="{_attribute(str(path))}" {_TYPED_ATTRIBUTE}{_attribute(typed)}"'
+    head = (
+        f'<reference path="{_attribute(_shown(path, cwd))}" '
+        f'{_TYPED_ATTRIBUTE}{_attribute(typed)}"'
+    )
     if rendered:
         head += " " + rendered
-    return f"{head}>\n{body}\n</reference>"
+    return f"{head}>\n{_defuse(body)}\n</reference>"
 
 
 async def _approved(
@@ -759,22 +867,26 @@ async def _expand(
         if not await _approved(path, inside, resolvable, request_approval, job_id):
             notices.append(f"{token.typed} — not included; approval declined")
             continue
+        # One display path per reference, resolved once and used by BOTH the
+        # element's ``path=`` attribute and every ``read(path=...)`` pointer
+        # inside its body, so the two can never name different addresses.
+        shown = _shown(path, cwd)
         try:
             if path.is_dir():
                 body, attributes = _directory_payload(path)
             else:
                 body, attributes = _file_payload(
-                    path, path.stat().st_size, INTERNAL_READ_LIMIT_CHARS
+                    path, path.stat().st_size, INTERNAL_READ_LIMIT_CHARS, shown
                 )
         except OSError as exc:
             notices.append(f"{token.typed} — could not be read ({exc.strerror or exc})")
             continue
-        element = _render(path, token.typed, body, attributes)
+        element = _render(path, token.typed, body, attributes, cwd)
         if used + len(element) > BLOCK_LIMIT_CHARS:
             # Past the whole-block cap the reference is named, not carried.
             # Naming it beats dropping it silently: the model can `read` a path
             # it has been told about.
-            listed_only.append(str(path))
+            listed_only.append(shown)
             continue
         used += len(element) + 2
         rendered.append(element)
