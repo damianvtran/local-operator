@@ -56,6 +56,75 @@ for free, bounds the process to one Herdr subprocess at a time, and — like
 ``SessionBroadcast`` — keeps the event loop off every subprocess wait. It is
 a daemon thread so a wedged ``herdr`` cannot hold the interpreter open; the
 exit drain below is what makes that safe for the release.
+
+WHY ONE LOST DELIVERY USED TO FREEZE THE ROW FOREVER (RETRY)
+-------------------------------------------------------------
+Each transition enqueued exactly ONE subprocess, and the worker caught every
+failure — non-zero exit, spawn error, the 5 s timeout — logged it at DEBUG
+and DROPPED the item. That looks like the right "best effort" shape until it
+is combined with the de-dupe in :meth:`HerdrReporter.report`, which updates
+``_last`` at ENQUEUE time. The 12.5 Hz spinner tick keeps calling ``report``
+with the same state for the whole of a turn, and every one of those calls is
+de-duped away — so the state whose SINGLE delivery failed can never be sent
+again. The observed symptom, reproduced deterministically with a wrapper
+binary failing one ``--state working`` call: the terminal title spins for a
+ten-minute turn while the Agents row still says ``idle``. Two sinks, one
+derivation, and only one of them lossy.
+
+So delivery is retried on the worker thread, in place, up to
+``len(RETRY_BACKOFF_S)`` times with 0.5 s / 2.0 s / 8.0 s between attempts.
+The geometry matters more than the numbers: the first retry is inside a
+human's "did that register?" window, and the last lands ~10.5 s out, which
+covers a Herdr server being restarted under a running pane without the
+worker sitting on a wedged socket for a minute. The item stays at the HEAD
+of the queue while it is retried, which preserves the module's ordering
+invariant (mint order == delivery order) rather than merely not breaking it;
+a retry that lands after a newer report would be harmless anyway, because
+Herdr's high-water mark discards the lower seq. On exhaustion the item is
+dropped and logged at WARNING, not DEBUG: a row that has stopped tracking a
+live session is a user-visible defect, and DEBUG is where the original one
+hid for a whole release.
+
+A report abandons its backoff the moment ``release`` latches — the release
+queued behind it is the delivery that matters, and the row is about to be
+gone. The ``release-agent`` itself does NOT abandon its backoff: nothing is
+queued behind it, and it is the one call whose loss leaves a row describing
+an exited process. Both are bounded at exit by the drain, which joins a
+daemon thread for :data:`EXIT_DRAIN_TIMEOUT_S` and then lets the interpreter
+go.
+
+WHY A HEARTBEAT AND NOT JUST RETRY
+-----------------------------------
+Retry fixes a delivery that fails. It cannot fix a delivery that SUCCEEDED
+and was then forgotten, and Herdr does not persist agent rows across a server
+restart. A pane whose session is mid-turn emits no further transitions — the
+spinner tick is de-duped — so a row lost to ``herdr`` restarting comes back
+only at the next state change, which for a long turn is many minutes away,
+and for an idle session is never.
+
+The fix is a re-assertion heartbeat: a daemon thread that wakes every
+``resync_interval_s`` (default 30 s) and re-sends the CURRENT state with a
+fresh seq. It is not a second source of truth — it does not decide anything,
+it asks the injected state provider (the band, through
+``StatusLine.set_herdr_reporter``) for the same derivation ``report`` uses,
+which keeps the single-derivation property this module is built on. 30 s is
+chosen against what the row is for: a sidebar a human glances at, where
+half a minute of staleness after an event as rare as a server restart is
+invisible, while the cost is one subprocess per pane per 30 s — two orders
+of magnitude below the 12.5 Hz tick that already reaches ``report``.
+
+It cannot break ordering: the heartbeat mints its seq and enqueues in the
+same ``_lock`` critical section every other caller uses (:meth:`_enqueue_report`
+is that section, factored out so there is exactly one of it). It cannot
+resurrect a released row for the same reason ``report`` cannot: it re-tests
+the released latch INSIDE the lock, so a heartbeat racing a ``release`` is
+dropped rather than delivered behind it with a higher seq. And it stops
+promptly rather than up to an interval late, because the sleep is
+``_released.wait(interval)`` and not ``time.sleep``.
+
+The heartbeat deliberately does NOT de-dupe. Same state plus a new seq is
+exactly the message that recreates a lost row, and suppressing it as a
+duplicate would reintroduce the bug the retry above exists to fix.
 """
 
 from __future__ import annotations
@@ -69,7 +138,7 @@ import subprocess
 import threading
 import time
 import weakref
-from typing import Callable, Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence, cast
 
 from local_operator.terminals import HERDR_BIN_ENV, HERDR_PANE_ENV, is_herdr
 
@@ -102,6 +171,16 @@ _ENV_DISABLE = "LOCAL_OPERATOR_NO_HERDR"
 #: per transition either. The same figure as ``multiplexer.cmux.CALL_TIMEOUT_S``.
 CALL_TIMEOUT_S = 5.0
 
+#: Backoff between delivery attempts for ONE queued call, in seconds; its
+#: length is therefore the retry budget (3 retries, 4 attempts total). Slept
+#: on the worker thread, never the event loop. See the module docstring for
+#: why the shape is 0.5 / 2 / 8 and why exhaustion logs at WARNING.
+RETRY_BACKOFF_S: tuple[float, ...] = (0.5, 2.0, 8.0)
+
+#: How often the heartbeat re-asserts the current state. Injectable per
+#: reporter so tests do not wait on it. See "WHY A HEARTBEAT" above.
+RESYNC_INTERVAL_S = 30.0
+
 #: Worst-case delay a user can experience at interpreter exit because of the
 #: release. One bounded join per process, shared by every reporter, never on
 #: the event loop — ``atexit`` runs on the main thread after ``on_unmount``
@@ -122,9 +201,28 @@ Invoker = Callable[[str, Sequence[str]], None]
 #: ~1.8e15, four orders of magnitude inside Herdr's ``u64``.
 Clock = Callable[[], int]
 
+#: Reads the CURRENT state, for the heartbeat to re-assert. Called off the
+#: event loop, so it must be cheap and must not block; the band's
+#: implementation is two attribute reads.
+StateProvider = Callable[[], HerdrState]
+
 
 def _default_clock() -> int:
     return time.time_ns() // 1_000
+
+
+def _argv_flag(argv: Sequence[str], name: str) -> str | None:
+    """The value following ``name`` in an argv, for log lines only.
+
+    Reading it back out of the argv rather than carrying it alongside keeps
+    the queue item the ``(subcommand, argv)`` pair the whole module (and
+    every fake invoker in the tests) is written against.
+    """
+    items = list(argv)
+    try:
+        return items[items.index(name) + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 def _source(env: EnvMap | None) -> EnvMap:
@@ -220,12 +318,18 @@ class HerdrReporter:
         session_id: str | None = None,
         invoker: Invoker | None = None,
         clock: Clock | None = None,
+        resync_interval_s: float = RESYNC_INTERVAL_S,
+        retry_backoff_s: Sequence[float] | None = None,
     ) -> None:
         self._pane_id = pane_id
         self._binary = binary
         self._session_id = (session_id or "").strip() or None
         self._invoker: Invoker = invoker or _run_cli
         self._clock: Clock = clock or _default_clock
+        self._resync_interval_s = resync_interval_s
+        self._retry_backoff_s: tuple[float, ...] = tuple(
+            RETRY_BACKOFF_S if retry_backoff_s is None else retry_backoff_s
+        )
         # Guards `_last`, `_seq` and `_session_id`: the seq must be minted in
         # the same critical section that decides the report is not a
         # duplicate, or two callers could both pass the de-dupe and enqueue
@@ -251,6 +355,19 @@ class HerdrReporter:
         # close to quit the last transition happened, and against a wedged
         # binary it saves nothing the bounded exit drain does not already cap.
         self._released = threading.Event()
+        #: The state of the last `report-agent` the worker actually DELIVERED,
+        #: as opposed to `_last`, which is what was last enqueued. Written on
+        #: the worker thread only; a plain attribute because a single
+        #: reference assignment needs no lock and no reader is making a
+        #: decision on it. Cleared back to None on a delivered `release-agent`
+        #: — the row is gone at that point, so "what Herdr is holding" is
+        #: nothing, and a stale `idle` here would be the wrong answer for any
+        #: diagnostic that reads it.
+        self._delivered: HerdrState | None = None
+        #: Set by `set_state_provider`; the heartbeat is inert without one, so
+        #: a reporter nobody wired stays exactly as cheap as it was before.
+        self._state_provider: StateProvider | None = None
+        self._resync_thread: threading.Thread | None = None
 
     # -- introspection (tests, diagnostics) --------------------------------
 
@@ -266,6 +383,16 @@ class HerdrReporter:
     def last_state(self) -> HerdrState | None:
         """The state most recently ENQUEUED (not necessarily delivered)."""
         return self._last
+
+    @property
+    def delivered_state(self) -> HerdrState | None:
+        """The state of the last ``report-agent`` that actually landed.
+
+        None before the first delivery, and again after a delivered
+        ``release-agent``. Differs from :attr:`last_state` exactly when a
+        delivery is in flight, being retried, or was dropped on exhaustion.
+        """
+        return self._delivered
 
     @property
     def released(self) -> bool:
@@ -296,40 +423,32 @@ class HerdrReporter:
         ``StatusLine.refresh``: one comparison under a lock in the common case
         and nothing else. Never raises.
         """
-        # Re-tested INSIDE the lock below, not only here. This early exit is a
-        # cheap filter for the common post-release case; it is not the
-        # decision, because a `report` that passes it and then blocks on
-        # `_lock` — held by a concurrent `release` — would otherwise mint a
-        # HIGHER seq than the release and resurrect the row for a process that
-        # has already exited. Herdr's high-water mark cannot discard a higher
-        # seq, so that row would say `working` forever (review round 1, A1).
-        if self._released.is_set():
+        self._enqueue_report(state, dedupe=True)
+
+    def set_state_provider(self, provider: StateProvider | None) -> None:
+        """Wire the heartbeat to the caller's derivation of the current state.
+
+        Attaching one starts the resync thread; it is the only thing that
+        does, so a reporter nobody wires never pays for a thread. Idempotent
+        in the sense that matters — the thread is started at most once, and a
+        later provider simply replaces the one it reads.
+
+        The provider is called ON THE RESYNC THREAD, never on the event loop,
+        so it must be cheap and must not block. It must also not raise; one
+        that does is logged and the tick skipped, because a heartbeat that
+        killed its own thread would silently take the resync with it.
+        """
+        self._state_provider = provider
+        if provider is None or self._released.is_set():
             return
         with self._lock:
-            if self._released.is_set():
+            if self._resync_thread is not None or self._released.is_set():
                 return
-            if state == self._last:
-                return
-            self._last = state
-            seq = self._next_seq_locked()
-            session_id = self._session_id
-            argv = self._argv(
-                "report-agent",
-                "--state",
-                state,
-                "--seq",
-                str(seq),
-                *(("--agent-session-id", session_id) if session_id else ()),
+            thread = threading.Thread(
+                target=self._resync_loop, name="lop-herdr-resync", daemon=True
             )
-            # Enqueued UNDER the lock, so the queue order is the mint order.
-            # Building the argv outside it and putting afterwards let two
-            # callers mint 1,2 and enqueue 2,1 — measured at 80/200 trials
-            # under `sys.setswitchinterval(1e-6)` (review round 1, A2). The
-            # lock is held for a list build and a `SimpleQueue.put`, both
-            # non-blocking, so this costs the caller nothing it can feel.
-            self._enqueue(("report-agent", argv))
-        # Outside the lock: see `_start_worker`.
-        self._start_worker()
+            self._resync_thread = thread
+        thread.start()
 
     def release(self) -> None:
         """Queue the ``release-agent``, exactly once, and stop the worker after it.
@@ -362,9 +481,9 @@ class HerdrReporter:
         Never called from the event loop: a call parked in a subprocess
         timeout would stall the TUI for exactly as long as this waits.
         """
-        thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=timeout)
+        for thread in (self._thread, self._resync_thread):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=timeout)
 
     # -- internals -----------------------------------------------------------
 
@@ -372,6 +491,68 @@ class HerdrReporter:
         # See the module docstring for why this is not `+= 1` alone.
         self._seq = max(self._seq + 1, self._clock())
         return self._seq
+
+    def _enqueue_report(self, state: HerdrState, *, dedupe: bool) -> None:
+        """Mint a seq for ``state`` and queue its ``report-agent``. Lock NOT held.
+
+        The ONE mint-and-enqueue critical section, shared by :meth:`report`
+        and by the heartbeat so the lock invariant lives in a single place.
+        ``dedupe`` is the only difference between the two callers: the
+        spinner tick must be suppressed, the heartbeat must not be (see the
+        module docstring).
+        """
+        # Re-tested INSIDE the lock below, not only here. This early exit is a
+        # cheap filter for the common post-release case; it is not the
+        # decision, because a `report` that passes it and then blocks on
+        # `_lock` — held by a concurrent `release` — would otherwise mint a
+        # HIGHER seq than the release and resurrect the row for a process that
+        # has already exited. Herdr's high-water mark cannot discard a higher
+        # seq, so that row would say `working` forever (review round 1, A1).
+        if self._released.is_set():
+            return
+        with self._lock:
+            if self._released.is_set():
+                return
+            if dedupe and state == self._last:
+                return
+            self._last = state
+            seq = self._next_seq_locked()
+            session_id = self._session_id
+            argv = self._argv(
+                "report-agent",
+                "--state",
+                state,
+                "--seq",
+                str(seq),
+                *(("--agent-session-id", session_id) if session_id else ()),
+            )
+            # Enqueued UNDER the lock, so the queue order is the mint order.
+            # Building the argv outside it and putting afterwards let two
+            # callers mint 1,2 and enqueue 2,1 — measured at 80/200 trials
+            # under `sys.setswitchinterval(1e-6)` (review round 1, A2). The
+            # lock is held for a list build and a `SimpleQueue.put`, both
+            # non-blocking, so this costs the caller nothing it can feel.
+            self._enqueue(("report-agent", argv))
+        # Outside the lock: see `_start_worker`.
+        self._start_worker()
+
+    def _resync_loop(self) -> None:
+        """Re-assert the current state every interval, until released.
+
+        ``_released.wait`` rather than ``time.sleep`` so a quit does not have
+        to outlast a 30 s nap: it returns True the instant the latch is set,
+        which is both the sleep and the stop condition.
+        """
+        while not self._released.wait(self._resync_interval_s):
+            provider = self._state_provider
+            if provider is None:
+                continue
+            try:
+                state = provider()
+            except Exception:  # noqa: BLE001 — a bad provider must not kill the thread
+                logger.debug("herdr state provider failed", exc_info=True)
+                continue
+            self._enqueue_report(state, dedupe=False)
 
     def _argv(self, subcommand: str, *rest: str) -> tuple[str, ...]:
         return (
@@ -431,10 +612,55 @@ class HerdrReporter:
             if item is None:
                 return
             subcommand, argv = item
+            self._deliver(subcommand, argv)
+
+    def _deliver(self, subcommand: str, argv: tuple[str, ...]) -> None:
+        """Invoke one queued call, retrying in place. Worker thread only.
+
+        Retrying HERE, rather than re-queueing the item at the back, is what
+        keeps delivery order equal to mint order: the item under retry holds
+        the head of the queue and nothing behind it can overtake it.
+        """
+        released_aborts = subcommand != "release-agent"
+        last_error: BaseException | None = None
+        for attempt in range(len(self._retry_backoff_s) + 1):
             try:
                 self._invoker(subcommand, argv)
-            except Exception:  # noqa: BLE001 — best-effort by contract
-                logger.debug("herdr %s failed", subcommand, exc_info=True)
+            except Exception as error:  # noqa: BLE001 — best-effort by contract
+                logger.debug("herdr %s attempt %d failed", subcommand, attempt + 1, exc_info=True)
+                last_error = error
+            else:
+                # Delivered. `release-agent` clears the tracker rather than
+                # leaving a state behind for a row that no longer exists.
+                if subcommand == "report-agent":
+                    state = _argv_flag(argv, "--state")
+                    self._delivered = cast(HerdrState, state) if state is not None else None
+                else:
+                    self._delivered = None
+                return
+            if attempt == len(self._retry_backoff_s):
+                break
+            delay = self._retry_backoff_s[attempt]
+            # A report gives up its backoff to the release queued behind it;
+            # a release has nothing behind it and must not give up. See the
+            # module docstring.
+            if released_aborts:
+                if self._released.wait(delay):
+                    return
+            elif delay > 0:
+                time.sleep(delay)
+        # WARNING, not DEBUG: the de-dupe means this state will not be sent
+        # again by a transition, so the row is now stale until the heartbeat
+        # or the next real change catches it. That is user-visible.
+        logger.warning(
+            "herdr %s dropped for pane %s after %d attempts (state=%s seq=%s): %s",
+            subcommand,
+            self._pane_id,
+            len(self._retry_backoff_s) + 1,
+            _argv_flag(argv, "--state"),
+            _argv_flag(argv, "--seq"),
+            last_error,
+        )
 
 
 def start_reporter(

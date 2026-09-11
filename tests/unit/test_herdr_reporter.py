@@ -13,10 +13,12 @@ by the invoker), never on the clock — see AGENTS.md "Timing, flakes".
 from __future__ import annotations
 
 import itertools
+import logging
 import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 from typing import Sequence, cast
 
@@ -78,11 +80,84 @@ class Recorder:
         return [int(_flag(argv, "--seq")) for _, argv in self.calls]
 
 
+class FlakyRecorder(Recorder):
+    """A recorder whose first ``failures`` calls raise, then succeed.
+
+    The retry tests need a transient failure rather than ``Recorder(fail=True)``'s
+    permanent one: the property under test is that the SAME item is delivered
+    on a later attempt, which a permanently broken invoker cannot show.
+    """
+
+    def __init__(self, *, failures: int) -> None:
+        super().__init__()
+        self._failures = failures
+
+    def __call__(self, subcommand: str, argv: Sequence[str]) -> None:
+        super().__call__(subcommand, argv)
+        # Only the worker thread calls this, so the counter needs no lock.
+        if self._failures > 0:
+            self._failures -= 1
+            raise RuntimeError("herdr exploded")
+
+
+class FakeHerdrRow:
+    """The pane row Herdr keeps: the highest ``--seq`` wins, lower ones are ignored.
+
+    A recorder is enough to see what was SENT; this is what is needed to see
+    what Herdr ends up HOLDING, which is the thing the field bug was about
+    ("title spinning while the Agents row says idle"). ``swallow`` drops
+    exactly one report of that state on the floor after accepting the call —
+    the server-side loss a client-side retry cannot see and only the
+    heartbeat recovers from.
+    """
+
+    def __init__(self, *, swallow: str | None = None) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.state: str | None = None
+        self.seq = 0
+        self._swallow = swallow
+        self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+
+    def __call__(self, subcommand: str, argv: Sequence[str]) -> None:
+        with self._changed:
+            self.calls.append((subcommand, tuple(argv)))
+            seq = int(_flag(argv, "--seq"))
+            state = _flag(argv, "--state") if subcommand == "report-agent" else None
+            if state is not None and state == self._swallow:
+                self._swallow = None
+            elif seq > self.seq:
+                self.seq = seq
+                self.state = state
+            self._changed.notify_all()
+
+    def wait_for_state(self, state: str) -> int:
+        """Block until the row holds ``state``; return the seq that put it there."""
+        with self._changed:
+            if not self._changed.wait_for(lambda: self.state == state, timeout=WAIT_S):
+                pytest.fail(f"row never reached {state}: {self.state} at seq {self.seq}")
+            return self.seq
+
+    def seqs(self) -> list[int]:
+        return [int(_flag(argv, "--seq")) for _, argv in self.calls]
+
+
 def _flag(argv: Sequence[str], name: str) -> str:
     return argv[list(argv).index(name) + 1]
 
 
-def _reporter(recorder: Recorder, *, session_id: str | None = "sess-1") -> HerdrReporter:
+#: Retry backoff for the tests that exercise it. The production shape is
+#: 0.5/2/8; the property is the retry, not the wait, so it is injected down
+#: to something the suite can afford (AGENTS.md "Timing, flakes").
+FAST_BACKOFF_S = (0.01, 0.02, 0.04)
+
+
+def _reporter(
+    recorder: Recorder,
+    *,
+    session_id: str | None = "sess-1",
+    retry_backoff_s: Sequence[float] | None = None,
+) -> HerdrReporter:
     # `clock` counts from one so the seqs read as the contract's `1, 2, 3`
     # rather than as epoch microseconds; the production clock is covered by
     # `test_the_sequence_is_anchored_to_the_clock`.
@@ -93,6 +168,7 @@ def _reporter(recorder: Recorder, *, session_id: str | None = "sess-1") -> Herdr
         session_id=session_id,
         invoker=recorder,
         clock=lambda: next(counter),
+        retry_backoff_s=retry_backoff_s,
     )
 
 
@@ -599,18 +675,27 @@ def test_set_session_id_resends_the_current_state_under_the_new_id() -> None:
 
 
 def test_an_invoker_that_raises_never_propagates_and_later_reports_still_run() -> None:
+    """Every item is still attempted, in order, and nothing reaches the caller.
+
+    Retries make the call LOG longer than the transition list — a permanently
+    broken invoker is attempted up to four times per item — so what is pinned
+    is the order of first attempts, not the count. The retry budget itself is
+    the two tests above.
+    """
     recorder = Recorder(fail=True)
-    reporter = _reporter(recorder)
+    reporter = _reporter(recorder, retry_backoff_s=FAST_BACKOFF_S)
     for state in ("idle", "working", "idle"):
         reporter.report(state)
     reporter.release()
-    reporter.join()
-    assert [sub for sub, _ in recorder.calls] == [
-        "report-agent",
-        "report-agent",
-        "report-agent",
-        "release-agent",
-    ]
+    reporter.join(timeout=WAIT_S)
+    subs = [sub for sub, _ in recorder.calls]
+    assert subs.count("release-agent") >= 1
+    assert subs[-1] == "release-agent", subs
+    # Duplicates are retries of one item, so collapsing them recovers the
+    # stream the transitions asked for.
+    seqs = recorder.seqs()
+    collapsed = [seq for i, seq in enumerate(seqs) if i == 0 or seq != seqs[i - 1]]
+    assert collapsed == [1, 2, 3, 4]
 
 
 def test_the_cli_invoker_raises_on_non_zero_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -638,13 +723,330 @@ def test_a_failing_cli_is_swallowed_end_to_end(monkeypatch: pytest.MonkeyPatch) 
             done.set()
 
     reporter = HerdrReporter(
-        pane_id="w1:p1", binary="/nonexistent/herdr", invoker=observed, clock=None
+        pane_id="w1:p1",
+        binary="/nonexistent/herdr",
+        invoker=observed,
+        clock=None,
+        retry_backoff_s=FAST_BACKOFF_S,
     )
     reporter.report("idle")
     assert done.wait(WAIT_S)
     reporter.release()
     reporter.join()
     assert reporter.released
+
+
+def test_a_delivery_that_fails_once_is_retried_and_lands_in_order() -> None:
+    """The bug: ONE lost call used to freeze the row for the rest of the turn.
+
+    De-dupe updates `_last` at enqueue time, so the 12.5 Hz tick can never
+    resend a state whose single delivery failed — the terminal title spins
+    while the Agents row still says the previous state. The retry is what
+    closes that, and the retry must carry the ORIGINAL seq: a fresh one would
+    make the retry a new report and reopen the ordering question.
+    """
+    recorder = FlakyRecorder(failures=1)
+    reporter = _reporter(recorder, retry_backoff_s=FAST_BACKOFF_S)
+    for state in ("idle", "working", "idle"):
+        reporter.report(state)
+    # Waited for BEFORE releasing, deliberately: a report gives up its
+    # backoff the moment the released latch is set, so releasing here would
+    # be testing that abort path instead of the retry (and the abort has its
+    # own test below).
+    recorder.wait_for_calls(4)
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+    # Three transitions, four report calls: the first was attempted twice.
+    assert [sub for sub, _ in recorder.calls] == [
+        "report-agent",
+        "report-agent",
+        "report-agent",
+        "report-agent",
+        "release-agent",
+    ]
+    assert recorder.states() == ["idle", "idle", "working", "idle"]
+    # The retry is the same item, same seq, and nothing overtook it.
+    seqs = recorder.seqs()
+    assert seqs == [1, 1, 2, 3, 4], seqs
+
+
+def test_a_report_under_retry_gives_up_its_backoff_to_a_release() -> None:
+    """Quit must not wait out a doomed report's backoff.
+
+    The exit drain is bounded at `EXIT_DRAIN_TIMEOUT_S` (2 s) and the
+    production backoff sums to 10.5 s, so a report retrying through a quit
+    would spend the whole drain budget and let the interpreter exit with the
+    `release-agent` still queued — a row outliving its process, which is the
+    exact failure `release-agent` exists to prevent. So the backoff aborts on
+    the released latch. The release's OWN backoff does not (there is nothing
+    behind it), which is why this test uses a report.
+
+    Timed, but with three orders of magnitude of margin: the backoff injected
+    here is 30 s and the assertion is "well under that", so a slow machine
+    cannot fail it — only a genuinely un-aborted sleep can.
+    """
+    recorder = FlakyRecorder(failures=1)
+    reporter = _reporter(recorder, retry_backoff_s=(30.0,))
+    reporter.report("idle")
+    recorder.wait_for_calls(1)  # the failing attempt; now parked in backoff
+    started = time.monotonic()
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, elapsed
+    # The report was abandoned; the release still went out.
+    assert [sub for sub, _ in recorder.calls] == ["report-agent", "release-agent"]
+
+
+def test_the_state_herdr_ends_up_holding_survives_a_failed_delivery() -> None:
+    """The same property from the server's side: the row tracks the last transition."""
+    row = FakeHerdrRow()
+    calls = {"n": 0}
+
+    def flaky(subcommand: str, argv: Sequence[str]) -> None:
+        calls["n"] += 1
+        # The `working` report fails once before it is accepted — the exact
+        # shape reproduced in the field with a wrapper binary.
+        if calls["n"] == 2:
+            raise RuntimeError("herdr exploded")
+        row(subcommand, argv)
+
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=flaky,
+        clock=lambda: next(counter),
+        retry_backoff_s=FAST_BACKOFF_S,
+    )
+    reporter.report("idle")
+    reporter.report("working")
+    assert row.wait_for_state("working") == 2
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+
+
+def test_retry_exhaustion_drops_the_item_warns_and_later_transitions_still_land(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WARNING, not DEBUG: a row that stopped tracking a live session is visible.
+
+    The original defect logged this at DEBUG, which is where it hid for a
+    whole release. The line has to name the pane, the subcommand and the
+    state/seq, or it cannot be matched to the row a user is looking at.
+    """
+    recorder = FlakyRecorder(failures=4)  # exactly one item's whole budget
+    reporter = _reporter(recorder, retry_backoff_s=FAST_BACKOFF_S)
+    with caplog.at_level(logging.WARNING, logger="local_operator.herdr.reporter"):
+        reporter.report("working")
+        recorder.wait_for_calls(4)
+        reporter.report("idle")
+        recorder.wait_for_calls(5)
+        reporter.release()
+        reporter.join(timeout=WAIT_S)
+
+    assert recorder.states() == ["working"] * 4 + ["idle"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    message = warnings[0].getMessage()
+    for fragment in ("report-agent", "w1:p1", "4 attempts", "state=working", "seq=1"):
+        assert fragment in message, message
+
+
+def test_delivered_state_is_what_landed_not_what_was_queued() -> None:
+    """`_delivered` is the worker's record; `last_state` is the caller's.
+
+    Pinned with the worker parked INSIDE the second call, so the two are
+    provably different at that instant rather than by a sleep.
+    """
+    gate = threading.Event()
+    recorder = Recorder()
+
+    def parked(subcommand: str, argv: Sequence[str]) -> None:
+        recorder(subcommand, argv)
+        if len(recorder.calls) == 2:
+            gate.wait(WAIT_S)
+
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1", binary="/opt/herdr", invoker=parked, clock=lambda: next(counter)
+    )
+    assert reporter.delivered_state is None
+    reporter.report("idle")
+    reporter.report("working")
+    recorder.wait_for_calls(2)
+    assert reporter.delivered_state == "idle"
+    assert reporter.last_state == "working"
+    gate.set()
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+    # The release clears it: the row is gone, so there is no state to hold.
+    assert reporter.delivered_state is None
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat resync
+# ---------------------------------------------------------------------------
+
+
+def test_the_heartbeat_re_asserts_a_state_herdr_lost_with_a_higher_seq() -> None:
+    """The half retry cannot reach: a delivery that SUCCEEDED and was forgotten.
+
+    Herdr does not persist agent rows across a server restart, and a pane
+    mid-turn emits no further transitions — the tick is de-duped — so the row
+    would come back only at the next state change. The fake server swallows
+    the `working` report after accepting the call, which is exactly that
+    shape, and no transition follows it.
+    """
+    row = FakeHerdrRow(swallow="working")
+    counter = itertools.count(1)
+    current: list[HerdrState] = ["idle"]
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=row,
+        clock=lambda: next(counter),
+        resync_interval_s=0.02,
+    )
+    reporter.set_state_provider(lambda: current[0])
+    reporter.report("idle")
+    current[0] = "working"
+    reporter.report("working")  # accepted by the invoker, lost by the server
+
+    # Re-asserted without any new transition, and with a HIGHER seq than the
+    # report that was lost — which is what makes the high-water mark accept it.
+    assert row.wait_for_state("working") > 2
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+    seqs = row.seqs()
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+
+
+def test_the_heartbeat_does_not_start_without_a_provider() -> None:
+    """A reporter nobody wired costs no thread and sends no extra call."""
+    recorder = Recorder()
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.report("idle")
+    recorder.wait_for_calls(1)
+    time.sleep(0.1)  # many intervals, had there been a heartbeat
+    assert len(recorder.calls) == 1
+    assert reporter._resync_thread is None
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+
+
+def test_the_heartbeat_stops_at_release() -> None:
+    """`_released.wait` is both the sleep and the stop, so quit is not an interval late."""
+    recorder = Recorder()
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.set_state_provider(lambda: "working")
+    reporter.report("working")
+    recorder.wait_for_calls(3)  # the transition plus at least two heartbeats
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+
+    thread = reporter._resync_thread
+    assert thread is not None and not thread.is_alive()
+    settled = len(recorder.calls)
+    time.sleep(0.1)  # ten intervals
+    assert len(recorder.calls) == settled
+    subs = [sub for sub, _ in recorder.calls]
+    assert subs[-1] == "release-agent", subs
+    seqs = recorder.seqs()
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
+
+
+def test_the_heartbeat_survives_a_provider_that_raises() -> None:
+    """A bad provider skips one tick; it must not take the resync thread with it."""
+    recorder = Recorder()
+    counter = itertools.count(1)
+    calls = {"n": 0}
+
+    def provider() -> HerdrState:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the band exploded")
+        return "blocked"
+
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.01,
+    )
+    reporter.set_state_provider(provider)
+    recorder.wait_for_calls(1)
+    assert recorder.states() == ["blocked"]
+    reporter.release()
+    reporter.join(timeout=WAIT_S)
+
+
+def test_the_heartbeat_does_not_break_mint_order_under_contention() -> None:
+    """The module's central claim, with a heartbeat minting concurrently.
+
+    The heartbeat enqueues through the same `_enqueue_report` critical
+    section as `report`, so it is just a third caller; this is the assertion
+    that says so rather than the docstring. Same forced switch interval as
+    `test_delivery_order_is_mint_order_under_contention`.
+    """
+    recorder = Recorder()
+    counter = itertools.count(1)
+    reporter = HerdrReporter(
+        pane_id="w1:p1",
+        binary="/opt/herdr",
+        invoker=recorder,
+        clock=lambda: next(counter),
+        resync_interval_s=0.001,
+    )
+    reporter.set_state_provider(lambda: "working")
+    start = threading.Event()
+
+    def hammer(states: Sequence[HerdrState]) -> None:
+        start.wait()
+        for state in states:
+            reporter.report(state)
+
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("working", "idle") * 20),)
+            ),
+            threading.Thread(
+                target=hammer, args=(cast(Sequence[HerdrState], ("blocked", "idle") * 20),)
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        start.set()
+        for thread in threads:
+            thread.join(WAIT_S)
+        reporter.release()
+        reporter.join(timeout=WAIT_S)
+    finally:
+        sys.setswitchinterval(previous)
+
+    seqs = recorder.seqs()
+    assert seqs == sorted(seqs), f"delivered out of mint order: {seqs}"
+    assert len(set(seqs)) == len(seqs), f"duplicate seq: {seqs}"
+    # Nothing was delivered behind the release, heartbeat included.
+    assert [sub for sub, _ in recorder.calls][-1] == "release-agent"
 
 
 # ---------------------------------------------------------------------------
