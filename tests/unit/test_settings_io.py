@@ -22,6 +22,7 @@ import yaml
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
 
@@ -1224,3 +1225,105 @@ def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, cand
     with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
+
+
+class TestTheModelEffortRow:
+    """The ``model_effort`` row: the birth-default reasoning level for new sessions.
+
+    Registered rather than read-only because ``/settings`` is where a user
+    discovers what is configurable and ``lop config edit`` resolves names out of
+    the same registry (AGENTS.md, "Adding a configuration key"). Its value space
+    is the shared FIXED vocabulary rather than anything model-derived — a paint
+    must not resolve a model, and the CLI must work with no model configured —
+    and an unsupported rung is exactly what the clamp at session build is for,
+    not a reason to hide rungs.
+    """
+
+    def test_the_row_is_a_fixed_vocabulary_enum(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert setting.kind is Kind.ENUM
+        assert setting.path == ("model_effort",)
+        assert setting.section == "model"
+        assert setting.default == ""
+        # Deliberately NOT a `choices_source` (which would need a model) and NOT
+        # `empty_unsets` ("" is a real choice here — `auto`, the model's own
+        # default — rather than a deletion).
+        assert setting.choices_source is None
+        assert setting.empty_unsets is False
+        labels = [choice.label for choice in setting.resolved_choices]
+        assert labels[0] == "auto"
+        assert labels[1:] == list(EFFORT_ORDER)
+        assert setting.resolved_choices[0].value == ""
+
+    def test_every_rung_carries_a_description(self) -> None:
+        """The page's expanded list wants a three-argument Choice per member.
+
+        The help dict's lookup falls back to an empty description on purpose
+        (a KeyError at import would take the whole CLI down for a missing
+        sentence), so the loud failure for a rung added without one belongs
+        HERE."""
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        for choice in setting.resolved_choices:
+            assert choice.description, choice
+
+    def test_a_level_round_trips_through_the_facade(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        assert settings_io.read_setting(manager, setting) == "high"
+
+    def test_the_empty_value_is_accepted_as_no_opinion(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        settings_io.write_setting(manager, setting, "")
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_an_off_vocabulary_value_is_refused(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        with pytest.raises(ValueError):
+            settings_io.write_setting(manager, setting, "turbo")
+
+
+class TestConfigEditAcceptsAnEnumLabel:
+    """``lop config edit`` must accept a choice's displayed LABEL.
+
+    It matched the typed text against the choice VALUES only, which left two
+    documented words unreachable: ``model_effort auto`` (the stored ``""``) was
+    rejected outright, and ``model_effort none`` — a real rung of
+    ``EFFORT_ORDER`` — was converted to Python ``None`` by the generic value
+    guess before ``write_setting`` ever saw it. The guard maps a label to its
+    value before that guess, and only for ENUM settings.
+
+    It lives in this file because it is really about the registry's
+    LABEL→VALUE pair, which is this module's subject; the command is just the
+    keyboard for it.
+    """
+
+    @pytest.mark.parametrize(
+        ("typed", "stored"),
+        [
+            ("auto", ""),
+            ("none", "none"),
+            ("HIGH", "high"),
+        ],
+    )
+    def test_a_label_is_stored_as_its_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        typed: str,
+        stored: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="model_effort", value=typed))
+        assert code == 0, capsys.readouterr()
+        assert ConfigManager(tmp_path).get_config_value("model_effort") == stored

@@ -10,11 +10,15 @@ outlive the model it was chosen for.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.model.configure import build_model_spec
 from local_operator.model.effort import (
     EFFORT_ORDER,
+    configured_effort,
     default_effort,
     next_effort,
     resolve_effort,
@@ -380,3 +384,53 @@ class TestClampingAgainstAnExplicitLadder:
             assert resolve_effort("claude-opus-5", requested) == resolve_effort_in(
                 supported_efforts("claude-opus-5"), default_effort("claude-opus-5"), requested
             )
+
+
+class TestConfiguredEffort:
+    """``configured_effort`` — the one reader of the ``model_effort`` key.
+
+    The registered key is the only vocabulary; this function just resolves it
+    and normalises the value. What matters most here is the property a rewrite
+    is most likely to lose: it sits on the BOOT path (``_prepare`` and
+    ``bootstrap.resolve_model_configuration``), so it must NEVER raise. A
+    broken, missing or hand-edited config degrades to "no opinion" — exactly
+    the behaviour before the key existed — rather than failing a launch.
+    """
+
+    @staticmethod
+    def _stored(tmp_path, value: Any) -> ConfigManager:
+        """A manager holding ``value`` at the key, as a hand-edit would.
+
+        ``set_config_value`` rather than the ``write_setting`` facade, because
+        the facade VALIDATES: a mis-cased or off-vocabulary value can only get
+        into the file by hand, which is the case this reader has to survive.
+        """
+        manager = ConfigManager(tmp_path)
+        manager.set_config_value("model_effort", value)
+        return manager
+
+    def test_absent_key_is_no_opinion(self, tmp_path) -> None:
+        assert configured_effort(ConfigManager(tmp_path)) is None
+
+    def test_empty_and_whitespace_are_no_opinion(self, tmp_path) -> None:
+        """The registry's own "no opinion" is the empty string, and the reader
+        must agree with the schema rather than inventing a second spelling."""
+        assert configured_effort(self._stored(tmp_path, "")) is None
+        assert configured_effort(self._stored(tmp_path, "   ")) is None
+
+    def test_a_level_is_normalised_to_lowercase(self, tmp_path) -> None:
+        assert configured_effort(self._stored(tmp_path, "High")) == "high"
+
+    def test_an_unknown_word_is_passed_through(self, tmp_path) -> None:
+        """Deliberately NOT validated away: ``resolve_effort_in`` answers an
+        off-vocabulary request with the model's own default, so a typo degrades
+        to the model default instead of raising on the boot path — and the
+        settings page can still show the user the odd token they stored."""
+        assert configured_effort(self._stored(tmp_path, "turbo")) == "turbo"
+
+    def test_it_never_raises(self) -> None:
+        """A manager that cannot answer, and the crudest wrong type, both mean
+        "no configured effort". This is the one property a boot path cannot
+        compromise on."""
+        assert configured_effort(None) is None
+        assert configured_effort(object()) is None

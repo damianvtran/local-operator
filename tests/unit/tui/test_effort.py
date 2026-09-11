@@ -23,7 +23,13 @@ from local_operator.model.configure import build_model_spec
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
-from tests.unit.tui.test_app_pilot import FakeSession, _band, _factory
+from tests.unit.tui.test_app_pilot import (
+    FakeProviderController,
+    FakeSession,
+    _band,
+    _factory,
+    _FakeDef,
+)
 
 
 class EffortSession(FakeSession):
@@ -48,6 +54,42 @@ class EffortSession(FakeSession):
 
     def set_model(self, model: Any, *, explicit: bool = False) -> None:
         self._spec = model
+
+
+class EffortProviderController(FakeProviderController):
+    """A controller that resolves a selector to a REAL, shipped ``ModelSpec``.
+
+    ``FakeProviderController.resolve_model`` answers with a bare ``FakeModel``
+    that carries no ladder at all, which would make every clamp assertion in
+    this file vacuous: a level would be cleared because there was nothing to
+    clamp INTO, not because the target lacks a knob. ``build_model_spec`` is
+    the same offline derivation the real controller lands on.
+    """
+
+    def login_providers(self):
+        return [
+            _FakeDef("anthropic", "Anthropic", None, ("claude",)),
+            _FakeDef("openai", "OpenAI", None, ("gpt",)),
+        ]
+
+    def provider(self, pid):
+        for definition in self.login_providers():
+            if definition.id == pid:
+                return definition
+        return None
+
+    def has_any_credential(self, provider):
+        return True
+
+    def is_usable(self, provider):
+        return True
+
+    # ``FakeProviderController.resolve_model`` is annotated to return a bare
+    # ``FakeModel``; a controller that answers with a REAL spec is the point of
+    # this subclass, so the return is widened to ``Any`` rather than narrowed
+    # to a type the base cannot promise.
+    def resolve_model(self, provider, model_id) -> Any:
+        return build_model_spec(provider.lower(), model_id)
 
 
 async def _boot(pilot, app: OperatorApp) -> None:
@@ -614,3 +656,165 @@ async def test_apply_frontend_state_preserves_auto_effort_label() -> None:
 
         assert app._status._effort == "auto"
         assert "auto" in _band(app)
+
+
+# ---------------------------------------------------------------------------
+# `/model default` persists the level, and `/model saved` adopts it back
+# ---------------------------------------------------------------------------
+
+
+def _config_file(tmp_path) -> None:
+    """A file on disk, so ConfigManager builds its own Config rather than
+    mutating the module-level DEFAULT_CONFIG singleton other tests share."""
+    (tmp_path / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: anthropic\n  model_name: claude-opus-5\n"
+    )
+
+
+def _written(tmp_path) -> dict[str, Any]:
+    import yaml
+
+    return yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+
+
+@pytest.mark.asyncio
+async def test_model_default_saves_the_level_alongside_the_model(tmp_path, monkeypatch) -> None:
+    """`/model default` used to persist only the model pair, so the operator
+    re-ran `/effort` every launch. The remembered level now rides into the
+    birth default, written LAST so a mid-loop failure cannot leave the effort
+    pointing at a model the pair never reached (nothing else has moved yet)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _config_file(tmp_path)
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort low")
+        await _submit(pilot, app, "/model default")
+        notices = _notices(app)
+    written = _written(tmp_path)
+    assert written["model_name"] == "claude-opus-5", written
+    assert written["model_effort"] == "low", written
+    # The receipt names the third key, in the registry's own vocabulary
+    # (`auto` for the empty value), so a user can see what was made durable.
+    assert any("model_effort low (used by new sessions)" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_model_default_with_no_chosen_level_saves_no_opinion(tmp_path, monkeypatch) -> None:
+    """The model's SEEDED default is not a deliberate choice (D6). Persisting
+    `high` here — which `build_model_spec` merely seeds for Anthropic — would
+    freeze an INFERENCE into every future launch and, on a later
+    `/model default <other>`, silently deepen that model's reasoning."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _config_file(tmp_path)
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/model default")
+        notices = _notices(app)
+    written = _written(tmp_path)
+    assert written["model_effort"] == "", written
+    assert any("model_effort auto (used by new sessions)" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_model_default_clamps_the_saved_rung_and_runs_it(tmp_path, monkeypatch) -> None:
+    """D7: on the persist path the SAVED rung and the RUNNING rung must agree.
+
+    `/effort xhigh` on `claude-opus-5`, then `/model default
+    anthropic/claude-opus-4-6` — whose ladder stops at `high`, one rung below
+    `xhigh` on both sides, so the tie goes down. Without the live clamp the key
+    would say `xhigh` while the band read the model's own default, and the next
+    launch would make that disagreement real.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _config_file(tmp_path)
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort xhigh")
+        await _submit(pilot, app, "/model default anthropic/claude-opus-4-6")
+        level = _level(app)
+        remembered = app._effort_choice
+        band = _band(app)
+    written = _written(tmp_path)
+    assert written["model_name"] == "claude-opus-4-6", written
+    assert written["model_effort"] == "high", written
+    assert level == "high"
+    assert remembered == "high"
+    assert "high" in band
+
+
+@pytest.mark.asyncio
+async def test_model_default_on_a_model_with_no_ladder_clears_the_level(
+    tmp_path, monkeypatch
+) -> None:
+    """A model that takes no effort knob has nothing to save: the key is cleared
+    rather than left holding a level the route would silently drop, and the
+    receipt says `auto`. No 400, and no band lying about a level in force."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _config_file(tmp_path)
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort low")
+        await _submit(pilot, app, "/model default openai/gpt-4.1")
+        level = _level(app)
+    written = _written(tmp_path)
+    assert written["model_name"] == "gpt-4.1", written
+    assert written["model_effort"] == "", written
+    assert level is None
+
+
+@pytest.mark.asyncio
+async def test_model_saved_adopts_the_configured_effort(tmp_path, monkeypatch) -> None:
+    """`/model saved` means "put me back on my configured baseline", and effort
+    is part of that baseline now (D8). Restored CLAMPED, so a configured level
+    the saved model cannot express lands on its nearest rung rather than
+    vanishing."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: anthropic\n  model_name: claude-opus-5\n"
+        "  model_effort: medium\n"
+    )
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort low")
+        await _submit(pilot, app, "/model saved")
+        level = _level(app)
+        remembered = app._effort_choice
+    assert level == "medium"
+    assert remembered == "medium"
+
+
+@pytest.mark.asyncio
+async def test_model_saved_clears_the_level_when_nothing_is_configured(
+    tmp_path, monkeypatch
+) -> None:
+    """The key unset means "the model's own default", so adopting the baseline
+    CLEARS a level chosen here — the opposite of leaving the pick in force, and
+    the reason the override is tri-state rather than a plain value."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _config_file(tmp_path)
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort low")
+        await _submit(pilot, app, "/model saved")
+        level = _level(app)
+        remembered = app._effort_choice
+    assert level == "high"  # the model's own documented default
+    assert remembered is None

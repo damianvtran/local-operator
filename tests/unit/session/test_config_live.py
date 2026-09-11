@@ -1089,8 +1089,15 @@ async def test_saving_the_default_here_never_reports_the_torn_pair(tmp_path, mon
         _EVENTS[id(session)].clear()
 
         # Exactly the loop in ``OperatorApp._activate_resolved_model``: the
-        # facade, one call per key, each notifying this process's watcher.
-        for key, value in (("hosting", "openai"), ("model_name", "gpt-x")):
+        # facade, one call per key, each notifying this process's watcher. The
+        # third key is the effort the persist path now writes LAST (D7); it
+        # notifies on its own, and must be silent for the same reason the pair
+        # is — the command printed its own receipt.
+        for key, value in (
+            ("hosting", "openai"),
+            ("model_name", "gpt-x"),
+            ("model_effort", "low"),
+        ):
             setting = settings_io.resolve_key(key)
             assert setting is not None, key
             settings_io.write_setting(manager, setting, value)
@@ -1102,6 +1109,7 @@ async def test_saving_the_default_here_never_reports_the_torn_pair(tmp_path, mon
         saved = ConfigManager(config_dir)
         assert saved.get_config_value("hosting") == "openai"
         assert saved.get_config_value("model_name") == "gpt-x"
+        assert saved.get_config_value("model_effort") == "low"
     finally:
         await session.dispose()
 
@@ -1309,5 +1317,50 @@ async def test_a_re_enabled_web_tool_returns_to_its_registry_position(
         assert DEFAULT_TOOL_NAMES.index("web_search") < DEFAULT_TOOL_NAMES.index("web_fetch")
         assert after.index("web_search") < after.index("web_fetch"), after
         assert after[-1] != "web_search", "the re-enabled tool was appended"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_external_effort_edit_says_so_once(tmp_path, monkeypatch) -> None:
+    """D9: the model-default notice covers an ``model_effort``-only edit too.
+
+    The TUI's own listener SKIPS the whole ``model`` section — a local write is
+    the author's own receipt — so without the effort in this predicate an edit
+    made in another process would move new conversations' birth default with no
+    signal anywhere: the one member of the section that changed silently. The
+    notice's advice is now literally true, because ``/model saved`` adopts the
+    configured effort here (D8) — so naming the change names the remedy.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    manager = ConfigManager(config_dir)
+    manager.set_config_value("hosting", MODEL.provider)
+    manager.set_config_value("model_name", MODEL.model_id)
+    session = make_session(tmp_path, RebindableStream({}), compaction_settings=CompactionSettings())
+    _capture_events(session)
+    watcher = process_watcher(config_dir)
+    subscribe(session, watcher)
+    try:
+        session.set_model(MODEL.model_copy(update={"model_id": "chosen"}), explicit=True)
+        await _settle(session)
+        _EVENTS[id(session)].clear()
+
+        write_from_another_process(config_dir, "model_effort", "high")
+        change = watcher.poll_now()
+        assert change is not None and change.source == "disk"
+        # One key, so the delivery cannot tear; the predicate's third member is
+        # what makes it differ from the spec's level and print.
+        assert change.changed_keys == frozenset({"model_effort"})
+        await _settle(session)
+
+        notices = _notices(session)
+        assert len(notices) == 1, notices
+        assert "keeping test/chosen" in notices[0] and "new sessions" in notices[0]
+        # The key is a birth default for NEW conversations: a running session's
+        # model and level are untouched.
+        assert session.model.model_id == "chosen"
+        assert session.model.reasoning_effort == MODEL.reasoning_effort
     finally:
         await session.dispose()
