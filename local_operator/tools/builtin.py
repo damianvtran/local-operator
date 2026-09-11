@@ -3608,15 +3608,19 @@ class _FileScan:
     lazy properties rather than built eagerly because the whole thing is a
     failure-path cost: an all-exact batch must not pay it once.
 
-    ``lines`` is cheap; ``token_set`` / ``bags`` are the expensive ones and are
-    built only by the diagnostics that need them.
+    ``lines`` / ``offsets`` / ``offline`` are cheap; ``token_set`` / ``bags`` /
+    ``doc_freq`` are the expensive ones and are built only by the two
+    consumers that need them.
     """
 
-    __slots__ = ("_content", "_lines", "_sets", "_bags")
+    __slots__ = ("_content", "_lines", "_raw_lines", "_offsets", "_stripped", "_sets", "_bags")
 
     def __init__(self, content: str) -> None:
         self._content = content
         self._lines: list[str] | None = None
+        self._raw_lines: list[str] | None = None
+        self._offsets: list[int] | None = None
+        self._stripped: dict[str, list[int]] | None = None
         self._sets: list[frozenset[str]] | None = None
         self._bags: list[Counter[str]] | None = None
 
@@ -3635,6 +3639,49 @@ class _FileScan:
         if self._lines is None:
             self._lines = self._content.splitlines()
         return self._lines
+
+    @property
+    def raw_lines(self) -> list[str]:
+        """Lines WITH their endings — what a matched window is rebuilt from.
+
+        Built from the raw content rather than by appending an ending to
+        ``lines``: ``str.splitlines`` also breaks on form feed and the C1
+        separators, so re-deriving the endings would silently disagree with
+        the line count for any file containing one.
+        """
+        if self._raw_lines is None:
+            self._raw_lines = self._content.splitlines(keepends=True)
+        return self._raw_lines
+
+    @property
+    def offsets(self) -> list[int]:
+        """Character offset each line starts at, aligned with ``lines``."""
+        if self._offsets is None:
+            offsets: list[int] = []
+            at = 0
+            for line in self.raw_lines:
+                offsets.append(at)
+                at += len(line)
+            self._offsets = offsets
+        return self._offsets
+
+    @property
+    def stripped_index(self) -> dict[str, list[int]]:
+        """``stripped line -> line indices``: the tolerant matcher's index.
+
+        Keyed on the bare ``strip()`` form, because that is exactly the
+        equality the tolerant pass tests — membership here is therefore not
+        an approximation of a tolerant match, it IS that match for one line.
+        CRLF spellings collapse onto the same key with their LF twins, which
+        is why the key is recomputed from the raw line instead of reused from
+        ``lines``.
+        """
+        if self._stripped is None:
+            index: dict[str, list[int]] = {}
+            for i, line in enumerate(self.raw_lines):
+                index.setdefault(line.strip(), []).append(i)
+            self._stripped = index
+        return self._stripped
 
     def token_set(self, index: int) -> frozenset[str]:
         """Distinct word tokens of one line — the candidate prefilter's unit."""
@@ -3712,6 +3759,17 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     Tolerance is one-directional by design: an exact match is never silently
     flexed, and a fuzzy match never silently wins over an exact one that
     exists elsewhere.
+
+    Pass 2 is index-driven rather than scan-driven. Every line of a tolerant
+    match must strip-equal its counterpart, so a window can only START where
+    the pattern's most selective stripped line occurs; the inverted index
+    hands those starts over directly and the remaining lines are verified by
+    dict membership. The naive loop this replaces (try every start, strip
+    every line of the window) was O(file_lines x pattern_lines) strip() calls
+    — 20,000 lines against a 200-line pattern is 4 million of them. The two
+    are equivalent by construction, and a unit test checks them against each
+    other on a generated corpus. The snapshot's index comes from ``_scan_for``
+    so it is shared with the not-found diagnostics of the same edit call.
     """
     windows: list[tuple[int, int, str]] = []
     start = content.find(old_text)
@@ -3721,30 +3779,34 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     if windows:
         return windows
 
-    file_lines = content.splitlines(keepends=True)
-    # Per-line start offsets so a window can be returned as a char span.
-    offsets: list[int] = []
-    at = 0
-    for line in file_lines:
-        offsets.append(at)
-        at += len(line)
+    scan = _scan_for(content)
     old_lines = old_text.splitlines()
+    stripped = [line.strip() for line in old_lines]
+    file_lines = scan.lines
     if not old_lines or len(old_lines) > len(file_lines):
         return []
 
-    def _tolerant(file_line: str, old_line: str) -> bool:
-        return file_line.strip() == old_line.strip()
-
-    for i in range(len(file_lines) - len(old_lines) + 1):
-        window = file_lines[i : i + len(old_lines)]
-        if all(_tolerant(f.rstrip("\r\n"), o) for f, o in zip(window, old_lines)):
+    # The seed is the pattern line whose stripped form occurs on the fewest
+    # file lines: one occurrence means one verification, and every other line
+    # of the window is then a single membership test. A seed that is absent
+    # from the index proves no window exists at all, however long the file.
+    index = scan.stripped_index
+    seed = min(range(len(stripped)), key=lambda i: len(index.get(stripped[i], ())))
+    candidates = index.get(stripped[seed], ())
+    offsets = scan.offsets
+    raw_lines = scan.raw_lines
+    width = len(old_lines)
+    for line_index in candidates:
+        first = line_index - seed
+        if first < 0 or first + width > len(file_lines):
+            continue
+        if all(file_lines[first + i].strip() == stripped[i] for i in range(width)):
             # The span runs to the end of the last matched line INCLUDING its
             # newline, so replacing it cannot splice the following line onto
             # the replacement's final line.
-            last_line = window[-1]
-            end = offsets[i + len(old_lines) - 1] + len(last_line)
-            matched = "".join(window)
-            windows.append((offsets[i], end, matched))
+            last_raw = raw_lines[first + width - 1]
+            matched = "".join(raw_lines[first : first + width])
+            windows.append((offsets[first], offsets[first + width - 1] + len(last_raw), matched))
     return windows
 
 
@@ -3831,10 +3893,11 @@ def _closest_regions(
     scores every file line against an anchor with a bare token-SET
     intersection (C-speed set ops, no Python loop over the anchor's tokens)
     and keeps the best ``_EDIT_MAX_CANDIDATE_STARTS`` window starts; stage two
-    runs the real bag-of-words Dice over just those windows. Measured on a
-    synthetic 20,000-line file with a 200-line drifted pattern: 19 ms against
-    6.07 s for scoring every window (326x), with the same top window and score
-    (0.97 at the true start).
+    runs the real bag-of-words Dice over just those windows. Measured here
+    (Darwin 25.6.0 arm64, CPython 3.12.13) on a synthetic 20,000-line file
+    with a 200-line drifted pattern: 21 ms against 6.6 s for scoring every
+    window (321x), with the same top window and score (0.97 at the true
+    start).
     """
     if not pattern_lines:
         return []
