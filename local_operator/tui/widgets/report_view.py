@@ -92,11 +92,12 @@ class ReportView(ScrollView):
     def set_lines(self, lines: list[Text], width: int) -> None:
         """Replace the whole body — one ``Text`` per line — and repaint.
 
-        ``lines`` are already split (``build_report`` returns one ``Text`` per
-        body line), so this is a straight hand-off, not a re-render: the body's
-        line numbering and the caller's must be the same numbering, or the
-        caller's "patch line N" would address a different row than the one it
-        composed.
+        ``lines`` are already split — the screen flattens ``build_report``'s
+        multi-line blocks into one ``Text`` per line before handing them over
+        (see ``analytics_panel._flatten_blocks``) — so this is a straight
+        hand-off, not a re-render. The body's line numbering and the caller's
+        must be the same numbering, or the caller's "patch line N" would
+        address a different row than the one it composed.
 
         ``width`` is the width the lines were COMPOSED for. The content size is
         the wider of that and the longest line, which reproduces what the
