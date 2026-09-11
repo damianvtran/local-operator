@@ -5,21 +5,39 @@ collapses toward the top-left corner: a click lands cells away from the glyph
 under the pointer, and drags select the wrong region. It never recovers within
 the session, because the state that causes it is one-way.
 
-THE DIVISOR. Textual's parser divides incoming mouse coordinates by the cell
-pixel size whenever ``mouse_pixels`` is set (``_xterm_parser.py:95-102``): it
-computes ``pixel_width / width`` and ``pixel_height / height`` and scales x and
-y by those ratios. That arithmetic is correct only if the coordinates on the
-wire are PIXELS. A Herdr-class terminal keeps sending CELL coordinates, so a
-position at cell (40, 44) arrives as (40, 44) and is divided by roughly (8, 16)
-into (5, 2) — the collapse.
+THE DIVISOR — AND THE ACTUAL BUG. Textual's parser divides incoming mouse
+coordinates by the cell pixel size whenever ``mouse_pixels`` is set
+(``_xterm_parser.py:95-102``): it computes ``pixel_width / width`` and
+``pixel_height / height`` and scales x and y by those ratios. That arithmetic is
+correct only if the coordinates on the wire are PIXELS. A Herdr-class terminal
+keeps forwarding CELL coordinates even once mode 1016 has been requested, so a
+position at cell (40, 44) arrives as (40, 44) and is divided by a measured
+(8.00, 16.00) into (5, 2) — the collapse. THIS mismatch is the defect; the mode
+negotiation below is only how we walk into it.
+
+THE REPORTS ARE SOLICITED — TEXTUAL ASKS FOR THEM ITSELF. A clean Herdr VT is
+spec-compliant: it answers ``CSI ?2048$p`` with ``;2`` (supported, NOT enabled)
+and sends NOTHING on a real geometry change. Reports begin only once an app sets
+mode 2048 — and on an unpatched boot the app that sets it is Textual, writing
+``?2048h`` at byte ~123 of its own output in reply to that ``;2``. Measured on
+herdr 0.9.0.
+
+MODE 2048 IS STICKY PER-VT, WHICH IS WHY THE RESET IS AT THE TERMINAL. The mode
+is terminal state, not process state: it outlives the process that set it and is
+shared by every process on that tty. A VT dirtied by an earlier app — a previous
+Textual run that exited without resetting, say — therefore feeds reports to a
+process that never asked for them. That is why the reset is written to the
+TERMINAL at boot rather than negotiated per session: we cannot assume we found
+the VT clean, and nothing in Textual's own negotiation would clear inherited
+state.
 
 THE UNGATED ONE-WAY LATCH. ``mouse_pixels`` is set to True by the in-band
 resize report handler at ``_xterm_parser.py:271-283``, on the mere ARRIVAL of a
 ``CSI 48;rows;cols;pxH;pxW t`` report, with nothing checked first and nothing
-that ever sets it back. This is why the environment guard alone is not enough:
-Herdr-class terminals emit that report UNSOLICITED on any resize, without mode
-2048 ever having been set, so suppressing our side of the negotiation does not
-stop the report from arriving and latching the divisor.
+that ever sets it back. It does not care WHY the report came — solicited by
+Textual moments earlier, or inherited from a sticky mode this process never
+touched. That is why the environment guard alone is not enough: it can stop us
+asking, but a report that arrives anyway still latches the divisor.
 
 THE NEGOTIATION GATE. The other direction is gated. ``TEXTUAL_SMOOTH_SCROLL=0``
 makes ``constants.SMOOTH_SCROLL`` False, and the mode-report branch at
@@ -30,15 +48,17 @@ THE RE-ENABLE BRANCH. That gate is why the mode reset alone is not enough
 either. Textual's driver answers a ``;2`` reply — supported but reset, exactly
 what a bare ``CSI ?2048l`` produces — by turning the mode back on: the
 supported-but-not-enabled branch at ``linux_driver.py:470-483`` calls
-``_enable_in_band_window_resize()`` and ``_enable_mouse_pixels()``, putting
-``?2048h`` and ``?1016h`` on the wire. Our reset would be undone within
-milliseconds of being written.
+``_enable_in_band_window_resize()`` (``:480``) and ``_enable_mouse_pixels()``
+(``:482``), putting ``?2048h`` and ``?1016h`` on the wire. This is exactly what
+an unpatched boot was measured doing — ``?2048h`` at byte ~123, ``?1016h`` at
+~131, reports immediately after — so without the guard our reset would be undone
+within milliseconds of being written, by us.
 
-SO BOTH MECHANISMS ARE LOAD-BEARING AND NEITHER IS REDUNDANT. The reset stops
-the TERMINAL from sending reports; the environment guard stops TEXTUAL from
-re-enabling the mode after seeing the reset. Remove either one and the divisor
-latches again — the first by the terminal's unsolicited report, the second by
-the driver's reply to its own query.
+SO BOTH MECHANISMS ARE LOAD-BEARING AND NEITHER IS REDUNDANT. The reset clears
+the mode AT THE TERMINAL, including a sticky one we inherited; the environment
+guard stops TEXTUAL from turning it straight back on after seeing the reset.
+Remove either one and the divisor latches again — the first on state left set in
+the VT by an earlier app, the second on the driver's reply to its own query.
 
 ORDERING. :func:`reset_in_band_resize` must reach the wire before the driver
 issues its ``CSI ?2048$p`` query at ``linux_driver.py:299``, and
@@ -49,7 +69,7 @@ RESIZE STAYS LIVE. Nothing here costs us resize handling. With the negotiation
 suppressed the driver's ``_in_band_window_resize`` stays False, which is the
 condition its SIGWINCH handler at ``linux_driver.py:246-250`` tests before
 sending a size event — so the out-of-band signal path remains the one in use,
-exactly as it is on any terminal without mode 2048.
+exactly as it is on any terminal where mode 2048 is not enabled.
 
 THE ACCEPTED COST. ``App.supports_smooth_scrolling`` (``app.py:865``) is only
 ever set True from an in-band resize message, so it stays False. Scrollbar drags
@@ -71,9 +91,10 @@ import os
 import sys
 from typing import MutableMapping, TextIO
 
-#: ``CSI ? 2048 l`` — reset in-band window resize notifications. Herdr-class
-#: terminals send the report unsolicited, so this is addressed at the TERMINAL,
-#: not at Textual's view of whether the mode is negotiated.
+#: ``CSI ? 2048 l`` — reset in-band window resize notifications. Addressed at the
+#: TERMINAL rather than at Textual's view of the mode because mode 2048 is
+#: STICKY per-VT: a previous app can have left it set, and no amount of
+#: not-negotiating on our side clears state we inherited.
 DISABLE_IN_BAND_RESIZE = "\x1b[?2048l"
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE``
