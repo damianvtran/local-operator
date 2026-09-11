@@ -387,7 +387,14 @@ async def test_listings_and_chart_stay_local_and_engage_nothing_extra(
             # Rendered from local config immediately, while still cold.
             assert "lopdev" in _transcript_text(app)
             land.set()
-            await _until(pilot, lambda: not session.is_cold)
+            # ASSERTED, not merely awaited: `_until` gives up after its own
+            # timeout and the assertions below would then run against a still-cold
+            # viewer with no listing to have routed anything — the warm half of
+            # this test passing vacuously. A mutation that makes `fake_engage`
+            # return without landing the runtime must fail HERE.
+            assert await _until(
+                pilot, lambda: not session.is_cold
+            ), "the mount engage never landed; the warm half was never reached"
             # Slack for the NEGATIVE assertion below rather than a settle for
             # work this test needs: any authoritative call these listings could
             # make would arrive on the owner's socket, and giving it time to

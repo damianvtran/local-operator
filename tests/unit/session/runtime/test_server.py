@@ -1424,6 +1424,46 @@ async def test_the_record_directory_is_fixed_when_the_runtime_starts(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    """The same invariant on the in-process start path.
+
+    ``start_in_process`` reaches ``_serve`` through a direct ``await`` on the
+    caller's own task, so today nothing can re-point the config dir in between
+    and this half is defence in depth rather than a closed race. It is still the
+    invariant both start paths share — the record's directory is decided when
+    the runtime is asked to START, never when the publisher is built — and this
+    fails if that pin is dropped, which is what makes it worth asserting rather
+    than assuming: `_serve` is made to observe a moved config dir, and the
+    record must land where this runtime started anyway.
+    """
+
+    started_in = tmp_path / "started-in"
+    moved_to = tmp_path / "moved-to"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
+    original_serve = RuntimeServer._serve
+
+    async def serve_after_the_world_moved(server: RuntimeServer) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+        await original_serve(server)
+
+    monkeypatch.setattr(RuntimeServer, "_serve", serve_after_the_world_moved)
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    await server.start_in_process()
+    try:
+        live = [rec for rec, state in registry.scan(started_in) if state == "live"]
+        assert live, "the runtime must publish into the config dir it started in"
+        stray = registry.run_dir(moved_to) / f"{server._record.pid}.json"
+        assert not stray.exists(), (
+            "an in-process runtime must not publish where the config dir has "
+            "since moved — that filename belongs to another session"
+        )
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S

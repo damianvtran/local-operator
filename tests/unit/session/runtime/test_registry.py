@@ -9,6 +9,8 @@ import stat
 import time
 from pathlib import Path
 
+import pytest
+
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 
@@ -229,7 +231,9 @@ def test_the_heartbeat_republishes_the_subagent_counts(tmp_path: Path) -> None:
         registry.unpublish(record.pid, root=tmp_path)
 
 
-def test_the_publisher_rewrites_the_file_it_created(tmp_path: Path, monkeypatch) -> None:
+def test_the_publisher_rewrites_the_file_it_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A publisher's directory is decided when it publishes, not per call.
 
     ``root=None`` means "whatever ``config_dir()`` says", and ``config_dir()``
@@ -265,7 +269,9 @@ def test_the_publisher_rewrites_the_file_it_created(tmp_path: Path, monkeypatch)
         publisher.close()
 
 
-def test_the_publisher_removes_only_the_file_it_created(tmp_path: Path, monkeypatch) -> None:
+def test_the_publisher_removes_only_the_file_it_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The exit path, where the damage inverts from clobbering to deleting.
 
     Needs its own test because the two directions fail differently: a stray

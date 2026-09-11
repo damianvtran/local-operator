@@ -215,7 +215,12 @@ async def start_exec_control(
         session_id=record.session_id,
         pid=record.pid,
         port=record.control_port,
-        record_path=str(registry.record_path(record.pid, config_dir())),
+        # The SAME root this run resolved above, not a second `config_dir()`
+        # call: the path printed as the supervisor's correlation handle has to
+        # be the file this run actually published, and a re-resolved
+        # environment could name another directory's `<pid>.json` — the same
+        # "resolve it once" rule `RecordPublisher` now holds for its own writes.
+        record_path=str(registry.record_path(record.pid, config_directory)),
         supervised=supervised,
     )
 

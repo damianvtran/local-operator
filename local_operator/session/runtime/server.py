@@ -764,7 +764,7 @@ class RuntimeServer:
         #: then — another session's, under a pid-keyed filename. Left as None
         #: until a start path runs, so a server that is never started keeps the
         #: publisher's own default.
-        self._run_root: Path | None = None
+        self._config_root: Path | None = None
         self._server: asyncio.AbstractServer | None = None
         self._unsubscribe_events: Callable[[], None] | None = None
         # Strong references to the one event writer per subscribed client. A
@@ -856,7 +856,7 @@ class RuntimeServer:
         # already moved on from, publishing — and then deleting — a record in
         # a directory this runtime never started in. See
         # ``RecordPublisher.__init__`` for the other half of this invariant.
-        self._run_root = config_dir()
+        self._config_root = config_dir()
         # The thread name is a runtime-observable diagnostic (py-spy, thread
         # dumps, `ps -M`) and deliberately keeps its mobile-era spelling: this
         # move changes no behaviour, and renaming it would silently invalidate
@@ -871,7 +871,14 @@ class RuntimeServer:
         call through a cross-thread hop for no benefit."""
         if self._server is not None:
             return
-        self._run_root = config_dir()
+        # Same pin as `start`, and here it is defence in depth rather than a
+        # closed race: this path reaches `_serve` through a direct `await` on
+        # the caller's own task, with no scheduling point in between, so today
+        # nothing can re-point the config dir first. The pin is still the
+        # invariant — the record's directory is decided when the runtime is
+        # asked to start, never when the publisher is built — and it is what
+        # keeps that true if `_serve` ever gains a yield before the publisher.
+        self._config_root = config_dir()
         self._loop = asyncio.get_running_loop()
         await self._serve()
 
@@ -1089,7 +1096,7 @@ class RuntimeServer:
         )
         port = self._server.sockets[0].getsockname()[1]
         self._record.control_port = port
-        self._publisher = RecordPublisher(self._record, self._run_root)
+        self._publisher = RecordPublisher(self._record, self._config_root)
         self._unsubscribe = self._handle.subscribe(self._schedule_push)
         # v4: hosts that can serialize their event stream feed the relay.
         # Probed, not required — a handle without the capability leaves attach
