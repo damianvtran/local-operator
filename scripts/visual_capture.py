@@ -219,12 +219,41 @@ async def settle_status_line(pilot: Any, app: Any, *, tries: int = 200) -> None:
     reach into the band's private state, and that is deliberate: the public
     surface paints the sentinel, so any public read would have to parse the
     very text being waited on.
+
+    The pending state is a NON-EMPTY sentinel, which is the trap this helper
+    shipped with: testing ``_model_label`` for truthiness is already true while
+    the band is pending, so the wait collapsed to one ``pause()`` — the very
+    "hope" it exists to replace (review round 2, M1). Hence the explicit
+    comparison, and hence the import of the sentinel instead of a re-typed
+    string that could drift from the one the app pushes.
+
+    NEVER RAISES, by design. A status line is not worth failing a capture over,
+    so an app with no readable band is a no-op, and a band that never settles
+    is bounded and then reported on stderr — the silent version of that path is
+    what let a pending frame ship in the first place.
     """
+    # Imported here rather than at module scope: this module is imported BEFORE
+    # `isolate_capture()` runs, and importing a `local_operator` module pulls in
+    # the app's package graph — which must not happen until HOME and the config
+    # dir have been redirected, or the isolation applies too late to matter.
+    from local_operator.tui.widgets.welcome import MODEL_PENDING
+
+    band = getattr(app, "_status", None)
+    label = getattr(band, "_model_label", None)
+    if label is None:
+        # No band, or a band this helper cannot read. There is no pending state
+        # to wait out, so this is a no-op rather than 200 frames of waiting.
+        return
     for _ in range(tries):
-        await pilot.pause()
-        if getattr(getattr(app, "_status", None), "_model_label", ""):
+        if label and label != MODEL_PENDING:
             return
-    raise AssertionError("status band never left the pending model label")
+        await pilot.pause()
+        label = getattr(band, "_model_label", "")
+    print(
+        f"warning: status band still reads {label!r} after {tries} frames; "
+        "saving the capture with it unsettled",
+        file=sys.stderr,
+    )
 
 
 def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | None = None) -> str:
