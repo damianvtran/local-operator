@@ -221,6 +221,34 @@ async def test_a_page_carrying_both_epoch_aliases_still_validates(tmp_path: Path
     assert emitted["owner_epoch"] == "synthetic-epoch"
 
 
+def test_the_alias_collapse_does_not_mutate_the_callers_dict() -> None:
+    """The ``mode="before"`` validator must not write through its input.
+
+    A before-validator is handed the caller's OWN object — not a pydantic-owned
+    copy — so the pop/assign that collapses the aliases used to rewrite the
+    dict passed to ``model_validate`` in place: the caller lost
+    ``runtime_epoch`` and had ``owner_epoch`` overwritten with the new value.
+    Today's sole caller passes a fresh dict, so nothing observable broke, but
+    the next caller that reuses a payload (validating one dict against two
+    models, or logging it after validation) would be silently corrupted. Hold
+    the caller's dict to its snapshot across the call.
+    """
+    payload = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+        "owner_epoch": "stale",
+        "runtime_epoch": "fresh",
+    }
+    snapshot = dict(payload)
+
+    validated = DisplayHistoryWindow.model_validate(payload)
+
+    assert validated.owner_epoch == "fresh"
+    assert validated.runtime_epoch == "fresh"
+    assert payload == snapshot
+
+
 @pytest.mark.asyncio
 async def test_a_pre_rename_viewer_still_accepts_the_wire_page(tmp_path: Path) -> None:
     """The exact attach break round 1 flagged, held shut by a fixture viewer.

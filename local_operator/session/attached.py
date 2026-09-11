@@ -4086,7 +4086,7 @@ class AttachedSession:
         """
         if self._deliberate_stop:
             return "this session was stopped"
-        return "session owner is reconnecting"
+        return "the runtime is reconnecting"
 
     def _go_cold(self, *, refresh: bool = False) -> None:
         """Unbind from a runtime that is gone, keeping the conversation.

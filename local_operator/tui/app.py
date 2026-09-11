@@ -7770,7 +7770,7 @@ class OperatorApp(App[None]):
         Says the same thing the owner's own ``/stop`` says, because it is the
         same fact: the session is cold and ``/resume`` is the way back. The
         id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
-        is what turns every later "owner is reconnecting" into the truth.
+        is what turns every later "runtime is reconnecting" into the truth.
         """
         source = source or self._interaction
         session = source.session
@@ -25764,14 +25764,16 @@ class OperatorApp(App[None]):
                 self._system_notice(text_line, kind)
             elif bool(getattr(session, "_recovering", False)):
                 # `is_cold` is a superset of the drop: it is also true while
-                # the facade is redialing an owner that died. There "send a
+                # the facade is redialing a runtime that died. There "send a
                 # message" is not the lever — the facade's own answer for the
-                # gap is `_unavailable_reason()` ("session owner is
+                # gap is `_unavailable_reason()` ("the runtime is
                 # reconnecting"), the sentence the prompt path already uses
-                # (review round 2, R2-M1).
+                # (review round 2, R2-M1). That literal is matched nowhere;
+                # `_is_runtime_gone` excludes it on the `reconnecting`
+                # substring alone, which the wording keeps.
                 reason = getattr(session, "_unavailable_reason", None)
                 self._system_notice(
-                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    f"{reason() if callable(reason) else 'the runtime is reconnecting'}; "
                     "try /model again in a moment",
                     "warning",
                 )

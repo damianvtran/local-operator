@@ -113,8 +113,18 @@ class DisplayHistoryWindow(BaseModel):
         comes from the newer producer, so its value is the authoritative one,
         and the alternative is honouring a key the rename is retiring. Delete
         with ``AliasChoices`` on the flip release.
+
+        A ``mode="before"`` validator is handed the CALLER's object, not a
+        pydantic-owned copy, so popping and assigning here would mutate the
+        dict the caller passed to ``model_validate`` in place — the caller
+        would lose ``runtime_epoch`` and see ``owner_epoch`` silently
+        overwritten. Today's sole caller passes a fresh dict, but a caller
+        that reuses a payload (validating one dict against two models, or
+        logging it after validation) would be corrupted. Copy before
+        rewriting.
         """
         if isinstance(data, dict) and "runtime_epoch" in data:
+            data = dict(data)
             data["owner_epoch"] = data.pop("runtime_epoch")
         return data
 

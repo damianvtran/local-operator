@@ -204,7 +204,7 @@ what the two caches were always supposed to mean.
 Teardown is already correct for this. `_release_sidebar_source`
 (`app.py:4648-4679`) saves the draft, unsubscribes the frontend, disposes the
 controller and calls `session.dispose()` — which closes the client socket
-(`attached.py`, inside `dispose` at 4964) and nothing else. The runtime
+(`attached.py`, inside `dispose` at 5663) and nothing else. The runtime
 then sees a client disappear, `attach_clients()` drops to 0, and **the
 existing 3-second drain reaps it** (`process.py:341-359`). No new wire op, no
 new frame, no protocol change, and the runtime keeps full authority over its
