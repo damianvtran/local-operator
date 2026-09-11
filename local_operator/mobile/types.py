@@ -532,7 +532,8 @@ def ask_pending_request(
     """Build the phone's ask card from an ``AskQuestion`` (harness type).
 
     The single seam both projection sites use — the TUI bridge
-    (:mod:`.tui_handle`) and the daemon-owned gate (:mod:`.owned`) — so the two
+    (:mod:`.tui_handle`) and the daemon-owned gate
+    (:mod:`local_operator.session.runtime.serving`) — so the two
     surfaces cannot drift in what they carry to the phone (was UX nit-1: one
     site used a ``str(option)`` fallback, the other ``""``). Reading through
     ``getattr`` keeps this decoupled from the pydantic model and lets tests pass

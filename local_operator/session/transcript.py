@@ -1795,6 +1795,17 @@ def _entry_to_message(
     entry: TranscriptEntry, attachments: AttachmentStore | None = None
 ) -> AgentMessage | None:
     """Rehydrate one message entry; malformed rows are dropped individually."""
+    # Bookkeeping rows are not messages and must not be reported as a failed
+    # parse. Custom host snapshots (``attention_started``, ``selected_model``,
+    # ``system_prefix``, ``todo_snapshot``) and ``prune`` markers are read by
+    # their own consumers (``latest_custom``, ``_apply_prune``) and simply are
+    # not message payloads, so validating them here only ever produced the
+    # same "dropping unparseable transcript message entry" warning a genuinely
+    # corrupt MESSAGE row produces — several per resume, which buries the real
+    # one during triage. Only a message row that fails to parse is a drop.
+    if entry.type != ENTRY_MESSAGE:
+        logger.debug("skipping non-message transcript entry %s (%s)", entry.id, entry.type)
+        return None
     payload = dict(entry.payload)
     kind = payload.pop("kind", CUSTOM_KIND_MESSAGE)
     # Producer identity belongs to the transcript envelope, never the Message

@@ -552,7 +552,7 @@ class PeerArrivalProtocol(Protocol):
 
     Threading: the session's implementation sets the event on the loop that
     owns the session, because every registrant path hops there first
-    (``mobile/tui_handle.py``, ``mobile/serving.py`` both use
+    (``mobile/tui_handle.py``, ``session/runtime/serving.py`` both use
     ``run_coroutine_threadsafe``). A future caller that invokes
     ``receive_peer_message`` from its own thread WITHOUT that hop would need
     ``loop.call_soon_threadsafe`` — ``asyncio.Event.set`` is not thread-safe.

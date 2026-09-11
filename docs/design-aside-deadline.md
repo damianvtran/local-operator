@@ -39,7 +39,7 @@ shared by all 19 ops that route through `_request`.
 carrying the whole conversation:
 
 * `tui/app.py:28660` — the aside worker awaits `session.complete_aside(...)`
-* `session/remote.py:4987-5000` — `RemoteSession.complete_aside` → `client.complete_aside`
+* `session/attached.py` — `AttachedSession.complete_aside` → `client.complete_aside`
 * `mobile/attach_client.py:765-766` — `return await self._request("complete_aside", turns=turns)`
 * `session/runtime/server.py:2141-2148` — dispatch awaits the handle
 * `mobile/tui_handle.py:528-536` — `asyncio.run_coroutine_threadsafe(session.complete_aside(messages), owner_loop)`, unbounded, no timeout, no cancellation
@@ -53,7 +53,7 @@ operation, not a fault — which is why the bug is "intermittent, reproducible
 under load" rather than rare.
 
 Blast radius is every terminal: since v0.45.0 every interactive `lop` TUI is a
-`RemoteSession` viewer, so every `/btw` everywhere takes this path.
+`AttachedSession` viewer, so every `/btw` everywhere takes this path.
 
 ### 1.1 Two corrections to the reported mechanism
 
@@ -101,12 +101,13 @@ parameter of the module-level `continue_command`, forwarded to
 ### 1.2 `/btw` is not the only op with this shape
 
 `/compact` from a viewer routes `client.slash("compact", "")`
-(`session/remote.py:5191`) through the same `_request` 15 s budget. The owner's
+(`session/attached.py`, in `compact_now`) through the same `_request` 15 s
+budget. The owner's
 summarization is a provider call the codebase itself measures at **"20-50 s on
 a large context"** (`session/session.py:447`).
 
 Its failure is quieter than `/btw`'s: `compact_now` catches `ConnectionError`
-(`remote.py:5192`) and returns
+(`attached.py`) and returns
 `CompactionOutcome(False, "unavailable", self._unavailable_reason())`, so a
 timeout is reported to the user as *the owner being unavailable* — no dangling
 colon, but a wrong diagnosis of a healthy owner.
@@ -126,14 +127,15 @@ the argument for adding the parameter rather than hard-coding a branch for
 `ConnectionError` from `_request` is load-bearing: callers read it to decide
 whether to redial. Auditing every catch that can see it:
 
-* `session/remote.py:2132` — `except (ConnectionError, OSError, TimeoutError)` (bind retry)
-* `session/remote.py:4418`, `4506` — `except (ConnectionError, OSError, TimeoutError)` (redial / takeover)
-* `session/remote.py:4571`, `4601`, `4647` — `except (ConnectionError, RuntimeError)` (capability absent → `return False`)
-* `session/remote.py:5183`, `5192` — `except ConnectionError` **alone** (routed slash, `compact_now`)
+* `session/attached.py` — `except (ConnectionError, OSError, TimeoutError)` (bind retry)
+* `session/attached.py` — `except (ConnectionError, OSError, TimeoutError)` (redial / takeover)
+* `session/attached.py` — `except (ConnectionError, RuntimeError)` (capability absent → `return False`)
+* `session/attached.py` — `except ConnectionError` **alone** (routed slash, `compact_now`)
 * `mobile/attach_client.py:424` — `except ConnectionError` alone (pump)
 * `server/routes/desktop_sessions.py:214` — `except ConnectionError` alone
 
-The two `ConnectionError`-only sites at `remote.py:5183/5192` are the
+The two `ConnectionError`-only sites in `session/attached.py`
+(`route_shared_slash`, `compact_now`) are the
 constraint. Re-raising an ack timeout as a plain `TimeoutError` would sail past
 both, and a timeout on `/compact` would escape as a raw exception instead of
 `CompactionOutcome(False, "unavailable", ...)`. **Changing the exception type to
@@ -169,7 +171,7 @@ from a slow one, and finding 9's test gap gets a test asserting on prose. It is
 smaller by about four lines and worse.
 
 Rejected: **plain `TimeoutError`**. Cleanest taxonomy, breaks
-`remote.py:5183/5192` as shown above.
+`route_shared_slash` / `compact_now` in `session/attached.py` as shown above.
 
 ## 3. Deadline policy
 
@@ -180,7 +182,7 @@ Four candidates, weighed against the corrected finding 5.
 no protocol change, no owner change. The other 18 ops are untouched because the
 default is unchanged.
 
-**(b) Real streaming.** `remote.py:4998-5003` already fakes it — it calls
+**(b) Real streaming.** `complete_aside` in `session/attached.py` already fakes it — it calls
 `on_delta` once with the settled answer — and the card is built to stream. Best
 end-state UX, and progress on the socket. But it needs an out-of-band
 owner→client frame, owner-side plumbing of `session.complete_aside(on_delta=)`,
@@ -247,7 +249,7 @@ rather than reinvented: an additive field on a known op is tolerated by
 `validate_control_frame` (`mobile/types.py:187-190` validates only `turns`); a
 new op gets `error: unknown op` from an old owner
 (`session/runtime/server.py:2257`, `2492`), which callers already handle
-(`remote.py:4571` treats it as capability-absent); and a capability string in
+(`session/attached.py` treats it as capability-absent); and a capability string in
 `record.capabilities` is the pre-dial probe, as `completion-ack-v1` does at
 `session/runtime/server.py:668-671` / `attach_client.py:218`.
 
@@ -296,7 +298,7 @@ aside worker renders a non-empty message and no trailing `:` — asserted on the
 rendered card text, not on the helper in isolation.
 
 Note the file boundary: slice 1 owns `mobile/attach_client.py`, slice 2 owns
-`tui/*`. Neither touches `session/remote.py`, which needs no change at all.
+`tui/*`. Neither touches `session/attached.py`, which needs no change at all.
 
 ### Slice 3 — the socket fix (follow-up, NOT this change)
 
@@ -305,7 +307,7 @@ Files: `local_operator/session/runtime/server.py`, `local_operator/mobile/tui_ha
 Scope: dispatch `complete_aside` off the reader loop (PR #678 shape) so it
 stops head-of-line blocking `server.py:1382`; deliver the answer out of band;
 add `cancel_aside`; then real streaming (§3b) reusing the delta channel
-`remote.py:4998-5003` currently fakes. Behind a capability string per §5.
+that `complete_aside` currently fakes. Behind a capability string per §5.
 
 Deferred honestly: this is the *correct* fix for the socket, and it is not what
 the user reported. It changes the protocol, so it carries skew risk that slices

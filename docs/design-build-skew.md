@@ -32,7 +32,7 @@ The Sep 5 incident is the concrete shape:
    the band and calls `_submit_command_prompt(request, attachments)`. The
    pre-#624 viewer prints `text` and has no consumer for `data.request`
    (verified: `git show v0.46.23:local_operator/tui/app.py` — the renderer
-   ends at `if text:`; and v0.46.23's `serving.py` still returned
+   ends at `if text:`; and v0.46.23's `owned.py` still returned
    `noop {"type": "team_mutate"}`, so the receipt type was brand new to it).
 5. Result: notice printed, request silently dropped. No user row, no turn.
 
@@ -281,7 +281,7 @@ incident.
 
 The discovery record **is** the version channel: an attach client reads it
 before dial (`find_runtime_record`) and holds it at bind
-(`AttachedSession._bind_to(record)`, remote.py:1002); the daemon reads records
+(`AttachedSession._bind_to(record)`, attached.py); the daemon reads records
 the same way. No frame change is needed — the "ready/hello" for a v5 attach
 client effectively arrives with the record. (The task suggested the frontend
 sync frame; the record is strictly earlier, needs no pydantic change, and

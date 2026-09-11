@@ -183,6 +183,73 @@ async def test_the_wire_keeps_the_old_epoch_key_and_reads_both(
 
 
 @pytest.mark.asyncio
+async def test_a_page_carrying_both_epoch_aliases_still_validates(tmp_path: Path) -> None:
+    """Tolerate the transitional payload that carries BOTH epoch keys.
+
+    ``AliasChoices`` consumes only the FIRST match and this DTO forbids extras,
+    so a payload with ``owner_epoch`` AND ``runtime_epoch`` used to raise
+    ``extra_forbidden`` on the second key. That is the one shape a producer
+    mid-rename can emit — the old key for viewers that have not flipped, the
+    new key for those that have — so it has to validate rather than kill the
+    attach. ``runtime_epoch`` wins when both are present: the payload carrying
+    it came from the newer producer. The emit stays ``owner_epoch`` alone, or
+    a pre-rename viewer's ``extra="forbid"`` DTO rejects our pages.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    base = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+    }
+
+    old_only = DisplayHistoryWindow.model_validate({**base, "owner_epoch": "e"})
+    assert old_only.owner_epoch == "e"
+
+    new_only = DisplayHistoryWindow.model_validate({**base, "runtime_epoch": "e"})
+    assert new_only.owner_epoch == "e"
+    assert new_only.runtime_epoch == "e"
+
+    both = DisplayHistoryWindow.model_validate(
+        {**base, "owner_epoch": "stale", "runtime_epoch": "e"}
+    )
+    assert both.owner_epoch == "e"
+    assert both.runtime_epoch == "e"
+
+    emitted = window(transcript).model_dump(mode="json")
+    assert "runtime_epoch" not in emitted
+    assert emitted["owner_epoch"] == "synthetic-epoch"
+
+
+def test_the_alias_collapse_does_not_mutate_the_callers_dict() -> None:
+    """The ``mode="before"`` validator must not write through its input.
+
+    A before-validator is handed the caller's OWN object — not a pydantic-owned
+    copy — so the pop/assign that collapses the aliases used to rewrite the
+    dict passed to ``model_validate`` in place: the caller lost
+    ``runtime_epoch`` and had ``owner_epoch`` overwritten with the new value.
+    Today's sole caller passes a fresh dict, so nothing observable broke, but
+    the next caller that reuses a payload (validating one dict against two
+    models, or logging it after validation) would be silently corrupted. Hold
+    the caller's dict to its snapshot across the call.
+    """
+    payload = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+        "owner_epoch": "stale",
+        "runtime_epoch": "fresh",
+    }
+    snapshot = dict(payload)
+
+    validated = DisplayHistoryWindow.model_validate(payload)
+
+    assert validated.owner_epoch == "fresh"
+    assert validated.runtime_epoch == "fresh"
+    assert payload == snapshot
+
+
+@pytest.mark.asyncio
 async def test_a_pre_rename_viewer_still_accepts_the_wire_page(tmp_path: Path) -> None:
     """The exact attach break round 1 flagged, held shut by a fixture viewer.
 

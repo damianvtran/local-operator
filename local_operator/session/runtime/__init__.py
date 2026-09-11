@@ -46,7 +46,7 @@ forever" — later PRs in this series give this package public entry points
 **importing this package must never pull the heavy graph**:
 :mod:`.types` and :mod:`.registry` are stdlib-only because the runtime
 publishes its record on the CLI startup path, where dragging in
-:mod:`.server` (asyncio) or :mod:`.owned` (the composition root) is paid by
+:mod:`.server` (asyncio) or :mod:`.serving` (the composition root) is paid by
 every ``lop`` invocation including ``--version``.
 
 So an entry point added here must resolve its heavy dependencies lazily

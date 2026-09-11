@@ -66,6 +66,7 @@ from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
     composer_may_take_focus,
+    focus_is_claimed,
     return_focus_to_composer,
 )
 
@@ -2976,6 +2977,48 @@ class TranscriptView(ScrollableContainer):
     #: full suite finds it.
     can_focus = True
 
+    def focus_on_click(self) -> bool:
+        """Refuse the MouseDown focus-steal while a surface has a real claim.
+
+        THE DEFECT THIS EXISTS TO PREVENT. Textual's own click-to-focus is not
+        this widget's :meth:`on_click` — it runs a step earlier, INSIDE
+        ``Screen._forward_event`` on ``MouseDown``: ``get_focusable_widget_at``
+        walks up from whatever is under the pointer, and because most rows
+        have no document position of their own (``UserBlock``,
+        ``AssistantBlock``, a settled ``ToolCard`` with nothing to expand),
+        that walk lands HERE, on the container, and Textual calls
+        ``self.app.set_focus(self)`` before ``on_click`` ever runs — before
+        this widget or the app has any say. A click on ordinary conversation
+        text was silently taking the keyboard away from a live tool approval,
+        an unsettled ``ask`` picker, or the ``/btw`` aside: none of those
+        surfaces stop the click (they have no reason to — a click did not use
+        to reach past them), and by the time :meth:`on_click` runs and
+        consults :func:`composer_focus.focus_is_claimed`, the damage is done —
+        focus is already here, not on the surface the user was trying to
+        answer.
+
+        Measured on a real approval: click a plain ``UserBlock`` while
+        ``rm -rf /tmp/x`` is unanswered, and ``app.focused`` became
+        ``TranscriptView`` with the prompt still up and unanswered underneath
+        it. The same click while the ``/btw`` aside is open leaves the
+        composer un-focusable for the rest of the gesture — see
+        :meth:`on_key`'s guard, which refuses to rescue a keystroke for
+        exactly this reason, and which this method is the other half of. One
+        predicate, two doors: :meth:`on_key` guards what happens to a
+        keystroke arriving AFTER focus lands here; this guards whether focus
+        is allowed to land here AT ALL.
+
+        Read-only where it can be. ``focus_is_claimed`` is the exact question
+        Textual is here answering "yes, focus me" to on its own — the widget
+        is not stealing the claim's OWN say, only declining Textual's default
+        one when nothing else has agreed to give the keyboard up. When
+        nothing claims it (the ordinary case, no approval/ask/aside/etc. up),
+        this returns True and the container still becomes the fallback focus
+        target exactly as before — :meth:`on_click` then redirects it to the
+        composer.
+        """
+        return not focus_is_claimed(self.app)
+
     def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
         """Typing at the transcript goes to the COMPOSER, not into the void.
 
@@ -3148,7 +3191,8 @@ class TranscriptView(ScrollableContainer):
         self.vertical_scrollbar.styles.pointer = "grab"
 
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
-        """A click on blank transcript returns focus to the composer.
+        """A click that lands on THIS container, and not on a descendant,
+        returns focus to the composer.
 
         Measured: with a card holding focus, clicking the empty column beside
         it left the card focused and the composer dark. The gesture said "I am
@@ -3158,17 +3202,41 @@ class TranscriptView(ScrollableContainer):
         scrolling surface, not an input, and focus resting there is the state
         :meth:`on_key` exists to rescue. Sending it to the composer is.
 
-        Only the blank column reaches this. A row's own handler runs first
-        (:meth:`ExpandableActionBlock.on_click` stops the event when it
-        expands), and the ``TranscriptBlock`` test below leaves a click that hit
-        a row alone, so clicking a card still focuses and expands it.
+        ``self.has_focus``, not ``isinstance(event.widget, TranscriptBlock)``.
+        The isinstance test was trying to ask "did a row's own handler already
+        deal with this?", but Textual answers that question directly:
+        ``Click`` bubbles from the widget under the pointer, a row that
+        legitimately takes the click stops it (:meth:`ExpandableActionBlock.
+        on_click` on activation), and a stopped event never reaches here at
+        all. So the only clicks this method ever SEES are ones nothing
+        claimed — except that MouseDown's own focus walk runs before any of
+        that: Textual focuses the nearest FOCUSABLE ancestor under the
+        pointer, and a row with no document position of its own
+        (``UserBlock``, ``AssistantBlock``, a settled ``ToolCard`` with
+        nothing to expand) has none, so the walk lands on this container.
+        ``event.widget`` is that row — a ``TranscriptBlock`` — and the old
+        guard bailed out on exactly that widget, leaving focus stranded here
+        with no rescue. Measured: click a plain conversation row (no aside, no
+        approval, nothing else open) and ``app.focused`` stays
+        ``TranscriptView`` — the same class of defect
+        :meth:`OperatorApp._focus_is_claimed` exists to prevent on the Esc
+        path, reopened here on the click path for every row that cannot take
+        focus itself.
+
+        ``self.has_focus`` reads the ANSWER to "did something else end up
+        holding it", which is true regardless of whether that something was a
+        row, blank padding, or nothing at all: a row that DID take focus
+        (``ToolCard.can_focus`` is True even when :meth:`ToolCard.can_expand`
+        is False) leaves ``self.has_focus`` False, and this correctly leaves
+        it alone. A row that could not take focus leaves the container
+        holding it by default, and this correctly redirects.
 
         ``event.stop()`` is deliberately NOT called: ``Click`` bubbles up from
         children, and stopping it at the container would swallow an event a
         descendant already owned. The rule is "focus the composer if nothing
         claimed the click", not "claim the click".
         """
-        if isinstance(event.widget, TranscriptBlock):
+        if not self.has_focus:
             return
         from local_operator.tui.widgets.editor import Editor
 

@@ -49,6 +49,7 @@ from local_operator.tui.widgets import tool_card as card_mod
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
+    DURATION_COL,
     EXPAND_HINT,
     EXPAND_MAX_LINES,
     ICON_ERROR,
@@ -1289,6 +1290,43 @@ def test_the_outcome_glyph_holds_one_column_whatever_the_duration() -> None:
         plain = card._build_row(80).plain.rstrip()
         offsets.append(len(plain) - plain.rindex("✓"))
     assert len(set(offsets)) == 1, offsets
+
+
+def test_a_sub_50ms_tool_never_renders_the_fabricated_0_0s() -> None:
+    """A real sub-50 ms call must not reprint the bug's own string.
+
+    ``f"{0.04:.1f}s"`` is ``0.0s`` — byte-identical to what the fabricated-
+    duration defect printed on a row whose duration was simply missing, which
+    is why that report was re-filed against a tool that had returned at once.
+    ``<0.1s`` says "too fast to measure", and it is exactly DURATION_COL wide,
+    so the pass/fail column does not move.
+    """
+    fast = ToolCard("a", "bash", {"command": "pytest"})
+    fast.mark_done("passed")
+    fast._duration = 0.04
+    row = fast._build_row(80).plain
+    assert "<0.1s" in row
+    assert "0.0s" not in row
+
+    assert len("<0.1s") == DURATION_COL
+    offsets = []
+    for elapsed in (0.04, 0.4):
+        card = ToolCard("t", "bash", {"command": "pytest"})
+        card.mark_done("passed")
+        card._duration = elapsed
+        plain = card._build_row(80).plain.rstrip()
+        offsets.append(len(plain) - plain.rindex("✓"))
+    assert len(set(offsets)) == 1, offsets
+
+
+def test_an_unknown_duration_stays_blank_rather_than_claiming_fast() -> None:
+    """``<0.1s`` is a CLAIM; a lost duration must keep saying nothing."""
+    card = ToolCard("t", "bash", {"command": "pytest"})
+    card.mark_done("passed")
+    card._duration = None
+    row = card._build_row(80).plain
+    assert "<0.1s" not in row
+    assert "0.0s" not in row
 
 
 def test_all_three_settled_outcomes_share_the_glyph_column() -> None:

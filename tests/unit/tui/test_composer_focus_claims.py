@@ -261,7 +261,17 @@ async def test_tab_from_a_row_does_not_steal_focus_from_a_live_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_a_blank_transcript_click_does_not_steal_focus_from_a_live_prompt() -> None:
-    """The third unguarded route: ``TranscriptView.on_click``."""
+    """The third unguarded route: ``TranscriptView.on_click``.
+
+    Two claims, not one. ``editor.has_focus is False`` alone passed even before
+    this route was guarded, because Textual's own ``MouseDown`` handling (see
+    :meth:`TranscriptView.focus_on_click`) moved focus to ``TranscriptView``
+    itself rather than to the composer — the picker's OWN focus was still
+    stolen, just not handed to the field the old assertion checked. The
+    stronger claim (``app.focused is picker``) is the one the report is
+    actually about: the question must still be answerable, which means the
+    ask picker, not merely "not the composer", holds the keyboard.
+    """
     from local_operator.tui.widgets.transcript import TranscriptView
 
     app = _app()
@@ -282,6 +292,54 @@ async def test_a_blank_transcript_click_does_not_steal_focus_from_a_live_prompt(
         assert (
             not editor.has_focus
         ), "a click on blank transcript took the keyboard off a live multi-select"
+        assert app.focused is picker, (
+            f"a click on blank transcript moved focus to {type(app.focused).__name__} "
+            "instead of leaving it on the multi-select picker"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_row_click_does_not_steal_focus_from_a_live_prompt() -> None:
+    """The MouseDown focus-walk, not just ``on_click``.
+
+    A click on a row with no document position of its own (``UserBlock``,
+    ``AssistantBlock``) never reaches a row's ``on_click`` at all before this
+    fix — Textual's ``get_focusable_widget_at`` walks up from the widget under
+    the pointer on ``MouseDown``, finds no focusable ancestor short of
+    ``TranscriptView``, and calls ``set_focus`` on it directly, one step
+    before any handler in this codebase gets to run. A live approval sits
+    behind the SAME dock the transcript is nowhere near, so this is not a
+    contrived gesture: "click the conversation to see what led to this" is
+    the ordinary thing a user does while deciding how to answer a prompt.
+    """
+    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._append_block(UserBlock("run the migration"))
+        await pilot.pause()
+        app.run_worker(
+            app.request_tool_approval("bash", "rm -rf /Users/me/project/data"), thread=False
+        )
+        for _ in range(8):
+            await pilot.pause()
+        prompt = app._approval
+        assert prompt is not None, "premise: the approval card is up"
+        assert app.focused is prompt, "premise: the approval holds the keyboard"
+
+        view = app.query_one(TranscriptView)
+        block = view.blocks()[-1]
+        assert isinstance(block, UserBlock) and block.can_focus is False
+        site = _clamped(app, (block.region.x + 2, block.region.y))
+        await pilot.click(offset=site)
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app.focused is prompt, (
+            f"clicking a plain conversation row moved focus to "
+            f"{type(app.focused).__name__}, off a live unanswered `rm -rf`"
+        )
 
 
 @pytest.mark.asyncio
