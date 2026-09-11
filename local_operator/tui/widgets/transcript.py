@@ -3674,9 +3674,53 @@ class TranscriptView(ScrollableContainer):
                     if on_settled is not None:
                         on_settled()
 
-            self.call_after_refresh(restore_anchor)
+            if not self.call_after_refresh(restore_anchor):
+                # The pump closed between the settle and the restore. Same
+                # contract as below: `on_settled` is owed unconditionally, and
+                # the offset correction it would have followed is moot on a
+                # view that will never paint again.
+                if on_settled is not None:
+                    on_settled()
 
-        self.call_after_refresh(settle_then_restore)
+        if not self.call_after_refresh(settle_then_restore):
+            # `call_after_refresh` POSTS A MESSAGE, and `post_message` returns
+            # False for a pump that is closing or closed — it does not raise
+            # and it does not queue. Ignoring that return made `on_settled` a
+            # promise this method could silently fail to keep, and its one
+            # production caller (`_mount_older_resume_page`) hands it the
+            # release of a single-flight paging lease that has ALREADY been
+            # flagged mounted. A dropped settle therefore stranded that lease
+            # in `_paging_leases` forever: `_resume_paging` stayed True for
+            # the source token (which outlives this view), every later scroll
+            # and click stood down against it, and
+            # `_break_abandoned_paging_lease` refuses a mounted lease by
+            # design — a permanently dead "older messages above" control.
+            #
+            # Reached without any fault of the caller's: `_release_sidebar_
+            # preparation` awaits `view.remove()` on a presentation the
+            # navigation did not keep, which closes the pump under an
+            # in-flight page.
+            #
+            # Called INLINE rather than dropped, because the callback's own
+            # purpose — gaps settled, anchor restored — is unreachable on a
+            # dead pump, while the caller's gate still has to open. The blocks
+            # are already mounted and `_reanchor_insert` above has already
+            # taken the offset correction that matters for a frame anyone can
+            # still see.
+            #
+            # INLINE MAKES THE RESUME FILL CHAIN SYNCHRONOUS, and what keeps
+            # that safe is `RESUME_FILL_MAX_PAGES`. `release_gate` → the
+            # fill's `on_settled` → the next `_mount_older_resume_page` then
+            # runs in one stack instead of one page per refresh (measured with
+            # every settle refused: 16 mounts, max depth 154, no
+            # `RecursionError`). That is the unbounded mid-interaction render
+            # cost the one-page-per-gesture bound exists to prevent — but it
+            # is only reachable once the pump is dead, i.e. when no frame will
+            # be painted and nobody is waiting on one, and the page cap bounds
+            # it regardless (review round 1, MINOR-3). Anyone raising that cap
+            # should re-measure this path.
+            if on_settled is not None:
+                on_settled()
 
     def append_block(self, block: TranscriptBlock) -> None:
         """Mount ``block`` at the bottom.
