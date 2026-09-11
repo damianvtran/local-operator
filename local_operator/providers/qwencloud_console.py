@@ -29,7 +29,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-#: Row namespace. Not a registry provider; see the module docstring.
+#: Row namespace, and the SINGLE SOURCE OF TRUTH for this string. Not a
+#: registry provider; see the module docstring. Anything else needing it --
+#: the controller's console route, a fetcher -- imports it from here rather
+#: than repeating the literal, so the row a writer creates and the row a
+#: reader looks for cannot drift apart. Safe to import from anywhere: this
+#: module pulls in only `stat`, `time`, `pathlib` and `typing`.
 QWENCLOUD_CONSOLE_PROVIDER = "qwencloud-console"
 
 #: Pinned so `_identity_key_for`'s field loop (org_id, account_id, email,
