@@ -120,22 +120,37 @@ async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
     The cold replay used to resolve attachment digests against a per-session
     store (``<config>/sessions/<id>``) that nothing ever writes to, so a user
     screenshot that is on disk and intact replayed as the "image unavailable —
-    no longer in the transcript" receipt. The write path externalizes to the
-    SHARED ``<config>/attachments`` store (``AttachmentStore``'s default root),
-    and that is the only root a replay can resolve against.
+    no longer in the transcript" receipt. The journal's own config dir is where
+    the write path externalizes to, and that is the only root a replay can
+    resolve against.
 
     Asserted through ``AttachedSession.cold`` — the real cold seam that boots a
-    viewer over a seeded journal — rather than ``replay_entries`` directly, so
-    the test fails if the viewer is ever wired to a third root.
+    viewer over a seeded journal — rather than ``replay_entries`` directly.
+
+    The reader's ENVIRONMENT deliberately differs from the owning config dir:
+    ``LOCAL_OPERATOR_CONFIG_DIR`` points at a second, empty directory while the
+    session is read with ``config_dir=<owner>``. A regression that resolved the
+    replay against ``AttachmentStore()`` (the env default) would therefore
+    resolve nothing and fail here, which is the wiring this pins — the bug's own
+    shape was a root that looked plausible and was not the writer's.
     """
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    directory = _seed_transcript(tmp_path, SESSION_ID)
+    owner_cfg = tmp_path / "owner"
+    reader_env = tmp_path / "reader-env"
+    directory = _seed_transcript(owner_cfg, SESSION_ID)
 
     import base64
     import json
 
     from local_operator.harness.types import ImageContent, Message
+    from local_operator.session.attachments import (
+        AttachmentStore,
+        store_for_transcript_dir,
+    )
     from local_operator.session.transcript import Transcript
+
+    # Write under the OWNING config dir, so the bytes land in
+    # <owner>/attachments — the store derived from the session directory.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(owner_cfg))
 
     # Above the 1 KB externalization floor, so the row references the store
     # rather than carrying the bytes inline — an inline row resolves with no
@@ -159,8 +174,15 @@ async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
         if isinstance(block, dict)
     ), "precondition: the image row must be externalized to the store"
 
+    # Now hand the reader a DIFFERENT env config dir than the one that owns the
+    # journal. The roots must disagree, or the test cannot see a rewire.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(reader_env))
+    assert store_for_transcript_dir(directory).root == owner_cfg / "attachments"
+    assert AttachmentStore().root == reader_env / "attachments"
+    assert store_for_transcript_dir(directory).root != AttachmentStore().root
+
     viewer = await AttachedSession.cold(
-        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        SESSION_ID, config_dir=owner_cfg, cwd=str(tmp_path), takeover_factory=_never
     )
     try:
         blocks = [

@@ -76,6 +76,34 @@ def attachments_dir() -> Path:
     return config_dir() / ATTACHMENTS_DIRNAME
 
 
+def store_for_transcript_dir(directory: str | Path) -> AttachmentStore:
+    """The store that OWNED the journal in ``directory``, derived from its path.
+
+    ``directory`` is a session directory — the one holding ``transcript.jsonl``,
+    i.e. ``<cfg>/sessions/<id>``. A journal written there was written by a
+    process whose config dir was ``<cfg>``, because that is the only place
+    ``Transcript`` externalizes to (``AttachmentStore()`` ==
+    ``config_dir()/attachments``). So ``<cfg>/attachments`` is the writer's
+    store **by construction**, independent of what ``config_dir()`` resolves to
+    in the process doing the reading.
+
+    That independence is the whole point, and it is why this is a path
+    computation rather than the env default. Two readers know the config dir
+    that OWNS the transcript they are reading without being the writer: the
+    sidebar's saved-preview reader and the attached viewer's cold replay. For
+    them the env default happens to be the same directory in every shipped
+    caller today, which is exactly the kind of unstated coincidence that let a
+    second, wrong root live beside this one before (#694 — a per-session root
+    that nothing writes to, so every reference resolved to ``None`` and a
+    live screenshot replayed as "image unavailable"). One definition keeps the
+    readers and the write path from drifting apart again.
+
+    NEVER root this at the session directory itself: nothing ever writes under
+    ``<cfg>/sessions/<id>``, so a store there can only return ``None``.
+    """
+    return AttachmentStore(Path(directory).parent.parent / ATTACHMENTS_DIRNAME)
+
+
 class AttachmentStore:
     """Content-addressed binary store under the config dir.
 
