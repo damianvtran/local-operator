@@ -321,8 +321,18 @@ _EVENT_QUEUE_MAX = 64
 #: OTHER reason means the runtime removed a client that had not asked to leave —
 #: an attach-cap eviction, a queue overflow, a send timeout — which is exactly
 #: the event a viewer learns about only as a cold facade, so those are logged at
-#: WARNING. Derived from the call sites rather than guessed: see the six
+#: WARNING. Derived from the call sites rather than guessed: see the eleven
 #: ``_drop_client`` callers, and keep this list beside any new one.
+#:
+#: ``frontend requested but unsupported`` is deliberately NOT in this set, and
+#: the call is a decision rather than an oversight (review n1). It reads like a
+#: client-caused drop, but the level is chosen by what the user sees, and what
+#: they see is identical to an eviction: a viewer that asked to be kept live is
+#: cut off and reads cold next. The cause is also permanent rather than
+#: transient — a runtime whose handler has no ``subscribe_frontend`` refuses
+#: every reconnect the same way — so burying it at INFO would make the one
+#: recurring reason a viewer keeps going cold the one reason the log does not
+#: show without turning INFO on for the whole runtime.
 _GRACEFUL_DROP_REASONS = frozenset(
     {"runtime shutdown", "reader eof", "reader reset", "daemon replaced"}
 )

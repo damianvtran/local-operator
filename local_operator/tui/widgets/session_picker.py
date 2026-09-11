@@ -140,12 +140,12 @@ PAGE_ROWS_MAX = 10
 #:
 #: Sized against what the markers can actually say, not against taste: the
 #: states they report come from heartbeat recency, whose own resolution is
-#: 45 s (``HEARTBEAT_TIMEOUT_S``), so a 1 s refresh is two orders of magnitude
-#: finer than the signal and no transition can be shown late at a scale a
-#: reader could notice. It still bounds the cost — 12.5 scans/s became 1 — and
-#: it keeps the repaint-on-change guard (`_tick`) working, which is what makes
-#: a row that REORDERS (a session parking on a gate, with nothing animating)
-#: reach the screen.
+#: 45 s (``HEARTBEAT_TIMEOUT_S``), so a 1 s refresh is 45× finer than that
+#: signal and no transition can be shown late at a scale a reader could
+#: notice. It still bounds the cost — 12.5 scans/s became 1 — and it keeps the
+#: repaint-on-change guard (`_tick`) working, which is what makes a row that
+#: REORDERS (a session parking on a gate, with nothing animating) reach the
+#: screen.
 LIVE_REFRESH_INTERVAL_S = 1.0
 
 #: Name/id matches at which the picker stops consulting the bounded soft tier
@@ -1415,9 +1415,9 @@ class SessionPickerScreen(ModalScreen[str | None]):
         animating. So it is BOUNDED rather than dropped, and the bound is what
         keeps a frozen marker from claiming to be live: the picker's own
         freshness is now a stated number instead of an accident of the frame
-        rate, and at 1 s it is two orders of magnitude finer than the 45 s
-        heartbeat the live states are derived from, which is the resolution
-        they actually change at.
+        rate, and at 1 s it is 45× finer than the 45 s heartbeat the live
+        states are derived from, which is the resolution they actually change
+        at.
         """
         before = self._marker_signature()
         refresh = self._refresh_live_state
