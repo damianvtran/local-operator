@@ -107,6 +107,29 @@ async def _press_and_settle(pilot, view: TranscriptView, key: str) -> None:
             return
 
 
+def _wheel_up_transcript(view: TranscriptView) -> None:
+    """One real upward wheel notch, through the widget's own input surface.
+
+    Posted rather than synthesised on the app so it routes through
+    `note_user_scroll` and the page-back latch exactly as a hand on a mouse
+    does — which is the whole point when the assertion is "the wheel still
+    pages".
+    """
+    view.post_message(
+        MouseScrollUp(
+            widget=view,
+            button=0,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            x=10,
+            y=10,
+            delta_x=0,
+            delta_y=-1,
+        )
+    )
+
+
 async def _wait_for_resume(pilot, app: OperatorApp, *, min_blocks: int = 1) -> None:
     """Boot paints, then a worker adopts the session and replays history.
 
@@ -1875,3 +1898,194 @@ async def test_an_unsettleable_mounted_lease_is_recoverable_by_an_explicit_ask()
         assert app._break_abandoned_paging_lease(source) is True
         assert source.token not in app._paging_leases
         assert app._resume_paging is False
+
+
+@pytest.mark.asyncio
+async def test_a_mounted_lease_on_a_live_view_is_never_retired() -> None:
+    """F1, pinned against the LIVE-VIEW evaluation of ``can_settle``.
+
+    ``test_a_mounted_lease_survives_a_second_click`` asserts the same refusal
+    but sets only ``mounted``, so it exits through ``can_settle``'s
+    ``view is None`` early return and never reaches the predicate that reads a
+    real widget. This one does, and it covers the window that made the first
+    version of that predicate wrong: ``Widget._is_mounted`` is set in the
+    pump's ``_pre_process``, a tick AFTER ``mount()``, so a freshly mounted
+    and fully live view reports ``is_mounted=False`` while ``post_message``
+    still returns True. Keying on it answered "unsettleable" for a view that
+    would deliver the callback — retiring a lease whose settle was still
+    coming, which is the F1 violation ``mounted_view`` exists to prevent
+    (review round 1, MAJOR-2).
+
+    The assertion is therefore tied to the pump's OWN terms: whenever the view
+    would still accept a post, the lease must be refused.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        source = app._interaction
+
+        # Mount WITHOUT awaiting: awaiting drains the pump and closes the very
+        # window under test. This is the state a caller sees between `mount()`
+        # and the pump's first `_pre_process`.
+        view = TranscriptView(id="probe-transcript")
+        app.screen.mount(view)
+        lease = app._acquire_paging_lease(source)
+        assert lease is not None
+        lease.mounted = True
+        lease.mounted_view = view
+
+        # The window under test: immediately after mount, BEFORE the pump's
+        # first `_pre_process`. The old predicate answered False here.
+        assert view.post_message(Key("ignored-probe", None)) is True
+        assert lease.can_settle() is True, (
+            "a view whose pump still accepts posts was reported unsettleable; "
+            "an explicit ask would retire a lease whose settle is still coming"
+        )
+        assert app._break_abandoned_paging_lease(source) is False
+        assert app._paging_leases.get(source.token) is lease
+
+        # And after it has fully settled, which the old predicate also allowed.
+        for _ in range(10):
+            await pilot.pause()
+        assert lease.can_settle() is True
+        assert app._break_abandoned_paging_lease(source) is False
+
+        # Only a pump that will genuinely never deliver flips it.
+        await view.remove()
+        assert lease.can_settle() is False
+        assert app._break_abandoned_paging_lease(source) is True
+
+
+@pytest.mark.asyncio
+async def test_a_refused_scroll_check_post_does_not_latch_the_wheel_dead() -> None:
+    """``_resume_check_pending`` must not survive a post that was refused.
+
+    The sibling of the insert-seam defect, and the worse one, because it needs
+    NO paging lease at all. ``_transcript_scrolled`` raises
+    ``_resume_check_pending`` and then posts ``run_check``, which is the only
+    thing that clears it. ``call_after_refresh`` returns False on a closing
+    pump, so a refused post latched the flag True — and the guard at the top
+    of the method then returned early on EVERY subsequent scroll. The wheel
+    was dead permanently while the notice click still worked, which is the
+    operator's reported symptom reached with an empty ``_paging_leases``
+    (review round 1, MAJOR-4; QA Q1).
+
+    A demand that cannot be scheduled is not retained; the reader's next
+    gesture re-arms it.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        view.note_user_scroll()
+        view.scroll_to(y=0, animate=False, immediate=True)
+        for _ in range(10):
+            await pilot.pause()
+        assert not app._paging_leases, "this defect must be shown with no lease held"
+
+        real = view.call_after_refresh
+        refused = {"n": 0}
+
+        def refuse(callback, *args, **kwargs):
+            # Refuse the scroll check's own posts (the outer deferral and the
+            # inner hop), and nothing else.
+            name = getattr(callback, "__name__", "")
+            if name in ("run_check", "defer_check", "post_check") or (
+                name == "<lambda>" and refused["n"] == 0
+            ):
+                refused["n"] += 1
+                return False
+            return real(callback, *args, **kwargs)
+
+        view.call_after_refresh = refuse  # type: ignore[assignment]
+        app._transcript_scrolled(True)
+        view.call_after_refresh = real  # type: ignore[assignment]
+        for _ in range(20):
+            await pilot.pause()
+
+        assert refused["n"], "the scroll check's post was never refused; hazard not armed"
+        # THE INVARIANT. Pre-fix this stayed True and every later scroll
+        # returned early at `_transcript_scrolled`'s own guard.
+        assert app._resume_check_pending is False
+        assert not app._paging_leases
+
+        # And the wheel still ARMS a check, which is what the latch killed.
+        # Deliberately asserted on the demand rather than on a loaded page:
+        # whether a given notch earns a page depends on the trigger zone
+        # (`RESUME_PAGE_TRIGGER_ROWS`), and the settled fill parks the reader
+        # below it — measured identically on an unarmed run, so asserting a
+        # page here would pin the trigger geometry, not this defect. The
+        # latch's signature is that `_transcript_scrolled` returns at its own
+        # guard before ever reaching `_check_resume_page`; that a later notch
+        # can still reach it is exactly what was lost.
+        reached = {"n": 0}
+        real_check = app._check_resume_page
+
+        def counting_check(*, force: bool = False) -> None:
+            reached["n"] += 1
+            real_check(force=force)
+
+        app._check_resume_page = counting_check  # type: ignore[assignment]
+        view.note_user_scroll()
+        view.scroll_to(y=0, animate=False, immediate=True)
+        for _ in range(10):
+            await pilot.pause()
+        for _ in range(3):
+            _wheel_up_transcript(view)
+            for _ in range(40):
+                await pilot.pause()
+        app._check_resume_page = real_check  # type: ignore[assignment]
+        assert reached["n"], (
+            "no scroll reached `_check_resume_page` after a refused post: "
+            "`_resume_check_pending` is still latching the wheel dead"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_fill_start_post_does_not_strand_the_fill_flag() -> None:
+    """``_resume_fill_active`` must not survive a post that was refused.
+
+    ``_start_resume_fill`` raises the flag before posting ``start``, and only
+    a delivered ``start`` (or a fill exit it leads to) lowers it again. A
+    refused post therefore stranded it True with no fill in flight — which is
+    the R6 skip inverted: ``_reconcile_head_notice`` is told a better frame is
+    on its way and keeps stale copy indefinitely (review round 1, MAJOR-4).
+
+    The honest answer on a pump that will not deliver a callback, and
+    therefore will not paint, is to stand the fill down and restate the row
+    from the geometry that actually exists.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+
+        real = view.call_after_refresh
+        refused = {"hit": False}
+
+        def refuse(callback, *args, **kwargs):
+            if not refused["hit"] and getattr(callback, "__name__", "") == "start":
+                refused["hit"] = True
+                return False
+            return real(callback, *args, **kwargs)
+
+        view.call_after_refresh = refuse  # type: ignore[assignment]
+        app._start_resume_fill()
+        view.call_after_refresh = real  # type: ignore[assignment]
+        for _ in range(20):
+            await pilot.pause()
+
+        assert refused["hit"], "the fill's start post was never refused; hazard not armed"
+        assert app._resume_fill_active is False
