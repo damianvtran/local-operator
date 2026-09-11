@@ -3097,11 +3097,22 @@ class TranscriptView(ScrollableContainer):
         self._name_col_cache: int | None = None
         # The width the ledger's ROWS were last published with — what their
         # summaries were actually laid out against. Deliberately separate from
-        # the cache: every path that can move the column DROPS the cache, so the
+        # the cache: a path that invalidates the column drops the cache, so the
         # cache cannot answer "did this actually change", and a resync comparing
         # against it would read `None` as "nothing to do" while rows sat at the
         # old offset. `None` here means no row has been painted under a published
         # column yet, so there is nobody to be stale.
+        #
+        # PRECISELY what this is, because it is compared as an EQUALITY and an
+        # over-stated invariant here would be a tear later: it is the shared
+        # column's value in force, NOT the cell count every row literally painted
+        # with. A row fits itself inside it — `ToolCard._name_col` answers the
+        # floor below `NAME_GROWTH_MIN_ROW`, and `name_budget` shrinks it further
+        # on a narrow frame — and those clamps are functions of the ROW's own
+        # width, so every row at one frame width agrees on them without the
+        # column moving. That is why the comparison stays sound: a row can hold
+        # less than this number, but no row holds a DIFFERENT one because of a
+        # missed repaint, which is the only thing this field exists to detect.
         self._name_col_applied: int | None = None
         #: The block held at the BOTTOM as later blocks arrive (the working
         #: line). Pinned rather than re-appended so it is never unmounted and
@@ -3613,15 +3624,20 @@ class TranscriptView(ScrollableContainer):
     def _resync_name_col(self) -> None:
         """Re-derive the shared name column and repaint the ledger if it moved.
 
-        THE one funnel for every path that can move the column: an append's
-        growth (through :meth:`_widen_name_col`, which keeps its O(1) fast path),
-        pagination, a rename, a removal, a clear, and a batch mount. Each of
-        those used to carry its own idea of what to do — most dropped the derived
-        width and repainted nobody, and the append's growth path returned early
-        whenever the width was unset, which is exactly the state those drops
-        leave — so rows kept the old offset until a pointer happened to hover
-        them. That is the tear a reader saw moving the cursor down the ledger,
-        and again on revealing an older page.
+        The one funnel for every path that can move the column EXCEPT an
+        append's growth: pagination, a rename, a composing row's promotion to
+        running, a removal, a clear, and a batch mount. Growth keeps
+        :meth:`_widen_name_col`, which is a deliberate second path because an
+        append can only ever widen and can answer that in O(1) (see its
+        docstring); everything else goes through here, because only a re-scan
+        can say which way the width moved.
+
+        Each of those paths used to carry its own idea of what to do — most
+        dropped the derived width and repainted nobody, and the append's growth
+        path returned early whenever the width was unset, which is exactly the
+        state those drops leave — so rows kept the old offset until a pointer
+        happened to hover them. That is the tear a reader saw moving the cursor
+        down the ledger, and again on revealing an older page.
 
         The comparison is against the width the rows were actually published
         with, :attr:`_name_col_applied` — never against the cache, which the

@@ -1514,11 +1514,15 @@ class ToolCard(ExpandableActionBlock):
         # command" instead of the call's life. The withheld clock survives
         # re-entry; only a card that can date itself restarts.
         clockless = self._state == "running" and self._started is None
+        # Whether this call PROMOTES the row: the two things that decide whether
+        # the spine may move because of it (see the invalidation at the end).
+        was_composing = self._state == "composing"
         # The name comes from the EXECUTION, not from the announcement. The first
         # compose event fires on the first name fragment — deliberately, so the
         # row appears immediately — and a provider that splits `write` into `wr`
         # and `ite` would otherwise leave `wr` on the settled row forever, in the
         # ledger, on the icon, and in the summary built from it.
+        renamed = tool_name != self.tool_name
         self.tool_name = _strip_control_sequences(tool_name)
         # The duration clock RESTARTS here. `_started` was set when the row was
         # mounted, which for an adopted row is when the model began dictating —
@@ -1575,6 +1579,25 @@ class ToolCard(ExpandableActionBlock):
         # would only burn a repaint per second.
         if not clockless:
             self._start_clock()
+        # A promotion can move the ledger's shared name column, and nothing else
+        # here will say so. `contributes_name` is False while the row is
+        # dictating and True once the call it names has started, so THIS is the
+        # moment a long MCP name starts counting towards the spine — the exact
+        # inverse of the transition `set_composing` already answers, and for the
+        # same reason: without it the row keeps the column it did NOT earn (the
+        # card is mounted and dictated at the floor) and paints its own name
+        # truncated (`list_va…`) for the rest of the session. A hover cannot
+        # repair it either — `_refresh_row` re-fits the row at the stale
+        # column — so the only cure would be an unrelated later resync.
+        #
+        # After every field above, so the derivation sees the RUNNING row and
+        # the broadcast repaints it from its final state: this runs inside the
+        # one event that promotes the card, so no frame is composited between
+        # the column moving and the rows being told.
+        if was_composing or renamed:
+            parent = self.parent
+            if isinstance(parent, TranscriptView):
+                parent.invalidate_name_col()
         self._refresh_row()
 
     def set_partial_detail(self, detail: str) -> None:
