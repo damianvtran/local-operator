@@ -852,9 +852,18 @@ def project_settled_rows(
         # The width goes to construction here for the same reason every other
         # block in this pass gets it: a notice wraps itself in `__init__`, and
         # this one is authored and mounted in the same pass as the rows below
-        # it, so a fallback fold here is a painted frame with a 36-cell
-        # sentence wrapped inside a 96-cell pane (QA round 1, Q1 caught exactly
-        # this row: `OlderHistoryNotice box=96 authored at 80`).
+        # it, so without it the row is folded at the 80-column fallback before
+        # any hint can reach it (QA round 1, Q1 caught exactly this row:
+        # `OlderHistoryNotice box=96 authored at 80`).
+        #
+        # The pane where that is VISIBLE is a narrow one, not the 96-cell pane
+        # the `box=` readout above happens to carry (design round 2, D6): the
+        # sentence is 36 cells and fits on one row at every pane above ~44, so
+        # at 100x30 and 60x20 this notice paints identically before and after.
+        # Measured at 40x20 (pane 36): the fallback build is one row ending
+        # `…scroll up`, and this one wraps to a second, hanging-indented row —
+        # `…scroll` / `up to load`. Below the fallback the width is the
+        # difference between the whole sentence and a truncated one.
         notice = OlderHistoryNotice(RESUME_OLDER_NOTICE, fold_width=fold_width)
         self._resume_head_notice = notice
         self._append_block(notice)
