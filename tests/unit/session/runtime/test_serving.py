@@ -885,6 +885,37 @@ async def test_title_refresh_retitles_a_detached_session_and_republishes() -> No
 
 
 @pytest.mark.asyncio
+async def test_a_renamed_session_reaches_the_projection_and_the_record() -> None:
+    """A name nobody can read is not a rename.
+
+    The projection's ``conversation_name`` has exactly one writer
+    (``_refresh_state``), the heartbeat republishes the PROJECTION's copy every
+    15 s, and ``_republish`` does not carry the name field at all. So a slash
+    path that skipped ``_refresh_state`` did not merely lag — the stale name was
+    re-asserted for the life of the session, and an attached phone kept the old
+    header forever. Covers both writers through the one seam they share.
+    """
+    for args, expected in (
+        ("refresh", "Billing importer rewrite"),
+        ("Typed by hand", "Typed by hand"),
+    ):
+        handle, session = make_handle()
+        session.conversation_name = "Fix the login flow"
+        session._name_state = ConversationName(text="Fix the login flow")
+        session.conversation_name_state = session._name_state
+        session.history = lambda: [  # type: ignore[attr-defined]
+            SimpleNamespace(role="user", text="fix the login redirect loop"),
+            SimpleNamespace(role="assistant", text="done"),
+            SimpleNamespace(role="user", text="now rewrite the billing importer"),
+        ]
+        session.title_reply = "<title>Billing importer rewrite</title>"
+
+        await handle._rename_slash(session, args, _SlashResult)
+
+        assert handle.session_projection_seed.conversation_name == expected, args
+
+
+@pytest.mark.asyncio
 async def test_title_refresh_that_changes_nothing_keeps_the_name_and_the_latch() -> None:
     """A refresh is not a rename: "the name still fits" must leave both the
     title and the user's claim on it exactly as they were."""

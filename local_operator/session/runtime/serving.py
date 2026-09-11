@@ -2888,14 +2888,28 @@ class ServingSessionHandle(SessionHandle):
     def _publish_name(self) -> None:
         """Push a changed conversation name onto every surface that shows it.
 
-        The name is on the discovery record, so ``lop sessions`` and the picker
-        must see it without waiting for the next heartbeat. ``_notify``
-        refreshes the projection; the registrant owns the record.
+        THREE calls, and dropping any one of them leaves the name visible in a
+        different place from where it is true:
+
+        * ``_refresh_state`` rebuilds the projection. This is the one that was
+          missing, and its absence was total rather than transient: the
+          projection's ``conversation_name`` has exactly one writer, the
+          heartbeat republishes the projection's copy every 15 s, and
+          ``_republish`` does not carry the name field at all — so a renamed
+          session was re-asserted under its OLD name forever, and an attached
+          phone kept the stale header for the life of the session. The runtime's
+          own naming worker has always made this call; the slash path did not.
+        * ``_notify`` pushes that projection to attached clients.
+        * ``_republish`` updates the discovery record, so ``lop sessions`` and
+          the picker see the change without waiting for the next heartbeat.
 
         Extracted from ``_rename_slash`` when the refresh branch became a second
         writer: two copies of this would be two chances for one of them to skip
-        the republish and leave a session listed under a name it no longer has.
+        a step and leave a session listed under a name it no longer has — which
+        is precisely what the missing ``_refresh_state`` was, and fixing it in
+        this one seam repairs ``/title <words>`` along with the refresh.
         """
+        self._refresh_state()
         self._notify()
         republish = getattr(self._registrant, "_republish", None)
         if callable(republish):
