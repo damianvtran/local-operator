@@ -259,6 +259,10 @@ class EpisodeConfig:
     the episode is still scored on the state it reached. ``None`` means
     :func:`default_guards`; an empty tuple disables them.
     ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
+    ``max_steps`` is snapshotted for the guards (``GuardInput.max_steps``):
+    an episode that states BOTH this step budget and an explicit provider-cost
+    cap is judged by the caps rather than by the cost-rate ratio, which cannot
+    tell a legitimate expensive cycle from a runaway one.
     ``max_decision_retries`` is how many corrective re-prompts one observation
     may take after a billed reply fails strict parsing (a ``frame_id`` the
     observation does not carry, malformed JSON) before the episode ends as a
@@ -1247,6 +1251,7 @@ class EpisodeRunner:
         recent = (*self._turns[-RECENT_TURNS_WINDOW:], EpisodeTurn(observation=latest))
         snapshot = GuardInput(
             steps_taken=self._steps_taken,
+            max_steps=self._config.max_steps,
             model_cycles=self._model_cycles,
             provider_cost_micros=self._provider_cost_micros,
             elapsed_ms=max(0, _now_ms() - self._started_ms),

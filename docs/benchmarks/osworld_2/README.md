@@ -875,10 +875,10 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | Parameter | Default | Notes |
 | --- | --- | --- |
 | `--route` | required | `<provider>/<model>`; the paid episode used `openrouter/deepseek/deepseek-v4-flash-vision-exp` |
-| `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50 |
-| `--max-usd` | 0.50 | hard provider spend cap |
+| `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50. With an explicit `--max-usd` this also makes the cost guard prorate a per-cycle ceiling from the remaining budget and remaining steps instead of judging the recent-vs-previous cost ratio |
+| `--max-usd` | 0.50 | hard provider spend cap; states the explicit cost cap the cost guard prorates against |
 | `--max-wall-s` | 18000 | runaway guard only; the 500-step budget binds first. The TTL lease is derived from it (`_ensure_lease_outlasts_wall`), see BUDGETS_AND_LATENCY.md |
-| `--max-cycle-usd` | none | per-cycle cost-rate guard |
+| `--max-cycle-usd` | none | ADDS an absolute per-cycle cap; it is not what stops a runaway on a doubly-capped episode, the prorated ceiling is |
 | `--keep-recent-frames` | 3 | frame retention |
 | `--benchmark-release` | `osworld-v2-2026.08.08` | |
 | `--run-root` | required | must be durable; `/tmp` and `$TMPDIR` are refused |
