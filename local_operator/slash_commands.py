@@ -162,10 +162,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # imperative, `/title refresh` is the request, and a bare `/title` reports.
     #
     # OPTIONAL rather than NONE now that an argument has a value list: the space
-    # offers `refresh` to a user who does not know the word exists, and Enter on
-    # the bare command still reports the current name — the exact distinction
-    # `/approvals` and `/effort` draw against `/login`'s REQUIRED. Free typing
-    # is unaffected, so an arbitrary title still submits.
+    # offers `--refresh` to a user who does not know the capability exists, and
+    # Enter on the bare command still reports the current name — the exact
+    # distinction `/approvals` and `/effort` draw against `/login`'s REQUIRED.
+    # Free typing is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
         # 45 cells, inside the ~55 at which the description column wraps and
