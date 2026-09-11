@@ -1603,10 +1603,38 @@ class WakeBlock(ExpandableActionBlock):
         self._refresh_row()
 
     def copy_gutter(self, index: int) -> int:
-        """The icon field on the summary row; the expansion's indent below it."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+        """The icon field on the summary row; the expansion's indent below it.
 
-        return 2 if index == 0 else OUTPUT_INDENT
+        The summary row's field is the ledger's shared left inset
+        (:data:`ROW_INDENT`) plus the icon, exactly as :class:`ToolCard` counts
+        it — a wake row sits between tool rows, so a gutter measured against a
+        different spine would eat the first character of the wake's name when
+        copied. Read back off the row as built rather than assumed, because
+        the inset is given up on a narrow ledger.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
+
+    def _row_indent(self) -> int:
+        """Cells of left inset on the summary row AS BUILT.
+
+        One derivation, shared by the row builder and the copy gutter, so a
+        gutter can never disagree with the row it is measured against. The
+        inset is the SHARED ledger spine, not decoration: a wake receipt sits
+        between tool rows and must start its icon, name column and summary on
+        the same cells they do, or the column stops reading as a column. It is
+        dropped on a narrow ledger for the same reason :class:`ToolCard` drops
+        it — breathing room is the first thing a narrow row should spend.
+        """
+        from local_operator.tui.widgets.tool_card import (
+            ROW_INDENT,
+            ROW_INDENT_MIN_WIDTH,
+        )
+
+        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
 
     def refresh_row(self) -> None:
         """Repaint at the current width — the ledger's shared column moved."""
@@ -1667,12 +1695,20 @@ class WakeBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            ROW_INDENT,
+            ROW_INDENT_MIN_WIDTH,
             truncate_cells,
         )
 
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+        # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
+        # taken off the budget BEFORE anything is measured, so the name column
+        # and every rung below size themselves against the width the row will
+        # really be drawn in. Threshold read here against the width being BUILT
+        # rather than `_built_width`, which this runs before updating.
+        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -1681,6 +1717,8 @@ class WakeBlock(ExpandableActionBlock):
         self._message = message
         if name_budget < 2:
             row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
             row.append(icon + " ", style=dim)
             return row
 
@@ -1700,6 +1738,8 @@ class WakeBlock(ExpandableActionBlock):
         summary = truncate_cells(identity, budget)
 
         row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
         row.append(summary, style=dim)
@@ -2183,10 +2223,39 @@ class PeerMessageBlock(ExpandableActionBlock):
         self._refresh_row()
 
     def copy_gutter(self, index: int) -> int:
-        """The icon field on the summary row; the expansion's indent below it."""
-        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT
+        """The icon field on the summary row; the expansion's indent below it.
 
-        return 2 if index == 0 else OUTPUT_INDENT
+        The summary row's field is the ledger's shared left inset
+        (:data:`ROW_INDENT`) plus the icon, exactly as :class:`ToolCard` counts
+        it — a peer receipt sits between tool rows, so a gutter measured
+        against a different spine would eat the first character of the peer
+        row's name when copied. Read back off the row as built rather than
+        assumed, because the inset is given up on a narrow ledger.
+        """
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard
+
+        if index != 0:
+            return OUTPUT_INDENT
+        return self._row_indent() + ToolCard.ICON_COLS
+
+    def _row_indent(self) -> int:
+        """Cells of left inset on the summary row AS BUILT.
+
+        One derivation, shared by the row builder and the copy gutter, so a
+        gutter can never disagree with the row it is measured against. The
+        inset is the SHARED ledger spine, not decoration: an inbound peer
+        receipt sits between tool rows and must start its icon, name column
+        and summary on the same cells they do, or the column stops reading as
+        a column. It is dropped on a narrow ledger for the same reason
+        :class:`ToolCard` drops it — breathing room is the first thing a
+        narrow row should spend.
+        """
+        from local_operator.tui.widgets.tool_card import (
+            ROW_INDENT,
+            ROW_INDENT_MIN_WIDTH,
+        )
+
+        return ROW_INDENT if self._built_width >= ROW_INDENT_MIN_WIDTH else 0
 
     def copy_row_is_chrome(self, index: int) -> bool:
         """The summary and the sender identity are the app talking.
@@ -2257,12 +2326,20 @@ class PeerMessageBlock(ExpandableActionBlock):
             _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
+            ROW_INDENT,
+            ROW_INDENT_MIN_WIDTH,
             truncate_cells,
         )
 
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
-        width = max(width - 2, 10)  # 1-cell inner padding each side (kit rule)
+        # The LEFT inset is the ledger's SHARED spine (see `_row_indent`): it is
+        # taken off the budget BEFORE anything is measured, so the name column
+        # and every rung below size themselves against the width the row will
+        # really be drawn in. Threshold read here against the width being BUILT
+        # rather than `_built_width`, which this runs before updating.
+        indent = ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
+        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
 
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
@@ -2284,6 +2361,8 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the identical reason; removing it here alone would make the two
             # rows disagree about their own floor.
             row = Text(no_wrap=True, overflow="ellipsis")
+            if indent:
+                row.append(" " * indent, style=dim)
             row.append(icon + " ", style=dim)
             return row
 
@@ -2333,6 +2412,8 @@ class PeerMessageBlock(ExpandableActionBlock):
         summary = truncate_cells(composed, budget)
 
         row = Text(no_wrap=True, overflow="ellipsis")
+        if indent:
+            row.append(" " * indent, style=dim)
         row.append(icon + " ", style=dim)
         row.append(name + " ", style=muted)
         row.append(summary, style=dim)
