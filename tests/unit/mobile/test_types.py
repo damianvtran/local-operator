@@ -30,7 +30,8 @@ from local_operator.mobile.types import (
     ask_pending_request,
     validate_control_frame,
 )
-from local_operator.session.remote import _ask_question_from_pending
+from local_operator.session.frontend_state import PendingGateState
+from local_operator.session.remote import _ask_question_from_pending, _pending_request
 from local_operator.session.runtime.types import SessionRecord
 
 
@@ -49,6 +50,9 @@ def _record() -> SessionRecord:
 
 def _round_trip(
     question: AskQuestion,
+    *,
+    question_index: int = 0,
+    question_total: int = 1,
 ) -> tuple[dict[str, Any], PendingRequest, AskQuestion]:
     """Project, serialize, rebuild through the REAL inbound path.
 
@@ -57,7 +61,12 @@ def _round_trip(
     ``AskOptionWire`` rebuild the wire actually uses, then rebuilds the
     question exactly as ``_run_ask`` does.
     """
-    pending = ask_pending_request(request_id=question.id, question=question)
+    pending = ask_pending_request(
+        request_id=question.id,
+        question=question,
+        question_index=question_index,
+        question_total=question_total,
+    )
     projection = SessionProjection(session_id="s1", pid=0, pending=pending)
     payload = projection.to_json()
     received = _projection_from_json(payload, _record())
@@ -139,7 +148,9 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     assert [option.label for option in question.options] == ["Beta", "Gamma", "Alpha"]
     assert question.recommended == 0
 
-    wire, pending, rebuilt = _round_trip(question)
+    # A NON-DEFAULT position, so `question_index`/`question_total` are carried
+    # values rather than the dataclass defaults `asdict` would emit anyway.
+    wire, pending, rebuilt = _round_trip(question, question_index=2, question_total=5)
 
     assert pending.recommended == 0
     assert wire["recommended"] == 0
@@ -159,10 +170,79 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     assert pending.secret is False
     assert rebuilt.secret is False
 
+    # -- the anti-vacuity half -------------------------------------------
+    #
+    # A name-set comparison CANNOT FAIL on its own: `to_json` is `asdict`, so
+    # every DECLARED field appears whether or not `ask_pending_request` ever
+    # populated it — an unwired field arrives as its default and the names
+    # still match. Verified by injecting a defaulted field nobody sets: the
+    # name check stayed green through it. So each field is checked for a value
+    # genuinely DERIVED from the question, and every field that CANNOT be
+    # derived here is named with the reason. An unwired field then fails.
+    defaults = {f.name: f.default for f in fields(PendingRequest)}
+    derived = {
+        "request_id": "wire-1",
+        "kind": "ask",
+        "title": "Which migration?",
+        "options": [
+            {"label": "Beta", "description": "second"},
+            {"label": "Gamma", "description": "third"},
+            {"label": "Alpha", "description": "first"},
+        ],
+        "recommended": 0,
+        "question_index": 2,
+        "question_total": 5,
+    }
+    for name, value in derived.items():
+        assert wire[name] == value, f"PendingRequest.{name} did not carry its derived value"
+    # `recommended` is the one whose derived value EQUALS its type's zero, so
+    # assert it is present and not the field default (None) — the exact trap
+    # `isinstance(..., int)` exists for in `ask_pending_request`.
+    assert wire["recommended"] == 0 and wire["recommended"] is not defaults["recommended"]
+
+    # The fields this question cannot exercise, each with why. `secret` and
+    # `persist` are covered non-default by the secret test below, which is the
+    # only shape the validator permits them on; `detail` is hardcoded empty by
+    # `ask_pending_request` for an ask, so nothing derives it.
+    not_derivable_here = {"secret", "persist", "detail"}
+    assert set(derived) | not_derivable_here == set(defaults), (
+        "a PendingRequest field is neither asserted with a derived value nor "
+        "listed as underivable; an unwired field would slip through"
+    )
+
+    # The same payload through the OTHER rebuild — the frontend-state path the
+    # terminal viewer actually uses, whose enumeration is where the real defect
+    # lived. A test that only walked the projection would have stayed green
+    # through the entire bug.
+    from_gate = _pending_request(PendingGateState(**wire))
+    assert from_gate is not None
+    for name in defaults:
+        gate_value = getattr(from_gate, name)
+        if name == "options":
+            # This rebuild passes the wire's dicts straight through, where the
+            # projection rebuild reconstitutes AskOptionWire; compare by
+            # content so the check is about FIDELITY, not representation.
+            gate_value = [
+                (
+                    (opt["label"], opt["description"])
+                    if isinstance(opt, dict)
+                    else (opt.label, opt.description)
+                )
+                for opt in gate_value
+            ]
+            expected_value = [(opt.label, opt.description) for opt in pending.options]
+        else:
+            expected_value = getattr(pending, name)
+        assert gate_value == expected_value, (
+            f"PendingRequest.{name} survives the projection rebuild but not "
+            "`_pending_request`; that enumeration drops anything not named in it"
+        )
+    assert _ask_question_from_pending(from_gate).recommended == 0
+
     # A future field added to PendingRequest without a wire value fails here
     # rather than in a user's terminal.
     carried = set(wire)
-    expected = {f.name for f in fields(PendingRequest)}
+    expected = set(defaults)
     assert carried == expected, (
         "a PendingRequest field is not reaching the wire (or vice versa); "
         "a new field needs a wire value AND a rebuild in _run_ask"
@@ -289,24 +369,48 @@ def test_an_old_ask_payload_without_the_new_keys_still_rebuilds() -> None:
     `PendingRequest(**pending_kwargs)`, so a payload written before these fields
     existed supplies neither key. The dataclass defaults are the entire
     mitigation — without them this raises TypeError and the ask card crashes.
-    """
-    old_payload = {
-        "session_id": "s1",
-        "pid": 0,
-        "pending": {
-            "request_id": "old-1",
-            "kind": "ask",
-            "title": "Which migration?",
-            "detail": "",
-            "options": [{"label": "Beta", "description": "second"}],
-            "secret": False,
-            "question_index": 0,
-            "question_total": 1,
-        },
-    }
 
-    received = _projection_from_json(old_payload, _record())
+    The payload is DERIVED from a real projection with the new keys deleted,
+    not hand-written: a hand-rolled dict drifts from what an owner actually
+    emits (an old owner still sent two options and a real question), and a
+    fixture the code never produces proves nothing about the code. Both
+    rebuilds are exercised through to the rebuilt `AskQuestion`, because
+    stopping at the dataclass would miss a rebuild that cannot construct.
+    """
+    question = AskQuestion(
+        id="old-1",
+        question="Which migration?",
+        options=[
+            AskOption(label="Beta", description="second"),
+            AskOption(label="Gamma", description="third"),
+        ],
+    )
+    current = ask_pending_request(request_id=question.id, question=question).to_json()
+    # Exactly what a pre-change owner put on the wire: today's frame minus the
+    # keys that did not exist yet.
+    old_pending = {k: v for k, v in current.items() if k not in {"recommended", "persist"}}
+    assert "recommended" not in old_pending and "persist" not in old_pending
+
+    received = _projection_from_json(
+        {"session_id": "s1", "pid": 0, "pending": old_pending}, _record()
+    )
 
     assert received.pending is not None
     assert received.pending.recommended is None
     assert received.pending.persist is False
+    # Through to the object the picker is handed, on the projection path...
+    from_projection = _ask_question_from_pending(received.pending)
+    assert from_projection.recommended is None
+    assert from_projection.persist is False
+    assert [option.label for option in from_projection.options] == ["Beta", "Gamma"]
+
+    # ...and on the frontend-state path, where `PendingGateState` simply has no
+    # extras to carry and `_pending_request`'s getattr falls back to the
+    # dataclass defaults.
+    from_gate = _pending_request(PendingGateState(**old_pending))
+    assert from_gate is not None
+    assert from_gate.recommended is None
+    assert from_gate.persist is False
+    rebuilt = _ask_question_from_pending(from_gate)
+    assert rebuilt.recommended is None
+    assert [option.label for option in rebuilt.options] == ["Beta", "Gamma"]
