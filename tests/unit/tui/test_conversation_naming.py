@@ -1736,6 +1736,37 @@ async def test_a_refresh_that_supersedes_the_first_naming_call_frees_the_latch()
 
 
 @pytest.mark.asyncio
+async def test_a_routed_refresh_also_frees_the_latch_it_superseded() -> None:
+    """The generation fence is two halves, and porting one is worse than none.
+
+    The bump supersedes any first-naming worker in flight; that worker then
+    returns at its OWN generation check, before reaching the re-arm which is the
+    only thing that ever clears `naming.requested`. So the routed handler
+    inherited the fence and left the compensation behind, and a `/title refresh`
+    from a phone during the opening turn — exactly when a user sees "untitled"
+    and reaches for the command — disarmed naming for the conversation's life.
+    """
+    app, session = await _boot(title="<title>Login redirect loop</title>")
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        gate = asyncio.Event()
+        session.name_gate = gate
+        app._submit_prompt("fix the login redirect loop")
+        session.gate.set()
+        await _settle()
+        assert not session.conversation_name, "the opening call was not still in flight"
+
+        await app._slash_result("title", "refresh", None)
+        gate.set()
+        await _settle()
+
+        assert not session.conversation_name
+        assert (
+            not app._interaction.naming.requested
+        ), "the routed refresh left naming permanently disarmed"
+
+
+@pytest.mark.asyncio
 async def test_the_routed_budget_covers_the_history_read_too() -> None:
     """The deadline must bound the WHOLE op, not just the naming call.
 

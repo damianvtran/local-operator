@@ -32549,47 +32549,67 @@ class OperatorApp(App[None]):
         generation = self._name_generation
         source = self._interaction
         current = session.conversation_name
-        # One budget over the history read AND the naming call, and one failure
-        # policy for both — shared with the runtime-hosted twin so the two
-        # cannot drift on the deadline the way they once drifted on the receipt.
-        result = await naming.routed_refresh(current, session)
-        # The rename-during-the-call guard the TUI worker documents: a `/rename`
-        # that landed while this was in flight outranks an answer decided
-        # against a title no longer in force, and storing over it would strip
-        # the latch protecting the words the user just typed.
-        standing = session.conversation_name
-        # Superseded alongside the rename guard, for the reason the worker twin
-        # checks both: a `/new` or `/resume` landing mid-call makes this answer
-        # belong to a conversation that is no longer here, and the retired
-        # source must not be painted or stamped.
-        if generation != source.naming.generation or source.retired:
+        try:
+            # One budget over the history read AND the naming call, and one
+            # failure policy for both — shared with the runtime-hosted twin so
+            # the two cannot drift on the deadline the way they once drifted on
+            # the receipt.
+            result = await naming.routed_refresh(current, session)
+            # The rename-during-the-call guard the TUI worker documents: a
+            # `/rename` that landed while this was in flight outranks an answer
+            # decided against a title no longer in force, and storing over it
+            # would strip the latch protecting the words the user just typed.
+            standing = session.conversation_name
+            # Superseded alongside the rename guard, for the reason the worker
+            # twin checks both: a `/new` or `/resume` landing mid-call makes
+            # this answer belong to a conversation that is no longer here, and
+            # the retired source must not be painted or stamped.
+            if generation != source.naming.generation or source.retired:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            if not result.changed or standing != current:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            # Probed rather than called outright: `session` is `Any` on this
+            # path (it is whatever facade the follower's owner holds), and the
+            # sibling in `serving.py` guards for the same reason. An
+            # AttributeError here would surface as a failed routed op rather
+            # than as a missing rename.
+            release = getattr(
+                getattr(session, "conversation_name_state", None), "release_user_set", None
+            )
+            if callable(release):
+                release()
+            stored = self._store_title_for(source, session, result.title)
             return SlashResult(
                 kind="notice",
-                text=naming.refresh_receipt(result, standing, stored=False),
+                text=naming.refresh_receipt(result, stored),
                 style="info",
+                data={"stored": stored},
             )
-        if not result.changed or standing != current:
-            return SlashResult(
-                kind="notice",
-                text=naming.refresh_receipt(result, standing, stored=False),
-                style="info",
-            )
-        # Probed rather than called outright: `session` is `Any` on this path
-        # (it is whatever facade the follower's owner holds), and the sibling in
-        # `owned.py` guards for the same reason. An AttributeError here would
-        # surface as a failed routed op rather than as a missing rename.
-        release = getattr(
-            getattr(session, "conversation_name_state", None), "release_user_set", None
-        )
-        if callable(release):
-            release()
-        stored = self._store_title_for(source, session, result.title)
-        return SlashResult(
-            kind="notice",
-            text=naming.refresh_receipt(result, stored),
-            style="info",
-            data={"stored": stored},
-        )
+        finally:
+            # The OTHER half of the generation fence, and it is not optional:
+            # the bump above supersedes any first-naming worker in flight, and
+            # that worker returns at its own generation check BEFORE reaching
+            # the re-arm which is the only thing that ever clears
+            # `naming.requested`. Without this, a `/title refresh` run from a
+            # phone during the opening turn — exactly when a user sees
+            # "untitled" and reaches for the command — leaves the conversation
+            # permanently unnamed with naming disarmed.
+            #
+            # In the `finally` and keyed on the OUTCOME, for the reason
+            # `_title_refresh_worker` does the same: every exit that leaves this
+            # conversation without a title should let a later message try again,
+            # and a landed title sets the name so the latch correctly stays
+            # spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     def _fast_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """``/fast`` over the remote/mobile control path.
