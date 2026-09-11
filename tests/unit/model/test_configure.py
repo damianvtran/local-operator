@@ -3599,6 +3599,187 @@ def test_anthropic_cache_ttl_threshold_setting_reads_like_openai_api() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter `provider` routing object: settings → dict, unset → None
+# ---------------------------------------------------------------------------
+
+
+def test_openrouter_provider_preferences_defaults_emit_nothing() -> None:
+    """THE cache-safety invariant: no configured preference → no dict at all.
+
+    OpenRouter's sticky routing keeps a long conversation's prompt cache warm
+    on one host; ANY explicit preference can route away from it. The shipped
+    DEFAULT_CONFIG block (every field at its "no opinion" value) must therefore
+    resolve to None so the request body carries no `provider` key.
+    """
+    from local_operator.config import DEFAULT_CONFIG
+    from local_operator.model.configure import _openrouter_provider_preferences as read
+
+    assert read(None) is None
+    assert read({}) is None
+    assert read({"providers": {"openai": {"api": "responses"}}}) is None
+    assert read({"providers": {"openrouter": "not-a-mapping"}}) is None
+    # The shipped defaults, exactly as DEFAULT_CONFIG seeds them.
+    assert read({"providers": DEFAULT_CONFIG.values["providers"]}) is None
+    assert (
+        read(
+            {
+                "providers": {
+                    "openrouter": {
+                        "sort": "",
+                        "order": [],
+                        "only": [],
+                        "ignore": [],
+                        "allow_fallbacks": "",
+                        "require_parameters": "",
+                        "data_collection": "",
+                        "zdr": "",
+                        "enforce_distillable_text": "",
+                        "quantizations": [],
+                        "max_price": "",
+                        "preferred_min_throughput": 0.0,
+                        "preferred_max_latency": 0.0,
+                    }
+                }
+            }
+        )
+        is None
+    )
+    # The BOOL-shaped block an earlier build of this feature wrote (and a
+    # hand-edited YAML still produces) reads as the same all-clear: the
+    # resolver tolerates both stored forms so no config ever breaks builds.
+    assert (
+        read(
+            {
+                "providers": {
+                    "openrouter": {
+                        "allow_fallbacks": True,
+                        "require_parameters": False,
+                        "zdr": False,
+                        "enforce_distillable_text": False,
+                    }
+                }
+            }
+        )
+        is None
+    )
+
+
+def test_openrouter_provider_preferences_sort_and_ignore() -> None:
+    """The operator's two priority knobs resolve into the wire names verbatim."""
+    from local_operator.model.configure import _openrouter_provider_preferences as read
+
+    assert read({"providers": {"openrouter": {"sort": "throughput"}}}) == {"sort": "throughput"}
+    prefs = read(
+        {"providers": {"openrouter": {"sort": "price", "ignore": ["some-host", "other-host"]}}}
+    )
+    assert prefs == {"sort": "price", "ignore": ["some-host", "other-host"]}
+    # Malformed values are ignored, not fatal (a hand-edited config must not
+    # break client builds); the settings registry validates real writes.
+    assert read({"providers": {"openrouter": {"sort": "bogus"}}}) is None
+    assert read({"providers": {"openrouter": {"ignore": "some-host"}}}) is None
+
+
+def test_openrouter_provider_preferences_full_surface() -> None:
+    """Every supported field lands under its wire name; unset siblings drop out."""
+    from local_operator.model.configure import _openrouter_provider_preferences as read
+
+    prefs = read(
+        {
+            "providers": {
+                "openrouter": {
+                    "sort": "latency",
+                    "order": ["deepseek", "google-ai-studio"],
+                    "only": ["deepseek"],
+                    "ignore": ["groq"],
+                    "allow_fallbacks": "false",
+                    "require_parameters": "true",
+                    "data_collection": "deny",
+                    "zdr": "true",
+                    "enforce_distillable_text": "true",
+                    "quantizations": ["fp8", "int8"],
+                    "max_price": {"prompt": 1, "completion": 2},
+                    "preferred_min_throughput": 40.0,
+                    "preferred_max_latency": 3.5,
+                }
+            }
+        }
+    )
+    assert prefs == {
+        "sort": "latency",
+        "order": ["deepseek", "google-ai-studio"],
+        "only": ["deepseek"],
+        "ignore": ["groq"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+        "data_collection": "deny",
+        "zdr": True,
+        "enforce_distillable_text": True,
+        "quantizations": ["fp8", "int8"],
+        "max_price": {"prompt": 1, "completion": 2},
+        "preferred_min_throughput": 40.0,
+        "preferred_max_latency": 3.5,
+    }
+
+
+def test_openrouter_provider_preferences_tri_state_switches() -> None:
+    """The four switches are tri-state at the wire: "" (the registry's ENUM
+    default) means "unset" and sends nothing; the explicit opt-in/out — a
+    "true"/"false" string from the settings page, or the bool a hand-edited
+    YAML parses to — is the only thing sent. `allow_fallbacks` inverts the
+    sense: OpenRouter's own default is "fall through", so only OFF is sent."""
+    from local_operator.model.configure import _openrouter_provider_preferences as read
+
+    for unset in ("", None, False):
+        assert read({"providers": {"openrouter": {"zdr": unset}}}) is None, unset
+    assert read({"providers": {"openrouter": {"zdr": "true"}}}) == {"zdr": True}
+    assert read({"providers": {"openrouter": {"zdr": True}}}) == {"zdr": True}
+    # Neither "on" (a label the registry never stores) nor junk is sent.
+    assert read({"providers": {"openrouter": {"zdr": "on"}}}) is None
+
+    for unset in ("", None, True):
+        assert read({"providers": {"openrouter": {"allow_fallbacks": unset}}}) is None, unset
+    assert read({"providers": {"openrouter": {"allow_fallbacks": "false"}}}) == {
+        "allow_fallbacks": False
+    }
+    assert read({"providers": {"openrouter": {"allow_fallbacks": False}}}) == {
+        "allow_fallbacks": False
+    }
+
+
+def test_openrouter_provider_preferences_max_price_accepts_string_and_mapping() -> None:
+    """The TUI editor types JSON text; PATCH/hand-written YAML store a mapping.
+    Both forms resolve to the same dict; unparseable text is dropped."""
+    from local_operator.model.configure import _openrouter_provider_preferences as read
+
+    assert read({"providers": {"openrouter": {"max_price": '{"prompt": 1}'}}}) == {
+        "max_price": {"prompt": 1}
+    }
+    assert read({"providers": {"openrouter": {"max_price": {"request": 0.5}}}}) == {
+        "max_price": {"request": 0.5}
+    }
+    assert read({"providers": {"openrouter": {"max_price": "{not json"}}}) is None
+
+
+def test_openrouter_preferences_reach_the_client_through_client_for() -> None:
+    """The settings → SessionStreamFn → client hand-off, end to end."""
+    from unittest.mock import MagicMock
+
+    from local_operator.model.configure import SessionStreamFn
+    from local_operator.providers.clients import OpenAICompatClient
+
+    store = MagicMock()
+    stream = SessionStreamFn(store, {"providers": {"openrouter": {"ignore": ["bad-host"]}}}, "s1")
+    spec = MagicMock(provider="openrouter", base_url=None)
+    client = stream._client_for(spec)
+    assert isinstance(client, OpenAICompatClient)
+    assert client._openrouter_provider_preferences == {"ignore": ["bad-host"]}
+    # A spec NOT routed through OpenRouter never receives the preferences.
+    other = stream._client_for(MagicMock(provider="kimi", base_url=None))
+    assert isinstance(other, OpenAICompatClient)
+    assert other._openrouter_provider_preferences is None
+
+
 def _anthropic_sse(context_tokens: int, *, tool_call: bool = False) -> bytes:
     """One mocked Anthropic stream whose usage adds up to ``context_tokens``
     (the client derives ``Usage.context_tokens`` as input + cache read +

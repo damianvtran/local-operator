@@ -3712,6 +3712,21 @@ class SettingsView(Vertical):
         # honesty rule (`command_picker.ghost_for`). A fuzzy match that would
         # rewrite typed characters shows no ghost; the dropdown row carries it.
         ghost = self._suggest_ghost()
+        # Resolved once for the whole editor: the placeholder below and the
+        # contract further down ask the same question.
+        setting = settings_io.resolve_key(self._editing or "")
+        if not ghost:
+            # No dropdown to ghost from — but a setting that DECLARES a
+            # `placeholder` still gets one, on the EMPTY buffer only: a
+            # placeholder is the answer to "what would I even type?", which
+            # is asked before the first keystroke, not after. This is the
+            # empty-state fix for the open LIST rows (the common OpenRouter
+            # host slugs exist only as a reject list otherwise) and for the
+            # `max_price` JSON shape. Paint only — it never enters the
+            # buffer, so it cannot be committed (the placeholder-as-value
+            # bug `—`/`auto` once had, see `_edit_seed`).
+            if setting is not None and setting.placeholder and not self._buffer:
+                ghost = setting.placeholder
         if ghost:
             editor.append(ghost, style=faint)
         # The CONTRACT rides the row; the ERROR does not. The detail line below
@@ -3731,7 +3746,7 @@ class SettingsView(Vertical):
         # (#387's deferred U6): on a setting whose empty string is a real value
         # the clause advertised a behaviour the row does not have.
         contract = "  enter saves · esc cancels"
-        setting = settings_io.resolve_key(self._editing or "")
+        # `setting` was resolved above the ghost, once, for the whole editor.
         # When a suggestion dropdown is live the contract names the browse and
         # complete keys, SHORTENED so it survives the value column at 100 cols
         # (review round 1, D1/U1). The old long form (`↑↓ suggestions · tab
@@ -4251,10 +4266,22 @@ class SettingsView(Vertical):
             # at 110 cols (UX round 2, U12). `default: N` is present at
             # every clause rung, so an unconfirmed `r` still names what it
             # restores (review round 1, U2/U3) — the ladder reverses nothing.
+            #
+            # THE ONE EXCEPTION that outranks the ladder (QA round 1, Q1 /
+            # design round 1, D2): a setting with a `warning` carries a HARD
+            # consequence, painted in the danger ink AHEAD of the help and
+            # pinned into EVERY rung — it is shed NEVER, not even for the
+            # clause. The finding's substance: on `providers.openrouter.order`
+            # the warning existed only while the row was at default, and the
+            # off-default clause (`default: —`) crowded it out exactly when
+            # the dangerous value was stored. Pinning also keeps the two
+            # ranks legible: the warning is danger ink, the how-to help
+            # stays faint, so a HARD routing cost can never be mistaken for
+            # a SOFT note.
             help_part = (help_text, faint, False)
             clause_part = (clause, clause_style, False)
             key_part = (key_suffix.strip(), key_style, True)
-            rungs: list[list[tuple[str, Style, bool]]] = (
+            base_rungs: list[list[tuple[str, Style, bool]]] = (
                 [
                     [help_part, clause_part, key_part],
                     [help_part, clause_part],
@@ -4266,6 +4293,17 @@ class SettingsView(Vertical):
                 if clause
                 else [[help_part, key_part], [help_part]]
             )
+            warning = row.setting.warning
+            if warning:
+                # Pinned first at every rung, with `[warning]` alone as the
+                # floor: the consequence outlives the help, the clause and
+                # the key path, so it is on screen in every state the row
+                # can be in — including the stored-value state that made it
+                # true. The floor still degrades to a visible `…` below.
+                warn_part = (warning, error, False)
+                rungs = [[warn_part, *rung] for rung in base_rungs] + [[warn_part]]
+            else:
+                rungs = base_rungs
             for rung in rungs:
                 rendered = self._join_detail(rung)
                 if cell_len(rendered.plain) <= width:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import inspect
+import json
 import logging
 import math
 import os
@@ -2419,6 +2420,84 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
     return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
 
 
+def _openrouter_provider_preferences(settings: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Build the OpenRouter chat-completions ``provider`` routing object.
+
+    Returns ``None`` when the user has expressed NO preference, and the caller
+    must then omit ``provider`` from the request body entirely. That default
+    path is load-bearing, not cosmetic: any explicit preference can route a
+    call away from the host OpenRouter's sticky routing had warmed for this
+    conversation (cold DeepSeek prompt cache on long sessions), and ``order``
+    disables sticky routing outright. So every unset/default value below means
+    "no opinion" and contributes nothing to the dict.
+
+    Same shape as ``_openai_api_mode``/``_anthropic_cache_ttl_1h_min_context_
+    tokens``: a missing ``providers`` block (old config files) or a malformed
+    leaf is ignored rather than raising, because the settings registry already
+    validates writes and a hand-edited config must not break client builds.
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    openrouter = providers.get("openrouter") if isinstance(providers, Mapping) else None
+    if not isinstance(openrouter, Mapping):
+        return None
+    prefs: dict[str, Any] = {}
+
+    # "" is the registry's "no opinion" member for the two ENUMs (the TUI
+    # shows "default" beside the real values as a peer choice).
+    sort = openrouter.get("sort")
+    if sort in ("price", "throughput", "latency"):
+        prefs["sort"] = sort
+    for key in ("order", "only", "ignore"):
+        value = openrouter.get(key)
+        if isinstance(value, list) and value:
+            prefs[key] = [str(item) for item in value]
+    data_collection = openrouter.get("data_collection")
+    if data_collection in ("allow", "deny"):
+        prefs["data_collection"] = data_collection
+    quantizations = openrouter.get("quantizations")
+    if isinstance(quantizations, list) and quantizations:
+        prefs["quantizations"] = [str(item) for item in quantizations]
+
+    # The four switches are tri-state at the wire level: the registry stores
+    # "" for "no opinion" (ENUM, like ``sort``) and only an explicit
+    # opt-in/opt-out ever reaches the body. ``allow_fallbacks`` inverts the
+    # sense: OpenRouter's own default is "fall through", so only an explicit
+    # off is sent. The bool forms are still honoured — a hand-edited YAML
+    # ``zdr: true`` parses as bool True and must keep meaning what it said.
+    allow_fallbacks = openrouter.get("allow_fallbacks")
+    if allow_fallbacks is False or allow_fallbacks == "false":
+        prefs["allow_fallbacks"] = False
+    for key in ("require_parameters", "zdr", "enforce_distillable_text"):
+        value = openrouter.get(key)
+        if value is True or value == "true":
+            prefs[key] = True
+
+    # `max_price` is stored verbatim as the user typed it — a JSON string from
+    # the TUI editor, a mapping from PATCH/hand-written YAML — so it is parsed
+    # here, once, at client build time.
+    max_price = openrouter.get("max_price")
+    if isinstance(max_price, str) and max_price.strip():
+        try:
+            parsed = json.loads(max_price)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, Mapping) and parsed:
+            prefs["max_price"] = dict(parsed)
+    elif isinstance(max_price, Mapping) and max_price:
+        prefs["max_price"] = dict(max_price)
+
+    # The throughput/latency scalars use 0 as "no preference" (a 0 tok/s floor
+    # or a 0-second latency ceiling would be nonsense to send).
+    throughput = openrouter.get("preferred_min_throughput")
+    if isinstance(throughput, (int, float)) and not isinstance(throughput, bool) and throughput > 0:
+        prefs["preferred_min_throughput"] = throughput
+    latency = openrouter.get("preferred_max_latency")
+    if isinstance(latency, (int, float)) and not isinstance(latency, bool) and latency > 0:
+        prefs["preferred_max_latency"] = latency
+
+    return prefs or None
+
+
 # ---------------------------------------------------------------------------
 # stream_fn factory
 # ---------------------------------------------------------------------------
@@ -2598,6 +2677,11 @@ class SessionStreamFn:
             anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
                 self._settings
             ),
+            # Resolved here, not inside the client: `client_for_spec` stays
+            # settings-free, and `self._settings` is rebound by
+            # `apply_settings` on every config change, so an edit applies to
+            # the next client build (the providers section is LIVE).
+            openrouter_provider_preferences=_openrouter_provider_preferences(self._settings),
         )
 
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
