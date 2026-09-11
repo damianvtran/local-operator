@@ -131,6 +131,7 @@ from local_operator.session.protocol import SessionProtocol, ViewerSessionProtoc
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
+    primary_slash_name,
     slash_command_for,
 )
 from local_operator.tui import images as images_mod
@@ -4755,7 +4756,7 @@ class OperatorApp(App[None]):
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
-                raise RuntimeError("The prepared owner is no longer active")
+                raise RuntimeError("The prepared runtime is no longer active")
             remote = await AttachedSession.connect(
                 record,
                 session_id,
@@ -4764,7 +4765,7 @@ class OperatorApp(App[None]):
                 display_window=True,
             )
         if not _is_viewer(remote):
-            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
@@ -4840,7 +4841,7 @@ class OperatorApp(App[None]):
         try:
             session = source.session
             if not _is_viewer(session):
-                raise RuntimeError("Sidebar navigation requires an owner-backed session")
+                raise RuntimeError("Sidebar navigation requires a runtime-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
             #
@@ -4858,7 +4859,7 @@ class OperatorApp(App[None]):
             # logs at debug and whose `finally` releases the preparation, so no
             # user-visible surface observes it.
             if speculative and session.is_cold:
-                raise RuntimeError("The prepared owner is no longer ready")
+                raise RuntimeError("The prepared runtime is no longer ready")
             if speculative or refresh:
                 await session.ensure_display_current()
             if not refresh:
@@ -5725,8 +5726,9 @@ class OperatorApp(App[None]):
         preparation loop expensive.
 
         Both terms move only on durable content. `display_history_revision` is
-        bumped by compaction, prune and recovery (`remote.py:1385,1506`) — the
-        rewrites that can make an over-budget window SMALLER.
+        bumped by compaction, prune and recovery (`attached.py`'s
+        `_invalidate_display_history`) — the rewrites that can make an
+        over-budget window SMALLER.
         `history_message_count` is the durable row count.
         """
         session = source.session
@@ -5945,7 +5947,7 @@ class OperatorApp(App[None]):
         if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
         if not _is_viewer(session):
-            raise RuntimeError("The conversation is not owner-backed")
+            raise RuntimeError("The conversation is not runtime-backed")
         if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
@@ -5958,7 +5960,7 @@ class OperatorApp(App[None]):
         focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not _is_viewer(previous):
-            raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed current session")
         if not refreshing:
             self._close_subagent_view()
             self._close_org_chart_view()
@@ -6443,7 +6445,7 @@ class OperatorApp(App[None]):
                 # A BIND THAT DID NOT BIND IS A FAILURE. The bind has two
                 # silent returns that look identical here — "already bound,
                 # nothing to do" and "cannot bind right now" (the facade is
-                # `_recovering`, remote.py) — and only the second leaves the
+                # `_recovering`, attached.py) — and only the second leaves the
                 # session cold. Committing on that second one publishes a COLD
                 # session as connected: `display_only` goes False, the saved
                 # transcript is swapped in live, and then
@@ -7769,7 +7771,7 @@ class OperatorApp(App[None]):
         Says the same thing the owner's own ``/stop`` says, because it is the
         same fact: the session is cold and ``/resume`` is the way back. The
         id is recorded FIRST — ``_no_session_notice`` is gated on it, so it
-        is what turns every later "owner is reconnecting" into the truth.
+        is what turns every later "runtime is reconnecting" into the truth.
         """
         source = source or self._interaction
         session = source.session
@@ -16450,7 +16452,7 @@ class OperatorApp(App[None]):
                         # recoverable (press again), so it renders as a
                         # warning that says exactly what is unknown.
                         self._replace_stop_notice(
-                            f"could not confirm the stop with the session owner — "
+                            f"could not confirm the stop with the runtime — "
                             f"{offered} subagent{'s' if offered != 1 else ''} may still "
                             "be running; press Esc twice again to retry",
                             "warning",
@@ -20148,7 +20150,7 @@ class OperatorApp(App[None]):
             record = getattr(session, "record_shell", None) if session is not None else None
             if not callable(record):
                 self._notice_for(
-                    source, "Shell finished, but this owner cannot save its receipt", "error"
+                    source, "Shell finished, but this runtime cannot save its receipt", "error"
                 )
                 return
             try:
@@ -21301,14 +21303,17 @@ class OperatorApp(App[None]):
         rename always wins, including one that landed while this call was in
         flight, so this may store nothing and return the name already there.
 
-        ``turn_count`` distinguishes the two callers and drives the growth
-        gate's counters. ``None`` is the FIRST title (the naming path): the
-        session's identity starts here, so the baseline is seeded from the
-        transcript's current turn count and the refresh budget is (re)set to
-        zero — this is where omp's ``lastTitledTurnCount``/``refreshCount`` are
-        initialised. An int is a RE-title: the baseline moves to the count the
-        check was dispatched at and one refresh is spent, so the next re-title
-        needs another doubling of the transcript.
+        ``turn_count`` distinguishes the callers and drives the growth gate's
+        counters. ``None`` means the conversation's identity is being DECIDED,
+        not merely refined, so the baseline is seeded from the transcript's
+        current turn count and the refresh budget is (re)set to zero — this is
+        where omp's ``lastTitledTurnCount``/``refreshCount`` are initialised.
+        Two callers pass it: the first naming call, where the identity starts;
+        and ``/title refresh``, where the user has just re-decided it by hand,
+        which restarts the drift clock for the same reason rather than by
+        coincidence. An int is an automatic RE-title: the baseline moves to the
+        count the check was dispatched at and one refresh is spent, so the next
+        one needs another doubling of the transcript.
         """
         stored = session.set_conversation_name(title, user_set=False)
         if turn_count is None:
@@ -21695,7 +21700,7 @@ class OperatorApp(App[None]):
         self._status.update(cwd=cwd)
 
     def _cmd_rename(self, arg: str, notice: NoticeFn) -> None:
-        """``/rename`` — report the title; ``/rename <text>`` — set it by hand.
+        """``/title`` — report; ``/title <text>`` — set it; ``/title refresh`` — ask.
 
         The ONE production writer of ``user_set=True``, which is what the
         precedence flag on :class:`ConversationName` is for: a title a human
@@ -21704,8 +21709,10 @@ class OperatorApp(App[None]):
         ``ConversationName.set``) and every later re-title, which
         :meth:`_maybe_retitle_conversation` declines to even spend a call on.
 
-        No provider call on either branch. The words are the user's, so the only
-        work is putting them on the two surfaces that show a conversation's name.
+        No provider call on the report or the set branch. The words are the
+        user's, so the only work is putting them on the two surfaces that show a
+        conversation's name. ``refresh`` is the one branch that spends a call,
+        and it is delegated to :meth:`_cmd_title_refresh`.
         """
         session = self._session
         if session is None:
@@ -21714,10 +21721,18 @@ class OperatorApp(App[None]):
             # `notice` would collapse it. The rule `_cmd_goal` follows.
             self._system_notice("session is still starting…", "warning")
             return
-        if not arg:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            notice(str(error), "warning")
+            return
+        if is_refresh:
+            self._cmd_title_refresh(session, notice)
+            return
+        if not title:
             current = session.conversation_name
             if current:
-                notice(f"conversation: {current} — /rename <title> to change it")
+                notice(f"conversation: {current} — /title <words>, or /title refresh")
             elif self._provisional_name:
                 # The band is wearing a stand-in, not a name (see
                 # `_show_provisional_name`). Answering a bare "unnamed" with an
@@ -21725,12 +21740,12 @@ class OperatorApp(App[None]):
                 # what the label actually is.
                 notice(
                     f"unnamed — the label above is a quote of your first message "
-                    f"({self._provisional_name}); /rename <title> names it"
+                    f"({self._provisional_name}); /title <words> names it"
                 )
             else:
-                notice("unnamed — /rename <title> names this conversation")
+                notice("unnamed — /title <words> names this conversation")
             return
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         # Superseded, and by the best possible answer: cleared for the reason
         # `_store_title` clears it, so nothing downstream still believes the
         # band is showing a stand-in.
@@ -21760,6 +21775,165 @@ class OperatorApp(App[None]):
         # ignored the format, while this is just a long name the user chose, and
         # refusing it outright would lose a title they typed.
         notice(f"renamed: {stored} — auto-naming will not override it")
+
+    def _cmd_title_refresh(self, session: SessionProtocol, notice: NoticeFn) -> None:
+        """``/title refresh`` — re-read the conversation and name it now.
+
+        The on-demand counterpart to :meth:`_maybe_retitle_conversation`, and
+        every difference between them follows from who asked. The automatic path
+        is a guess about whether a refresh is WANTED, so it is gated four ways
+        (``user_set``, low signal, growth, a churn floor) to keep the guessing
+        cheap. This caller is not guessing, so all four gates are dropped:
+        the user has just said the title is wrong, which is better evidence than
+        any schedule.
+
+        ``user_set`` is not merely bypassed but RELEASED
+        (``ConversationName.release_user_set``), and that is the load-bearing
+        half of this command. Asking for a fresh title is withdrawing the name
+        you typed — keeping the flag would mean the refreshed title landed and
+        then automatic naming stayed disabled forever on the strength of a
+        rename the user had just abandoned. Released, the conversation goes back
+        to tracking its own subject, which is what "refresh" means. The release
+        happens in the worker and only once a replacement is actually in hand —
+        see :meth:`_title_refresh_worker`.
+
+        The growth budget is not charged either. It bounds AUTOMATIC calls so an
+        unattended session cannot spend indefinitely; a call the user asked for
+        is not unattended, and charging it would let two deliberate refreshes
+        exhaust the automatic schedule for the rest of the session. A landed
+        refresh instead re-seeds the schedule through ``_store_title``'s
+        first-title branch, which is the honest reading: this conversation's
+        identity was just re-decided, so its drift clock starts again here.
+        """
+        # Generation-stamped like the automatic path so a `/new` or `/resume`
+        # landing while the call is in flight cannot repaint the replacement
+        # conversation with this one's title.
+        self._name_generation += 1
+        generation = self._name_generation
+        # Snapshot on the UI thread, exactly as the automatic path does: the
+        # sampler only reads role/text, so a shallow copy is enough, and taking
+        # it now titles the conversation as it stands rather than as it looks
+        # after a concurrent turn has written more history.
+        turns = (
+            None
+            if hasattr(session, "materialize_history")
+            else (list(session.history()) if hasattr(session, "history") else [])
+        )
+        notice("refreshing the title…")
+        self.run_worker(
+            self._title_refresh_worker(
+                session,
+                session.conversation_name,
+                generation,
+                turns,
+                source=self._interaction,
+            ),
+            thread=False,
+            group=self._interaction.worker_group("naming"),
+        )
+
+    async def _title_refresh_worker(
+        self,
+        session: SessionProtocol,
+        current: str,
+        generation: int,
+        turns: list[AgentMessage] | None,
+        source: SessionInteraction | None = None,
+    ) -> None:
+        """One isolated refresh call, whose every outcome gets a receipt.
+
+        Unlike :meth:`_retitle_conversation_worker`, silence is not an option on
+        any branch. That worker runs unasked and repaints only on a genuinely
+        new title, so "no change" and "the call failed" can both correctly
+        resolve to doing nothing. Here a user typed a command and is watching
+        for an answer, so each outcome says which one it was — a refresh that
+        quietly changed nothing is indistinguishable from a broken command.
+
+        ``source`` is captured at DISPATCH and every write goes through it —
+        ``_store_title_for``, ``_notice_for`` — rather than through
+        ``self._interaction``, which is a moving target: a sidebar switch during
+        the call moves it, and a worker that re-read it on resume would paint
+        the refreshed title onto the conversation the user switched TO and stamp
+        that innocent session's naming schedule. The neighbouring naming workers
+        both take the source as a parameter for this reason; this one is not
+        special.
+        """
+        source = source or self._interaction
+        source.active_workers += 1
+        try:
+            try:
+                if turns is None:
+                    turns = await getattr(session, "materialize_history")()
+                result = await naming.refresh_title(current, session.complete_once, turns=turns)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 — silence is the one defect here
+                # `refresh_title` swallows the NAMING call's failures, but
+                # `materialize_history` is outside it and raises on ordinary
+                # reconnect races ("history changed while materializing").
+                # Uncaught, the worker dies with `refreshing the title…` still on
+                # screen and no answer ever — precisely what this method's
+                # contract forbids. The routed twins already resolve it this way.
+                logger.debug("title refresh could not read the history", exc_info=True)
+                result = naming.TitleRefresh(naming.TITLE_UNAVAILABLE)
+            # A cancel that the naming call swallowed on our behalf. The
+            # `except` above cannot see it — `_ask_for_title` catches
+            # `CancelledError` for the detached workers and RETURNS a sentinel,
+            # so this worker resumes normally with a cancelled outcome rather
+            # than unwinding. Painting here would tell a user who just
+            # cancelled that the model judged the name still fits; no judgement
+            # happened. Silence is the honest answer, and it is what the
+            # `except` branch would have given.
+            if result.outcome == naming.TITLE_CANCELLED:
+                return
+            # Superseded (a reload) or belonging to a session no longer on
+            # screen: touch neither the title nor the transcript.
+            if generation != source.naming.generation or source.retired:
+                return
+            # Re-read rather than trusting `current`, the rule
+            # `_retitle_conversation_worker` follows: a `/rename` may have landed
+            # while this call was in flight, and it outranks an answer decided
+            # against a title no longer in force. Without this the release below
+            # would strip the very latch protecting the name the user just typed,
+            # and the refresh would overwrite it — silently revoking their most
+            # recent instruction in favour of their previous one.
+            standing = session.conversation_name
+            if not result.changed or standing != current:
+                self._notice_for(source, naming.refresh_receipt(result, standing, stored=False))
+                return
+            # Released only once a replacement is actually in hand. Released
+            # before the call instead, a refresh that came back "unchanged"
+            # would still have silently re-armed automatic naming over a name
+            # the user typed and is keeping.
+            #
+            # Dereferenced DIRECTLY, unlike the two routed handlers that probe
+            # with `getattr`, and the difference is the type rather than the
+            # care taken: `session` is `SessionProtocol` here, which makes
+            # `conversation_name_state` mandatory (see its declaration there),
+            # so a probe would guard a state pyright already forbids — and
+            # would silently skip the release if the member were ever dropped,
+            # where this line fails the type-check that is the real guard. The
+            # routed paths take `Any` (whatever facade a follower's owner
+            # holds) and have no such promise, so they must probe.
+            session.conversation_name_state.release_user_set()
+            stored = self._store_title_for(source, session, result.title)
+            self._notice_for(source, naming.refresh_receipt(result, stored))
+        finally:
+            source.active_workers -= 1
+            # Naming fires ONCE per conversation, and the only thing that re-arms
+            # it is `_name_conversation_worker`'s own failure path — which a
+            # worker superseded by this one's generation bump returns before
+            # reaching. So a refresh dispatched while the opening naming call was
+            # still in flight would leave an unnamed conversation with naming
+            # permanently disarmed AND no title, the two failures compounding.
+            #
+            # In the `finally` rather than on one branch because the condition is
+            # about the OUTCOME, not the route to it: any exit that leaves this
+            # conversation unnamed — superseded, nothing-yet, a dead provider,
+            # cancellation — should let a later substantive message try again. A
+            # landed title sets the name, so the latch correctly stays spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     # -- background jobs ------------------------------------------------------
     def _poll_subagents(self) -> None:
@@ -23922,7 +24096,7 @@ class OperatorApp(App[None]):
             # second line about the same fact pointing the other way is the
             # defect, not the diagnosis.
             logger.debug(
-                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                "build skew (runtime) at %s: %s is current, this window (%s) is behind",
                 reason,
                 owner.label(),
                 loaded.label(),
@@ -23992,7 +24166,7 @@ class OperatorApp(App[None]):
                 # in this build, so anything without it is older than this
                 # window.
                 announce(
-                    "owner-unknown",
+                    "runtime-unknown",
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
@@ -24027,7 +24201,7 @@ class OperatorApp(App[None]):
                 # reaper compares itself against disk and acts on the answer
                 # (QA round 1, Q-1 all-refs sub-case).
                 announce(
-                    "owner",
+                    "runtime",
                     owner.label(),
                     loaded.label(),
                     # Collapsed by hand when the versions are EQUAL (the
@@ -24057,7 +24231,7 @@ class OperatorApp(App[None]):
                 )
                 return
             announce(
-                "owner",
+                "runtime",
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
@@ -24068,7 +24242,7 @@ class OperatorApp(App[None]):
 
         if runtime_idle and callable(ask):
             logger.debug(
-                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                "build skew (runtime) at %s: %s -> %s; runtime idle, requesting refresh",
                 reason,
                 owner.label() if owner is not None else "<unstamped>",
                 loaded.label(),
@@ -24625,8 +24799,8 @@ class OperatorApp(App[None]):
             # list (a reduced test double) still falls through, matching the
             # pre-guard behaviour the round-4 walk established.
             self._system_notice(
-                f"/{entry.name} is not available from this session's owner; "
-                "run it in the owner's terminal",
+                f"/{entry.name} is not available from this session's runtime; "
+                "run it in the runtime's terminal",
                 "warning",
             )
             return
@@ -25073,7 +25247,7 @@ class OperatorApp(App[None]):
             # `AttachedSession.request_stop` does.
             self._issued_own_stop = False
             self._system_notice(
-                "cannot stop this session's owner — the owner is an older process; "
+                "cannot stop this session's runtime — the runtime is an older process; "
                 "close it there or upgrade",
                 "warning",
             )
@@ -25763,14 +25937,16 @@ class OperatorApp(App[None]):
                 self._system_notice(text_line, kind)
             elif bool(getattr(session, "_recovering", False)):
                 # `is_cold` is a superset of the drop: it is also true while
-                # the facade is redialing an owner that died. There "send a
+                # the facade is redialing a runtime that died. There "send a
                 # message" is not the lever — the facade's own answer for the
-                # gap is `_unavailable_reason()` ("session owner is
+                # gap is `_unavailable_reason()` ("the runtime is
                 # reconnecting"), the sentence the prompt path already uses
-                # (review round 2, R2-M1).
+                # (review round 2, R2-M1). That literal is matched nowhere;
+                # `_is_runtime_gone` excludes it on the `reconnecting`
+                # substring alone, which the wording keeps.
                 reason = getattr(session, "_unavailable_reason", None)
                 self._system_notice(
-                    f"{reason() if callable(reason) else 'session owner is reconnecting'}; "
+                    f"{reason() if callable(reason) else 'the runtime is reconnecting'}; "
                     "try /model again in a moment",
                     "warning",
                 )
@@ -29535,8 +29711,9 @@ class OperatorApp(App[None]):
         self._interaction.draft.aside = None
         panel.close()
         panel._on_height = None
-        # Give the transcript its own last rows back, and land the reader at
-        # the end of the conversation they came back to.
+        # Give the transcript its own last rows back, and land the reader
+        # back where THEY were — the tail only if that is where they already
+        # were (see the `is_following_tail` guard below).
         #
         # DROP the inline rule rather than write a number back. The sheet's own
         # bottom padding is the conversation's trailing row of ground (1 in the
@@ -29548,8 +29725,31 @@ class OperatorApp(App[None]):
         # which is the only place that knows which layout is up.
         transcript = self._transcript_view()
         if transcript is not None:
+            # `follow_tail()` ONLY when the reader was already at the end —
+            # not unconditionally. The unconditional call was itself a
+            # defect: a reader who scrolled BACK to re-read something before
+            # opening the aside (the exact gesture the docstring at
+            # `_reserve_ground_for_aside` names — "re-reading is a thing
+            # people do WHILE asking an aside about it") got yanked to the
+            # tail the moment they closed the card, landing on unrelated
+            # content and one click away from the D2/D3 defects this same
+            # change fixes elsewhere. Measured: parked at `scroll_y=3` of 15,
+            # `/btw` opened and closed with no scroll gesture in between —
+            # `scroll_y` came back as `15`, not `3`. Clearing the padding
+            # rule alone (no `follow_tail()`) already lands the SAME row at
+            # the SAME offset, because the padding is the only thing that
+            # moved: the conversation's own rows never did.
+            #
+            # `is_following_tail()`, not `is_near_bottom()`: the anchor is the
+            # authority on INTENT (did the reader ask to be at the end),
+            # which is what a re-acquire on close should honour, and it is
+            # already resynced against the padded extent by
+            # `_reserve_ground_for_aside`'s own `follow_tail()` call when the
+            # aside opened at the tail.
+            was_following = transcript.is_following_tail
             transcript.styles.clear_rule("padding")
-            transcript.follow_tail()
+            if was_following:
+                transcript.follow_tail()
         draft = self._aside_draft
         images = self._aside_draft_images
         self._aside_draft = None
@@ -29980,6 +30180,34 @@ class OperatorApp(App[None]):
                 ]
             )
             picker.set_notice("")
+            return
+        if message.command in ("rename", "title"):
+            # ONE row, and it is the whole reason this command takes a list. The
+            # other argument is free text — a title cannot be offered from a
+            # list, because the app does not know what the conversation should
+            # be called — so the list exists to teach the one word a user could
+            # not guess. Free typing is unaffected: the editor RANKS what is
+            # typed and never filters what may be submitted, so an arbitrary
+            # title still reaches `_cmd_rename`.
+            #
+            # The description states the release, not just the call. That the
+            # refresh hands the name back to automatic naming is the surprising
+            # half of the command, and this row is the last surface before it
+            # runs.
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name="refresh",
+                        description="Re-read the conversation and name it again",
+                        detail="resumes auto-naming",
+                    )
+                ]
+            )
+            picker.set_notice(
+                f"conversation: {self._session.conversation_name}"
+                if self._session is not None and self._session.conversation_name
+                else "or type a title"
+            )
             return
         if message.command == "mcp":
             # Clear BEFORE the fill: the builder may set a notice of its own
@@ -32177,12 +32405,22 @@ class OperatorApp(App[None]):
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
+        # Resolved to the registry PRIMARY name before any branch reads it, for
+        # the reason `_run_slash_command` does the same: the branches below
+        # match literals, so an ALIAS arriving off the wire (`/title`,
+        # `/models`, `/recall`) would fall past every one of them and be
+        # answered with the "not available from an attached terminal" refusal —
+        # for a command this owner implements and the invoker's own picker
+        # completed. The local path resolves at dispatch and the routed path did
+        # not, which is precisely how one spelling of a command worked in a
+        # terminal and failed on a phone.
+        command = primary_slash_name(command)
         if command == "context":
             return self._context_slash_result(SlashResult)
         if command == "goal":
             return self._goal_slash_result(args, SlashResult)
         if command == "rename":
-            return self._rename_slash_result(args, SlashResult)
+            return await self._rename_slash_result(args, SlashResult)
         if command == "effort":
             return self._effort_slash_result(args, SlashResult)
         if command == "fast":
@@ -32279,25 +32517,136 @@ class OperatorApp(App[None]):
             data={"type": "goal_set", "stored": stored, "request": arg.strip()},
         )
 
-    def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _rename_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """``/title`` over the remote/mobile control path.
+
+        Async solely for the refresh branch, which spends a provider call. The
+        report and set branches are the same synchronous work they have always
+        been — awaiting a coroutine that never suspends costs nothing, and the
+        alternative (a sync entry that spawns a detached task) would answer the
+        phone with a receipt for a title that had not been decided yet.
+
+        The refresh is AWAITED rather than run on a worker for the same reason:
+        this path's whole contract is that the returned ``SlashResult`` is the
+        answer the invoker renders. A follower has no naming worker of its own
+        and no second chance to paint, so a result produced before the call
+        finished would be a receipt for work that had not happened.
+        """
         session = self._session
         if session is None:
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
-        if not arg:
+        try:
+            is_refresh, title = naming.parse_title_arg(arg)
+        except ValueError as error:
+            return SlashResult(kind="notice", text=str(error), style="warning")
+        if is_refresh:
+            return await self._title_refresh_slash_result(session, SlashResult)
+        if not title:
             current = session.conversation_name
             text = (
-                f"conversation: {current} — /rename <title> to change it"
+                f"conversation: {current} — /title <words>, or /title refresh"
                 if current
-                else "unnamed — /rename <title> names this conversation"
+                else "unnamed — /title <words> names this conversation"
             )
             return SlashResult(kind="notice", text=text, style="info")
-        stored = session.set_conversation_name(arg, user_set=True)
+        stored = session.set_conversation_name(title, user_set=True)
         return SlashResult(
             kind="notice",
             text=f"renamed: {stored} — auto-naming will not override it",
             style="info",
             data={"stored": stored},
         )
+
+    async def _title_refresh_slash_result(self, session: Any, SlashResult: Any) -> Any:
+        """``/title refresh`` routed from a follower, with this app as owner.
+
+        Shares :func:`naming.refresh_title`, the release-on-success rule and
+        :func:`naming.refresh_receipt` with :meth:`_title_refresh_worker` rather
+        than reimplementing any of them, so a phone and a terminal cannot drift
+        on what a refresh does to the ``user_set`` flag or on what it says.
+        What differs is the delivery — a receipt returned as data rather than
+        painted — and the deadline: a client is holding a socket open for this
+        answer, so the call gets :data:`naming.ROUTED_TITLE_TIMEOUT_S` instead
+        of the worker's full budget.
+
+        ``source`` is captured at DISPATCH here for the same reason the worker
+        does it, and it is easy to miss on this path precisely because there is
+        no worker in sight: the two awaits below are just as long, so
+        ``self._interaction`` is just as much a moving target, and
+        ``_store_title``'s convenience wrapper (which re-reads it) is safe only
+        for callers that do not suspend.
+        """
+        # Generation-stamped at DISPATCH exactly as :meth:`_cmd_title_refresh`
+        # does, and for the same reason: an automatic naming call dispatched
+        # BEFORE this one still matches its own captured generation when it
+        # resumes, so without the bump it stores its pre-refresh answer over the
+        # title this refresh just landed. The follower asked for a fresh name
+        # and would be left with the stale one (review round 1, MAJOR-1).
+        self._name_generation += 1
+        generation = self._name_generation
+        source = self._interaction
+        current = session.conversation_name
+        try:
+            # One budget over the history read AND the naming call, and one
+            # failure policy for both — shared with the runtime-hosted twin so
+            # the two cannot drift on the deadline the way they once drifted on
+            # the receipt.
+            result = await naming.routed_refresh(current, session)
+            # The rename-during-the-call guard the TUI worker documents: a
+            # `/rename` that landed while this was in flight outranks an answer
+            # decided against a title no longer in force, and storing over it
+            # would strip the latch protecting the words the user just typed.
+            standing = session.conversation_name
+            # Superseded alongside the rename guard, for the reason the worker
+            # twin checks both: a `/new` or `/resume` landing mid-call makes
+            # this answer belong to a conversation that is no longer here, and
+            # the retired source must not be painted or stamped.
+            if generation != source.naming.generation or source.retired:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            if not result.changed or standing != current:
+                return SlashResult(
+                    kind="notice",
+                    text=naming.refresh_receipt(result, standing, stored=False),
+                    style="info",
+                )
+            # Probed rather than called outright: `session` is `Any` on this
+            # path (it is whatever facade the follower's owner holds), and the
+            # sibling in `serving.py` guards for the same reason. An
+            # AttributeError here would surface as a failed routed op rather
+            # than as a missing rename.
+            release = getattr(
+                getattr(session, "conversation_name_state", None), "release_user_set", None
+            )
+            if callable(release):
+                release()
+            stored = self._store_title_for(source, session, result.title)
+            return SlashResult(
+                kind="notice",
+                text=naming.refresh_receipt(result, stored),
+                style="info",
+                data={"stored": stored},
+            )
+        finally:
+            # The OTHER half of the generation fence, and it is not optional:
+            # the bump above supersedes any first-naming worker in flight, and
+            # that worker returns at its own generation check BEFORE reaching
+            # the re-arm which is the only thing that ever clears
+            # `naming.requested`. Without this, a `/title refresh` run from a
+            # phone during the opening turn — exactly when a user sees
+            # "untitled" and reaches for the command — leaves the conversation
+            # permanently unnamed with naming disarmed.
+            #
+            # In the `finally` and keyed on the OUTCOME, for the reason
+            # `_title_refresh_worker` does the same: every exit that leaves this
+            # conversation without a title should let a later message try again,
+            # and a landed title sets the name so the latch correctly stays
+            # spent.
+            if not session.conversation_name:
+                source.naming.requested = False
 
     def _fast_slash_result(self, arg: str, SlashResult: Any) -> Any:
         """``/fast`` over the remote/mobile control path.
@@ -35297,7 +35646,7 @@ class OperatorApp(App[None]):
         if session is not self._session:
             logger.debug("dropped a recall refusal for a session that is no longer current")
             return
-        logger.debug("session owner refused the recall of steer %s", command_id)
+        logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
     def _settle_queued_steer_notices_unsent(self) -> None:

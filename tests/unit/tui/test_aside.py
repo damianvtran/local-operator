@@ -437,6 +437,73 @@ async def test_the_card_rests_on_the_end_of_the_chat_not_on_top_of_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> None:
+    """Closing the aside must not move a reader who was not at the end.
+
+    ``_reserve_ground_for_aside``'s own docstring makes the promise this test
+    pins: "yanking someone who had scrolled back to re-read something is what
+    this must not do, and re-reading is a thing people do WHILE asking an
+    aside about it." ``_close_aside`` broke exactly that promise on the way
+    out — it called ``transcript.follow_tail()`` unconditionally, so a reader
+    who opened `/btw` from a scrolled-back position landed back at the newest
+    message the instant they dismissed the card, with no scroll gesture of
+    their own in between.
+
+    Measured before this fix, at ``scroll_y=3`` of a 15-row scrollback: opening
+    and closing `/btw` with no scroll gesture between the two moved
+    ``scroll_y`` to `15`. The row the reader was looking at is still on
+    screen after the fix — clearing the padding rule alone repositions the
+    SAME rows correctly, because the conversation's own content never moved;
+    only the reserved ground under the card did.
+    """
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        for i in range(40):
+            app._append_block(UserBlock(f"question number {i:02d} about the codebase"))
+        await pilot.pause()
+        transcript = app._transcript_view()
+
+        # Scroll back to re-read something, the gesture the docstring names.
+        transcript.note_user_scroll()
+        transcript.scroll_to(y=3, animate=False, immediate=True)
+        await pilot.pause()
+        parked = transcript.scroll_y
+        assert parked < transcript.max_scroll_y, "premise: not at the tail"
+        assert not transcript.is_following_tail, "premise: the anchor released"
+
+        await _open_with_question(pilot, app, "why is this long?")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert transcript.scroll_y == parked, (
+            f"closing the aside moved the reader from {parked} to "
+            f"{transcript.scroll_y} with no scroll gesture of their own"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_reader_at_the_tail_still_lands_at_the_tail_on_close() -> None:
+    """The other half: a reader who WAS following still is, after the round trip."""
+    session = AsideSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        transcript = app._transcript_view()
+        assert transcript.is_following_tail
+
+        await _open_with_question(pilot, app, "are the subagents stuck?")
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert transcript.is_following_tail
+        assert transcript.scroll_y == transcript.max_scroll_y
+
+
+@pytest.mark.asyncio
 async def test_an_aside_question_never_enters_the_prompt_history() -> None:
     """ "esc discards it" has to be true of UP as well as of the transcript.
 

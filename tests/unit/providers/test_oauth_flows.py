@@ -158,9 +158,133 @@ async def test_manual_input_only_pastes_code_without_server() -> None:
     assert flow.bound_port is None  # no server in manual mode
 
 
+#: Backstop for the squatter's read, in seconds. NOT a timing assertion and
+#: not a bound on the behaviour under test: the read is normally ended by the
+#: peer closing (the flow's ``GET /cancel`` probe closes its writer in its own
+#: ``finally`` after a 2s read timeout, so the peer is gone within ~4s). This
+#: exists so that a FUTURE peer that connects and never closes cannot turn the
+#: double back into the unbounded wait it was written to remove -- the same
+#: shape ``tests/e2e/watchdog.py`` describes, where the deadline is there "so a
+#: genuine hang fails the run instead of blocking forever. It is a backstop,
+#: not the assertion." 60s is ~15x the worst measured peer-close (3.85s single
+#: test call on 3.12), so a healthy run can never reach it.
+_PEER_CLOSE_BACKSTOP_S = 60.0
+
+
+class _PortSquatter:
+    """A server that occupies a port and answers nothing — without hanging.
+
+    Used as the ``client_connected_cb`` for the port-blocking doubles below.
+
+    WHY A HANDLER IS NOT OPTIONAL. ``Server.wait_closed()`` returns only when
+    the server is closed AND every connection it ACCEPTED has been released.
+    A handler that never closes its writer pins that count for the life of the
+    event loop, so ``await server.wait_closed()`` in a test's ``finally`` never
+    returns. That was this file's ``lambda r, w: None``: the flow's
+    best-effort ``GET /cancel`` probe is what connects here, the probe always
+    closes its own side, and on CPython 3.12 a closed peer is not enough —
+    ``StreamReaderProtocol.eof_received()`` returns True (a half-close is
+    legal HTTP), so the transport stays open and the server never detaches it.
+
+    WHAT THE INTERPRETERS ACTUALLY DIFFER ON, because the version number is not
+    the property and naming the property is what makes this readable on the
+    next machine. ``Server`` tracks accepted connections with
+    ``self._active_count = 0`` on 3.12 -- a plain counter, decremented only by
+    ``Server._detach()``, which runs from the transport's ``connection_lost``.
+    A handler that never closes its writer leaves the transport open, so
+    ``connection_lost`` never arrives, the counter stays at 1 and
+    ``wait_closed()`` waits for the life of the loop. From **3.13** the same
+    field is ``self._clients = weakref.WeakSet()``, and the server holds its
+    accepted transports only WEAKLY, so a connection nothing else keeps alive
+    stops counting against the waiter -- which is why ``wait_closed()`` returns
+    there even though the socket was never released.
+
+    Verified against the interpreters' own sources, not recalled:
+    ``3.12.13 asyncio/base_events.py:281`` has ``_active_count`` while
+    ``3.13.12`` and ``3.14.3`` both have ``_clients`` at ``:283``, and the same
+    probe returns on 3.13.12 and 3.14.3 and does not on 3.12.13. So the
+    divergence is 3.12 versus 3.13-and-later, and it is the WEAK reference --
+    not the version -- that decides it.
+
+    Measured consequence, because this is the reason it went unnoticed: with
+    ``lambda r, w: None``, ``test_pinned_port_fails_before_browser_when_busy``
+    hangs and is killed by ``timeout 45`` on **3.12.13, 3 of 3 runs** (its
+    coroutine parked on an idle event loop, its stack a bare
+    ``await blocker.wait_closed()``), while the identical code passes on 3.13
+    and 3.14. On CI that difference is a 20-minute ``timeout-minutes`` cancel
+    with no failing assertion and a ~6-minute silent tail -- the stall the shard
+    watchdog (``tests/shard_stall_watchdog.py``) named in run 34558244102, job
+    103135419093 -- so the double, not the product, is the defect here.
+
+    Reading to EOF before closing keeps the double FAITHFUL as well as safe:
+    it still answers nothing, so the probe still has to wait out its own read
+    timeout, which is the behaviour under test. The read is bounded by the peer
+    closing first, with :data:`_PEER_CLOSE_BACKSTOP_S` as a backstop so the
+    double cannot itself become the unbounded wait it exists to prevent.
+    """
+
+    def __init__(self) -> None:
+        self.accepted: list[asyncio.StreamWriter] = []
+        # Deliberately STICKY: it means "at least one handler finished", which
+        # is all the guard's fast-path assertion needs, because a leak of any
+        # ADDITIONAL connection is caught by that guard's ``wait_for`` bound
+        # rather than by this flag. A count would only sharpen the failure
+        # message in a case that cannot arise at either call site (each accepts
+        # exactly one connection, the flow's cancel probe).
+        self.released = False
+
+    async def __call__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.accepted.append(writer)
+        try:
+            await asyncio.wait_for(reader.read(-1), timeout=_PEER_CLOSE_BACKSTOP_S)
+        except Exception:  # a reset or the backstop: either way the peer is gone
+            pass
+        finally:
+            writer.close()
+            self.released = True
+
+
+async def test_the_port_squatter_double_releases_what_it_accepts() -> None:
+    """Pin the double's contract, so the hang cannot come back unnoticed.
+
+    The regression this guards is real and costly: the previous
+    ``lambda r, w: None`` left the accepted connection attached forever, and
+    the only symptom was a shard cancelled at the workflow's 20-minute cap with
+    the suite at 99% and no failure anywhere.
+
+    What it catches, precisely -- mutation-tested, both interpreters: removing
+    the handler's ``writer.close()`` (so the connection is accepted, tracked and
+    never released) fails this guard in 5.32s on 3.12 AND on 3.14, because the
+    bounded ``wait_closed()`` below cannot return while a connection is still
+    attached. What it does NOT catch is a call site that stops using
+    ``_PortSquatter`` at all -- the literal ``lambda r, w: None`` binds at the
+    ``start_server`` call, not here. That case is covered by the test that owns
+    the behaviour instead: it hangs on 3.12, so the shard watchdog reports it in
+    four minutes rather than the workflow cap reporting it in twenty.
+    """
+    squatter = _PortSquatter()
+    blocker = await asyncio.start_server(squatter, "127.0.0.1", 0)
+    busy_port = int(blocker.sockets[0].getsockname()[1])
+    _reader, writer = await asyncio.open_connection("127.0.0.1", busy_port)
+    writer.write(b"GET /cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+    assert squatter.accepted, "nothing connected, so this guard would prove nothing"
+    for _ in range(200):
+        if squatter.released:
+            break
+        await asyncio.sleep(0.01)
+    assert squatter.released, "the squatter kept an accepted connection attached"
+
+    blocker.close()
+    await asyncio.wait_for(blocker.wait_closed(), timeout=5.0)
+
+
 async def test_pinned_port_fails_before_browser_when_busy() -> None:
     """A provider-pinned port that is busy must fail fast — no browser."""
-    blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    blocker = await asyncio.start_server(_PortSquatter(), "127.0.0.1", 0)
     busy_port = int(blocker.sockets[0].getsockname()[1])
     opened: list[str] = []
     try:
@@ -178,7 +302,7 @@ async def test_pinned_port_fails_before_browser_when_busy() -> None:
 
 
 async def test_port_fallback_when_allowed() -> None:
-    blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    blocker = await asyncio.start_server(_PortSquatter(), "127.0.0.1", 0)
     busy_port = int(blocker.sockets[0].getsockname()[1])
     try:
         flow = _EchoFlow(
