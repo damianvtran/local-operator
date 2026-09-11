@@ -8,6 +8,7 @@ the request) and what the TRANSCRIPT shows (the short line the user typed).
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,15 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import TranscriptView
 
 from .test_app_pilot import FakeSession, _factory, _transcript_text
+
+# The slash surface's own submit helper, imported rather than re-implemented:
+# this file's local `_submit` drives the COMPOSER (caret-anchored, picker open),
+# while a `/team …` line needs the picker dismissed first. Aliased because the
+# two helpers coexist here and a third one would be the drift both exist to
+# prevent. `_agent_registry` comes along for the `/agent` case.
+from .test_slash_echo import _agent_registry, _boot, _notice_texts
+from .test_slash_echo import _submit as _submit_slash
+from .test_slash_echo import _user_rows
 
 
 @pytest.fixture
@@ -1132,3 +1142,168 @@ class TestSkillTokenParser:
         # The bare-prefix case IS an append, and still previews.
         bare = completion_for("$res", 4, CompletionMode.SKILL, "research", ())
         assert ghost_for(bare, "$res") == "earch "
+
+
+class TestInvocationInsideACommandArgument:
+    """A `$skill` leading a slash command's ARGUMENT fires, same as a bare one.
+
+    `/team <name> <request>`, `/agent <name> <message>` and `/goal <text>` all
+    hand their argument to the model as a real user turn, so a `$research` at
+    the front of that argument is the same gesture the composer already honours
+    — and used to reach the model as the literal characters `$research`.
+
+    The anchored parser needs no change to serve this: the argument is its OWN
+    string, whose offset 0 is exactly where the user's `$` sits. That is why
+    the fix is a call to the existing `_expand_invocation` rather than a second
+    grammar, and why the money/shell guards below hold for free.
+    """
+
+    @staticmethod
+    def _team_session(name: str = "feature-release") -> FakeSession:
+        """A session with one real team registered, the `test_slash_echo` way."""
+        from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+        session = FakeSession()
+        registry = TeamRegistry(Path(tempfile.mkdtemp()))
+        registry.create_team(
+            TeamEditFields(
+                name=name,
+                manager="manager",
+                members=[TeamMember(role="coder")],
+            )
+        )
+        session.team_registry = registry
+        return session
+
+    @pytest.mark.asyncio
+    async def test_team_request_expands_a_leading_skill_invocation(self, skill_root) -> None:
+        """THE BUG: the manager was handed the literal `$research …` string."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $research fix the login bug")
+            await _await_prompt(pilot, session)
+        assert session.attached_teams, "the team must be attached before the turn"
+        assert session.attached_teams[0].name == "feature-release"
+        assert len(session.prompts) == 1, session.prompts
+        sent = session.prompts[0]
+        assert "Read primary sources." in sent, sent
+        assert "fix the login bug" in sent, sent
+        assert "`research`" in sent, sent
+
+    @pytest.mark.asyncio
+    async def test_team_row_stays_the_typed_argument_not_the_body(self, skill_root) -> None:
+        """The display/sent split the bare-prompt path already keeps."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $research fix the login bug")
+            await _await_prompt(pilot, session)
+            await pilot.pause()
+            rows = _user_rows(app)
+            shown = _transcript_text(app)
+        assert rows == ["$research fix the login bug"], rows
+        assert "Read primary sources." not in shown, shown
+
+    @pytest.mark.asyncio
+    async def test_agent_message_expands_a_leading_skill_invocation(self, skill_root) -> None:
+        """`/agent <name> <message>` is the same tail, so it inherits the fix."""
+        session = FakeSession()
+        session.agent_registry = _agent_registry(tempfile.mkdtemp())
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/agent dashboard-sme $research fix the login bug")
+            await _await_prompt(pilot, session)
+        assert session.attached_agents == ["dashboard-sme"], session.attached_agents
+        assert len(session.prompts) == 1, session.prompts
+        assert "Read primary sources." in session.prompts[0], session.prompts[0]
+        assert "fix the login bug" in session.prompts[0], session.prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_goal_expands_the_turn_but_stores_the_unexpanded_goal(self, skill_root) -> None:
+        """The body reaches the TURN only.
+
+        `/goal`'s text rides the system prompt's volatile tail on every later
+        turn, so storing an expanded goal would replay the whole SKILL.md into
+        every subsequent request. `set_goal` runs before this tail and keeps
+        the typed argument; only the message the model is handed is expanded.
+        """
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/goal $research fix the login bug")
+            await _await_prompt(pilot, session)
+        assert len(session.prompts) == 1, session.prompts
+        assert "Read primary sources." in session.prompts[0], session.prompts[0]
+        assert session.goal == "$research fix the login bug", session.goal
+
+    @pytest.mark.asyncio
+    async def test_bare_skill_as_the_whole_request_fires(self, skill_root) -> None:
+        """No request after the token: the body IS the instruction, unpadded."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $research")
+            await _await_prompt(pilot, session)
+        assert len(session.prompts) == 1, session.prompts
+        sent = session.prompts[0]
+        assert "Read primary sources." in sent, sent
+        # `render_invocation` invents no request, so nothing trails the close tag.
+        assert sent.rstrip().endswith("</skill>"), sent
+
+    @pytest.mark.asyncio
+    async def test_a_failed_team_attach_expands_nothing(self, skill_root) -> None:
+        """An unknown name returns before the submit tail — no skill is read."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team no-such-team $research fix it")
+            await pilot.pause()
+        assert session.prompts == [], session.prompts
+        assert session.attached_teams == [], session.attached_teams
+
+    @pytest.mark.asyncio
+    async def test_a_dollar_amount_in_a_command_argument_is_prose(self, skill_root) -> None:
+        """`$100` matches no skill name, so the vocabulary rejects it."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release review $100 of spend")
+            await _await_prompt(pilot, session)
+        assert session.prompts == ["review $100 of spend"], session.prompts
+
+    @pytest.mark.asyncio
+    async def test_a_non_leading_dollar_in_a_command_argument_is_prose(self, skill_root) -> None:
+        """Anchoring holds INSIDE the argument: offset 0 of it, not of the line."""
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release explain the MR $research")
+            await _await_prompt(pilot, session)
+        assert session.prompts == ["explain the MR $research"], session.prompts
+
+    @pytest.mark.asyncio
+    async def test_an_empty_skill_body_warns_and_sends_the_argument_as_written(
+        self, skill_root
+    ) -> None:
+        """The empty-body guard lives in `_expand_invocation`, so it comes free."""
+        stub = skill_root / "stub"
+        stub.mkdir(parents=True)
+        (stub / "SKILL.md").write_text("---\nname: stub\ndescription: Not written yet.\n---\n")
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $stub do the thing")
+            await _await_prompt(pilot, session)
+            notices = _notice_texts(app)
+        assert session.prompts == ["$stub do the thing"], session.prompts
+        assert any("empty body" in n for n in notices), notices
