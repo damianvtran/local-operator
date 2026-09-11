@@ -167,6 +167,17 @@ class PickerMode(Enum):
     #: not run anything — an invocation produces a PROMPT the user still has to
     #: write.
     SKILL = "skill"
+    #: The ``@path`` file/folder list. A FOURTH mode rather than a reuse of
+    #: ``SKILL``, because the two things that make ``SKILL`` what it is are both
+    #: wrong for paths. :meth:`sync_skills` remembers ``_skill_inline`` state one
+    #: tick across the refill, and a path has no such state to remember — every
+    #: keystroke re-derives the list from the buffer alone. And
+    #: :func:`skill_suggestions`' lowercase-evidence gate exists to keep four
+    #: classes of non-invocation off a row, which would reject ``README.md`` for
+    #: being uppercase and ``src/`` for carrying no skill evidence at all. FILE
+    #: ranks through :func:`argument_suggestions` instead, like every other
+    #: app-pushed list.
+    FILE = "file"
 
 
 #: One rendered row: its display name and the thing it stands for. A UNION
@@ -676,6 +687,12 @@ class CompletionMode(Enum):
     #: space for the same reason ``NAME_ARGUMENT`` does: the space closes the
     #: list and opens the request tail the user is about to type.
     SKILL = "skill"
+    #: An ``@path`` reference — ``@sr`` → ``@src/``. Takes NO trailing space,
+    #: unlike ``SKILL``: a path segment may continue (``@src/`` → ``@src/app.py``)
+    #: and a space would terminate the token and close the very list the
+    #: keystroke just used. That is the ``ARGUMENT`` reasoning above, which
+    #: withholds the space for the identical reason.
+    FILE = "file"
 
 
 def completion_for(
@@ -748,6 +765,11 @@ def completion_for(
         if reassembled is not None:
             return reassembled
         return _skill_span_replacement(text, token, row_name)
+    if mode is CompletionMode.FILE:
+        token = at_token(text, caret)
+        if token is None:
+            return None
+        return _file_span_replacement(text, token, row_name)
     if mode is CompletionMode.COMMAND:
         context = slash_context(text, caret, known)
         if context is None:
@@ -789,6 +811,51 @@ def completion_for(
         if outside:
             return _reassembled_completion(filled, caret_after, known)
     return filled, caret_after
+
+
+def _file_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
+    """Replace just the ``@`` token's span with ``row_name`` — the whole of FILE.
+
+    The simplest completion in this module, and deliberately so. ``$`` needs
+    :func:`_reassembled_skill` because its submit-side parser is ANCHORED at
+    offset 0, so an inline token has to be moved to the front before that parser
+    can read it. ``@`` has no anchored parser — a reference is resolved wherever
+    it sits in the text — so there is nothing to reassemble and the span
+    replacement is the entire operation.
+
+    NO trailing space, unlike the skill and command words. A path segment may
+    continue (``@src/`` → ``@src/app.py``) and a space would terminate the token
+    and close the list the user is still navigating. For the same reason the
+    tail is preserved verbatim rather than ``lstrip``-ed as the ``$`` path does:
+    there is no request tail to open here, so removing the user's spacing would
+    be an edit nobody asked for.
+
+    The token's DIRECTORY PART survives; only the last segment is replaced.
+    ``scan_directory`` returns BARE entry names — ``app.py``, not
+    ``src/app.py`` — because that is what a row should read under a ``@src/``
+    the user just typed. So replacing the whole span with the row name would
+    drop the directory: ``@src/`` + ``app.py`` became ``@app.py``, a path that
+    does not exist, and the reference then failed to resolve with a "no such
+    path" notice at submit. The displayed row and the inserted text are
+    deliberately allowed to differ here, which is the whole reason this
+    arithmetic lives in the one function that owns "what does accepting this
+    row put in the buffer".
+
+    Every segment before the last is kept, not just one, so a second-level
+    accept (``@src/sub/`` + ``deep.py``) keeps ``src/sub/`` rather than
+    truncating to ``sub/``.
+
+    A name containing a space is emitted in its QUOTED form. ``at_token`` reads
+    that form back; a bare space would otherwise end the token at the gap and
+    leave the rest of the filename as prose. The quotes go around the FULL
+    path, not the bare name, so the directory sits inside them and the whole
+    thing round-trips as one token.
+    """
+    directory = token.query[: token.query.rfind("/") + 1]
+    path = f"{directory}{row_name}"
+    quoted = f'"{path}"' if " " in path else path
+    completed = f"{text[: token.start]}@{quoted}{text[token.end :]}"
+    return completed, token.start + len(quoted) + 1
 
 
 def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
@@ -1141,6 +1208,93 @@ def argument_suggestions(
     return prefixed or matches
 
 
+def _reference_grammar() -> tuple[
+    Callable[[str, int | None], "SlashContext | None"],
+    Callable[[str], tuple[str, str]],
+]:
+    """``(at_token, split_token)`` from the resolver — the ONE lazy seam.
+
+    SCAFFOLDING WITH A NAMED REMOVAL POINT. Read this before copying the idiom.
+
+    ``at_token`` and ``split_token`` are pure grammar: a parser over
+    :class:`SlashContext` and :func:`is_boundary`, both of which already live in
+    ``local_operator/sigils.py``. That is their correct final home, and this
+    module already imports from ``sigils`` at module scope — so when they move
+    there, this function DISAPPEARS and its three callers import them directly
+    beside ``SlashContext``. Nothing else about the ``@`` feature changes.
+
+    Until then they live in ``local_operator/references.py``, a SESSION-layer
+    module, and this is a Textual widget. A module-scope import of it here
+    would point a widget at the session layer and make this module's import
+    order depend on it — the same wrong direction that put the sigil grammar in
+    ``sigils.py`` in the first place. The lazy import follows the precedent in
+    ``harness/rows.py:103-108`` (``typed_line_of``) rather than inventing a
+    second idiom, and costs one ``sys.modules`` dict lookup per call after the
+    first, which is nothing beside the keystroke work around it.
+
+    ONE accessor rather than an inline import in each caller, deliberately: the
+    relocation above must be a single edit, and five copies of the same lazy
+    import is the thing that makes it five.
+
+    Failure is NOT swallowed, unlike ``typed_line_of``'s. A missing resolver is
+    a broken install, and this grammar has no meaningful degraded answer —
+    reporting "no token" would present as a picker that silently never opens,
+    which is far harder to diagnose than the ImportError.
+    """
+    from local_operator.references import at_token, split_token
+
+    return at_token, split_token
+
+
+def at_token(text: str, cursor: int | None = None) -> SlashContext | None:
+    """The active ``@path`` token at ``cursor``, or ``None``.
+
+    Forwards to the resolver's parser through :func:`_reference_grammar`, which
+    is the one definition of the ``@`` grammar and is shared with the
+    submit-side expander so the composer and the expander cannot disagree about
+    where a token starts and ends.
+    """
+    parse, _ = _reference_grammar()
+    return parse(text, cursor)
+
+
+def split_token(query: str) -> tuple[str, str]:
+    """``(dir_part, name_query)`` for an ``@`` token's query.
+
+    Forwards to the resolver through :func:`_reference_grammar`. The editor
+    needs this to key its directory re-arm (``@src/`` and ``@src/ap`` are the
+    same directory; ``@src/sub/`` is not), and it must be the SAME split the
+    resolver performs or the composer would list one directory while the
+    expander read another.
+    """
+    _, split = _reference_grammar()
+    return split(query)
+
+
+def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[str, ArgumentChoice]]:
+    """``(display_name, choice)`` suggestions for an ``@path`` token.
+
+    A DELEGATION, and that is the whole implementation. A path is ranked by the
+    very scorer that ranks commands, providers and skills, so ``@ap`` finds
+    ``app.py`` by the rule the user already learned from ``/lgt`` finding
+    ``logout``.
+
+    It carries NO gate of its own, deliberately. :func:`skill_suggestions` has
+    one because four classes of non-invocation must never reach a row, and every
+    part of that gate is wrong for a path: it demands a lowercase letter as
+    evidence (``README.md`` has none) and case-sensitive prefix matching (a
+    user typing ``@read`` means ``README.md``). The empty-query case is likewise
+    a real answer here — a bare ``@`` lists the directory — which is exactly
+    what :func:`argument_suggestions` already does with an empty query.
+
+    Kept as a named seam rather than calling :func:`argument_suggestions`
+    directly at the two call sites, so that if paths ever do need a rule of
+    their own there is one place to put it, and so the call sites read in the
+    same shape as their ``skill``/``argument`` siblings.
+    """
+    return argument_suggestions(query, choices)
+
+
 def _pad_to(row: Text, width: int, style: Style) -> Text:
     """Pad ``row`` out to exactly ``width`` cells under ``style``.
 
@@ -1315,13 +1469,14 @@ class CommandPicker(Static):
         the first report a no-op — and is where a browse should start anyway.
         """
         self._choices = list(choices)
-        # SKILL rides the same fill path as ARGUMENT: both are app-pushed
-        # ``ArgumentChoice`` sets that land one message-loop tick after the
-        # keystroke that opened the list, so both need the immediate re-derive
-        # below or the picker sits closed on the empty set it opened with until
-        # the user types another character. Gating this on ARGUMENT alone is
-        # exactly why a bare ``$`` painted nothing.
-        if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL):
+        # SKILL and FILE ride the same fill path as ARGUMENT: all three are
+        # app-pushed ``ArgumentChoice`` sets that land one message-loop tick
+        # after the keystroke that opened the list, so all three need the
+        # immediate re-derive below or the picker sits closed on the empty set
+        # it opened with until the user types another character. Gating this on
+        # ARGUMENT alone is exactly why a bare ``$`` painted nothing, and FILE
+        # is the third case: without it a bare ``@`` paints nothing either.
+        if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL, PickerMode.FILE):
             # SKILL re-derives through its own gate: this refill lands a tick
             # after the keystroke that opened the list, so reaching for
             # ``argument_suggestions`` here would restore the fuzzy rows
@@ -1482,7 +1637,7 @@ class CommandPicker(Static):
         return bool(self._matches)
 
     def is_pending(self) -> bool:
-        """True for an ARGUMENT list that is open in principle but has no rows yet.
+        """True for an app-filled list that is open in principle but has no rows yet.
 
         The app fills an argument list in answer to a posted message, so for one
         message-loop tick the picker is in argument mode holding nothing —
@@ -1490,11 +1645,16 @@ class CommandPicker(Static):
         just opened. A key that only reaches an ``is_open()`` picker is silently
         dropped in that window.
 
+        FILE has the identical window and for the identical reason: the editor
+        posts ``FileQueryOpened`` and the app answers with ``set_choices`` a tick
+        later, so an Esc pressed in between would be dropped and the user would
+        watch the list they just dismissed appear anyway.
+
         False once :meth:`dismiss` has recorded the query, so a dismissed list
         stops swallowing the key that dismissed it.
         """
         return (
-            self._mode is PickerMode.ARGUMENT
+            self._mode in (PickerMode.ARGUMENT, PickerMode.FILE)
             and not self._matches
             and self._dismissed_query is None
         )
@@ -1612,6 +1772,39 @@ class CommandPicker(Static):
             token.query,
             skill_suggestions(token.query, self._choices, self._skill_inline),
         )
+
+    def sync_files(self, text: str, cursor: int | None = None) -> None:
+        """Re-derive the ``@path`` suggestions from the editor's ``text``.
+
+        The fourth sibling of :meth:`sync`, :meth:`sync_argument` and
+        :meth:`sync_skills`, and it closes exactly the way they do: leaving the
+        token forgets the dismissal, so the next ``@`` opens a fresh list rather
+        than inheriting an Esc.
+
+        THERE IS NO ``_skill_inline`` ANALOGUE HERE, and there must not be one.
+        That flag exists because :meth:`sync_skills` has to remember one bit of
+        parse state across the app's asynchronous refill, and carrying remembered
+        state is precisely why FILE is not riding :attr:`PickerMode.SKILL`. A
+        path list is a pure function of the buffer and the choices the app
+        pushed: every keystroke re-derives it from scratch, and the refill in
+        :meth:`set_choices` re-derives the same rows through
+        :func:`argument_suggestions` with nothing to remember.
+        """
+        token = at_token(text, cursor)
+        if token is None:
+            self._dismissed_query = None
+            self._mode = PickerMode.FILE
+            self._close()
+            return
+        # Ranked on the NAME part, never the whole token. The rows the app
+        # pushes are that directory's BARE entry names (``app.py``), so matching
+        # them against the full query would compare ``app.py`` to ``src/ap`` and
+        # match nothing: a `@src/` list that scanned correctly and then painted
+        # empty. ``split_token`` is the same split the scan is keyed on, so the
+        # directory that produced the rows and the query they are matched
+        # against cannot drift apart.
+        _, name_query = split_token(token.query)
+        self._apply(PickerMode.FILE, name_query, file_suggestions(name_query, self._choices))
 
     def sync_argument(self, query: str) -> None:
         """Re-derive the ARGUMENT suggestions for the current command.

@@ -112,6 +112,12 @@ from local_operator.mcp.verbs import _home_relative
 # A leaf table (`re` and `dataclasses` only), so importing it here costs the
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import next_effort
+
+# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
+# it is reached through a lazy seam: this module already imports the session
+# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
+# objection that applies to a Textual WIDGET does not apply to the app.
+from local_operator.references import expand_references, scan_directory
 from local_operator.session import naming
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 
@@ -225,6 +231,7 @@ from local_operator.tui.widgets.editor import (
     EditorPasteEmpty,
     EditorQuit,
     EditorSubmitted,
+    FileQueryOpened,
     InlineCommandRequested,
     InterruptRequested,
     Marked,
@@ -12466,6 +12473,23 @@ class OperatorApp(App[None]):
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
+        # `@path` REFERENCES are deliberately NOT expanded here, and the absence
+        # is the decision — not an omission somebody forgot.
+        #
+        # This method is synchronous and so is every path into it (`_cmd_team`,
+        # `_cmd_agent`, `_cmd_goal`, `_render_authoritative_slash`), while
+        # `expand_references` is a coroutine. Expansion happens instead in
+        # `Session.prompt`, which awaits it before taking the turn lock, so every
+        # request that leaves here IS expanded by the time the model sees it —
+        # including the programmatic call sites, which have no composer and so
+        # no operator waiting to read a notice.
+        #
+        # REJECTED: dispatching it as a detached task (`run_worker` /
+        # `create_task`) to bridge sync to async here. That sends the turn before
+        # the expansion resolves — the bare token reaches the model and the
+        # expansion lands after — and it puts a human approval gate in a task
+        # nothing awaits. If this ever needs TUI-side notices, the fix is making
+        # this method async as its own refactor, not a task launched from here.
         sent = self._expand_invocation(request, attachments)
         # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
         # argument as its row (the body belongs in the payload, never the
@@ -15176,6 +15200,18 @@ class OperatorApp(App[None]):
             # UNRECOVERABLE rather than merely absent (review round 2,
             # BLOCKER-1). The aside is also the surface a user is most likely to
             # paste a log into, since it exists for "what is this?".
+            # `@path` REFERENCES are expanded here too, and this exit is the one
+            # most likely to be missed because it does not go through
+            # `_expand_invocation` and so does not look like the others. Without
+            # it `/btw what does @foo.py do?` reaches the aside model with a bare
+            # token — the same shape of hole as the paste bug above, in the same
+            # branch, for the same reason: this path returns before the splice at
+            # the foot of the method.
+            #
+            # `@path` REFERENCES are expanded in `_aside_worker`, not here. This
+            # is only ONE of three routes into the card (`_cmd_aside` at the
+            # `/btw` command and the inline-command path are the others), and
+            # expanding per-route is how two of them would quietly miss it.
             self._ask_aside(expand_pastes(text, message.attachments))
             return
         if message.shell:
@@ -15303,7 +15339,22 @@ class OperatorApp(App[None]):
         # `typed=` carries the chip line on for NAMING only — the expanded
         # payload is what the row shows and what the model gets, but titling a
         # conversation after a pasted stack trace is not what the user asked.
-        sent = self._expand_invocation(text, message.attachments)
+        # REFERENCES FIRST, invocation second, and the order is load-bearing. A
+        # `@path` inside a `$skill` REQUEST must expand; one inside the SKILL.md
+        # BODY must not, and `_expand_invocation`'s request-only splice already
+        # guarantees that shape — but only if the references are already in the
+        # request by the time it runs. Expanding after would reach the body.
+        #
+        # `text` itself is rebound, so the invocation parse below sees the
+        # expanded request while `row`/`typed` keep the line the user typed:
+        # the transcript shows `@src/app.py`, the model gets the file.
+        referenced = await self._expand_references(text)
+        sent = self._expand_invocation(referenced, message.attachments)
+        if sent is None and referenced is not text:
+            # Not an invocation, but references DID expand: send the expanded
+            # text explicitly, since the `row if sent is None` rule below would
+            # otherwise send the typed line and drop the block entirely.
+            sent = referenced
         # An INVOCATION keeps the typed line as its row; everything else shows
         # the expanded text (design §2.5).
         #
@@ -29899,7 +29950,23 @@ class OperatorApp(App[None]):
         for previous in prior_turns or []:
             if previous.forkable:
                 turns.extend((Message.user(previous.question), Message.assistant(previous.answer)))
-        turns.append(Message.user(ASIDE_PROMPT.format(question=question)))
+        # `@path` REFERENCES expand HERE, and this is the only place they can.
+        # The aside is a separate model call that never reaches
+        # `Session.prompt`, so the session-layer expansion every other exit
+        # relies on does not run for it — without this, `/btw what does
+        # @auth.py do?` asks the model about a token it cannot resolve.
+        #
+        # In the WORKER rather than at the three `_ask_aside` call sites
+        # (`on_editor_submitted`, `_cmd_aside`, the inline-command path) because
+        # this is where they converge and where an await is already legal. Per
+        # route, two of the three would have missed it — and `/btw` typed fresh
+        # goes through `_cmd_aside`, which is the commonest way in.
+        #
+        # The card still shows the TYPED question: only the text handed to the
+        # model is expanded, so the display/sent split holds on this surface
+        # exactly as it does in the transcript.
+        asked = await self._expand_references(question)
+        turns.append(Message.user(ASIDE_PROMPT.format(question=asked)))
         source.active_workers += 1
         try:
             try:
@@ -30111,6 +30178,45 @@ class OperatorApp(App[None]):
                 for skill in sorted(skills.values(), key=lambda item: item.name.lower())
             ]
         )
+
+    def on_file_query_opened(self, message: FileQueryOpened) -> None:
+        """The buffer just entered an ``@`` token — offer that directory's entries.
+
+        The ``@`` twin of :meth:`on_skill_query_opened`, answering on the message
+        for the same reason: every route into the list arrives at one place with
+        one set of rows.
+
+        The message carries the DIRECTORY, not the whole query, because the
+        editor re-posts whenever that directory changes rather than once per
+        token — a file vocabulary is not fixed for the session the way the skill
+        vocabulary is. Resolution is against :meth:`_session_cwd`, the same cwd
+        an ``@path`` is expanded against at submit, so the list can never offer
+        a row the expander would then fail to find.
+
+        SYNCHRONOUS, and deliberately so (design D6). ``scan_directory`` does one
+        ``os.scandir`` of one directory, measured at 0.04–0.07 ms against the
+        0.29 ms fingerprint probe this same keystroke path already accepts.
+        Do NOT move it to ``run_worker``, ``asyncio.to_thread`` or a debounce:
+        this codebase has no cancellation for a stale list beyond
+        ``_dismissed_query`` and ``_apply`` re-matching the current query, so a
+        worker would mean BUILDING cancellation to make a 0.04 ms call
+        affordable. The staleness it would introduce is a real bug; the latency
+        it would save is not measurable.
+
+        An empty directory sets a notice rather than leaving a bare list, exactly
+        as an empty skill vocabulary does: "this directory has nothing to offer"
+        is a real answer, and the row says so instead of showing an empty box.
+        """
+        message.stop()
+        picker = self._editor().picker
+        choices = scan_directory(message.directory, self._session_cwd())
+        if not choices:
+            picker.set_choices([])
+            where = message.directory or "this directory"
+            picker.set_notice(f"nothing to reference in {where}")
+            return
+        picker.set_notice("")
+        picker.set_choices(choices)
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
@@ -32137,6 +32243,30 @@ class OperatorApp(App[None]):
             if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
+
+    async def _expand_references(self, text: str) -> str:
+        """Expand every ``@path`` in ``text``, painting one notice per problem.
+
+        The shared tail of the submit exits, so "what does a reference expand
+        to" has ONE answer no matter which exit the text left by. The exits
+        differ in what they do with the result — the aside asks with it, the
+        prompt path sends it while the row keeps the typed line — but never in
+        how the expansion itself is computed.
+
+        Never raises, by the resolver's contract: every failure degrades to the
+        original text plus a notice. That is the same bargain
+        :meth:`_expand_invocation` strikes for an unreadable skill body, and for
+        the same reason — swallowing the user's request is the worse half of the
+        trade, so an unresolved token is SAID and the raw text still goes.
+
+        Notices go through the app's ordinary :meth:`_notice` rather than any
+        new mechanism, so a reference problem reads like every other thing the
+        app has to tell the user.
+        """
+        result = await expand_references(text, self._session_cwd())
+        for notice in result.notices:
+            self._notice(notice, "warning")
+        return result.sent
 
     def _expand_invocation(
         self, text: str, attachments: Mapping[int, Marked] | None = None
