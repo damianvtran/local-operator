@@ -321,14 +321,22 @@ async def test_phone_answer_first_takes_the_terminal_card_down() -> None:
 
 @pytest.mark.asyncio
 async def test_the_recommended_option_reaches_the_phone_first() -> None:
-    """The phone card carries option labels and NO ``recommended`` field, so
-    POSITION is the only channel the recommendation has on this surface.
+    """The card now carries the ``recommended`` marker AND still hoists, so
+    POSITION alone remains correct for the phone, which does not read it yet.
 
-    This is the reason ``AskQuestion`` hoists rather than the picker doing it:
-    a model authoring its recommendation mid-list used to have it dropped
-    silently here, because the wire has nowhere to put the marker. Asserted on
-    the serialized JSON the phone actually renders from, and the answer is then
-    sent back by LABEL — which is what keeps a reordered list correct.
+    Both halves have to hold on ONE payload. The marker is what lets a surface
+    that rebuilds the question draw the badge — the terminal picker reached
+    through the detached viewer. The hoist is what keeps the recommendation
+    visible on the phone, whose TypeScript has no ``recommended`` concept and
+    ignores the key: there, position is still the only channel, and a model
+    authoring its recommendation mid-list would otherwise have it dropped
+    silently. If someone later "simplifies" the hoist away on the grounds that
+    the marker now travels, the ordering assertion below is what catches it.
+
+    Phone parity for the marker (rendering a badge in the TSX) is a tracked
+    follow-up and out of scope here. Asserted on the serialized JSON the phone
+    actually renders from, and the answer is then sent back by LABEL — which is
+    what keeps a reordered list correct.
     """
     question = AskQuestion(
         id="stale",
@@ -358,8 +366,10 @@ async def test_the_recommended_option_reaches_the_phone_first() -> None:
                 {"label": "Drop them", "description": "nothing reads the column"},
                 {"label": "Backfill", "description": "slower, keeps history"},
             ]
-            # There is no marker on the card to carry it instead.
-            assert "recommended" not in wire
+            # And the marker now rides alongside that order, pointing at the
+            # hoisted option AS CARRIED.
+            assert wire["recommended"] == 0
+            assert wire["options"][wire["recommended"]]["label"] == "Dual-write"
 
             request_id = pending.request_id
             reply = await control.send("ask_answer", request_id=request_id, value="Dual-write")
