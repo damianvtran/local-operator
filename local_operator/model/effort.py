@@ -322,7 +322,20 @@ def configured_effort(config_manager: object) -> str | None:
         # Any failure — a broken config.yml, a manager that cannot read — means
         # "no configured effort", which is exactly the pre-change behaviour.
         return None
-    return str(raw).strip().lower() or None
+    # A NON-STRING is "no opinion", checked BEFORE the strip/lower (B1).
+    # ``str(raw)`` mapped a YAML null — ``model_effort:`` with no value,
+    # ``model_effort: null``, ``model_effort: ~`` — onto the word ``"None"``,
+    # whose lowercase spelling ``none`` is a REAL rung of :data:`EFFORT_ORDER`.
+    # So the plainest spelling of "clear the key" turned reasoning off on every
+    # new conversation of any model whose ladder offers ``none``: silently,
+    # durably (D6's clause 2 reads the same value back for a later
+    # ``/model default``), and against this docstring's own promise that a
+    # non-string value reads as ``None``. ``none`` is the one wrong type that is
+    # also a rung, which is why this cannot be left to ``resolve_effort_in``'s
+    # vocabulary check below.
+    if not isinstance(raw, str):
+        return None
+    return raw.strip().lower() or None
 
 
 def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:

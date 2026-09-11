@@ -1315,8 +1315,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # the raw input would tell the user their config holds a spelling it
         # does not — the same class of lie as a page displaying a key the
         # runtime never bound.
+        #
+        # An ENUM echoes the LABEL the typed word selected, when it selected one
+        # (D8). The stored form is a wire value, not vocabulary: ``model_effort
+        # auto`` stores ``""``, so the receipt read "Successfully updated
+        # model_effort to " — the user typed a word and the confirmation named
+        # nothing. The same blank met every other member whose value is empty
+        # (``providers.openrouter.* default``), and the label also restores the
+        # words for the members whose value is not their label at all
+        # (``display.nerd_icons auto`` stores ``None`` and used to echo
+        # ``None``). Values that matched no label fall through unchanged, so the
+        # echo of a normalised value is exactly what it was.
         stored = settings_io.read_setting(config_manager, setting)
-        print(f"Successfully updated {args.key} to {stored}")
+        echoed = matched_choice.label if matched_choice is not None else stored
+        print(f"Successfully updated {args.key} to {echoed}")
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are

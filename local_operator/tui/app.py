@@ -3766,14 +3766,24 @@ class OperatorApp(App[None]):
         self._effort_choice: str | None = None
         #: A ONE-SHOT effort the NEXT model activation must apply CLAMPED
         #: instead of consulting `_effort_choice`. Set by `_cmd_model_saved`
-        #: (adopt the configured default) and by the persist path of
-        #: `/model default` (so the saved rung and the running rung agree).
-        #: Consumed and cleared at the TOP of `_activate_resolved_model`, before
-        #: any early return, so it cannot leak onto a later, unrelated switch.
-        #: A tuple rather than `str | None` because "no override" and "override
-        #: to no opinion" are DIFFERENT: the second is how `/model saved` clears
-        #: a session level when the configured key is unset.
+        #: (adopt the configured default). Consumed and cleared at the TOP of
+        #: `_activate_resolved_model`, before any early return, so it cannot
+        #: leak onto a later, unrelated switch. A tuple rather than
+        #: `str | None` because "no override" and "override to no opinion" are
+        #: DIFFERENT: the second is how `/model saved` clears a session level
+        #: when the configured key is unset.
         self._pending_effort_override: tuple[bool, str | None] = (False, None)
+        #: One-shot handoff for the override above, set by `_cmd_model_saved`
+        #: immediately before it re-dispatches `/model <p>/<id>` and consumed by
+        #: the very next `_cmd_model` entry (B2). `_cmd_model_saved` has to arm
+        #: the override BEFORE the dispatch, because the dispatch is a string
+        #: through the general slash dispatcher and there is no argument to
+        #: carry it; without this marker the entry guard that clears a stale
+        #: override would eat the one just armed. With it, `_cmd_model` clears the
+        #: override on every entry EXCEPT the dispatch it was armed for, so an
+        #: early return of its own (the unknown-provider guard) can no longer
+        #: leave it armed to land on a later, unrelated switch.
+        self._effort_override_handoff: bool = False
         #: The user's fast-mode choice, kept on the APP so it survives a session
         #: being replaced under it (`/new`, `/reload`, `/resume` all rebuild
         #: one) — the same reason `_effort_choice` lives here. Defaults False:
@@ -25697,6 +25707,20 @@ class OperatorApp(App[None]):
         on screen says the next launch comes back on the old one — so the command
         that fixes that was reachable only by already knowing it existed.
         """
+        # Clear any armed effort override UNLESS this entry is the dispatch one
+        # was armed for (B2). `_cmd_model_saved` arms `_pending_effort_override`
+        # and then re-dispatches `/model <p>/<id>`; the override is consumed only
+        # deep inside `_activate_resolved_model`, so a return from ANY of the
+        # guards below it — the unknown-provider check is the reachable one —
+        # used to leave it armed for the next, unrelated switch, where the user
+        # silently landed on a level they never asked for. The handoff marker is
+        # the one thing that distinguishes "the dispatch this was armed for" from
+        # "any other entry", and it is cleared here either way, so the arming
+        # cannot outlive the single hop it was created for.
+        if self._effort_override_handoff:
+            self._effort_override_handoff = False
+        else:
+            self._pending_effort_override = (False, None)
         if arg and not self._allow_source_command():
             return
         session = self._session
@@ -25838,6 +25862,14 @@ class OperatorApp(App[None]):
             return
         provider = provider.lower()  # build_model_spec is case-insensitive
         if self._providers is None:
+            # An ARMED effort override goes with the dispatch that failed (B2):
+            # `_cmd_model_saved` arms one for exactly this call, and the two
+            # guards here are the only ways it can end without reaching
+            # `_activate_resolved_model`. Dropping it at the entry guard alone
+            # would leave the field reading `(True, 'none')` after the refusal
+            # below — harmless to the user, but a state that outlives the command
+            # it belonged to is what made the original leak hard to see.
+            self._pending_effort_override = (False, None)
             self._system_notice(
                 "provider controller unavailable — cannot infer model spec", "warning"
             )
@@ -25847,6 +25879,9 @@ class OperatorApp(App[None]):
         # typo would silently reconfigure the session and only fail on the next
         # turn, reading as a network/auth error instead of a typo.
         if self._providers.provider(provider) is None:
+            # Same rule as the guard above: the dispatch the override was armed
+            # for has failed, so it goes with it (B2).
+            self._pending_effort_override = (False, None)
             self._system_notice(f"unknown provider: {provider} — see /provider", "warning")
             return
         self._model_activation_generation += 1
@@ -25945,6 +25980,14 @@ class OperatorApp(App[None]):
         if session is not self._session or not self._allow_source_command():
             return
         old_label = session.model_label
+        # The level in force BEFORE this activation, for the `/model saved`
+        # receipt below (U1/design D7): that command's commonest shape resolves to
+        # the model already in force, where the effort is the only thing that
+        # moved and the old receipt printed an `X → X` model line saying nothing
+        # about it. Read off the session's own spec — the same source
+        # `_effort_label` paints the band from — so receipt and band cannot
+        # disagree.
+        old_effort = getattr(getattr(session, "model", None), "reasoning_effort", None)
         # The DESTINATION is derived from the spec this command resolved, never
         # re-read from ``session.model_label`` after ``set_model``. On a local
         # ``Session`` the two agree — ``set_model`` assigns synchronously — but
@@ -26050,6 +26093,10 @@ class OperatorApp(App[None]):
         # BOOT clamp, which must leave a wider ladder's `xhigh` recoverable on a
         # later switch; an explicit `/model default` re-saves deliberately.
         saved_effort: str | None = None
+        #: The level the user asked to make durable, BEFORE the clamp — kept so the
+        #: receipt can say that a rung was dropped rather than quietly showing a
+        #: different value than the one on the command they just ran (U4).
+        requested_effort: str | None = None
         if persist_default:
             choice = self._effort_choice
             if choice:
@@ -26060,6 +26107,7 @@ class OperatorApp(App[None]):
                 current = getattr(spec, "reasoning_effort", None)
                 default = getattr(spec, "reasoning_default_effort", None)
                 saved_effort = current if current and current != default else ""
+            requested_effort = saved_effort
             if saved_effort:
                 saved_effort = (
                     resolve_effort_in(
@@ -26119,13 +26167,22 @@ class OperatorApp(App[None]):
             # gate makes this a no-op when the row is already warm.
             self._warm_usage_background()
         # The remembered choice follows the value just put in force, so the band,
-        # the persisted key and `_effort_choice` agree (D7/D8). On the persist
-        # path `saved_effort` is the clamped rung (or `""` — remember nothing);
-        # on an override it is the level the live spec actually carries, read
-        # BACK from the spec so a target with no ladder clears the choice rather
-        # than remembering a level it cannot express. The ordinary switch leaves
-        # `_effort_choice` to `_spec_with_chosen_effort`, which owns it.
-        if persist_default:
+        # the persisted key and `_effort_choice` agree (D7/D8) — on the paths that
+        # actually PUT something in force. The write-only form (a bare
+        # `/model default` on the model already in force) switches nothing: it
+        # writes the config default for NEW sessions and leaves the running
+        # session exactly as it is, so it must not touch `_effort_choice` either.
+        # It used to assign `saved_effort` unconditionally, which fabricated a
+        # remembered choice the live spec never carried — so a later, unrelated
+        # `/model <other>` resurrected a level the user had explicitly withdrawn
+        # with `/effort auto` (M1), and the band and the key disagreed until it
+        # did (D7 violated). On the persist path `saved_effort` is the clamped
+        # rung (or `""` — remember nothing); on an override it is the level the
+        # live spec actually carries, read BACK from the spec so a target with no
+        # ladder clears the choice rather than remembering a level it cannot
+        # express. The ordinary switch leaves `_effort_choice` to
+        # `_spec_with_chosen_effort`, which owns it.
+        if persist_default and not write_only:
             self._effort_choice = saved_effort or None
         elif apply_effort_override:
             # The level the live spec actually carries, so a target with no
@@ -26224,10 +26281,16 @@ class OperatorApp(App[None]):
         if persist_result is not None:
             notice(persist_result, "warning")
         elif persist_default:
-            # Names both halves, the file and the keys. "saved" alone is a claim
-            # the user cannot check without quitting and relaunching, and the
-            # PROVIDER is the half that rides along silently — it is written from
-            # the selector's left side, never typed as its own setting.
+            # Names the file, the model pair and the third key, as one row
+            # (design review D3). The pair is joined the way the app names a model
+            # everywhere else (``provider/model_id``) rather than as the two
+            # registry keys ``hosting``/``model_name``: at 120 columns a notice
+            # row holds 110 cells, and the key-per-half spelling pushed this
+            # receipt from the base 109 to 128, orphaning ``(used by new
+            # sessions)`` on a second line. The new third key is the half that
+            # must NOT be cut — it is the only place the level just made durable
+            # is named — so the cells come out of the preamble and the pair, which
+            # carry the same information the file path and the label already show.
             #
             # "used by new sessions", the noun PERSIST_HINT already uses, not
             # "from the next launch" (design review D3): a user who ran this
@@ -26237,23 +26300,69 @@ class OperatorApp(App[None]):
             # there as well as at relaunch. The settings page keeps its own
             # "new launch" vocabulary; it is a different surface.
             notice(
-                f"boot default saved to {saved_to}: hosting {provider}, "
-                f"model_name {model_id}, model_effort {saved_effort or 'auto'} "
-                f"(used by new sessions){suffix}"
+                f"boot default: {saved_to} — {provider}/{model_id}, "
+                f"model_effort {saved_effort or 'auto'} (used by new sessions){suffix}"
             )
+            if requested_effort and saved_effort and saved_effort != requested_effort:
+                # The clamp dropped a rung on the way to durable (U4). On its own
+                # row rather than as a parenthetical, so the row above keeps the
+                # one-line budget D3 bought and this clause pays only when it is
+                # true. README documents the rule; this names the instance the
+                # user just created, where the stored level silently differs from
+                # the one they were running.
+                notice(
+                    f"model_effort {saved_effort} ({requested_effort} clamps to this "
+                    "model's nearest rung)",
+                    "info",
+                )
         else:
-            # "(next turn)" alone read as permanent — the complaint behind this
-            # wording. The scope and the one command that widens it belong on the
-            # line that announces the switch, not in documentation the user would
-            # have to already suspect exists.
-            #
-            # TWO clauses and no more. This carried four separators — a
-            # parenthetical with a comma in it, the access note's ` · `, then a
-            # ` — ` onto a sentence of its own — and wrapped at 80 columns into a
-            # run-on. "(this session)" is the half that answers "for how long";
-            # "from the next turn" answered "starting when", which nothing had
-            # asked and which the very next receipt demonstrates anyway.
-            notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
+            # `/model saved` resolving to the model already in force: the model did
+            # not move and the EFFORT is the only thing that did (U1, design D7).
+            # The generic line below is the shape this codebase refuses to print
+            # on purpose — an arrow between two identical labels reads as "this
+            # moved" — and here it also advertised the command the user did NOT
+            # run while saying nothing about the dial that did move.
+            ladder = tuple(getattr(live_spec, "reasoning_efforts", ()) or ())
+            after_effort = getattr(live_spec, "reasoning_effort", None)
+            source = "the configured default" if override_effort else "the model's own default"
+            if apply_effort_override and old_label == new_label:
+                if not ladder:
+                    # No dial on this model, so there is no level to name: the
+                    # honest receipt is that nothing moved, without the `X → X`
+                    # shape (U1).
+                    notice(f"already on {new_label} — {PERSIST_HINT}")
+                elif (old_effort or None) == (after_effort or None):
+                    notice(f"reasoning effort: already {after_effort} ({source})")
+                else:
+                    notice(
+                        f"reasoning effort: {old_effort or 'auto'} → "
+                        f"{after_effort or 'auto'} ({source})"
+                    )
+            else:
+                # "(next turn)" alone read as permanent — the complaint behind this
+                # wording. The scope and the one command that widens it belong on the
+                # line that announces the switch, not in documentation the user would
+                # have to already suspect exists.
+                #
+                # TWO clauses and no more. This carried four separators — a
+                # parenthetical with a comma in it, the access note's ` · `, then a
+                # ` — ` onto a sentence of its own — and wrapped at 80 columns into a
+                # run-on. "(this session)" is the half that answers "for how long";
+                # "from the next turn" answered "starting when", which nothing had
+                # asked and which the very next receipt demonstrates anyway.
+                notice(f"model: {old_label} → {new_label} (this session){suffix} — {PERSIST_HINT}")
+                if (
+                    apply_effort_override
+                    and ladder
+                    and (old_effort or None) != (after_effort or None)
+                ):
+                    # The model moved AND the adopted baseline moved the dial. The
+                    # model line answers the command; this answers the level, on
+                    # its own row so neither sentence has to carry the other.
+                    notice(
+                        f"reasoning effort: {old_effort or 'auto'} → "
+                        f"{after_effort or 'auto'} ({source})"
+                    )
         # MID-TURN is the one moment "starting when" is a live question, and the
         # next receipt cannot answer it because the answer is visible before
         # then: the agent goes on working on the old model until the step in
@@ -26363,8 +26472,13 @@ class OperatorApp(App[None]):
         # default, not whatever was picked here. ONLY a local session arms it: a
         # follower's re-dispatch routes through its owner's canonical mutation,
         # and the owner decides the effort on its own copy.
+        #
+        # The handoff marker travels WITH it: `_cmd_model` clears an armed
+        # override at every entry except the dispatch this marker tags, so the
+        # override survives exactly the one hop below and cannot outlive it (B2).
         if not callable(getattr(session, "route_shared_slash", None)):
             self._pending_effort_override = (True, saved_effort)
+            self._effort_override_handoff = True
         self._run_slash_command(f"/model {provider}/{model_id}")
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
@@ -26408,6 +26522,14 @@ class OperatorApp(App[None]):
             manager.set_config_value("hosting", provider)
             manager.set_config_value("model_name", model_id)
             saved_to = _home_relative(str(manager.config_file))
+            # U5: a stored `model_effort` is left untouched by this write and
+            # rides into the boot below, clamped to the chosen model's ladder. The
+            # sibling `/model default` receipt names all three keys, so the one
+            # receipt a NEW user sets their first default through naming only two
+            # of them hid the half they never typed. Read through the same reader
+            # the boot path uses, so this cannot disagree with what actually
+            # applies.
+            stored_effort = configured_effort(manager)
         except Exception as error:  # noqa: BLE001 — a read-only config dir
             # Fatal HERE, unlike the ordinary `/model default` path where the
             # live switch already succeeded: with no session, an unwritten
@@ -26415,7 +26537,11 @@ class OperatorApp(App[None]):
             # and drop straight back into this state.
             self._system_notice(f"could not save the model: {error}", "error")
             return
-        notice(f"saved hosting {provider}, model_name {model_id} to {saved_to}", "info")
+        effort_clause = f", model_effort {stored_effort}" if stored_effort else ""
+        notice(
+            f"saved hosting {provider}, model_name {model_id}{effort_clause} to {saved_to}",
+            "info",
+        )
         self._leave_setup_state_and_boot(notice)
 
     def _leave_setup_state_and_boot(self, notice: NoticeFn) -> None:
@@ -26896,8 +27022,10 @@ class OperatorApp(App[None]):
         — by saving the model with ``/model default`` while it is in force —
         which is a separate, deliberate action about the DEFAULT rather than a
         side effect of turning a dial. So the SET receipt points at that
-        command (D10). The ``/effort auto`` receipt deliberately does not: auto
-        withdraws the preference, so there is nothing there to keep.
+        command (D10). The ``/effort auto`` receipt points at ``/settings``
+        instead: auto WITHDRAWS the preference, so ``/model default`` is not the
+        route that keeps it (a stored level survives a bare ``/model default`` by
+        design, D6) — the settings row is (U2).
         """
         session = self._session
         spec = _model_spec(session)
@@ -26925,6 +27053,13 @@ class OperatorApp(App[None]):
             # Restores the MODEL's documented default rather than blanking the
             # field, so the band goes on naming the level actually in force —
             # `high` on Anthropic — rather than only the fact that it reasons.
+            #
+            # ``/new`` returns to the CONFIGURED default, not to this — the
+            # NEW_SESSIONS contract, working as designed: `model_effort` is a
+            # birth default, so a withdrawal here is scoped to this conversation
+            # and the next one boots on the stored key again. The receipt says
+            # that out loud (U2, below) rather than leaving the user to discover
+            # it one `/new` later.
             #
             # Off the SPEC, not re-derived from the model name. That keeps this
             # command agreeing with the band by CONSTRUCTION, whatever the spec
@@ -26954,12 +27089,27 @@ class OperatorApp(App[None]):
             # for a level that was already the model's own default asserts a
             # change that did not happen. The sibling `already <level>` branch
             # below is the voice this codebase already uses for a no-op.
-            destination = restored or "the provider's default"
+            # `auto` rather than `the provider's default` for the no-restore case
+            # (U2/D2): it is the word the BAND shows for that state, and the
+            # 24-cell alternative pushed this receipt past the 70-cell row budget
+            # at 80 columns once the scope clause below joined it.
+            destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             if restored == current:
                 notice(f"reasoning effort: already {destination} {scope}")
                 return
-            notice(f"reasoning effort: {current or 'auto'} → {destination} {scope}")
+            # U2: the withdrawal is SESSION-scoped and the user is told the one
+            # route that makes it stick, because the key they set earlier still
+            # holds the level and the next `/new` boots on it. The origin clause
+            # (`(the model's own default)` / `(nothing sent)`) gives way to it:
+            # at 80 columns a notice row holds 70 cells (design review D2) and
+            # origin + `(this session)` + the pointer do not fit together, so the
+            # actionable half stays. What it dropped is on the band and in the
+            # `/settings` expansion beside the level this row names.
+            notice(
+                f"reasoning effort: {current or 'auto'} → {destination} "
+                f"(this session) — /settings sets auto"
+            )
             return
         if wanted not in levels:
             # The model is not named: the band names it one row below, and the
@@ -26990,9 +27140,16 @@ class OperatorApp(App[None]):
         # the standing default (D10); it is on this receipt and not on the bare
         # listing, whose budget is tight and whose "this session only" clause is
         # still exactly true of the command it describes.
+        #
+        # `{current or 'auto'}` is the BAND's word for "a ladder, no level set"
+        # (`_effort_label`), so the receipt and the band name one state one way.
+        # The old `provider default` was a second spelling of it and 12 cells
+        # longer, which is the whole budget the pointer gets (design review D2:
+        # a notice row holds 70 cells at 80 columns). `; /model default keeps it`
+        # rather than ` — /model default to keep it` is the 3 cells that fit.
         notice(
-            f"reasoning effort: {current or 'provider default'} → {wanted} "
-            f"(this session) — /model default to keep it"
+            f"reasoning effort: {current or 'auto'} → {wanted} "
+            f"(this session); /model default keeps it"
         )
 
     # -- theme --------------------------------------------------------------
@@ -32910,7 +33067,7 @@ class OperatorApp(App[None]):
                 return SlashResult(
                     kind="notice", text="session cannot change model settings", style="warning"
                 )
-            destination = restored or "the provider's default"
+            destination = restored or "auto"
             scope = "(the model's own default)" if restored else "(nothing sent)"
             # The no-op voice, for the reason the sibling site above spells out:
             # an arrow between two identical values reads as a change.
@@ -32920,9 +33077,17 @@ class OperatorApp(App[None]):
                     text=f"reasoning effort: already {destination} {scope}",
                     style="info",
                 )
+            # Word for word the sibling site above, including the session scope and
+            # the route to making the withdrawal stick (U2): the two surfaces exist
+            # so a phone and a terminal get the SAME answer from one set of rules,
+            # and an answer that omitted the durability clause here would be the one
+            # divergence a user could act on wrongly.
             return SlashResult(
                 kind="notice",
-                text=f"reasoning effort: {current or 'auto'} → {destination} {scope}",
+                text=(
+                    f"reasoning effort: {current or 'auto'} → {destination} "
+                    f"(this session) — /settings sets auto"
+                ),
                 style="info",
             )
         if wanted not in levels:
@@ -32949,7 +33114,7 @@ class OperatorApp(App[None]):
             )
         return SlashResult(
             kind="notice",
-            text=f"reasoning effort: {current or 'provider default'} → {wanted} (this session)",
+            text=f"reasoning effort: {current or 'auto'} → {wanted} (this session)",
             style="info",
         )
 
