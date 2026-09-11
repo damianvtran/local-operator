@@ -3785,3 +3785,71 @@ async def test_a_raising_revalidation_never_kills_the_poller(monkeypatch) -> Non
             break
     assert calls["n"] >= 3, "the poller stopped after a raising tick"
     await session.dispose()
+
+
+# --- The configured birth-default effort (model_effort) -----------------------
+
+
+async def _prepare_effort_plan(config_manager, tmp_config_dir: Path, **arg_overrides):
+    """Drive the real ``_prepare`` for a model whose ladder is the shipped one.
+
+    ``_prepare`` is the ONE funnel every launch path shares — TUI boot, /new,
+    /reload, /resume, ``lop exec``, the server and the scheduler — so the
+    configured effort is read there rather than mutated post-hoc by each
+    caller. Anthropic's `claude-opus-5` is used because its ladder is a real
+    one (low/medium/high/xhigh/max) and resolves offline from the registry.
+    """
+    from local_operator.session_factory import _prepare
+
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+    args = _args(**{"hosting": "anthropic", "model": "claude-opus-5", **arg_overrides})
+    return await _prepare(
+        args,
+        cast("ConfigManager", config_manager),
+        credential_manager,
+        cast("AgentRegistry", registry),
+        has_ui=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_picked_by_the_flag(
+    tmp_config_dir: Path,
+) -> None:
+    """Carried unconditionally on ``model_source``: a ``--model`` flag chooses a
+    MODEL, not an effort, so the standing configured level rides across it — and
+    the clamp in ``configure_model`` is what makes that safe for a weaker ladder."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "low"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    assert plan.session_kwargs["model"].reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_taken_from_config(
+    tmp_config_dir: Path,
+) -> None:
+    """The same read serves the no-flag path, so a plain launch gets the level
+    without the operator re-running `/effort` every time."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "medium"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir, hosting=None, model=None)
+    assert plan.session_kwargs["model"].reasoning_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_no_configured_effort_leaves_the_builders_seed(tmp_config_dir: Path) -> None:
+    """``""`` is "no opinion", so the spec builder's own seeding must survive —
+    for a direct Anthropic route that is the documented ``high``. A regression
+    that read the empty string as a level would blank or move it."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": ""}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    spec = plan.session_kwargs["model"]
+    assert spec.reasoning_effort == "high"
+    assert spec.reasoning_default_effort == "high"
