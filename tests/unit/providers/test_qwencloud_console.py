@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.cli import qwencloud_ticket_command
+from local_operator.cli import _qwencloud_ticket_action, qwencloud_ticket_command
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.qwencloud_console import (
     QWENCLOUD_CONSOLE_PROJECT_ID,
@@ -144,10 +144,65 @@ def test_read_ticket_record_never_returns_the_value(store: AuthStore) -> None:
     assert FAKE_TICKET not in json.dumps(record)
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, store: AuthStore, command: str) -> int:
-    """Drive the CLI verb against the tmp_path store, never the real one."""
-    monkeypatch.setattr("local_operator.providers.auth_store.AuthStore", lambda: store)
-    return qwencloud_ticket_command(argparse.Namespace(qwencloud_command=command))
+def _run(monkeypatch: pytest.MonkeyPatch, store: AuthStore, command: str | None) -> int:
+    """Drive one CLI verb against the tmp_path store, never the real one.
+
+    Calls the action seam rather than `qwencloud_ticket_command`, because the
+    command owns the store's lifetime and closes it on the way out — which
+    would leave the assertions after the call reading a closed database. The
+    closing behaviour itself is asserted in
+    `test_the_command_closes_the_store_it_opened`.
+    """
+    del monkeypatch  # kept for signature symmetry with the patched-stdin tests
+    return _qwencloud_ticket_action(command, store)
+
+
+def test_the_command_closes_the_store_it_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A CLI verb must not leak the SQLite connection (or the usage cache's).
+
+    Every sibling command in cli.py wraps the store in try/finally; this is the
+    regression for that discipline.
+    """
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    closed: list[bool] = []
+    real_close = opened.close
+
+    def recording_close() -> None:
+        closed.append(True)
+        real_close()
+
+    monkeypatch.setattr(opened, "close", recording_close)
+    monkeypatch.setattr("local_operator.providers.auth_store.AuthStore", lambda *a, **k: opened)
+
+    assert qwencloud_ticket_command(argparse.Namespace(qwencloud_command="status")) == 0
+    capsys.readouterr()
+    assert closed == [True], "the command must close the store it opened"
+
+
+def test_the_store_is_closed_even_when_the_verb_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`finally`, not a trailing call: an unexpected error must still release it."""
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    closed: list[bool] = []
+    real_close = opened.close
+
+    def recording_close() -> None:
+        closed.append(True)
+        real_close()
+
+    monkeypatch.setattr(opened, "close", recording_close)
+    monkeypatch.setattr("local_operator.providers.auth_store.AuthStore", lambda *a, **k: opened)
+    monkeypatch.setattr(
+        "local_operator.cli._qwencloud_ticket_action",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        qwencloud_ticket_command(argparse.Namespace(qwencloud_command="status"))
+    assert closed == [True]
 
 
 def test_status_never_prints_the_value(

@@ -3730,6 +3730,25 @@ def qwencloud_ticket_command(args: argparse.Namespace) -> int:
     This mirrors `lop secret set NAME`.
     """
     from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore()
+    try:
+        return _qwencloud_ticket_action(getattr(args, "qwencloud_command", None), store)
+    finally:
+        # Same discipline as every sibling command in this file (see
+        # `login_command`, `logout_command`, `login_status_command`): the store
+        # owns a SQLite connection and, lazily, the usage cache's, and a verb
+        # that returns without closing leaks both.
+        store.close()
+
+
+def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
+    """One `qwencloud-ticket` verb, against an already-open store.
+
+    Split from the command so the store's lifetime is owned in exactly one
+    place, and so a test can drive a verb against a temp store it still needs
+    to read assertions from afterwards.
+    """
     from local_operator.providers.qwencloud_console import (
         QWENCLOUD_TICKET_STALE_MS,
         TicketStoreError,
@@ -3737,9 +3756,6 @@ def qwencloud_ticket_command(args: argparse.Namespace) -> int:
         read_ticket_record,
         store_ticket,
     )
-
-    command = getattr(args, "qwencloud_command", None)
-    store = AuthStore()
 
     if command == "set":
         if sys.stdin is None or sys.stdin.isatty():
