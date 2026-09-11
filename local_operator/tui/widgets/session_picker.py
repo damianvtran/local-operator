@@ -145,13 +145,21 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: the RENDERED side-by-side name field reaches :data:`NAME_MAX` and so stops
 #: being narrower than the stacked field at that same width.
 #:
-#: 159, not the 154 the same arithmetic predicts on paper: the rendered pane
-#: comes out 2–3 cells narrower than ``split × cols`` because the preview's
+#: Not the value the same arithmetic predicts on paper: the rendered pane comes
+#: out 2–3 cells narrower than ``split × cols`` because the preview's
 #: ``border-left`` and both panes' ``padding: 0 1`` are taken before the text
 #: width, and Textual's ``fr`` resolution rounds. Re-run the sweep after
 #: touching :data:`LIST_FR`/:data:`PREVIEW_FR` or any fixed column, because all
 #: three move this number.
-STACK_BELOW_COLS = 159
+#:
+#: 161, raised from 159 when :data:`SOFT_GUTTER_CELLS` became an unconditional
+#: reservation. That is this docstring's own instruction being followed rather
+#: than a retuning: the gutter is a fixed column, so the sweep was re-run and
+#: the width at which side-by-side reaches :data:`NAME_MAX` moved by two. A
+#: reviewer found the previous pairing — gutter reserved, constant left at 159
+#: — as a 64 -> 63 name shrink at the flip on the query path, which is exactly
+#: the D16 BLOCKER reappearing from the constant and the layout disagreeing.
+STACK_BELOW_COLS = 161
 
 #: Cells the name column is capped at: the longest of the 141 real session
 #: names (p95 48, p99 53, max 64), measured in CELLS rather than characters.
@@ -526,7 +534,34 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
     # prototype's own note says inlining it meant D16 could only be argued on
     # paper — the invariant is a comparison between two layouts at the SAME
     # width, so the compared quantity needs a single source of truth.
-    fixed = GUTTER_CELLS + 2 + AGE_CELLS + (SOFT_GUTTER_CELLS if querying else 0)
+    # THE SOFT GUTTER IS RESERVED UNCONDITIONALLY, AND NEVER OUT OF THE NAME.
+    # Both halves of that are what keep D16 true on the query path.
+    #
+    # Charging it only while querying made the reservation a function of the
+    # QUERY as well as the width, and the two layouts absorbed it differently:
+    # stacked, the raw field is far past NAME_MAX so the cap swallowed the 2
+    # cells; side-by-side at the flip the raw field is 65 — close enough to the
+    # cap that the same 2 cells came straight out of the name. That is the
+    # 64 -> 63 shrink at exactly 158 -> 159 with a query typed: one event, and
+    # one a no-query sweep cannot see.
+    #
+    # Reserving it ALWAYS also stops the name column moving when the user
+    # starts typing, which is the same argument `plan_columns` makes for the
+    # marker columns: a column that appears and disappears moves every name
+    # sideways. `querying` stays in the signature because callers state it and
+    # the tests sweep both values, but it no longer changes the arithmetic.
+    #
+    # Reserving it always moves the breakpoint from 159 to 161, and the
+    # CONSTANT FOLLOWS THE MEASUREMENT rather than the other way round — §3.3
+    # defines the breakpoint as the width at which side-by-side reaches
+    # NAME_MAX, and instructs re-running the sweep after touching any fixed
+    # column. This reservation is one. Pinning 159 while the fields say 161
+    # would leave the constant and the layout disagreeing, which IS the D16
+    # defect rather than a fix for it; the alternative — shedding the id
+    # across 159..172 to buy the 2 cells — spends a column the user copies
+    # into `/resume <id>` to protect a number.
+    del querying
+    fixed = GUTTER_CELLS + 2 + AGE_CELLS + SOFT_GUTTER_CELLS
     show_id = (list_width - fixed - 2 - ID_CELLS) >= NAME_P75
     raw_name = list_width - fixed - ((2 + ID_CELLS) if show_id else 0)
     name_width = max(NAME_MIN_CELLS, min(NAME_MAX, raw_name))
@@ -2347,7 +2382,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
             tail.append(" of ", style=faint)
             tail.append(f"{total:,}", style=dim)
         else:
-            count = len(self._all)
+            # THE FILTERED COUNT WHENEVER A FILTER IS ACTIVE, even though the
+            # list fits one page and there is no scroll position to report.
+            # A design round caught this reporting the whole store's size over
+            # eleven visible rows (8 of 8 such frames): the counter branch is
+            # skipped when everything fits, and the branch it falls through to
+            # was answering a different question — "how many sessions are
+            # there" rather than "how many matched". The unfiltered case still
+            # states the store total, which is what it means there.
+            count = len(rows) if self._query else len(self._all)
             word = "session" if count == 1 else "sessions"
             tail.append(f"   {count:,} {word}", style=dim)
 
@@ -2383,8 +2426,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         mode_hint.append("ctrl+e", style=dim)
         mode_hint.append(f" {self.preview_mode_for_test()}", style=faint)
 
-        def key_row(room: int) -> Text:
-            """The key hints that fit ``room``, plus the always-present mode hint."""
+        def key_row(room: int, *, budget: int | None = None) -> Text:
+            """The key hints that fit ``room``, plus the mode hint if it also fits.
+
+            ``room`` is the space for the HINTS; ``budget`` is the space for
+            this whole row including the mode hint, and defaults to
+            ``room`` + the hint's own width — i.e. the caller already reserved
+            it. Passing them separately is what stops the reservation being
+            counted twice, which dropped the hint at widths with room to spare.
+            """
             out_keys = Text(no_wrap=True, overflow="ellipsis")
             for index, (key, what) in enumerate(
                 _footer_hints(
@@ -2397,7 +2447,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 out_keys.append(key, style=dim)
                 if what:
                     out_keys.append(f" {what}", style=faint)
-            out_keys.append_text(mode_hint)
+            # The mode hint is a STATUS, not a way out, so it is the first
+            # thing in this row to go when the keys themselves are under
+            # pressure. Keeping it ahead of `esc` is what let a 24-column row
+            # read `esc · ctrl+e con…` — the exit truncated mid-word to make
+            # room for a label saying which preview mode is on.
+            room_total = budget if budget is not None else max(0, room) + cell_len(mode_hint.plain)
+            if cell_len(out_keys.plain) + cell_len(mode_hint.plain) <= room_total:
+                out_keys.append_text(mode_hint)
             return out_keys
 
         keys = key_row(
@@ -2423,16 +2480,35 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # legend explain what is on screen and have no other home, while a
             # bare `enter · esc` still states the way out. `_footer_hints` does
             # exactly this reduction itself when asked for less room.
-            keys = key_row(0)
+            keys = key_row(0, budget=max(0, width - cell_len(out.plain)))
             room = width - cell_len(out.plain) - cell_len(keys.plain)
         if cell_len(tail.plain) <= room:
             out.append_text(tail)
+
+        # THE WAY OUT IS SHED LAST, AND THE QUERY YIELDS TO IT. Everything
+        # above trims the row from the right, but the ECHO on the left grows
+        # with what the user types, so at the floor the two meet and a blind
+        # truncation takes `esc` off the end — a modal with no stated exit,
+        # which is the one state this row exists to prevent (see this module's
+        # header). Below the width where both fit, the echo is truncated to
+        # whatever is left after the keys are reserved: a shortened query is
+        # still a receipt that typing landed, while a missing `esc` is a dead
+        # end. Measured at 24 and 30 columns, where the full row is 33 cells.
+        keys_cells = cell_len(keys.plain)
+        if cell_len(out.plain) + keys_cells > width:
+            room_for_echo = max(0, width - keys_cells)
+            out = Text(truncate_cells(out.plain, room_for_echo), style=out.style)
         out.append_text(keys)
         # The row is `no_wrap` with ellipsis overflow, but Textual only applies
         # that against the widget's REAL width — and this text is also read
         # back by the accessors on an unmounted screen. Truncating here keeps
         # the two answers identical and makes the "never wider than the
         # terminal" invariant a property of the text, not of the paint.
+        #
+        # Truncating from the LEFT end of the row would take the keys with it,
+        # so anything still over budget here means even the bare keys do not
+        # fit; the assertion in `test_the_way_out_is_stated_at_every_width_the
+        # _picker_supports` pins the floor at which that would start to happen.
         if cell_len(out.plain) > width:
             return Text(truncate_cells(out.plain, width), style=out.style)
         return out

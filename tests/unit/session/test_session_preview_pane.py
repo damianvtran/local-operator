@@ -282,3 +282,119 @@ def test_a_missing_transcript_returns_empty_rather_than_raising(tmp_path: Path) 
     assert previews.verbose("no-such-session") == []
     assert previews.checkpoint("no-such-session") == {}
     assert previews.created_at("no-such-session") == 0.0
+
+
+# --- D34: the head fallback when the tail window has no user turn ------------
+
+
+def _padded(tmp_path: Path, session_id: str, *, head_user: bool, target: int) -> Path:
+    """A transcript larger than the tail window, padded with assistant turns.
+
+    ``head_user`` puts the session's opening USER turn at the very head, so it
+    falls outside the tail window — which is exactly the shape that hid D34
+    through three design rounds: every transcript those rounds measured fit
+    inside 256 KB.
+    """
+    session = tmp_path / "sessions" / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    transcript = session / "transcript.jsonl"
+    pad = "assistant narration " * 220
+    with transcript.open("w", encoding="utf-8") as handle:
+        if head_user:
+            handle.write(json.dumps(_message("user", "THE ORIGINAL QUESTION", ts=1.0)) + "\n")
+        index = 0
+        while transcript.stat().st_size < target:
+            handle.write(json.dumps(_message("assistant", f"{pad}{index}", ts=2.0 + index)) + "\n")
+            handle.flush()
+            index += 1
+    return transcript
+
+
+def test_a_user_turn_before_the_tail_window_is_still_what_the_preview_opens_on(
+    tmp_path: Path,
+) -> None:
+    """D34, and D18 resurfacing past the window.
+
+    QA measured 24 of 159 real rows opening on ``▪ lop`` — rank 0 among them —
+    because their first user turn sits before the tail window. The brief's
+    §4.2 rule is "open at the session's FIRST USER TURN"; a window that cannot
+    see one is a reason to go and look, not a reason to show mid-session
+    assistant narration.
+    """
+    transcript = _padded(tmp_path, "aa11bb22cc33", head_user=True, target=388_000)
+    assert transcript.stat().st_size > PREVIEW_TAIL_BYTES
+
+    turns = SessionPreviews(tmp_path / "sessions").condensed("aa11bb22cc33")
+    assert turns, "the head fallback returned nothing"
+    assert turns[0].role == "user"
+    assert "THE ORIGINAL QUESTION" in turns[0].text
+
+    lines = wrap_turns(turns, width=60, height=40)
+    gutters = [text for kind, text in lines if kind == "gutter"]
+    assert gutters[0] == "▸ you"
+
+
+def test_a_tail_of_only_tool_turns_condenses_from_the_head_instead_of_nothing(
+    tmp_path: Path,
+) -> None:
+    """QA's MINOR: 3 of 159 sessions condensed to zero turns.
+
+    The pane then reads "(no prose in this transcript)" about a conversation
+    that plainly has prose — it is just older than the window.
+    """
+    session = tmp_path / "sessions" / "bb22cc33dd44"
+    session.mkdir(parents=True, exist_ok=True)
+    transcript = session / "transcript.jsonl"
+    pad = "tool output " * 240
+    with transcript.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(_message("user", "THE HEAD QUESTION", ts=1.0)) + "\n")
+        handle.write(json.dumps(_message("assistant", "the head answer", ts=2.0)) + "\n")
+        index = 0
+        while transcript.stat().st_size < 300_000:
+            handle.write(json.dumps(_message("tool", f"{pad}{index}", ts=3.0 + index)) + "\n")
+            handle.flush()
+            index += 1
+
+    turns = SessionPreviews(tmp_path / "sessions").condensed("bb22cc33dd44")
+    assert [turn.role for turn in turns] == ["user", "assistant"]
+    assert "THE HEAD QUESTION" in turns[0].text
+
+
+def test_a_user_turn_inside_the_tail_window_never_pays_for_a_head_read(
+    tmp_path: Path,
+) -> None:
+    """The fast path stays one read.
+
+    The fallback exists for the minority of sessions whose opening turn is out
+    of reach; making every preview pay a second read to serve them would trade
+    a correctness bug for a performance one. Counted by opens, not inferred.
+    """
+    transcript = _padded(tmp_path, "cc33dd44ee55", head_user=False, target=300_000)
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_message("user", "A LATE QUESTION", ts=99_999.0)) + "\n")
+
+    opens = 0
+    real_open = Path.open
+
+    def counting_open(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal opens
+        if self == transcript:
+            opens += 1
+        return real_open(self, *args, **kwargs)
+
+    Path.open = counting_open  # type: ignore[method-assign]
+    try:
+        previews = SessionPreviews(tmp_path / "sessions")
+        turns = previews.condensed("cc33dd44ee55")
+        # And again, to prove the cache holds rather than re-reading.
+        previews.condensed("cc33dd44ee55")
+    finally:
+        Path.open = real_open  # type: ignore[method-assign]
+
+    # The tail DOES contain a user turn, so the fallback must not fire. Asserted
+    # on the turn list rather than on ``turns[0]``: the tail also holds the
+    # assistant padding before it, and dropping leading assistant turns is
+    # ``wrap_turns``' job (D18), not the reader's.
+    assert any(turn.role == "user" for turn in turns)
+    assert any("A LATE QUESTION" in turn.text for turn in turns)
+    assert opens == 1, f"tail had a user turn but the file was opened {opens} times"

@@ -23,12 +23,34 @@ to spare — and it is cached because holding a wheel-scroll issues about 30
 cursor moves a second. There is NO full-transcript parse, ever, and no per-row
 read per keystroke.
 
-HONEST LIMIT, stated because a caller will otherwise assume otherwise: the
-preview reads the TAIL, so "the session's first user turn" means the first
-user turn *in the tail window*. On a transcript larger than
-:data:`PREVIEW_TAIL_BYTES` that is not the session's opening message. This
-matches the validated prototype and the established ``resume.session_preview``
-pattern; do not add a second head read to close it.
+THE READ RULE: TAIL FIRST, HEAD ONLY AS A FALLBACK. ``condensed`` reads the
+tail window. If that window holds no USER turn — or no turns at all — it reads
+a HEAD window of the same byte budget and condenses from there instead.
+
+That fallback is deliberate and was added against an earlier version of this
+docstring which forbade it. The prohibition was written to protect the cost
+model and it was right about the cost; it was wrong that the cost was the only
+thing at stake. The preview's contract is to open on the session's first user
+turn, and on a long transcript whose opening turn predates the window the tail
+can only offer mid-session assistant narration — which is the exact defect the
+"open on the first user turn" rule exists to prevent, displaced past the window
+rather than avoided. Measured on the real store: 24 of 159 rows opened on
+``▪ lop`` (rank 0 among them) and 3 more condensed to nothing, because their
+tail was all tool traffic. Correctness wins; the cost concern shapes HOW.
+
+So the fallback is bounded the same way the tail is, cached the same way, and
+never taken when the tail can answer: a session whose tail carries a user turn
+opens the file exactly ONCE, which is the common case. When it does fire the
+worst case is two bounded reads rather than one — still O(1) in file size, and
+still nothing like parsing a 15 MB transcript. Measured on the real store: 25
+of 162 rows take it, and 60 mixed previews cost 1.20 ms per session against
+1.12 ms when every row used the tail alone.
+
+WHAT IS STILL NOT CLOSED, so a caller does not assume otherwise: the preview
+shows the head and the tail, never the middle. A turn in neither window is not
+visible, and ``ctrl+g``/``ctrl+d`` scroll what was read rather than paging the
+file. That is the same bounded-read bargain ``resume.session_preview``
+established; only the "first user turn" guarantee is restored here.
 """
 
 from __future__ import annotations
@@ -233,6 +255,27 @@ def grep_context(digest: str, query: str, width: int) -> str | None:
     return f"{'…' if start > 0 else ''}{snippet}{'…' if end < len(digest) else ''}"
 
 
+def _parse(lines: Iterable[str]) -> list[dict[str, Any]]:
+    """JSONL lines to entries, skipping blanks and anything unparseable.
+
+    Shared by the tail and head windows so the two cannot drift in what they
+    tolerate — a fallback that parsed more strictly than the fast path would
+    fail exactly on the rows it exists to rescue.
+    """
+    out: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
 class SessionPreviews:
     """Bounded, cached, read-only reads for ONE open picker.
 
@@ -253,6 +296,11 @@ class SessionPreviews:
         self._verbose: dict[str, list[PreviewTurn]] = {}
         self._checkpoint: dict[str, dict[str, Any]] = {}
         self._created: dict[str, float] = {}
+        # Head windows are cached separately and on the same terms as the tail:
+        # the fallback is rare, but a cursor resting on one of those rows must
+        # not re-read on every repaint.
+        self._head_lines: dict[str, list[str]] = {}
+        self._head_entries_cache: dict[str, list[dict[str, Any]]] = {}
 
     def _tail(self, session_id: str) -> list[str]:
         """The last :data:`PREVIEW_TAIL_BYTES` of the transcript, as whole lines."""
@@ -275,28 +323,77 @@ class SessionPreviews:
         self._lines[session_id] = window.decode("utf-8", errors="replace").splitlines()
         return self._lines[session_id]
 
+    def _head(self, session_id: str) -> list[str]:
+        """The FIRST :data:`PREVIEW_TAIL_BYTES` of the transcript, as whole lines.
+
+        Read only when the tail window cannot answer "what did the user ask?"
+        — see :meth:`condensed`. The last line is dropped rather than the
+        first: reading a prefix ends mid-line, and a truncated JSON object is
+        not recoverable.
+        """
+        if session_id in self._head_lines:
+            return self._head_lines[session_id]
+        transcript = self._sessions / session_id / TRANSCRIPT_NAME
+        window = b""
+        try:
+            with transcript.open("rb") as handle:
+                window = handle.read(PREVIEW_TAIL_BYTES)
+        except OSError:
+            window = b""
+        lines = window.decode("utf-8", errors="replace").splitlines()
+        # A short file was read whole, so its final line is complete; a file
+        # longer than the window was cut, so its final line is a fragment.
+        if len(window) == PREVIEW_TAIL_BYTES and lines:
+            lines = lines[:-1]
+        self._head_lines[session_id] = lines
+        return self._head_lines[session_id]
+
+    def _head_entries(self, session_id: str) -> list[dict[str, Any]]:
+        """Parsed entries from the head window, skipping unparseable lines."""
+        if session_id in self._head_entries_cache:
+            return self._head_entries_cache[session_id]
+        self._head_entries_cache[session_id] = _parse(self._head(session_id))
+        return self._head_entries_cache[session_id]
+
     def entries(self, session_id: str) -> list[dict[str, Any]]:
         """Parsed JSONL entries from the tail window, skipping unparseable lines."""
         if session_id in self._entries:
             return self._entries[session_id]
-        out: list[dict[str, Any]] = []
-        for line in self._tail(session_id):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(entry, dict):
-                out.append(entry)
-        self._entries[session_id] = out
-        return out
+        self._entries[session_id] = _parse(self._tail(session_id))
+        return self._entries[session_id]
 
     def condensed(self, session_id: str) -> list[PreviewTurn]:
-        """Human turns only — the picker's DEFAULT view."""
+        """Human turns only — the picker's DEFAULT view.
+
+        TAIL FIRST, HEAD ONLY WHEN THE TAIL CANNOT ANSWER THE QUESTION. The
+        preview exists to answer "which session is this?", and §4.2's rule is
+        that it opens on the first USER turn. A tail window holding no user
+        turn cannot satisfy that rule from what it has: it can only show
+        mid-session assistant narration, which is precisely the D18 defect —
+        resurfaced past the window rather than fixed differently.
+
+        QA measured the shape on the real store: 24 of 159 rows opened on
+        ``▪ lop``, rank 0 among them, and a further 3 condensed to NOTHING
+        because their tail was all tool traffic. Three design rounds could not
+        see it because every transcript they measured fit inside the window.
+
+        The fallback is bounded by the SAME byte budget as the tail, cached per
+        session id like every other read here, and taken only on the minority
+        of sessions that need it — a tail carrying a user turn never opens the
+        file twice. Cost when it does fire: one extra ``seek(0)`` + 256 KB read
+        and a parse of that window, so the worst case is exactly twice the
+        fast path and still independent of file size.
+        """
         if session_id not in self._condensed:
-            self._condensed[session_id] = condense_entries(self.entries(session_id))
+            turns = condense_entries(self.entries(session_id))
+            if not any(turn.role == "user" for turn in turns):
+                head = condense_entries(self._head_entries(session_id))
+                # Only when the head actually improves matters. A session with
+                # no user turn anywhere — and there are such rows — keeps the
+                # tail's turns rather than trading them for an empty list.
+                if any(turn.role == "user" for turn in head) or not turns:
+                    turns = head or turns
+            self._condensed[session_id] = turns
         return self._condensed[session_id]
 
     def verbose(self, session_id: str) -> list[PreviewTurn]:

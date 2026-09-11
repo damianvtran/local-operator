@@ -11,6 +11,11 @@ Usage:
 
 FRAME is one of:
     list    the picker with no query, at whatever geometry is asked for
+    narrowed
+            the picker filtered down to FEWER rows than one page holds, which
+            is the case that skips the position counter — and the case a
+            design round caught reporting the whole store's size instead of
+            the match count.
     query   the picker with a filter typed, whose CURSOR ROW is an exact body
             match — so the frame actually demonstrates the grep context line.
             Design round 2 spent a whole round unable to verify the stacked
@@ -44,12 +49,16 @@ from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.session_picker import SessionPickerScreen  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
-FRAMES = ("list", "query")
+FRAMES = ("list", "query", "narrowed")
 
 #: The query the ``query`` frame types. Chosen because the seeded bodies below
 #: contain it as a literal substring, which is what makes the cursor row an
 #: EXACT match and so gives it a context line.
 QUERY = "picker"
+
+#: A query that matches only the three named sessions, so the list fits one
+#: page and the position counter is skipped.
+NARROWING_QUERY = "asteroids"
 
 #: Conversations seeded into the isolated store. The first is the one the
 #: cursor lands on under ``QUERY``; its body carries the literal query so the
@@ -141,6 +150,21 @@ async def _shoot(out: Path, frame: str, cols: int, rows: int) -> None:
         assert len(screen.visible_rows) >= len(
             SEEDED
         ), f"store seeded {len(screen.visible_rows)} rows, expected at least {len(SEEDED)}"
+
+        if frame == "narrowed":
+            for char in NARROWING_QUERY:
+                await pilot.press(char)
+            for _ in range(6):
+                await pilot.pause()
+            matches = len(screen.visible_rows)
+            budget = screen._layout().list_rows
+            # ASSERT THE SHAPE: a frame that still scrolls exercises the
+            # counter branch, not the one under review.
+            assert 0 < matches <= budget, (
+                f"{matches} matches against a {budget}-row page — this frame "
+                "does not show the single-page case"
+            )
+            print(f"narrowed: {matches} matches, page holds {budget}")
 
         if frame == "query":
             for char in QUERY:
