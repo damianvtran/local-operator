@@ -2032,8 +2032,14 @@ MovePickerScreen .move-picker {
  * with Esc — and giving diagnostics their own visual language would make one
  * more screen look like a different app. It differs in one structural way:
  * the body can be long (a per-session table grows without bound), so the card
- * pins a title and a hint and puts the report itself in a VerticalScroll
- * between them, rather than sizing to content the way the picker does. */
+ * pins a title and a hint and gives the report a scrolling body between them,
+ * rather than sizing to content the way the picker does. The three bodies
+ * differ, and the difference is the point: `/info`'s is a `Static` inside a
+ * `VerticalScroll`, `/usage`'s is the `UsagePanel` `Static` scrolling itself
+ * inside a plain container (it paints its own bar), and `/analytics`'s is a
+ * `ReportView` — a line-API widget that converts only the lines the compositor
+ * asks for. Why that one needed its own shape (it repaints per mouse event, not
+ * per key) and its rule (`#analytics-scroll`) are below. */
 AnalyticsScreen, SessionScreen, InfoScreen {
     align: center middle;
     background: $lo-sunken;
@@ -2086,9 +2092,26 @@ InfoScreen .analytics-panel {
     scrollbar-color-active: $lo-accent;
 }
 
-#analytics-body, #session-report-body, #info-body {
+/* `#analytics-body` is gone: the analytics body is a `ReportView` that paints
+ * its own lines and is its own scroller, so it carries `#analytics-scroll`
+ * above and has no `Static` to size. `#session-report-body`/`#info-body` keep
+ * the shape — those panels repaint once per key, not per mouse event, so they
+ * do not pay the price this rule used to cost. */
+#session-report-body, #info-body {
     width: auto;
     height: auto;
+    color: $lo-fg;
+}
+
+#analytics-scroll {
+    /* The report body's own foreground. The body used to get this from the
+     * `#analytics-body` rule; with the body and the viewport now one widget it
+     * belongs on the widget that paints. Kept as its own rule rather than added
+     * to the shared `#analytics-scroll, #session-report-scroll, #info-scroll`
+     * block above, so the two sibling panels' styles are not touched by an
+     * analytics change. Drop it and the report's unstyled cells (blank spacer
+     * lines, the pads between columns) would paint in the app default instead
+     * of `fg`, which the frame comparison would catch. */
     color: $lo-fg;
 }
 
