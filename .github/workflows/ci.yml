@@ -372,6 +372,22 @@ jobs:
         # requests.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
         shard: [0, 1, 2, 3, 4]
+    env:
+      # Seconds of no completed test before the controller reports which tests
+      # are still in flight, and the per-item bound after which a worker dumps
+      # every thread's stacks. Four shards have been cancelled at the 20-minute
+      # cap after a silent 6-minute tail (5m55s-7m18s of zero output) which the
+      # log cannot attribute: `-q` prints one line per 72 completed tests, so
+      # the last partial line is withheld until its slowest item finishes.
+      #
+      # 240s is chosen against measurements, not taste. This budget is a CI
+      # number, as AGENTS.md requires: the worst legitimate test measured in a
+      # full local run is 81s, and a shard averages ~0.2s per completed test, so
+      # four minutes with NO completion is already anomalous rather than slow.
+      # It also has to fire with time to spare before the cap: the observed
+      # stalls begin ~14 minutes into the job, so 240s puts the first report at
+      # ~18 minutes with the 30s repeat getting at least one more before 20.
+      LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"
     steps:
       - uses: actions/checkout@v7
 
@@ -413,6 +429,27 @@ jobs:
         run: |
           pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report=
           mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Print the shard stall report
+        # `always()` unconditionally: the report exists exactly when this job is
+        # cancelled at the cap or dies, and `always()` is the one condition that
+        # still runs then. It is belt-and-braces rather than the delivery path
+        # -- the controller prints its report straight to this log while the
+        # stall is happening, because that is the only channel a cancelled job
+        # leaves intact -- but it also covers a device-level failure nothing
+        # printed, and a fired worker stack dump in the case where the shard
+        # step failed rather than timed out.
+        if: always()
+        run: |
+          dir="${TMPDIR:-/tmp}/lo-shard-stall"
+          if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+            echo "no shard stall report: nothing stalled long enough to trip the watchdog"
+            exit 0
+          fi
+          for f in "$dir"/*.log; do
+            echo "===== $f ====="
+            cat "$f"
+          done
 
       - name: Upload shard coverage data
         uses: actions/upload-artifact@v4
