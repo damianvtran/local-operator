@@ -29535,8 +29535,9 @@ class OperatorApp(App[None]):
         self._interaction.draft.aside = None
         panel.close()
         panel._on_height = None
-        # Give the transcript its own last rows back, and land the reader at
-        # the end of the conversation they came back to.
+        # Give the transcript its own last rows back, and land the reader
+        # back where THEY were — the tail only if that is where they already
+        # were (see the `is_following_tail` guard below).
         #
         # DROP the inline rule rather than write a number back. The sheet's own
         # bottom padding is the conversation's trailing row of ground (1 in the
@@ -29548,8 +29549,31 @@ class OperatorApp(App[None]):
         # which is the only place that knows which layout is up.
         transcript = self._transcript_view()
         if transcript is not None:
+            # `follow_tail()` ONLY when the reader was already at the end —
+            # not unconditionally. The unconditional call was itself a
+            # defect: a reader who scrolled BACK to re-read something before
+            # opening the aside (the exact gesture the docstring at
+            # `_reserve_ground_for_aside` names — "re-reading is a thing
+            # people do WHILE asking an aside about it") got yanked to the
+            # tail the moment they closed the card, landing on unrelated
+            # content and one click away from the D2/D3 defects this same
+            # change fixes elsewhere. Measured: parked at `scroll_y=3` of 15,
+            # `/btw` opened and closed with no scroll gesture in between —
+            # `scroll_y` came back as `15`, not `3`. Clearing the padding
+            # rule alone (no `follow_tail()`) already lands the SAME row at
+            # the SAME offset, because the padding is the only thing that
+            # moved: the conversation's own rows never did.
+            #
+            # `is_following_tail()`, not `is_near_bottom()`: the anchor is the
+            # authority on INTENT (did the reader ask to be at the end),
+            # which is what a re-acquire on close should honour, and it is
+            # already resynced against the padded extent by
+            # `_reserve_ground_for_aside`'s own `follow_tail()` call when the
+            # aside opened at the tail.
+            was_following = transcript.is_following_tail
             transcript.styles.clear_rule("padding")
-            transcript.follow_tail()
+            if was_following:
+                transcript.follow_tail()
         draft = self._aside_draft
         images = self._aside_draft_images
         self._aside_draft = None
