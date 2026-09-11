@@ -519,3 +519,73 @@ def test_an_older_owners_gate_state_without_the_new_keys_still_rebuilds() -> Non
     assert pending is not None
     assert pending.recommended is None
     assert pending.persist is False
+
+
+def test_a_card_the_wire_permits_but_the_model_rejects_still_mounts() -> None:
+    """The tolerant wire accepts shapes the strict model refuses.
+
+    `_projection_from_json` builds `AskOptionWire(label=str(opt.get("label", "")))`
+    with no minimum length, while `AskOption.label` is `min_length=1`. So an
+    owner that projects an option with no label produces a card that cannot be
+    rebuilt — and since `ValidationError` is a `ValueError`, which `_run_ask`
+    does not catch, the escape is not a missing badge but an unretrieved-task
+    traceback and a question that NEVER MOUNTS.
+
+    The unlabelled row is named by position rather than dropped: the answer
+    travels by LABEL, so removing the row would silently change which choice
+    the user's tap resolves to.
+    """
+    pending = PendingRequest(
+        request_id="skewed",
+        kind="ask",
+        title="Which migration?",
+        options=[
+            AskOptionWire(label="", description="the owner sent no label"),
+            AskOptionWire(label="Gamma", description="third"),
+        ],
+    )
+
+    question = _ask_question_from_pending(pending)
+
+    assert [option.label for option in question.options] == ["Option 1", "Gamma"]
+    # The description still rides, so the row is readable even unlabelled.
+    assert question.options[0].description == "the owner sent no label"
+
+
+def test_a_card_beyond_repair_does_not_escape_as_a_traceback() -> None:
+    """A shape neither the guard nor the model accepts is bounded, not fatal.
+
+    A single-option picker is the clearest example: the model requires two
+    answers, and inventing a second would put a choice on screen the agent
+    never offered. `_ask_question_from_pending` therefore re-raises, and
+    `_run_ask`'s `ValueError` arm is what keeps that from becoming "Task
+    exception was never retrieved" with no card and no explanation.
+    """
+    pending = PendingRequest(
+        request_id="skewed",
+        kind="ask",
+        title="Which migration?",
+        options=[AskOptionWire(label="Beta", description="only one")],
+    )
+
+    with pytest.raises(ValueError):
+        _ask_question_from_pending(pending)
+
+
+def test_the_happy_path_is_untouched_by_the_repair_guard() -> None:
+    """The repair must never fire on a well-formed card."""
+    pending = PendingRequest(
+        request_id="fine",
+        kind="ask",
+        title="Which migration?",
+        options=[
+            AskOptionWire(label="Beta", description="second"),
+            AskOptionWire(label="Gamma", description="third"),
+        ],
+        recommended=0,
+    )
+
+    question = _ask_question_from_pending(pending)
+
+    assert [option.label for option in question.options] == ["Beta", "Gamma"]
+    assert question.recommended == 0
