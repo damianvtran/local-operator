@@ -795,7 +795,30 @@ aggregator_router_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=1_048_576,
     supports_images=True,
-    supports_prompt_cache=False,
+    # True, and the asymmetry is the whole argument. The router is a ROUTE, so
+    # whether caching applies depends on the model it selects; today every route
+    # caches (DeepSeek and Gemini both cache implicitly, and the aggregator
+    # keeps the conversation on one host once it has affinity), and a router
+    # that resolves to a non-caching model tomorrow pays almost nothing for this
+    # flag being True: `prompt_cache_key` is a routing hint the provider ignores
+    # if it does not cache, and `cache_control` is stripped by the aggregator for
+    # providers that do not honour it (see ``clients._message_cache_markers``).
+    #
+    # A wrong False is not symmetric — it is what made this a defect. Both
+    # emissions are gated on this flag, so False sent NO routing key and NO cache
+    # marker on the router route, and a long agentic session paid full input
+    # price on every turn after the first: the largest avoidable cost in the
+    # largest conversations. It also disabled OpenRouter's provider sticky
+    # routing for exactly the route least able to predict where it lands, since
+    # the fallback (hashing the opening messages) only starts pinning after a hit
+    # it may never get.
+    #
+    # The listing cannot supply the answer for us either: the synthetic "auto"
+    # entry quotes the aggregator's meta-route price sentinel rather than a
+    # cache-read price, so discovery derives False from it, and
+    # ``discovery._merge_one`` ORs the two — this flag is the only input that can
+    # turn it on.
+    supports_prompt_cache=True,
     input_price=0.0,
     output_price=0.0,
     cache_writes_price=0.0,

@@ -35,7 +35,7 @@ from local_operator.model.discovery import (
     fetch_models,
     merge_models,
 )
-from local_operator.model.registry import ModelInfo, static_models
+from local_operator.model.registry import ModelInfo, get_model_info, static_models
 from local_operator.providers.registry import PROVIDER_REGISTRY
 
 
@@ -2387,3 +2387,24 @@ def test_cached_available_models_falls_back_to_static_on_cache_miss(tmp_path) ->
     agg_models, agg_status = discovery.cached_available_models("openrouter", cache_dir=tmp_path)
     assert agg_status == "static"
     assert agg_models == []
+
+
+def test_a_router_row_keeps_cache_support_though_the_listing_cannot_state_it() -> None:
+    """The router is the one row a listing cannot answer for, so it must not be
+    allowed to answer "no".
+
+    The synthetic `auto` entry in an aggregator listing quotes a meta-route price
+    sentinel rather than a cache-read price, and discovery derives cache support
+    from a positive cache-read price, so the live row always arrives as False. The
+    merge ORs it against the registry, which makes the registry the only input that
+    can turn this on — and losing it silently costs a router conversation its
+    prompt cache on every turn after the first.
+    """
+    router = {"auto": get_model_info("radient", "auto")}
+    live = [DiscoveredModel(id="auto", supports_prompt_cache=False, cache_read_price=0.0)]
+
+    merged = merge_models(router, live)
+
+    assert (
+        merged[0].supports_prompt_cache is True
+    ), "a listing row that cannot express cache support must not downgrade the router"
