@@ -78,7 +78,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
-from local_operator.session.attachments import AttachmentStore
+from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -3248,6 +3248,16 @@ class AttachedSession:
             if page.status == "full_required":
 
                 def replay() -> list[Any]:
+                    # ``Transcript``'s own store is the env default
+                    # (``AttachmentStore()`` == ``config_dir()/attachments``).
+                    # That is the same root ``store_for_transcript_dir``
+                    # derives for this session in every shipped caller — the
+                    # session's config dir comes from ``config_dir()`` (see the
+                    # AttachedSession construction sites) — so read root ==
+                    # write root here today. Left as the env default
+                    # deliberately: it is the write path's own expression, and
+                    # the construction sites, not this call, are what keep the
+                    # two equal.
                     transcript = Transcript(self._config_dir / "sessions" / self._session_id)
                     return (
                         transcript.build_llm_history(through_id=window.through_id)
@@ -3353,7 +3363,22 @@ class AttachedSession:
                 # the file START without meeting the cursor, so this is the
                 # same "id is not in the journal" the whole-file parse saw.
                 cut = None
-            return replay_entries(suffix.entries, AttachmentStore(directory), through_id=cut)
+            # Resolve externalized media against the store that OWNED this
+            # journal (``<config>/attachments``), derived from the session
+            # directory rather than from this reader's environment — the
+            # sidebar's saved-preview reader and this cold replay both know
+            # the config dir that owns the transcript, and only the co-located
+            # root is the writer's root by construction. The obvious-looking
+            # alternative, a per-session store at ``<config>/sessions/<id>``,
+            # was the bug (#694): NOTHING ever writes there, so every digest
+            # resolved to None and a live, on-disk screenshot replayed as
+            # "image unavailable — no longer in the transcript".
+            # ``store_for_transcript_dir`` owns that rule for both readers.
+            return replay_entries(
+                suffix.entries,
+                store_for_transcript_dir(directory),
+                through_id=cut,
+            )
 
         return await asyncio.to_thread(_replay)
 
