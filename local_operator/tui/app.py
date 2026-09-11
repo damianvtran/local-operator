@@ -1074,7 +1074,7 @@ _OLDER_PAGE_TRANSPORT_NOTICE = "session is reconnecting; earlier messages will l
 _OLDER_PAGE_FAULT_NOTICE = "Could not load earlier messages right now — scroll up to try again"
 
 
-@dataclass(frozen=True)
+@dataclass
 class _PagingLease:
     """Ownership of ONE backward-paging transaction, request through settle.
 
@@ -1091,9 +1091,28 @@ class _PagingLease:
     and are checked separately. Ownership answers a different question — may
     this completion open the gate — and the honest answer is "only if the gate
     is still the one it took", which is object identity and nothing else.
+
+    ``mounted`` is mutated in place on THIS object rather than by swapping a
+    replacement into the dict: ``owns()`` and ``_release_paging_lease``
+    compare identity, so replacing the stored lease would make the in-flight
+    fetch's object no longer the holder and its settle would refuse to
+    release. Frozen was the original F1 shape; the flags that let a click
+    retire a wedged holder have to live on the same object.
+
+    ``mounted`` records whether THIS transaction ever painted a page. A lease
+    that has held across one explicit click without mounting anything belongs
+    to a fetch that will never complete (a wedged owner socket that no
+    disconnect event reaches, or a settle callback that never fired), so a
+    second click retires it rather than standing down against a gate that
+    nothing will ever release — the stuck "older messages above" frame, where
+    no click and no scroll-up could trigger a fetch. A holder that HAS
+    mounted is merely settling, and keeps its gate (F1). A fetch that has not
+    yet returned is indistinguishable from a wedge, so the click is the
+    reader's way out of that wait.
     """
 
     source_token: str
+    mounted: bool = False
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -8799,6 +8818,10 @@ class OperatorApp(App[None]):
                 self._fetch_older_display_page(source, lease, on_settled=settled),
                 group=source.worker_group("history-page"),
             )
+            # The fetch is now the thing that will make the frame scrollable.
+            # Until it lands, an unscrollable frame cannot honour "scroll up
+            # to load" — restate so the notice offers the click instead.
+            self._reconcile_head_notice()
         else:
             self._resume_fill_active = False
             self._reconcile_head_notice()
@@ -8881,7 +8904,21 @@ class OperatorApp(App[None]):
             # R6). The pessimistic state is worth stating once the fill has
             # actually given up, and the fill's own exits do exactly that:
             # every one of them clears this flag before reconciling.
-            return
+            #
+            # Exception: a fill whose lease has mounted NOTHING and the frame
+            # still cannot scroll. That is the wedged holder, not an
+            # intermediate geometry — scrolling cannot work, and the click is
+            # the way out. Advertising "scroll up to load" here is the stuck
+            # frame's lie. A lease that HAS mounted is merely settling, and
+            # keeping the skip there is what prevents R6.
+            lease = self._paging_leases.get(self._interaction.token)
+            if lease is None or lease.mounted:
+                return
+            self._restate_head_notice(
+                notice,
+                RESUME_AUDIT_UNREACHABLE_NOTICE if audit else RESUME_UNREACHABLE_NOTICE,
+                "note",
+            )
         elif not scrollable:
             # `note`, not `info`: this is the answer to "where did my history
             # go", which is the role `NoticeBlock` reserves `note` for, and it
@@ -9144,10 +9181,20 @@ class OperatorApp(App[None]):
             self._mount_newer_resume_page()
 
     def on_older_history_notice_requested(self, message: OlderHistoryNotice.Requested) -> None:
-        """The explicit affordance uses the same demand lease as upward input."""
+        """The explicit affordance uses the same demand lease as upward input.
+
+        One extra duty the wheel does not carry: the click is the reader
+        ASKING for the page the row advertises, so a gate that swallowed the
+        previous ask without mounting anything is abandoned, not busy. Retire
+        it and let this click fetch — otherwise a wedged holder (an owner
+        socket that never answers and is never torn down, a settle callback
+        that never fires) leaves the frame with a notice no input can answer:
+        the stuck "older messages above" state.
+        """
         message.stop()
         if message.notice is self._resume_head_notice:
             self._resume_fill_active = False
+            self._break_abandoned_paging_lease(self._interaction)
             self._resume_in_zone = True
             self._check_resume_page(force=True)
 
@@ -9462,6 +9509,9 @@ class OperatorApp(App[None]):
             self._fetch_older_display_page(source, lease, on_settled=on_settled),
             group=source.worker_group("history-page"),
         )
+        # Until this fetch lands, an unscrollable frame cannot honour
+        # "scroll up to load". Restate so the notice offers the click.
+        self._reconcile_head_notice()
 
     def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
         """Take the backward-paging gate for ``source``, or refuse.
@@ -9490,6 +9540,43 @@ class OperatorApp(App[None]):
         if self._paging_leases.get(lease.source_token) is not lease:
             return False
         del self._paging_leases[lease.source_token]
+        return True
+
+    def _break_abandoned_paging_lease(self, source: SessionInteraction) -> bool:
+        """Retire a paging gate whose holder will never release it.
+
+        The reader's click is the only gesture that may do this, and only
+        against a lease that has produced NOTHING: it held the gate through
+        one explicit request and still mounted no rows. That combination means
+        the holder is wedged — a fetch parked on an owner socket that never
+        answers and whose teardown never arrives, or a mount whose settle
+        callback never fired — and every input gates on it, so the frame is
+        stuck until the lease is retired.
+
+        A fetch that has not yet returned is indistinguishable from a wedge
+        from this side of the gate, so the click is also the way out of a
+        hung wait. A holder that HAS mounted is merely settling, and keeping
+        that gate is F1: retiring it would let a second fetch re-consume the
+        same cursor.
+
+        Retiring is safe because the wedged holder's own completion is fenced
+        on identity: when it finally lands (or is cancelled) it no longer owns
+        the gate, so it releases nothing it does not hold and publishes nothing
+        to a screen it no longer owns. The replacement fetch re-reads the same
+        ``history_before_token`` cursor the wedged one never consumed, so no
+        page is skipped or duplicated.
+
+        Returns whether a lease was retired, so the caller can decide whether
+        the gesture should now proceed to a fresh fetch.
+        """
+        lease = self._paging_leases.get(source.token)
+        if lease is None or lease.mounted:
+            return False
+        # Cancel the wedged fetch's worker so its coroutine unwinds through
+        # its own `finally` (which now releases nothing, having lost the gate)
+        # rather than lingering against the retired lease.
+        self.workers.cancel_group(self, source.worker_group("history-page"))
+        del self._paging_leases[source.token]
         return True
 
     def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
@@ -9688,6 +9775,10 @@ class OperatorApp(App[None]):
             # stays the top row and the conversation keeps its order.
             mounted = transcript.blocks()
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            # Flag BEFORE the insert's settle: a click arriving while gaps
+            # are still answering must see a working transaction, not a
+            # wedge. Mutated on this object so identity (F1) is unchanged.
+            lease.mounted = True
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
             # Hidden-only pages still yield; otherwise initial fill projects
