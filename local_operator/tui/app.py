@@ -88,6 +88,7 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
+from local_operator.harness.rows import is_harness_injection
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -8423,6 +8424,15 @@ class OperatorApp(App[None]):
             return  # reduced hosts (embedders, pilot fakes) may lack it
         for message in history:
             if getattr(message, "role", None) != "user":
+                continue
+            if is_harness_injection(message):
+                # A row the harness minted from a ``CustomMessage`` (a failover
+                # model-switch notice, an incident) is not the opening prompt.
+                # The decision is the shared one from ``harness/rows.py``, so
+                # this scan and ``history_window.opener_text`` — the other
+                # thing that reads the first user turn as a title — cannot
+                # disagree about it. Titling a thread "[model switch] You are
+                # now running as …" is the visible form of getting this wrong.
                 continue
             text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
