@@ -170,15 +170,36 @@ MIN_TRANSCRIPT_ROWS = 4
 #: R9-R11, measured on the composited screen rather than the card's own text).
 MIN_BODY_ROWS = 3
 
-#: Max wrapped lines the QUESTION header may occupy, mirroring OMP's
-#: ``MAX_HEADER_ROWS`` (ask-dialog.ts:62). A question longer than this is
-#: truncated to ``cap - 1`` whole lines plus a ``…``-marked line, so a long
-#: question cannot starve the option list of its budget and leave a cut
-#: description unreachable by any gesture (GAP D7). The ordering "question
-#: outranks options" (the safety property, ``_layout`` steps 1-2) is unchanged;
-#: this only bounds how many rows the question may TAKE before the options
-#: start competing for what is left.
-MAX_QUESTION_ROWS = 4
+#: Option lines the card refuses to let the QUESTION go below.
+#:
+#: This is what enforces GAP D7 — a long question must not consume the whole
+#: body and leave the option list a 1-2 line viewport in which a cut description
+#: is unreachable by any gesture. It replaces a blind ``MAX_QUESTION_ROWS = 4``
+#: that mirrored OMP's ``MAX_HEADER_ROWS`` (ask-dialog.ts:62) and bounded the
+#: question by a CONSTANT regardless of how much room the terminal had: measured
+#: at 100x46, 100x40 and 80x40, the constant cut the fifth line of a 429-cell
+#: question while the card still had a spare body row, and no gesture reached
+#: the cut text.
+#:
+#: Four lines, for the reason :data:`MIN_TRANSCRIPT_ROWS` gives at the other end
+#: of the card: it is the smallest reserve that keeps two 2-line option rows, so
+#: options can be COMPARED rather than merely listed. One 2-line row shows a
+#: choice with nothing beside it, which is the state the question already has
+#: the user in.
+#:
+#: The ordering "question outranks options" (the safety property, ``_layout``
+#: steps 1-2) is unchanged. This bounds how many rows the question may TAKE
+#: before the options start competing for what is left, not whether it is shown
+#: first.
+QUESTION_LIST_RESERVE = 4
+
+#: The floor the question's adaptive bound never goes below.
+#:
+#: One, because ``_allocate`` already charges the question's first line ahead of
+#: the option rows (``_allocate`` step 1), so one line is the guaranteed minimum
+#: the card draws whenever it draws anything at all. A bound that promised fewer
+#: would be describing a card that does not exist.
+MIN_QUESTION_ROWS = 1
 
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
@@ -1405,8 +1426,8 @@ class AskPickerScreen(Container):
         width, _ = self._screen_size()
         return max(1, width - ASK_PADDING_CELLS * 2)
 
-    def _question_lines(self, width: int) -> list[str]:
-        """The question, wrapped and bounded to :data:`MAX_QUESTION_ROWS`.
+    def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
+        """The question, wrapped and bounded by what the BODY can spare.
 
         Wrapping makes the header's height depend on content, which is why the
         row budget below is computed from this rather than from a constant.
@@ -1422,14 +1443,98 @@ class AskPickerScreen(Container):
         first. The mark matches the budget-cut idiom ``_allocate`` already uses
         for a question the body cannot fit, so the two truncation paths read
         identically.
+
+        The bound is DERIVED from the body rather than fixed at four. A constant
+        cannot know how much room the terminal has, so it cut the fifth line of
+        a long question at 100x46 while the card had a spare row — the question
+        abbreviated to protect an option list that was not under threat. What
+        the options actually need is :data:`QUESTION_LIST_RESERVE`, and what the
+        question may have is whatever is left above :data:`MIN_QUESTION_ROWS`.
+
+        The bound is :meth:`_question_bound`, a search rather than an
+        expression: the largest question height whose resulting option viewport
+        still meets :data:`QUESTION_LIST_RESERVE`. Subtracting the reserve from
+        ``_body_rows(1)`` instead is the arithmetic that was tried first and is
+        wrong — that subtracts the reserve from the BODY, while ``_allocate``
+        spends most of the body on chrome before the option viewport is sized,
+        so a nominal reserve of 4 delivered 2 at 100x30/26/24/22/20 and 80x24:
+        the very starvation the constant exists to prevent.
+
+        ``reveal`` LIFTS the bound — it does not promise the whole question.
+        Past the point where the body cannot hold the text, ``_allocate`` step 5
+        clips it and marks the cut, which is the card's existing discipline and
+        the honest answer on a terminal with nothing left to give.
         """
         lines = wrap_cells(self.question.question, width) or [""]
-        if len(lines) <= MAX_QUESTION_ROWS:
+        if reveal:
             return lines
-        kept = lines[: MAX_QUESTION_ROWS - 1]
-        tail = truncate_cells(lines[MAX_QUESTION_ROWS - 1], max(1, width - 2))
+        cap = self._question_bound(width, len(lines))
+        if len(lines) <= cap:
+            return lines
+        kept = lines[: cap - 1]
+        tail = truncate_cells(lines[cap - 1], max(1, width - 2))
         tail = tail[:-1].rstrip() if tail.endswith("…") else tail
         return [*kept, f"{tail} …"]
+
+    def _question_bound(self, width: int, full_len: int) -> int:
+        """The most question lines that still leave the options their reserve.
+
+        A SCAN over candidate heights, not an expression, because the cost of a
+        question line is not a constant the card can subtract: ``_allocate``
+        spends the body on the footer, the first question line, an option row
+        and possibly the position row before the option viewport is sized, and
+        the rest of the question competes with the options for what is left.
+        The only honest way to ask "does a question this tall still leave the
+        options four lines" is to plan it and look.
+
+        **This is not the circularity a budget-derived bound has to avoid.**
+        The hazard is feeding the LIVE budget back in — ``q -> budget -> q`` over
+        the real question — which is a fixed-point iteration and was measured
+        diverging (13<->23 at 100x50). Each probe here is a SYNTHETIC question,
+        ``[""] * candidate``, so nothing reads :meth:`_question_lines` and no
+        cycle exists: this is a scan over a fixed domain, which has no fixed
+        point to find. It is a pure function of ``candidate`` and the terminal's
+        geometry, so it cannot flicker across repaints.
+
+        It terminates by construction: the domain is bounded above by the
+        question's own wrap length, computed before the loop.
+
+        The ``break`` on first crossing is sound because the predicate does not
+        recover — swept across 72 sizes x 2 reveal states x every cursor row,
+        ``body_line_budget`` never returned to >= the reserve once it had
+        dropped below, so first-crossing equals the exhaustive largest answer.
+
+        Where the reserve is UNPURCHASABLE — even a one-line question leaves the
+        viewport below it, at 100x24 and below and at 80x24 — this returns
+        :data:`MIN_QUESTION_ROWS` rather than the full wrap, and that is a
+        decision with evidence rather than a fallback of convenience. Drawing
+        the question in full there means it is not CUT, so the reveal's question
+        disjunct (:meth:`_reveal_is_useful`) has nothing to offer and ``^e``
+        leaves the footer entirely — measured at 100x24, 100x22, 100x20 and
+        80x24. Yielding to the floor keeps the question visibly cut, which keeps
+        the gesture that shows the rest on screen.
+        """
+        cap = MIN_QUESTION_ROWS
+        for candidate in range(MIN_QUESTION_ROWS, full_len + 1):
+            probe = [""] * candidate
+            plan = self._allocate(
+                width, probe, self._body_rows(candidate), position=False, reveal=False
+            )
+            total = plan.line_start_by_row[-1] if plan.line_start_by_row else 0
+            if plan.body_line_budget > 0 and total > plan.body_line_budget:
+                # The list would window, and the position row is bought on that
+                # retry — which costs a line the first pass did not charge. Ask
+                # the plan the card would actually draw, for the same reason
+                # ``_layout`` does.
+                windowed = self._allocate(
+                    width, probe, self._body_rows(candidate), position=True, reveal=False
+                )
+                if windowed.question or not plan.question:
+                    plan = windowed
+            if plan.body_line_budget < QUESTION_LIST_RESERVE:
+                break
+            cap = candidate
+        return cap
 
     def _description_indent(self) -> int:
         """Cells a description line is inset by, so it sits under the LABEL.
@@ -1720,9 +1825,12 @@ class AskPickerScreen(Container):
         away from being stuck in a mode nobody selected.
         """
         width = self._card_width()
-        question = self._question_lines(width)
-        budget = self._body_rows(len(question))
+        # ``revealed`` is resolved FIRST because the question's bound now
+        # depends on it: ``ctrl+e`` lifts that bound, so the wrap cannot be
+        # computed before the card knows which state it is drawing.
         revealed = self.state.revealed if reveal is None else reveal
+        question = self._question_lines(width, reveal=revealed)
+        budget = self._body_rows(len(question))
         plan = self._allocate(width, question, budget, position=False, reveal=revealed)
         # Would the line list overflow the first pass's viewport? The first pass
         # never buys the position row (``position=False`` forces ``show_position``
@@ -3385,18 +3493,43 @@ class AskPickerScreen(Container):
         Answered against the two PLANS the card would draw, not against the
         descriptions alone: "is there more on screen" is a question about the
         viewport, not about the text.
+
+        A SECOND disjunct: or the QUESTION is bounded below its full wrap and
+        lifting that bound would put a new line of it in the frame. The adaptive
+        bound cuts a long question wherever the body cannot spare the lines, and
+        without this the user has no gesture that reaches the cut text — which
+        is the complaint the bound was meant to answer, surviving at 100x24.
+        Measured: with the bound alone, ``^e`` was offered at NO size where the
+        question was cut.
+
+        The rule is TOTAL and ADDITIVE: ``ctrl+e`` lifts BOTH the question's
+        bound and the selected row's cap, and this returns True when either has
+        something to show. The two targets are disjoint at every swept size
+        today, so the key expands exactly one thing in practice; written
+        additively, a future size where they overlap degrades to "both expand"
+        rather than to "the wrong one expands".
+
+        This disjunct lives HERE and nowhere else. :meth:`_offers_reveal` asks
+        the FOOTER whether ``^e`` is on screen before letting the key fire, and
+        ``action_toggle_reveal`` refuses a gesture the card does not advertise;
+        that guard only holds if there is one predicate to guard.
         """
         selected = self.state.selected
         width = self._card_width()
+        default = self._layout(reveal=False)
+        revealed = self._layout(reveal=True)
+        # Would lifting the QUESTION's bound put a new line of it on screen?
+        # Asked of the two plans' drawn question text, for the same reason the
+        # row disjunct is: what matters is the FRAME, not the wrap.
+        if len(revealed.question) > len(default.question):
+            return True
         # More of the selected row's OWN prose than the default clamp shows?
         if len(self._reveal_wrap(selected, width)) <= DEFAULT_DESC_CAP:
             return False
-        default = self._layout(reveal=False)
         if selected not in self._window(default):
             # The cursor's row is not even partially drawn. Nothing on screen
             # would change in a way the user can attribute.
             return False
-        revealed = self._layout(reveal=True)
         # How many of the selected row's lines each plan actually draws in its
         # viewport — the lift is useful iff the revealed frame shows strictly
         # more of THIS row than the default one.
