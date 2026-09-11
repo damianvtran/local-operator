@@ -31,7 +31,7 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
   shapes answer differently and are pinned by tests rather than frames: a
   viewer `/stop` ended answers `this session was stopped; /resume <id> reopens
   it` ahead of the routing seam, and one redialing a dead runtime answers
-  `session owner is reconnecting; try /model again in a moment`.
+  `the runtime is reconnecting; try /model again in a moment`.
 
 The status band is unchanged between each pair on purpose: it repaints from
 the runtime's frontend-state sync, which the fake never delivers. The band's cwd

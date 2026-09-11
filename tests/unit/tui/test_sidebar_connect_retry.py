@@ -81,7 +81,7 @@ class RecoveringRemote(AttachedSession):
     """A viewer that reproduces the ``_recovering`` silent return.
 
     ``_ensure_bound`` returns without raising and without clearing ``is_cold``,
-    which is what the real method does at ``remote.py`` when the facade is
+    which is what the real method does at ``attached.py`` when the facade is
     mid-recovery. ``heals_after`` binds on the Nth call so the retry budget has
     something to succeed against, mirroring the real timeline where the facade
     stops being ``_recovering`` once ``COLD_FALLBACK_S`` elapses.

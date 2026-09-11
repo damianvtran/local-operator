@@ -1728,7 +1728,7 @@ class AttachedSession:
         self._cwd = cwd
         # JOINED by awaiting ``_ensure_bound`` rather than by blocking on the
         # lock directly — the same construction ``run_slash_authoritative``
-        # uses for the same reason (remote.py, "Join its lock before mutating").
+        # uses for the same reason (attached.py, "Join its lock before mutating").
         # Waiting on the raw lock would park this coroutine for as long as the
         # engage takes with no bound on failure, so a spawn that never
         # completes would hang the command instead of refusing it; awaiting the
@@ -4086,7 +4086,7 @@ class AttachedSession:
         """
         if self._deliberate_stop:
             return "this session was stopped"
-        return "session owner is reconnecting"
+        return "the runtime is reconnecting"
 
     def _go_cold(self, *, refresh: bool = False) -> None:
         """Unbind from a runtime that is gone, keeping the conversation.
