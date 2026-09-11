@@ -11,6 +11,73 @@ fresh first so "next" is what the list would show, never a stale snapshot.
 Settings control visibility and left/right placement. Narrow layouts use a drawer
 that ends above the input dock and closes after any valid selection.
 
+## Sections, pins and the subagent layer
+
+The list is drawn in up to four sections, in this order: **★ Pinned**, **Active
+Sessions**, **Previous Sessions**, **⌥ Subagent Runs**. An empty section costs
+no heading. Sectioning is display-only — `rank_entries` still decides the
+ranking, and pins never reorder it — which is what keeps the terminal and the
+mobile relay agreeing on the same active/previous partition.
+
+### Pins
+
+`F10` pins or unpins the session under the pointer; with no pointer on the list
+and the list focused, it acts on the cursor row. Hover wins over the cursor
+because the pointer resting on a row says which session is meant, while the
+cursor persists invisibly when the list is unfocused. A pinned row leaves
+whatever section it ranked into and appears under ★ Pinned with a `★` in place
+of its state mark.
+
+Pins live in `sidebar-pins.json` in the configuration directory
+(`~/.local-operator` unless `LOCAL_OPERATOR_CONFIG_DIR` says otherwise), newest
+pin first, capped at 50. They are durable: a pin survives quitting and
+relaunching. A pin to a session that no longer exists simply disappears — the
+list is pruned against the session store when it is read, so deleting a session
+needs to know nothing about pins.
+
+`F10` is a function key rather than `Ctrl+P` because Textual's `App` binds
+`Ctrl+P` to its command palette at `priority`, so an app-level binding there
+never fires. It also continues the series `F8` (aside) and `F9` (focus
+sessions) for app-level gestures that must survive a focused composer.
+
+### The ⌥ subagent layer
+
+Subagent runs are hidden from the list by default. `Ctrl+A` toggles them on for
+the current session, and `Ctrl+O` jumps the cursor to the first one. Both are
+**sidebar-scoped**: they fire only while the list owns the focus chain (F9
+mode), because both are also composer keys — `Ctrl+A` is the caret's line-start
+and `Ctrl+O` expands a collapsed paste.
+
+`tui.sidebar_show_subagents` sets the startup default. `Ctrl+A` never writes it:
+the flip applies to the session you pressed it in, and a write would fan out
+through the config watcher to every running `lop` process. A `/settings` change
+does apply live to an already-painted sidebar.
+
+The layer is capped at 40 rows and does not page. A sub row is labelled by what
+it was delegated to do (`label · role`, degrading to whichever half exists),
+carries `⌥` where a state glyph would be, and never shows live state or a
+completion mark — the hidden population is not polled for one.
+
+A pinned subagent row stays in ★ Pinned even with the layer off, since pinning
+is an explicit request for that row.
+
+### The footer count
+
+When hidden subagent runs exist, the footer gains a `· ⌥N` chip on its existing
+line — never a second line, which would cost a session row at every terminal
+height. The count is capped at `999+` so the footer's width stays predictable,
+and it is refreshed every 15 polls (about 30 s) plus whenever the sidebar is
+opened, rather than on every poll: reading it is a second full scan of the
+session store.
+
+### One behaviour change to know about
+
+`Ctrl+Shift+↑`/`Ctrl+Shift+↓` traverse the list's own ranking, so **with the ⌥
+layer on, subagent rows join that traversal**. This follows the shortcut's
+existing contract — what the user sees is what they traverse — but it is the
+change most likely to surprise. With the layer off they are not in the list and
+cannot be reached.
+
 ## Ownership and readiness
 
 `SessionInteraction` owns each source's turns, loop, shell, compaction, draft,
