@@ -867,6 +867,93 @@ async def test_a_logout_during_an_in_flight_exchange_is_not_undone(
 
 
 @pytest.mark.asyncio
+async def test_a_marker_write_never_re_creates_a_removed_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A removal that beat the marker write stays a removal (review round 3, M1).
+
+    ``mark_send_unconfirmed`` used ``self._read() or {}``, so a ``/mcp logout``
+    landing between the exchange's locked re-read and the write-ahead arming was
+    silently undone: the upsert re-created the row keyed on ``project_id``
+    (probed before the fix: ``rows == []`` -> one row of
+    ``grant_refresh_unconfirmed`` + ``project_id``, and the next
+    ``send_unconfirmed()`` then cleared the marker and left the empty row
+    behind). The impact is bounded — no grant comes back, so the wording and
+    ``server_has_stored_grant`` are unaffected — but it contradicts the symmetry
+    this delta states ("two writers racing a removal must give the same answer"):
+    ``store_refresh_result`` and ``mark_grant_dead`` both declined on a
+    definitively removed row and this third writer did not.
+
+    The rule is narrow, and the second half pins that: an UNREADABLE store is
+    not evidence of removal, so the marker is still written. Suppressing a
+    healthy refresh over a transient store error would cost the user a browser
+    visit for nothing.
+    """
+    caplog.set_level(logging.INFO, logger="local_operator.mcp.auth")
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+    assert storage.clear() is True
+    assert store.rows == []
+
+    storage.mark_send_unconfirmed("refresh-0")
+
+    assert store.rows == [], "the marker write re-created the row a logout removed"
+    assert storage.send_unconfirmed() is False
+    assert any(
+        "mark_send_unconfirmed" in record.getMessage() for record in caplog.records
+    ), "a refusal to arm the marker must be logged, naming its writer"
+
+    # The sibling mutator answers the same question the same way — including on
+    # the call that carries no rejected token, which was the other shape that
+    # re-created the row.
+    assert storage.mark_grant_dead() is False
+    assert store.rows == []
+    assert storage.grant_is_dead() is False
+
+    class _UnreadableStore(FakeAuthStore):
+        def list_credentials(self, provider: Any = None, include_disabled: bool = False) -> Any:
+            raise RuntimeError("store unavailable")
+
+    unreadable = _UnreadableStore()
+    blind = McpTokenStorage(SERVER_URL, unreadable)
+    blind.mark_send_unconfirmed("refresh-0")
+    assert unreadable.rows != [], "an unreadable store must not read as a removal"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_row_is_unsent_so_no_server_is_blamed() -> None:
+    """Nothing to present means no request at all (review round 3, M2).
+
+    This shape returned ``"failed"``, which the manager composes as the ENDPOINT
+    text — "the server returned no token" — a claim that is untrue about the
+    WIRE (no request was made) and about the SERVER (it was never asked). Probed
+    before the fix: ``client_info`` present, no stored tokens -> outcome
+    ``"failed"`` -> the endpoint wording on the card.
+    """
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    from local_operator.mcp.auth import REFRESH_REFUSAL_UNSENT, McpRefreshContendedError
+    from local_operator.mcp.manager import McpManager
+
+    store = FakeAuthStore()
+    storage = McpTokenStorage(SERVER_URL, store)
+    await storage.set_client_info(OAuthClientInformationFull(client_id=CLIENT_ID))
+
+    # The endpoint points at a closed port: had this shape made a request, the
+    # exchange would have failed rather than reported an outcome.
+    outcome = await auth_mod._refresh_oauth_token_locked(
+        SERVER_URL, storage, _endpoints_for("http://127.0.0.1:1/token")
+    )
+
+    assert outcome == "unsent"
+    text = McpManager._auth_failure_text(
+        "notion", McpRefreshContendedError(SERVER_URL, reason_code=REFRESH_REFUSAL_UNSENT)
+    )
+    assert text == "no stored token to send"
+    assert "server" not in text
+
+
+@pytest.mark.asyncio
 async def test_a_first_grant_still_creates_its_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
