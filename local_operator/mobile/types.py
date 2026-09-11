@@ -216,6 +216,13 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("key must be a string")
         if not isinstance(frame.get("value", ""), str):
             raise ValueError("value must be a string")
+    elif op == "register_secret_redaction":
+        # The other op that carries a secret's value, and it carries ONLY that:
+        # the value has one named home and one consumer (the owner's redactor).
+        # Typed so a non-string is refused rather than coerced to its repr and
+        # registered as a redaction that would never match the real secret.
+        if not isinstance(frame.get("value"), str):
+            raise ValueError("value must be a string")
     elif op == "adopt_aside":
         messages = frame.get("messages")
         if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):

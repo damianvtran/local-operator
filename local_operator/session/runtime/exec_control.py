@@ -134,6 +134,16 @@ class ExecControl:
             await self.runtime.aclose()
         except Exception:  # noqa: BLE001 — teardown must not fail the run
             logger.warning("exec control: runtime shutdown failed", exc_info=True)
+        # Deregister the handle's secret session as part of the same teardown.
+        # ``ServingSessionHandle.dispose`` would do it, but this path never
+        # disposes the handle — the run's owner disposes the session and the
+        # process exits — so without this the socket-close backstop would be the
+        # only revocation, and a supervisor that reuses the process would leave
+        # descendants of a finished agent authorized (§2.1).
+        try:
+            self.handle.close_secret_registration()
+        except Exception:  # noqa: BLE001 — teardown must not fail the run
+            logger.debug("exec control: secret deregistration failed", exc_info=True)
 
 
 async def start_exec_control(
@@ -175,6 +185,7 @@ async def start_exec_control(
     )
 
     loop = asyncio.get_running_loop()
+    config_directory = config_dir()
     handle = ServingSessionHandle(
         session,
         loop,
@@ -182,9 +193,12 @@ async def start_exec_control(
         auto_approve=yolo,
         approval_pinned=yolo,
         install_gates=supervised,
+        # Declared so the §6 registration's store-existence check and the
+        # registration itself share this run's root (MINOR-3).
+        config_dir=config_directory,
     )
     if supervised:
-        attach_gate_config_watch(handle, config_dir())
+        attach_gate_config_watch(handle, config_directory)
     # The ``stop`` control op (and therefore `lop stop`, which can now see this
     # run because it publishes a record) reaches ``request_stop`` -> this hook.
     # Without one the handle falls back to disposing in place, UNDER the prompt

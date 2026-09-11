@@ -41,6 +41,7 @@ from local_operator.harness.types import AgentEvent, ModelChangeEvent
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
+    from local_operator.secrets.session import SessionRegistration
 
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -237,6 +238,7 @@ class ServingSessionHandle(SessionHandle):
         auto_approve: bool = False,
         approval_pinned: bool = False,
         install_gates: bool = True,
+        config_dir: Path | None = None,
     ) -> None:
         self._session = session
         self._goal_loop: Any = None
@@ -333,6 +335,24 @@ class ServingSessionHandle(SessionHandle):
             effort_ladder=_ladder(session),
         )
         self._fold = ProjectionFold(self._projection)
+        #: The broker registration that authorizes THIS process's descendants to
+        #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
+        #: promptly rather than waiting for the process's socket to close: a
+        #: runtime can outlive the session it served — a stopped ``exec`` run
+        #: returning to its supervisor — and a session that is gone must stop
+        #: authorizing its descendants (§2.1).
+        self._secret_registration: SessionRegistration | None = None
+        #: The config root this handle's session was built from, when the spawn
+        #: site knows it (``spawn_owned_session``/``start_exec_control`` both
+        #: do). Passed rather than re-read from ``config_dir()`` at registration
+        #: time so the store-existence check and the registration share ONE
+        #: base (MINOR-3): a handle whose session is rooted elsewhere can no
+        #: longer check one store and register against another. ``None`` means
+        #: the spawn site did not declare one; registration then falls back to
+        #: this process's own ``config_dir()``, which is the same root the
+        #: session was built from because the runtime is spawned with it in the
+        #: environment.
+        self._config_dir = config_dir
         # Conversation naming is a TUI-only errand today (OperatorApp owns the
         # naming worker), so a phone-started session used to stay "mobile
         # session" forever — the session list and the header both read the
@@ -405,6 +425,15 @@ class ServingSessionHandle(SessionHandle):
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        # Last, so a handle that could not be fully built never leaves a live
+        # registration behind (see :meth:`_register_secret_session`). The call
+        # is synchronous and can stall the loop for up to ``STARTUP_TIMEOUT_S``
+        # (5 s) while a cold broker starts — bounded, one-time, and paid only
+        # when a store exists at this handle's root and no daemon is listening
+        # (MINOR-1). It mirrors the TUI's own boot cost deliberately, because
+        # the alternative (registering off-loop) would let the handle serve
+        # turns before it can authorize the descendants those turns spawn.
+        self._register_secret_session()
 
     # -- gates -----------------------------------------------------------------
 
@@ -697,6 +726,84 @@ class ServingSessionHandle(SessionHandle):
         self._mcp_reload_tasks.add(task)
         task.add_done_callback(self._mcp_reload_tasks.discard)
 
+    def _register_secret_session(self) -> None:
+        """Register THIS process as the session the broker notifies (§6).
+
+        **The notice has to reach the process that owns the output filter and
+        the transcript**, and in the attached architecture that is this
+        runtime: ``Session.variables`` here is the store the bash and eval
+        redactors read, while the TUI holds only an ``AttachedSession`` facade
+        with no store at all. Registering from the viewer instead made the
+        notice unanswerable by construction, so the broker (correctly) denied
+        every descendant retrieval in every attached session.
+
+        Best-effort by contract, exactly like the TUI's own registration: the
+        store is an optional capability and never a boot dependency (§13), so a
+        session starts and runs normally with no broker to reach.
+
+        Runs on the runtime's loop, so the one blocking step — starting a
+        broker that is not up yet — is a bounded, one-time stall
+        (``STARTUP_TIMEOUT_S``, 5 s) before the runtime serves anyone. That is
+        the cost the TUI already pays at its own boot, and it is paid only when
+        a store exists at this handle's root AND no daemon is already
+        listening; a warm daemon makes the poll return on its first check.
+
+        The base is the handle's own ``self._config_dir``, not a re-read of
+        ``config_dir()``: the spawn sites declare the root they built the
+        session from, so the store-existence check inside
+        ``register_variable_store_session`` and the registration itself cannot
+        disagree about WHICH store this session owns (MINOR-3, NIT-2).
+        """
+        from local_operator.secrets.session import register_variable_store_session
+
+        try:
+            self._secret_registration = register_variable_store_session(
+                self._session,
+                session_id=getattr(self._session, "session_id", None),
+                base=self._config_dir,
+            )
+        except Exception:  # noqa: BLE001 — the store is optional; boot must not fail on it
+            logger.debug("secret session registration failed", exc_info=True)
+            self._secret_registration = None
+
+    def register_secret_redaction(self, value: str) -> None:
+        """Add ONE value the §6 notice asked this process to scrub.
+
+        The owner side of ``AttachedSession.register_secret_redaction``: the
+        viewer forwards a value here when ITS registration, not this runtime's,
+        is the one that answered the broker's notice — which happens when this
+        runtime registered nothing because no store existed at its base at boot
+        (see :meth:`_register_secret_session`). The value has to reach the store
+        the bash and eval redactors read, which is ``self._session.variables``,
+        so that is the only thing this method touches.
+
+        It writes the value into the redaction set and nothing else: never a
+        credential, never an announcement, never a log line, never an audit row
+        or an event. It RAISES when there is no store, so the viewer's sink
+        declines to acknowledge and the broker denies the child rather than
+        serving a value nothing can scrub — the fail-closed direction §6 requires.
+        """
+        variables = getattr(self._session, "variables", None)
+        if variables is None:
+            raise RuntimeError("this runtime has no variable store to redact through")
+        variables.register_redaction(value)
+
+    def close_secret_registration(self) -> None:
+        """Deregister this process, so its descendants stop being authorized.
+
+        Idempotent and non-raising. The socket closing on process exit is the
+        backstop; this is the plan (§2.1), and it is what covers a runtime that
+        outlives the session it served — an ``exec`` run whose control surface
+        closes while the process lives on to be reused.
+        """
+        registration = self._secret_registration
+        self._secret_registration = None
+        if registration is not None:
+            try:
+                registration.close()
+            except Exception:  # noqa: BLE001 — teardown must not fail on a deregistration
+                logger.debug("secret session deregistration failed", exc_info=True)
+
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -704,6 +811,10 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # Revoke the broker registration along with the session: descendants of
+        # a session that is going away must not stay authorized behind it
+        # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
+        self.close_secret_registration()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         if self._unsubscribe_config_watch is not None:
@@ -4135,7 +4246,15 @@ async def spawn_owned_session(
     # the running one; the guard mirrors that seam's "boot must not depend on
     # the watcher" degrade.
     handle = ServingSessionHandle(
-        session, loop, cwd=cwd, auto_approve=auto_approve, approval_pinned=False
+        session,
+        loop,
+        cwd=cwd,
+        auto_approve=auto_approve,
+        approval_pinned=False,
+        # Declared so the §6 registration's store-existence check and the
+        # registration itself share the config root this session was built
+        # from (MINOR-3).
+        config_dir=config_directory,
     )
     attach_gate_config_watch(handle, config_directory)
     return handle
