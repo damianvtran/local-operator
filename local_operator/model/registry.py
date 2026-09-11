@@ -800,9 +800,9 @@ aggregator_router_model_info: ModelInfo = ModelInfo(
     # caches (DeepSeek and Gemini both cache implicitly, and the aggregator
     # keeps the conversation on one host once it has affinity), and a router
     # that resolves to a non-caching model tomorrow pays almost nothing for this
-    # flag being True: `prompt_cache_key` is a routing hint the provider ignores
-    # if it does not cache, and `cache_control` is stripped by the aggregator for
-    # providers that do not honour it (see ``clients._message_cache_markers``).
+    # in `prompt_cache_key` is a routing hint the provider ignores if it does not
+    # cache, and a `cache_control` marker is inert on a provider that does not honour
+    # it (see ``clients._message_cache_markers``).
     #
     # A wrong False is not symmetric — it is what made this a defect. Both
     # emissions are gated on this flag, so False sent NO routing key and NO cache
@@ -813,11 +813,15 @@ aggregator_router_model_info: ModelInfo = ModelInfo(
     # the fallback (hashing the opening messages) only starts pinning after a hit
     # it may never get.
     #
-    # The listing cannot supply the answer for us either: the synthetic "auto"
-    # entry quotes the aggregator's meta-route price sentinel rather than a
-    # cache-read price, so discovery derives False from it, and
-    # ``discovery._merge_one`` ORs the two — this flag is the only input that can
-    # turn it on.
+    # The catalogue cannot supply the answer, and for this provider it does not even
+    # get a chance to try: `discovery._merge_one` ORs a listing row against a static
+    # registry row, and `discovery._static_rows("radient")` is empty, so the merge for
+    # this provider runs with no registry input at all and its rows stay False
+    # whatever this flag says. What reads this flag is
+    # ``configure.resolve_model_info`` (static registry first) and then
+    # ``build_model_spec``, which is the one path the request builder calls — so this
+    # row is the only input that can turn caching on for the router route, and a
+    # ``False`` here is what withheld the key and the marker.
     supports_prompt_cache=True,
     input_price=0.0,
     output_price=0.0,

@@ -35,7 +35,7 @@ from local_operator.model.discovery import (
     fetch_models,
     merge_models,
 )
-from local_operator.model.registry import ModelInfo, get_model_info, static_models
+from local_operator.model.registry import ModelInfo, static_models
 from local_operator.providers.registry import PROVIDER_REGISTRY
 
 
@@ -2389,22 +2389,29 @@ def test_cached_available_models_falls_back_to_static_on_cache_miss(tmp_path) ->
     assert agg_models == []
 
 
-def test_a_router_row_keeps_cache_support_though_the_listing_cannot_state_it() -> None:
-    """The router is the one row a listing cannot answer for, so it must not be
-    allowed to answer "no".
+def test_a_router_listing_row_is_not_where_cache_support_comes_from() -> None:
+    """The router's cache support cannot arrive through the listing merge, and does not.
 
-    The synthetic `auto` entry in an aggregator listing quotes a meta-route price
-    sentinel rather than a cache-read price, and discovery derives cache support
-    from a positive cache-read price, so the live row always arrives as False. The
-    merge ORs it against the registry, which makes the registry the only input that
-    can turn this on — and losing it silently costs a router conversation its
-    prompt cache on every turn after the first.
+    Review finding R1-1. The first version of this test asserted the merge restores
+    the flag, which is a contract the shipped merge does not provide for this row:
+    `_merge_one` ORs a listing row against a static registry row, and
+    `discovery._static_rows("radient")` is empty — this provider bundles no rows —
+    so the merge runs with `info=None` and `bool(row or None)` stays False.
+
+    That is inert rather than broken, and the boundary is worth pinning in BOTH
+    directions: the flag the request builder reads comes from the registry row via
+    `configure.resolve_model_info` / `build_model_spec` (covered by
+    `test_registry.py::test_aggregator_router_rows_advertise_prompt_caching`), and
+    nothing reads this field on this row. If a future change starts reading it, the
+    router route silently loses its cache key again — the defect the registry change
+    fixed — so it should fail here first.
     """
-    router = {"auto": get_model_info("radient", "auto")}
+    assert discovery._static_rows("radient") == {}, (
+        "this test's premise is that this provider contributes no static rows to the "
+        "merge; if that changed, re-derive the test rather than editing the assertion"
+    )
+
     live = [DiscoveredModel(id="auto", supports_prompt_cache=False, cache_read_price=0.0)]
+    merged = merge_models(discovery._static_rows("radient"), live)
 
-    merged = merge_models(router, live)
-
-    assert (
-        merged[0].supports_prompt_cache is True
-    ), "a listing row that cannot express cache support must not downgrade the router"
+    assert merged[0].supports_prompt_cache is False
