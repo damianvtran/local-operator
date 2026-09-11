@@ -9,9 +9,9 @@ import pytest
 
 from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.reexec import REEXEC_CODE, take_plan
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import (
     ScriptedStream,
@@ -34,10 +34,10 @@ async def test_committed_gate_drains_before_viewer_disposal(
     directory = config / "sessions" / "replyowner01"
     await seed_transcript(directory, [user_message("Preserve my answer")])
     owner = build_session(directory, ScriptedStream([]), cwd=workspace)
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    viewer = await RemoteSession.connect(
+    viewer = await AttachedSession.connect(
         server._record, owner.session_id, config_dir=config, takeover_factory=_never_take_over
     )
     client = viewer._client
@@ -125,7 +125,7 @@ async def test_committed_gate_drains_before_viewer_disposal(
                 # Draining Q1 must not auto-answer/cancel Q2 while the old DOM
                 # disappears. A fresh viewer receives the still-pending question.
                 assert not answer_task.done()
-                successor = await RemoteSession.connect(
+                successor = await AttachedSession.connect(
                     server._record,
                     owner.session_id,
                     config_dir=config,

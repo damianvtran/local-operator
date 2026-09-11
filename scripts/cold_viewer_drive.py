@@ -1,15 +1,15 @@
 """The operator's exact command on a GENUINELY cold viewer, pasted at t=0.
 
 The attached-viewer driver beside this (``attached_viewer_drive.py``) attaches
-to a running runtime with ``RemoteSession.connect`` — the live-local case. Review round 1 (R5, Q5)
+to a running runtime with ``AttachedSession.connect`` — the live-local case. Review round 1 (R5, Q5)
 pointed out that the PR's claim was about the COLD case: a fresh ``lop`` is a
-``RemoteSession.cold(<minted id>)`` bound to nothing, and the four commands
+``AttachedSession.cold(<minted id>)`` bound to nothing, and the four commands
 this PR fixes were still lost there whenever Enter beat the 1–3 s warm engage.
 
 This drives that case with nothing stubbed:
 
 - the viewer is built byte-for-byte as ``cli.py`` builds it (id minted first,
-  then ``RemoteSession.cold``), in an isolated ``HOME`` + config dir;
+  then ``AttachedSession.cold``), in an isolated ``HOME`` + config dir;
 - the runtime is a REAL spawned ``python -m local_operator.session.runtime.process``
   child, talking to the ``test`` mock provider (the same one
   ``tests/e2e/test_cold_wake_e2e.py`` boots against);
@@ -51,7 +51,7 @@ os.environ["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
 
 from textual import events  # noqa: E402
 
-from local_operator.session.remote import RemoteSession  # noqa: E402
+from local_operator.session.attached import AttachedSession  # noqa: E402
 from local_operator.session.runtime import registry  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
@@ -99,7 +99,7 @@ def _viewer_factory(config_dir: Path):
 
     async def factory():
         session_id = uuid.uuid4().hex[:12]
-        return await RemoteSession.cold(
+        return await AttachedSession.cold(
             session_id, config_dir=config_dir, cwd=str(ISO), takeover_factory=_never_take_over
         )
 
@@ -154,9 +154,9 @@ async def main() -> None:
     async with app.run_test(size=(110, 30)) as pilot:
         await _until(pilot, lambda: app._session is not None)
         session = app._session
-        assert isinstance(session, RemoteSession)
+        assert isinstance(session, AttachedSession)
         sid = session.session_id
-        print(f"viewer: RemoteSession.cold  id={sid!r}  is_cold={session.is_cold}")
+        print(f"viewer: AttachedSession.cold  id={sid!r}  is_cold={session.is_cold}")
         print(f"        capabilities advertised: {len(session.frontend_state.slash_capabilities)}")
         print(f"        runtime records: {len(list(registry.scan(CONFIG)))}")
         print(f"        _session_runs_elsewhere(): {app._session_runs_elsewhere()}")
@@ -190,7 +190,7 @@ async def main() -> None:
     async with app.run_test(size=(110, 30)) as pilot:
         await _until(pilot, lambda: app._session is not None)
         session = app._session
-        assert isinstance(session, RemoteSession)
+        assert isinstance(session, AttachedSession)
         cold_at_submit = session.is_cold
         await _paste_enter(app, pilot, "/credential DEMO_TOKEN")
         prompt_before_bind = app._key_prompt is not None
@@ -218,7 +218,7 @@ async def main() -> None:
     async with app.run_test(size=(110, 30)) as pilot:
         await _until(pilot, lambda: app._session is not None)
         session = app._session
-        assert isinstance(session, RemoteSession)
+        assert isinstance(session, AttachedSession)
         cold_at_submit = session.is_cold
         manager.set_config_value("model_name", "mock")
         await _paste_enter(app, pilot, "/model default test/mock-model")
@@ -241,7 +241,7 @@ async def main() -> None:
     async with app.run_test(size=(110, 30)) as pilot:
         await _until(pilot, lambda: app._session is not None)
         session = app._session
-        assert isinstance(session, RemoteSession)
+        assert isinstance(session, AttachedSession)
         cold_at_submit = session.is_cold
         await _paste_enter(app, pilot, "/agent reviewer look at this")
         routed = await _until(pilot, lambda: "reviewer" in _transcript(app), timeout=60)

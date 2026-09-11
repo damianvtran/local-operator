@@ -103,7 +103,7 @@ class TuiSessionHandle(SessionHandle):
         session = app._session
         if session is None:
             raise RuntimeError("TUI session has not finished starting")
-        # Same wiring ``OwnedSessionHandle.__init__`` performs: the session
+        # Same wiring ``ServingSessionHandle.__init__`` performs: the session
         # flips the discovery record's ``started`` bit at the top of every
         # real turn (``Session._run_turn_pipeline``), and the handle owns the
         # publish. Without it a TUI-owned ``kind="tui"`` record would stay
@@ -145,7 +145,7 @@ class TuiSessionHandle(SessionHandle):
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         # request_id -> the live AskPickerScreen for every ask picker this
         # handle has projected to the phone. Keyed by a token_hex request id
-        # (owned.py's scheme) because the phone answers by request id and never
+        # (serving.py's scheme) because the phone answers by request id and never
         # sees the widget. The current question (and thus the answer key) is
         # read LIVE off ``card.question`` on each answer, because a
         # multi-question picker advances between phone answers (U1) — a stashed
@@ -174,7 +174,7 @@ class TuiSessionHandle(SessionHandle):
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories for the record.
 
-        The ``kind="tui"`` twin of ``OwnedSessionHandle.subagent_counts``, so a
+        The ``kind="tui"`` twin of ``ServingSessionHandle.subagent_counts``, so a
         full TUI runtime contributes to ``/info``'s fleet tally instead of being
         counted as a session that does not report. Implemented rather than left
         out because this handle already reaches the roster (see
@@ -266,7 +266,7 @@ class TuiSessionHandle(SessionHandle):
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once this session runs a real turn.
 
-        The ``kind="tui"`` twin of ``OwnedSessionHandle``'s hook, called from
+        The ``kind="tui"`` twin of ``ServingSessionHandle``'s hook, called from
         ``Session._run_turn_pipeline`` at the top of every turn; the
         registrant's ``set_record_started`` de-duplicates so only the first
         turn publishes. Defensive in the same shape as the owned hook: a
@@ -636,7 +636,7 @@ class TuiSessionHandle(SessionHandle):
         machine from a relayed remote device.
 
         ``consumers`` is forwarded for the same reason and to the same end as
-        on ``OwnedSessionHandle``: a session can be hosted either by a detached
+        on ``ServingSessionHandle``: a session can be hosted either by a detached
         runtime or by this app, and a follower must get the same answer from
         both. A viewer that does not consume action-carrying receipts has its
         request completed HERE when this TUI is the host, exactly as the
@@ -799,7 +799,7 @@ class TuiSessionHandle(SessionHandle):
             # answer_current takes the chosen text for the CURRENT question:
             # for options that is the tapped label, for free-text/secret the
             # typed value. An empty value means "nothing chosen" (settles with
-            # None on Q0, keeps partials past it) — parity with owned.py.
+            # None on Q0, keeps partials past it) — parity with serving.py.
             settled = card.answer_current([value] if value else [])
             if settled:
                 return "answered"
@@ -870,7 +870,7 @@ class TuiSessionHandle(SessionHandle):
         synchronous and only ``_notify`` crosses threads (the registrant
         coalesces the push onto its own loop).
 
-        A ``token_hex`` request id (owned.py's scheme); the card's CURRENT
+        A ``token_hex`` request id (serving.py's scheme); the card's CURRENT
         question is what gets projected — with its options + descriptions (U3),
         the ``secret`` flag (D1/U2, never the value), and the question position
         for the "N of M" header (U1). A multi-question ask re-projects its next
@@ -883,7 +883,7 @@ class TuiSessionHandle(SessionHandle):
             return
         request_id = secrets.token_hex(8)
         self._ask_pending[request_id] = card
-        # Parity with owned.py's gate: log when more than one question rides a
+        # Parity with serving.py's gate: log when more than one question rides a
         # single card, so the operator can see a multi-part ask went to the
         # phone (UX minor-1).
         total = self._question_total(card)

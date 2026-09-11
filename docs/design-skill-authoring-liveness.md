@@ -65,7 +65,7 @@ not from the session's `cwd`. `effective_cwd` is already in scope at the call
 site (`session_factory.py:1950`, call at `:1952`) and is passed to everything
 else — `_seed_mcp_routing`, `_build_variable_store`, `load_repo_guidance`. A
 session created with an explicit `cwd` (`bootstrap.py:264`,
-`scheduler_service.py:777`, `session/runtime/owned.py:3832`) therefore discovers
+`scheduler_service.py:777`, `session/runtime/serving.py:3832`) therefore discovers
 project-local skills for the **process** directory rather than its own. It is a
 one-line fix and it belongs in this PR, because the refresh path has to decide
 which roots it walks and shipping a refresh that is correct while startup stays

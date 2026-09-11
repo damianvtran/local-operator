@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from textual import events
 
+from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FrontendModelSpec
-from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.tui.app import OperatorApp
@@ -110,7 +110,7 @@ async def _held_startup(tmp_path, monkeypatch, phase="sync"):
             while not any(status == "live" for _, status in registry.scan(config)):
                 await asyncio.sleep(0.01)
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "startup-test", config_dir=config, cwd=str(tmp_path), takeover_factory=_never
     )
     original = viewer._await_frontend

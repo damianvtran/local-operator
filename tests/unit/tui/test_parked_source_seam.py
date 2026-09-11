@@ -25,7 +25,7 @@ side has its own failure:
   while hidden (review R1).
 
 The assertions are on DELIVERED DELTAS -- real events pushed through a real
-``RemoteSession`` subscription into the real controller -- not on the ``parked``
+``AttachedSession`` subscription into the real controller -- not on the ``parked``
 flag alone. A flag is the API; the delta count is the mechanism, and review
 round 1 found the guard density on the mechanism thinner than the test count
 suggested (QA Q1). Each assertion below fails if the corresponding
@@ -50,9 +50,9 @@ from local_operator.harness.types import (
     TextContent,
     ToolExecutionUpdateEvent,
 )
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import AssistantDelta
@@ -75,7 +75,7 @@ def _rows(count: int = 3) -> list[Message]:
 
 @asynccontextmanager
 async def _remote(tmp_path: Path, name: str):
-    """A real owner runtime plus a real ``RemoteSession`` viewer over it.
+    """A real owner runtime plus a real ``AttachedSession`` viewer over it.
 
     Mirrors ``test_rendered_history_paging.remote_session``; kept local so this
     module does not import a neighbour's private fixture, and because the
@@ -89,10 +89,10 @@ async def _remote(tmp_path: Path, name: str):
     directory = config / "sessions" / f"synthetic-{name}"
     await seed_transcript(directory, _rows())
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,
@@ -673,7 +673,7 @@ async def test_switching_away_stamps_the_deadline_the_idle_sweep_reaps_on(tmp_pa
             def capture_release(coro: Any, **kwargs: Any) -> Any:
                 # Close the coroutine rather than running it: the assertion is
                 # that the sweep HANDED the source to a release worker, and
-                # actually retiring it would tear down the live RemoteSession
+                # actually retiring it would tear down the live AttachedSession
                 # this test still owns. Mirrors `test_sidebar_idle_reap.py`.
                 released.append(coro)
                 coro.close()

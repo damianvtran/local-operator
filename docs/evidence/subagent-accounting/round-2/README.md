@@ -8,7 +8,7 @@ Only persisted receipts/estimates are priced here; no discovery. Malformed or
 legacy accounting leaves the checkpoint fallback; a valid empty ledger replaces
 it. Retained rows are not summed, so swept-only money survives.
 
-Independent QA ran real billed background children and ownerless RemoteSession,
+Independent QA ran real billed background children and ownerless AttachedSession,
 then reattached the same facade to a real runtime. Actual before/after:
 
 | State | Before cold total | After cold / rendered / bound total |
@@ -19,7 +19,7 @@ then reattached the same facade to a real runtime. Actual before/after:
 
 The automated regression matrix covers checkpoint present/absent, swept/visible
 rows, valid/empty/malformed/legacy ledger (16 combinations), through actual
-`RemoteSession.cold`. Cold/remote plus model regression suite: 45 passed.
+`AttachedSession.cold`. Cold/remote plus model regression suite: 45 passed.
 
 ## Explicit Fable and Astra regression
 

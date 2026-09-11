@@ -2565,7 +2565,7 @@ def attach_config_watch(session: Session, config_dir: Path) -> None:
 
     Every front end (TUI, headless, exec worker, owned phone session) reaches
     this through ``create_session``, so they all follow config for free.
-    ``RemoteSession`` followers never get here: the owner applies the change
+    ``AttachedSession`` followers never get here: the owner applies the change
     and the follower renders what the owner projects.
 
     Degrades to "this session does not follow config" on any failure rather
@@ -2644,7 +2644,7 @@ async def create_session(
     effective_cwd = cwd if cwd is not None else os.getcwd()
 
     # A full-screen TUI resuming a session already owned elsewhere consumes
-    # that owner's v4 event relay through RemoteSession. This lives at the
+    # that owner's v4 event relay through AttachedSession. This lives at the
     # shared session-factory seam (not in cli.py) so cold ``--resume`` and any
     # future TUI launcher cannot accidentally construct a second writer or
     # invent another attach UI. Headless/exec callers still take the lease and
@@ -2652,7 +2652,7 @@ async def create_session(
     resume_id = getattr(args, "resume", None)
     if has_ui and resume_id is not None and not _force_local_takeover:
         from local_operator.mobile.attach_client import find_runtime_record
-        from local_operator.session.remote import RemoteSession
+        from local_operator.session.attached import AttachedSession
 
         root = Path(agent_registry.config_dir)
         record, owner = await asyncio.to_thread(find_runtime_record, root, str(resume_id))
@@ -2667,7 +2667,7 @@ async def create_session(
                 # Owner death is the one time this process may try the writer
                 # path. The lease is still the arbiter: racing followers call
                 # this concurrently, one wins, losers get SessionLeaseHeldError
-                # and RemoteSession rediscovers the winner.
+                # and AttachedSession rediscovers the winner.
                 return await create_session(
                     args,
                     config_manager,
@@ -2678,7 +2678,7 @@ async def create_session(
                     _force_local_takeover=True,
                 )
 
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 record,
                 str(resume_id),
                 config_dir=root,

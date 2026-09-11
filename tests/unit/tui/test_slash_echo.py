@@ -2091,7 +2091,7 @@ async def test_team_launch_refuses_instead_of_sending_without_the_briefs(tmp_pat
     and no briefs. A confidently wrong persona is worse than a refusal, because
     nothing on screen distinguishes the two.
 
-    Reachable on the viewer (`RemoteSession`), which lists teams from local
+    Reachable on the viewer (`AttachedSession`), which lists teams from local
     config but has no seam to stamp an attachment onto the runtime that builds
     the turn.
     """

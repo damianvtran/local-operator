@@ -402,7 +402,7 @@ def threading_get_ident() -> int:
     return threading.get_ident()
 
 
-# --- A3: RemoteSession history replay leaves the loop free --------------------
+# --- A3: AttachedSession history replay leaves the loop free --------------------
 
 
 @pytest.mark.asyncio
@@ -427,7 +427,7 @@ async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> 
 
     await build()
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.server import RuntimeServer
     from tests.unit.session.runtime.test_server import FakeHandle
     from tests.unit.session.test_remote import _wait_record
@@ -441,7 +441,7 @@ async def test_remote_connect_replay_does_not_stall_the_loop(tmp_path: Path) -> 
         record = await _wait_record(tmp_path)
         recorder = StallRecorder()
         await recorder.start()
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -497,7 +497,7 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
     await build()
     assert (tmp_path / "sessions" / "s1" / "transcript.jsonl").stat().st_size > 60 * 1024 * 1024
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.server import RuntimeServer
     from tests.unit.session.runtime.test_server import FakeHandle
     from tests.unit.session.test_remote import _wait_record
@@ -509,7 +509,7 @@ async def test_reconnect_gap_replay_does_not_stall_the_loop(tmp_path: Path) -> N
     remote = None
     try:
         record = await _wait_record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
         )
         events: list[Any] = []
@@ -1346,7 +1346,7 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
         MessageStartEvent,
         TextContent,
     )
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.transcript import Transcript
     from tests.unit.session.runtime.test_server import FakeHandle
@@ -1377,7 +1377,7 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
         # already in history.
         replay_started = _asyncio.Event()
 
-        real_load = RemoteSession._load_history
+        real_load = AttachedSession._load_history
 
         async def instrumented_load(self_inner, *args, **kwargs) -> None:
             replay_started.set()
@@ -1385,9 +1385,9 @@ async def test_relay_frame_during_threaded_replay_is_not_double_painted(tmp_path
 
         from unittest.mock import patch as _patch
 
-        with _patch.object(RemoteSession, "_load_history", instrumented_load):
+        with _patch.object(AttachedSession, "_load_history", instrumented_load):
             connect_task = _asyncio.create_task(
-                RemoteSession.connect(
+                AttachedSession.connect(
                     record,
                     "s1",
                     config_dir=tmp_path,

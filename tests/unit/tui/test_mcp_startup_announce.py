@@ -4,7 +4,7 @@ Reported: "MCP ready: 12 servers, 425 tools" fired on EVERY session attach,
 including every click in the session sidebar. ``session.mcp_startup`` is a
 frozen BOOT SNAPSHOT and ``_report_mcp_startup`` runs on every adoption, so a
 sidebar switch re-announced a round that happened minutes ago — and, through
-``RemoteSession``'s rehydration of the owner's outcome, sometimes a round this
+``AttachedSession``'s rehydration of the owner's outcome, sometimes a round this
 process never ran at all.
 
 These tests pin the rule the fix implements: each SESSION remembers the last

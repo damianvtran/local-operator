@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import (
     ScriptedStream,
@@ -35,7 +35,7 @@ async def test_cold_snapshot_live_preferences_overrides_and_cancel(
     await seed_transcript(directory, [user_message("cold saved conversation")])
     stream = ScriptedStream([])
     owner = build_session(directory, stream, cwd=workspace)
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     engaged = []
@@ -63,7 +63,7 @@ async def test_cold_snapshot_live_preferences_overrides_and_cancel(
             return True
 
     monkeypatch.setattr(registry, "active_backend", lambda **kwargs: GuardBackend())
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         owner.session_id, config_dir=config, cwd=str(workspace), takeover_factory=_never_take_over
     )
 
@@ -142,7 +142,7 @@ async def test_cold_snapshot_live_preferences_overrides_and_cancel(
 
                 async def return_to_original(sid):
                     assert sid == owner.session_id
-                    return await RemoteSession.connect(
+                    return await AttachedSession.connect(
                         server._record, sid, config_dir=config, takeover_factory=_never_take_over
                     )
 

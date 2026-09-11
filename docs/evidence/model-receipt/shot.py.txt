@@ -1,6 +1,6 @@
 """Frame the `/model` receipt on a session whose label updates ASYNCHRONOUSLY.
 
-Mirrors `RemoteSession.set_model` (an `asyncio.create_task` against the owner;
+Mirrors `AttachedSession.set_model` (an `asyncio.create_task` against the owner;
 `model_label` reads the frontend-state sync that lands later). The fake is the
 SAME class the regression tests assert against, imported from the test module,
 so the frames and the assertions describe one behaviour. Usage, from anywhere:

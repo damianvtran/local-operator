@@ -77,9 +77,9 @@ async def test_old_failure_is_not_inserted_at_a_new_retry_tail(
 ) -> None:
     from local_operator.harness.types import StreamEndEvent
     from local_operator.paths import config_dir
-    from local_operator.session.remote import RemoteSession
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.tui.widgets.transcript import NoticeBlock, UserBlock
     from tests.unit.session.test_session import make_session
 
@@ -104,7 +104,7 @@ async def test_old_failure_is_not_inserted_at_a_new_retry_tail(
     if already_read:
         await session.acknowledge_attention(old["completion_token"])
     runtime = RuntimeServer(
-        OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path)), kind="daemon"
+        ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path)), kind="daemon"
     )
     await runtime.start_in_process()
     retry = asyncio.create_task(session.prompt("New retry is running"))
@@ -116,7 +116,7 @@ async def test_old_failure_is_not_inserted_at_a_new_retry_tail(
 
     try:
         if follow:
-            source = await RemoteSession.connect(
+            source = await AttachedSession.connect(
                 runtime._record, session.session_id, config_dir=config_dir(), takeover_factory=never
             )
 

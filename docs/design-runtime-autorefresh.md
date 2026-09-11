@@ -40,7 +40,7 @@ the operator is refusing.
 
 ### 1.2 The record's `busy` bit sticks at True after any wake/peer turn — PROVEN
 
-Hypothesis in the task: only `_observe_prompt_drain` (`owned.py:1058-1074`)
+Hypothesis in the task: only `_observe_prompt_drain` (`serving.py:1058-1074`)
 publishes `busy` *after* the final `AgentEndEvent`, because that event is
 emitted while `Session._is_streaming` is still True (cleared in the `finally`
 at `session.py:6047`, after `_flush_held_end` at `:5766`). Every turn that
@@ -48,7 +48,7 @@ does not run through the prompt queue therefore ends with the record saying
 `busy: true`.
 
 Verified on this worktree with a throwaway e2e probe (real `Session` from
-`tests/e2e/harness.build_session`, production `OwnedSessionHandle` +
+`tests/e2e/harness.build_session`, production `ServingSessionHandle` +
 `RuntimeServer`, `handle.subscribe(server._schedule_push)` as `_serve` does):
 
 | path | `handle.is_busy()` after turn | `server._busy` (record) |
@@ -60,7 +60,7 @@ Verified on this worktree with a throwaway e2e probe (real `Session` from
 The four `_spawn_background(self._prompt_messages(...))` callers in
 `session.py` all share the shape: peer wake `:4889/:4897`, background-job
 result delivery `:6607`, resume catch-up `:9472`, scheduled wake `:10201`.
-Also the goal loop: `_loop_driver` (`owned.py:1010-1037`) *does* go through
+Also the goal loop: `_loop_driver` (`serving.py:1010-1037`) *does* go through
 `self.prompt(..., wait_complete=True)`, so it is covered by the drain
 observer — but only for its last iteration, which is fine.
 
@@ -72,7 +72,7 @@ runtime's own `is_busy()` is correct; only the *published* bit is wrong.
 
 ### 1.3 A transient viewer disconnect paints "interrupted" on a turn that never stopped
 
-`RemoteSession._on_disconnected` (`session/remote.py:1824-1857`):
+`AttachedSession._on_disconnected` (`session/attached.py:1824-1857`):
 
 ```
 self._recovering = True
@@ -116,7 +116,7 @@ Why the socket drops in the first place — every one of these is silent
    updates pending before `frontend_ready` → drop.
 4. Reader EOF / reset (`:1010, :1017`) and shutdown (`:779-781`).
 
-Also `RemoteSession.abort` (`remote.py:2662-2664`) is
+Also `AttachedSession.abort` (`remote.py:2662-2664`) is
 `asyncio.create_task(self._client.abort())` with no done-callback; when the
 client is mid-recovery `_request_frame` raises `ConnectionError("not
 attached")` (`attach_client.py:461`) and the loop logs "Task exception was
@@ -221,7 +221,7 @@ called from `_run_turn_pipeline`'s `finally` **after** `_flush_held_end`
 ```python
 # session.py, Session.__init__
 #: Fired once per turn, after the turn's terminal event has been emitted
-#: AND ``is_streaming`` has been cleared. The OwnedSessionHandle uses it to
+#: AND ``is_streaming`` has been cleared. The ServingSessionHandle uses it to
 #: republish the record's ``busy`` bit; the per-event path cannot, because
 #: the final AgentEndEvent is emitted while the flag is still True.
 self.on_turn_settled: Callable[[], None] | None = None
@@ -247,12 +247,12 @@ still be >0 (a `task` left children running); that is correct — the handle's
 `_notify` (a subagent event) republishes it. The hook only guarantees the
 *turn's* contribution is observed.
 
-`session/runtime/owned.py` — `OwnedSessionHandle.__init__`: 
+`session/runtime/serving.py` — `ServingSessionHandle.__init__`: 
 `session.on_turn_settled = self._publish_busy` (probe `hasattr` so reduced
 sessions in tests keep working). `_observe_prompt_drain` keeps its
 `_publish_busy()` — it is harmless and covers legacy sessions without the
 hook. Also call `self._publish_busy()` at the tail of `receive_peer_message`
-(`owned.py:1273` already calls `_notify()` which does it — no change needed
+(`serving.py:1273` already calls `_notify()` which does it — no change needed
 there; the missing publish is the *end* of the turn, which the hook covers).
 
 Belt: `RuntimeServer._heartbeat_loop` (`server.py:826-845`) adds
@@ -355,7 +355,7 @@ by re-adopting on the next record).
 RETIRING_REASON` with `RETIRING_REASON = "owner retired for a newer build"`
 next to `STOPPED_REASON` (`:61`). `_ClientConn` needs nothing new.
 
-**Viewer.** `RemoteSession._on_disconnected` (`remote.py:1824`):
+**Viewer.** `AttachedSession._on_disconnected` (`remote.py:1824`):
 
 ```python
 if _reason == RETIRING_REASON:
@@ -419,7 +419,7 @@ runtime stale?
 request_refresh()` → op `refresh_if_idle`, dispatched next to
 `retire_if_pristine` (`server.py:1332`, and add it to the no-push list at
 `:1425-1432`). Handler: same `_should_refresh` predicate as the reaper (share
-it: move the predicate into `owned.py` as `OwnedSessionHandle.may_refresh()`
+it: move the predicate into `serving.py` as `ServingSessionHandle.may_refresh()`
 and have `process.py` call that, so both sides use one function). Answers
 `"retiring"` or `"kept: <reason>"`; a `kept` answer because the runtime is
 busy is when C′ paints. An old runtime answers unknown-op → treat as `kept`
@@ -477,11 +477,11 @@ viewer never waits on a runtime that is "about to" leave.
 | file | change |
 |---|---|
 | `session/session.py` | `on_turn_settled` hook; call in `_run_turn_pipeline` `finally` (`:5764-5776`) |
-| `session/runtime/owned.py` | wire hook in `__init__`; `may_refresh()` predicate + `refresh_if_idle` handle method |
+| `session/runtime/serving.py` | wire hook in `__init__`; `may_refresh()` predicate + `refresh_if_idle` handle method |
 | `session/runtime/process.py` | `BUILD_CHECK_S/SETTLE_S/STAGGER_S`; `_build_changed`; reaper refresh branch |
 | `session/runtime/server.py` | `_boot_build`; `announce_retiring`; `refresh_if_idle` op; heartbeat republishes busy |
 | `mobile/attach_client.py` | `RETIRING_REASON`; `retiring` op in `_pump`; `request_refresh()` |
-| `session/remote.py` | `_on_disconnected` refresh branch; `_go_cold(refresh=)`; `set_refresh_callback`; `request_refresh()`; `runtime_idle` helper |
+| `session/attached.py` | `_on_disconnected` refresh branch; `_go_cold(refresh=)`; `set_refresh_callback`; `request_refresh()`; `runtime_idle` helper |
 | `tui/app.py` | `_on_runtime_refreshed`; `_check_build_skew` C→C′ + belt; copy |
 | `update.py` | `build_marker_age_s()` (mtime of `.lop-source` or dist-info) |
 | `cli.py` | nothing (record fields unchanged) |
@@ -490,7 +490,7 @@ viewer never waits on a runtime that is "about to" leave.
 
 ### 4.1 Defer the synthesised abort
 
-`RemoteSession._on_disconnected` (`remote.py:1854-1857`) becomes:
+`AttachedSession._on_disconnected` (`remote.py:1854-1857`) becomes:
 
 ```python
 self._recovering = True
@@ -587,7 +587,7 @@ another client's writes. A 5 s stall on a TUI loop is rare but real (a
 `--resume` reflow is seconds); the cost of a false drop is the whole §1.3
 sequence. Watch it in rollout (§7).
 
-### 4.5 `RemoteSession.abort` unretrieved exception
+### 4.5 `AttachedSession.abort` unretrieved exception
 
 `remote.py:2662-2664`:
 
@@ -604,7 +604,7 @@ def abort(self, reason: str = "interrupted") -> None:
 
 | file | change |
 |---|---|
-| `session/remote.py` | deferred end (`_suspect_generation`, `_settle_suspect_turn`); `abort` done-callback |
+| `session/attached.py` | deferred end (`_suspect_generation`, `_settle_suspect_turn`); `abort` done-callback |
 | `session/frontend_state.py` | `last_turn_outcome` field (additive) |
 | `session/session.py` | set `last_turn_outcome` in `_run_turn_pipeline` finally |
 | `session/runtime/server.py` | `_drop_client(reason=)` + logs; `_projection_recipients`; per-kind send timeout |
@@ -615,7 +615,7 @@ def abort(self, reason: str = "interrupted") -> None:
 ### 5.1 PR A
 
 Unit — `tests/unit/session/runtime/test_busy_settles.py`:
-1. Real `Session` + `OwnedSessionHandle` + `RuntimeServer` (the probe in
+1. Real `Session` + `ServingSessionHandle` + `RuntimeServer` (the probe in
    §1.2, promoted): after `prompt`, `receive_peer_message(wake=True)`,
    `receive_peer_message(mode="steer")` on idle, and a `_spawn_background(
    _prompt_messages(...))` driven directly — `server._busy is False` within
@@ -707,7 +707,7 @@ projections after PR B (`lop mobile status` + a phone attach).
 ## 6. Interactions and edge cases
 
 - **Refresh while a gate is parked**: `is_busy()` returns True for
-  `_pending_futures` (`owned.py:657-660`) — never retires under a question.
+  `_pending_futures` (`serving.py:657-660`) — never retires under a question.
 - **Refresh while subagents run but the parent turn ended**:
   `running_subagents() > 0` → busy → no refresh. Correct: the children die
   with `dispose`.
@@ -754,7 +754,7 @@ projections after PR B (`lop mobile status` + a phone attach).
    continuation: set in `_run_turn_pipeline`'s finally, which is after the
    whole logical turn (start/end pair) — one value per user prompt. Pin it.
 6. **Busy hook and `_disposing`**: `is_busy()` returns False under
-   `_disposing` (`owned.py:633-636`), so a publish from the hook during
+   `_disposing` (`serving.py:633-636`), so a publish from the hook during
    dispose writes `busy: false` right before the record is unpublished —
    harmless, and `set_busy` de-dupes.
 

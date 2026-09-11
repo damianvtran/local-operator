@@ -7,7 +7,7 @@ the cold-viewer refusal that keeps that receipt honest when nothing is bound.
 Captured with `shot.py.txt`, which imports the SAME `_AsyncLabelSession` the
 regression tests in `tests/unit/tui/test_app_pilot.py` assert against — a
 fake whose `set_model` records the request and never moves the label, which is
-how `RemoteSession` reads for a terminal attached to another runtime's session
+how `AttachedSession` reads for a terminal attached to another runtime's session
 until the runtime's frontend-state sync arrives. Run from anywhere; the script
 locates the repo root from its own path:
 

@@ -7,7 +7,7 @@ DOCSTRING IS HOW A BUG SHIPPED.** It used to open with: "a desktop notification
 is only sent when NOTHING is watching the session, so by definition there is no
 emulator around the sending process to inherit. The click therefore has to OPEN
 a terminal." That was true when written — ``detached_notify`` had one caller,
-``session/runtime/owned.py::_announce_pending``, which fires only after
+``session/runtime/serving.py::_announce_pending``, which fires only after
 ``_watching_surfaces()`` comes back empty.
 
 Background-completion notifications (#724) added a second caller: the observer

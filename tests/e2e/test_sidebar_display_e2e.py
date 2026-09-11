@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import (
     ASIDE_PLACEHOLDER,
     SIDEBAR_CONNECT_ATTEMPTS,
@@ -72,7 +72,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
     aborts = []
     initial_content = "waiting historical anchor" if wrapped else "waiting saved answer"
     local_modes = not (switch_away or fail_sync or restore_anchor)
-    original_await = RemoteSession._await_frontend
+    original_await = AttachedSession._await_frontend
 
     async def await_frontend(remote, future, *, timeout, preempt=None):
         # Expire an AUTHENTICATED, deliberately held sync deterministically.
@@ -82,7 +82,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
             timeout = 0
         return await original_await(remote, future, timeout=timeout, preempt=preempt)
 
-    monkeypatch.setattr(RemoteSession, "_await_frontend", await_frontend)
+    monkeypatch.setattr(AttachedSession, "_await_frontend", await_frontend)
     try:
         for sid in ("origin", "waiting", "neighbour"):
             directory = config / "sessions" / sid
@@ -102,7 +102,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 )
             await seed_transcript(directory, messages)
             owner = build_session(directory, ScriptedStream([]), cwd=config)
-            handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+            handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
             if sid == "waiting":
                 original_abort = owner.abort
 
@@ -131,7 +131,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
             raise AssertionError("view navigation must never take execution ownership")
 
         async def resume(sid):
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 servers[sid]._record,
                 sid,
                 config_dir=config,
@@ -161,7 +161,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 await asyncio.wait_for(entered.wait(), 10)
                 source = app._interaction
                 assert not released.is_set()
-                assert isinstance(app._session, RemoteSession)
+                assert isinstance(app._session, AttachedSession)
                 assert app._session.session_id == "waiting"
                 assert initial_content in visible_text(app)
                 assert app._sidebar_gate_surface_ready(source)
@@ -241,7 +241,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 assert source.connection_task is not None
                 await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
                 if switch_away:
-                    assert isinstance(app._session, RemoteSession)
+                    assert isinstance(app._session, AttachedSession)
                     assert app._session.session_id == "neighbour"
                     assert "waiting saved answer" not in visible_text(app)
                     # Returning uses its own canonical state and controller.

@@ -15,8 +15,8 @@ import uvicorn
 
 from local_operator.mcp.manager import McpManager
 from local_operator.server.app import app
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.slash_commands import SLASH_COMMANDS
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
@@ -133,7 +133,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
             manager = McpManager(str(workspace))
             session.mcp_manager = manager
-            handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
             runtime = RuntimeServer(handle, kind="daemon")
             await runtime.start_in_process()
             (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))

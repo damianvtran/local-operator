@@ -77,7 +77,7 @@ class _BoundViewer(FakeSession):
     """A follower facade that has already bound to a runtime.
 
     Not owning the runtime, plus a resolved ``runtime_version``, is what a real
-    ``RemoteSession`` looks like after ``_dial``; ``is_cold`` False is what
+    ``AttachedSession`` looks like after ``_dial``; ``is_cold`` False is what
     makes the owner comparison meaningful, since a cold viewer has not dialled
     anything and its empty stamp would otherwise read as a prehistoric
     runtime.
@@ -102,7 +102,7 @@ class _BoundViewer(FakeSession):
         super().__init__()
         self.runtime_version = runtime_version
         self.runtime_source_ref = runtime_source_ref
-        # ``idle`` is what a real ``RemoteSession.runtime_idle`` reads off the
+        # ``idle`` is what a real ``AttachedSession.runtime_idle`` reads off the
         # canonical snapshot. The default is BUSY so every pre-existing cell
         # keeps exercising the notice path; the refresh cells opt in.
         self._skew_idle = idle
@@ -840,7 +840,7 @@ async def test_an_attach_receipt_still_submits_its_request(monkeypatch, tmp_path
 # follower routing `/team <name> <request>` must get the same answer from
 # both. Every completion cell in
 # ``tests/unit/session/runtime/test_action_receipt_completion.py`` drives
-# ``OwnedSessionHandle``, so before these cells the app-side copy of the
+# ``ServingSessionHandle``, so before these cells the app-side copy of the
 # predicate was executed by nothing in CI: an edit drifting it toward
 # ``declared is None`` would double-submit on the TUI-owner path with no test
 # noticing (review round 1, R1-3).
@@ -1887,7 +1887,7 @@ async def test_one_build_pair_is_announced_once_across_a_disk_move(monkeypatch, 
 async def test_a_title_that_raises_does_not_cost_the_re_engage(monkeypatch, tmp_path) -> None:
     """A pre-sync `conversation_name` raises; the eager re-engage must survive.
 
-    `RemoteSession.conversation_name` reads `frontend_state`, which raises
+    `AttachedSession.conversation_name` reads `frontend_state`, which raises
     until the first sync completes — and the refresh callback reads the title
     BEFORE re-engaging. `_go_cold` swallows the exception, so the cost was a
     silently lost re-engage: the viewer stays cold until the next keystroke,

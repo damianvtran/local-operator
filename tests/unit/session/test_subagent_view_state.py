@@ -433,7 +433,7 @@ async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_r
 ) -> None:
     import asyncio
 
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from local_operator.session.transcript import Transcript
     from local_operator.tools.builtin import TODO_STORE
     from local_operator.tui.widgets.subagent_panel import job_elapsed, job_seconds
@@ -469,7 +469,7 @@ async def test_cold_owner_hydrates_selected_child_plan_and_reconstructs_nested_r
     assert (
         next(job for job in root.frontend_state.jobs if job.id == "leaf").parent_job_id == "manager"
     )
-    handle = OwnedSessionHandle(root, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(root, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         page = await handle.job_trajectory("manager", 0, 100)
         assert page["known"] is True
@@ -489,7 +489,7 @@ async def test_live_empty_child_plan_fetch_never_reads_transcript(tmp_path, monk
     import asyncio
 
     from local_operator.harness.jobs import AsyncJob
-    from local_operator.session.runtime import owned
+    from local_operator.session.runtime import serving
     from local_operator.tools.builtin import TODO_STORE
     from tests.unit.harness.test_comms import ScriptedProvider, make_parent
 
@@ -504,8 +504,8 @@ async def test_live_empty_child_plan_fetch_never_reads_transcript(tmp_path, monk
     def forbid_read(*args):  # noqa: ANN002, ANN202
         raise AssertionError("a live empty plan must not trigger historical disk I/O")
 
-    monkeypatch.setattr(owned, "_read_child_todo_snapshot", forbid_read)
-    handle = owned.OwnedSessionHandle(root, asyncio.get_running_loop(), cwd=str(tmp_path))
+    monkeypatch.setattr(serving, "_read_child_todo_snapshot", forbid_read)
+    handle = serving.ServingSessionHandle(root, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         page = await handle.job_trajectory(job.id, 0, 100)
         assert page["known"] is True

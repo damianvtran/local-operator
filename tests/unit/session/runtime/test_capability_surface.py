@@ -54,7 +54,7 @@ OPTIONAL_CAPABILITIES = {
     # Set by the registrant on itself, not implemented by the handle.
     "_frontend",
     "_install_interactivity_probe",
-    # Owned-handle instance state (assigned in ``OwnedSessionHandle.__init__``),
+    # Owned-handle instance state (assigned in ``ServingSessionHandle.__init__``),
     # not a class-declared capability, so the class-level ``hasattr`` cannot
     # see it. Read once at record construction to seed ``started`` from the
     # resumed conversation's durable history; a handle without one (the TUI's,
@@ -140,12 +140,12 @@ def _attributes_read_in(source: str) -> set[str]:
 def test_the_owned_handle_answers_every_capability_the_server_asks_for() -> None:
     """The round-1/round-3 defect class, as an enforced property.
 
-    `OwnedSessionHandle` is the handle EVERY session on this release uses, so
+    `ServingSessionHandle` is the handle EVERY session on this release uses, so
     a capability the server asks for and it does not answer is a feature that
     fails for every user — which is exactly how eleven slash commands, both
     aside paths and Esc-cancels-subagents shipped broken behind a green suite.
     """
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     asked = _handle_attributes_read_by_the_server()
     assert asked, "the AST walk found no handle attributes — the extractor has drifted"
@@ -153,11 +153,11 @@ def test_the_owned_handle_answers_every_capability_the_server_asks_for() -> None
     missing = sorted(
         name
         for name in asked
-        if name not in OPTIONAL_CAPABILITIES and not hasattr(OwnedSessionHandle, name)
+        if name not in OPTIONAL_CAPABILITIES and not hasattr(ServingSessionHandle, name)
     )
     assert not missing, (
         "the runtime's handle does not answer capabilities the server asks it for: "
-        f"{missing}. Implement them on OwnedSessionHandle, or add each to "
+        f"{missing}. Implement them on ServingSessionHandle, or add each to "
         "OPTIONAL_CAPABILITIES with the reason its absence is a designed degradation."
     )
 
@@ -206,12 +206,12 @@ def _advertised_authoritative_commands() -> set[str]:
 
 
 def _commands_dispatched_by_the_runtime() -> set[str]:
-    """The commands `OwnedSessionHandle._slash_result` actually handles.
+    """The commands `ServingSessionHandle._slash_result` actually handles.
 
     Read from the dispatcher body rather than from a list, so a command added
     to the advertisement without a branch here is caught by construction.
     """
-    source = (RUNTIME_DIR / "owned.py").read_text()
+    source = (RUNTIME_DIR / "serving.py").read_text()
     body = source.split("async def _slash_result", 1)[1].split("\n    def ", 1)[0]
     return set(re.findall(r'command == "([a-z_]+)"', body))
 
@@ -234,7 +234,7 @@ def test_the_runtime_dispatches_every_slash_command_it_advertises() -> None:
     unhandled = sorted(advertised - dispatched)
     assert not unhandled, (
         f"advertised as authoritative_session but never dispatched: {unhandled}. "
-        "Implement them in OwnedSessionHandle._slash_result, or stop advertising them."
+        "Implement them in ServingSessionHandle._slash_result, or stop advertising them."
     )
 
 
@@ -251,11 +251,11 @@ def test_no_advertised_command_tells_an_attached_user_to_reattach(command: str) 
     reads and where it does work.
     """
     from local_operator.session.frontend_state import SlashResult
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     # Read the STRING CONSTANTS the dispatcher can return, not its comments —
     # the comment explaining this rule contains the word by necessity.
-    source = (RUNTIME_DIR / "owned.py").read_text()
+    source = (RUNTIME_DIR / "serving.py").read_text()
     tree = ast.parse(source)
     literals: list[str] = []
     for node in ast.walk(tree):
@@ -280,7 +280,7 @@ def test_no_advertised_command_tells_an_attached_user_to_reattach(command: str) 
         "handling, so that instruction cannot be followed."
     )
     assert command in _advertised_authoritative_commands()
-    assert SlashResult is not None and OwnedSessionHandle is not None
+    assert SlashResult is not None and ServingSessionHandle is not None
 
 
 def test_the_runtime_knows_every_mcp_verb_the_terminal_offers() -> None:
@@ -299,7 +299,7 @@ def test_the_runtime_knows_every_mcp_verb_the_terminal_offers() -> None:
 
     assert OperatorApp.MCP_SUBCOMMANDS == MCP_SUBCOMMANDS
 
-    source = (RUNTIME_DIR / "owned.py").read_text()
+    source = (RUNTIME_DIR / "serving.py").read_text()
     body = source.split("def _mcp_slash", 1)[1].split("\n    def ", 1)[0]
     # Every mutating verb must be dispatched by name somewhere in the handler.
     for verb in ("add", "remove"):
@@ -363,7 +363,7 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
     """
     from local_operator.model.configure import build_model_spec
     from local_operator.session.frontend_state import SlashResult
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     class _Session:
         # Runtime role (SessionProtocol). This fake stands in for an OWNER:
@@ -405,7 +405,7 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
                 self.variables, getattr(self, "journal_credential_change", None), action, key, value
             )
 
-    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
     handle._notify = lambda: None  # type: ignore[method-assign]
     session = _Session()
     assert session.model.supports_fast_mode and not session.model.fast_mode

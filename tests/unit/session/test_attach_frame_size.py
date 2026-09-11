@@ -43,6 +43,7 @@ from local_operator.mobile.attach_client import (
     _RefitReport,
     _text_is_the_bulk_refusal,
 )
+from local_operator.session.attached import AttachedSession
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
     _DERIVED_STATE_LABELS,
@@ -75,7 +76,6 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_ITERATIONS,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
-from local_operator.session.remote import RemoteSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
 from local_operator.tui.costs import job_cost
@@ -879,7 +879,7 @@ async def test_attach_succeeds_against_a_session_that_exceeded_the_old_limit(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         # Attach itself is the assertion: an oversized frame never arrives, so
@@ -949,7 +949,7 @@ async def test_watched_todo_fetch_cannot_roll_back_newer_state(tmp_path, monkeyp
     registrant.start()
     remote = None
     try:
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
         )
 
@@ -1015,7 +1015,7 @@ async def test_live_appends_reach_only_the_watched_job(tmp_path: Path, monkeypat
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         assert await remote.load_job_trajectory("job0") is True
@@ -1229,7 +1229,9 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
         record = await _record(tmp_path)
         started = asyncio.get_running_loop().time()
         with pytest.raises(ConnectionError) as caught:
-            await RemoteSession.connect(record, "s1", config_dir=tmp_path, takeover_factory=_never)
+            await AttachedSession.connect(
+                record, "s1", config_dir=tmp_path, takeover_factory=_never
+            )
         elapsed = asyncio.get_running_loop().time() - started
 
         # The 15 s sync timeout is the backstop for a silent owner, not the
@@ -1451,7 +1453,7 @@ async def test_attach_succeeds_against_an_owner_offering_thousands_of_models(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         # The attach completing at all is the assertion.
@@ -1498,7 +1500,7 @@ async def test_an_oversized_delta_keeps_the_socket_and_the_follower_resyncs(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         _assert_reachable(remote)
@@ -1601,7 +1603,7 @@ async def test_a_burst_of_degraded_deltas_coalesces_into_one_resync(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         _assert_reachable(remote)
@@ -1802,7 +1804,7 @@ async def _windowed_handle(tmp_path: Path) -> _WindowedHandle:
     return handle
 
 
-def _assert_reachable(remote: RemoteSession) -> None:
+def _assert_reachable(remote: AttachedSession) -> None:
     """Refuse a fixture whose starting state PRODUCTION CANNOT REACH.
 
     Review round 2, Q. A fixture pairing a window generation with a disagreeing
@@ -1847,7 +1849,7 @@ async def test_a_windowed_follower_also_resyncs_after_a_degraded_delta(
     try:
         record = await _record(tmp_path)
         assert "display-history-window-v1" in record.capabilities
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -1915,7 +1917,7 @@ async def test_a_failed_resync_is_retried_rather_than_left_permanently_stale(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -2043,7 +2045,7 @@ async def test_a_degrade_folded_into_an_in_flight_refresh_is_still_retried(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -2202,7 +2204,7 @@ async def test_a_quiescent_follower_recovers_without_waiting_for_more_traffic(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record,
             "s1",
             config_dir=tmp_path,
@@ -2325,7 +2327,7 @@ async def test_a_display_refresh_failure_still_reports_when_nothing_canonical_is
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never, display_window=True
         )
         assert remote._display_window_supported
@@ -2503,7 +2505,7 @@ def test_oversized_event_frame_degrades_instead_of_killing_the_socket():
     through ``frontend_sync`` plus durable history — while killing the socket
     is not.
     """
-    from local_operator.session.remote import deserialize_event
+    from local_operator.session.attached import deserialize_event
     from local_operator.session.runtime.server import (
         _MAX_LINE_BYTES,
         relay_frame_or_degraded,
@@ -2808,7 +2810,7 @@ async def test_attach_succeeds_mid_turn_against_an_owner_with_a_heavy_seed(
     remote = None
     try:
         record = await _record(tmp_path)
-        remote = await RemoteSession.connect(
+        remote = await AttachedSession.connect(
             record, "s1", config_dir=tmp_path, takeover_factory=_never
         )
         # Connecting at all is the assertion the bound exists to protect.
@@ -3130,13 +3132,13 @@ def _spec_state() -> FrontendSessionState:
     )
 
 
-def _remote_with_state(tmp_path: Path, state: FrontendSessionState) -> RemoteSession:
+def _remote_with_state(tmp_path: Path, state: FrontendSessionState) -> AttachedSession:
     """A viewer bound to a REAL store, with no socket.
 
     The accessors under test read only the store, so a live connection would
     add a fixture without adding coverage.
     """
-    remote = RemoteSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never)
+    remote = AttachedSession(config_dir=tmp_path, session_id="s1", takeover_factory=_never)
     remote._frontend_store = FrontendStateStore(state)
     return remote
 
@@ -3966,7 +3968,7 @@ def test_the_composer_stamps_the_chip_number_onto_every_image_it_sends() -> None
     delete, so a draft that lost ``#2`` sends chips 1 and 3 from wire positions
     0 and 1.
     """
-    from local_operator.session.remote import _image_to_wire
+    from local_operator.session.attached import _image_to_wire
     from local_operator.tui.widgets.editor import Attachment, resolve_markers
 
     def _attachment(index: int) -> Attachment:

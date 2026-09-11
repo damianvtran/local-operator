@@ -26,19 +26,21 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import AgentEndEvent
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 
-async def _rig(directory: Path, replies: int = 2) -> tuple[Any, OwnedSessionHandle, RuntimeServer]:
+async def _rig(
+    directory: Path, replies: int = 2
+) -> tuple[Any, ServingSessionHandle, RuntimeServer]:
     """A real Session under the production handle and a server that is NOT
     listening: the record's busy bit lives on ``server._busy`` regardless, and
     the projection subscription is what ``_serve`` installs first."""
     directory.mkdir(parents=True, exist_ok=True)
     stream = ScriptedStream([text_turn(f"reply {i}") for i in range(replies)])
     session = build_session(directory, stream)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     handle.subscribe(server._schedule_push)
     return session, handle, server
@@ -63,7 +65,7 @@ def _watch_turn_end(session: Any) -> asyncio.Event:
 
 
 async def _settle(
-    ended: asyncio.Event, handle: OwnedSessionHandle, server: RuntimeServer, timeout: float = 5.0
+    ended: asyncio.Event, handle: ServingSessionHandle, server: RuntimeServer, timeout: float = 5.0
 ) -> None:
     """Wait for the turn to END, then bounded-poll until the record agrees.
 

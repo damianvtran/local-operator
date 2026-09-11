@@ -1,7 +1,7 @@
 """Growth harness: what accumulates in-process across sidebar uptime and switches.
 
 Drives the REAL assembled ``OperatorApp`` headlessly (stylesheet loaded, real
-``RuntimeServer`` owners in-process, real ``RemoteSession`` viewers over real
+``RuntimeServer`` owners in-process, real ``AttachedSession`` viewers over real
 loopback sockets) and records, at checkpoints, every quantity that could
 explain "the TUI gets slower until /reload":
 
@@ -9,7 +9,7 @@ explain "the TUI gets slower until /reload":
 * live asyncio tasks, Textual ``Timer`` objects (app + every widget), workers,
 * DOM node count (``len(app.query('*'))``), transcript views mounted,
 * sizes of every app/sidebar/session container that is keyed per session,
-* ``FrontendStateStore`` / ``RemoteSession`` subscriber list lengths,
+* ``FrontendStateStore`` / ``AttachedSession`` subscriber list lengths,
 * wall + loop-CPU for one switch and one sidebar poll cycle,
 * tracemalloc top allocation deltas between the first and last checkpoint.
 
@@ -119,9 +119,9 @@ import scripts.probe_isolation as isolation  # noqa: E402
 
 # isort: split
 import local_operator  # noqa: E402
-from local_operator.session.remote import RemoteSession  # noqa: E402
-from local_operator.session.runtime.owned import OwnedSessionHandle  # noqa: E402
+from local_operator.session.attached import AttachedSession  # noqa: E402
 from local_operator.session.runtime.server import RuntimeServer  # noqa: E402
+from local_operator.session.runtime.serving import ServingSessionHandle  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.e2e.harness import (  # noqa: E402
     ScriptedStream,
@@ -247,14 +247,14 @@ def instrument() -> None:
         app_mod.OperatorApp._prewarm_sidebar = (  # type: ignore[method-assign]
             lambda self, entries: None
         )
-    wrap(RemoteSession, "dispose", "RemoteSession.dispose")
-    original_connect = RemoteSession.connect.__func__  # type: ignore[attr-defined]
+    wrap(AttachedSession, "dispose", "AttachedSession.dispose")
+    original_connect = AttachedSession.connect.__func__  # type: ignore[attr-defined]
 
     async def connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
-        COUNTS["RemoteSession.connect"] += 1
+        COUNTS["AttachedSession.connect"] += 1
         return await original_connect(cls, *args, **kwargs)
 
-    RemoteSession.connect = classmethod(connect)  # type: ignore[method-assign]
+    AttachedSession.connect = classmethod(connect)  # type: ignore[method-assign]
 
 
 def rss_mb() -> float:
@@ -455,7 +455,7 @@ class Fixture:
                 messages.append(assistant_message(f"{sid} answer {j}: " + "reply words " * 25))
             await seed_transcript(directory, messages)
             owner = build_session(directory, ScriptedStream([]), cwd=CONFIG)
-            handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(CONFIG))
+            handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(CONFIG))
             server = RuntimeServer(handle, kind="daemon")
             await server.start_in_process()
             if self.busy:
@@ -469,12 +469,12 @@ class Fixture:
         server = self.servers.get(sid)
         return (server._record, server._record.pid) if server else (None, None)
 
-    async def resume(self, sid: str | None) -> RemoteSession:
+    async def resume(self, sid: str | None) -> AttachedSession:
         async def never() -> Any:
             raise AssertionError("view navigation must never take execution ownership")
 
         assert sid is not None
-        return await RemoteSession.connect(
+        return await AttachedSession.connect(
             self.servers[sid]._record,
             sid,
             config_dir=CONFIG,
@@ -554,7 +554,7 @@ async def checkpoint(
             for k in (
                 "FrontendSync",
                 "FrontendSessionState",
-                "RemoteSession",
+                "AttachedSession",
                 "AttachClient",
                 "SessionInteraction",
                 "SessionPresentation",

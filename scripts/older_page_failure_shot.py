@@ -56,9 +56,9 @@ isolate_capture()
 from textual.events import MouseScrollUp  # noqa: E402
 
 from local_operator.harness.types import Message, TextContent  # noqa: E402
-from local_operator.session.remote import RemoteSession  # noqa: E402
-from local_operator.session.runtime.owned import OwnedSessionHandle  # noqa: E402
+from local_operator.session.attached import AttachedSession  # noqa: E402
 from local_operator.session.runtime.server import RuntimeServer  # noqa: E402
+from local_operator.session.runtime.serving import ServingSessionHandle  # noqa: E402
 from local_operator.session.transcript import Transcript  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from tests.e2e.harness import ScriptedStream, build_session, text_turn  # noqa: E402
@@ -115,10 +115,10 @@ async def capture(out_dir: Path, state: str, size: tuple[int, int] = (100, 34)) 
     directory = config / "sessions" / f"older-page-{state}"
     await _seed(directory, rows=600)
     session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=root)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
-    remote = await RemoteSession.connect(
+    remote = await AttachedSession.connect(
         server._record,
         directory.name,
         config_dir=config,

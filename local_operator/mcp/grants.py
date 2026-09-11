@@ -5,7 +5,7 @@ These three verbs move OAuth grants: they delete the row in the shared
 Like :mod:`local_operator.mcp.verbs`, they are MACHINE-AND-SESSION work rather
 than terminal work, so a detached runtime must be able to run them too.
 
-Before this module the runtime could not. ``OwnedSessionHandle._mcp_slash``
+Before this module the runtime could not. ``ServingSessionHandle._mcp_slash``
 refused all three with "run it from a terminal on that machine", on the theory
 that the invoker sits somewhere the runtime's browser cannot reach. That was
 wrong for the only topology that exists today: the control socket binds

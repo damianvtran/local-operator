@@ -2408,7 +2408,7 @@ async def test_tui_send_timeout_is_five_seconds(monkeypatch: pytest.MonkeyPatch)
 # but that test emits only ``NoticeEvent`` — it never puts a compose frame on
 # the wire, so it is not evidence for this path (review R2). The compose path
 # itself was driven end to end against a production ``RuntimeServer`` and a real
-# ``RemoteSession`` viewer in QA's round-1 cell, which reproduced the reported
+# ``AttachedSession`` viewer in QA's round-1 cell, which reproduced the reported
 # frame on base (viewer dropped by overflow; three composing rows never adopted
 # or retired; the turn never completed) and showed this branch adopting and
 # retiring all three. That cell needs two processes and a real socket, so it

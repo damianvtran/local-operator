@@ -3,7 +3,7 @@
 **This file exists because a green four-stream review shipped a half-feature.**
 The inline-credential submit seam was built primarily against
 :class:`~local_operator.session.session.Session` — and `lop`'s TUI never builds
-one. ``cli.py``'s ``viewer_factory`` returns a ``RemoteSession`` on every path
+one. ``cli.py``'s ``viewer_factory`` returns a ``AttachedSession`` on every path
 and its takeover closure raises outright, so the branch the tests certified was
 unreachable in the product and the branch that actually ran was written as the
 "degradation". The operator hit it on his first use: he typed a secret and was
@@ -12,7 +12,7 @@ instead.
 
 So the rule here is the one ``test_viewer_attach_e2e`` states and for the same
 reason: **the production handle class, the production server, a real loopback
-socket, the production ``RemoteSession`` client, and the real ``OperatorApp``
+socket, the production ``AttachedSession`` client, and the real ``OperatorApp``
 driven by keystrokes.** A test that constructs a ``Session`` and hands it to
 the app proves nothing about `lop` — that substitution IS the defect this file
 guards. ``test_the_app_under_test_holds_the_class_the_product_builds`` asserts
@@ -36,8 +36,8 @@ import pytest
 from textual import events
 
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 pytestmark = pytest.mark.e2e
@@ -94,7 +94,7 @@ class _Runtime:
         assert self.session.session_id == self.session_id, (
             "the session must publish under the directory's id, which is what " "the app dials"
         )
-        handle = OwnedSessionHandle(
+        handle = ServingSessionHandle(
             self.session, asyncio.get_running_loop(), cwd=str(self.directory)
         )
         self.server = RuntimeServer(handle, kind="daemon")
@@ -110,19 +110,19 @@ class _Runtime:
 
 
 async def _viewer_app(runtime: _Runtime) -> Any:
-    """The real ``OperatorApp`` over a real attached ``RemoteSession``.
+    """The real ``OperatorApp`` over a real attached ``AttachedSession``.
 
     ``cli.viewer_factory`` in miniature and deliberately no smaller: a live
-    record exists, so the production ``RemoteSession.connect`` is what the app
+    record exists, so the production ``AttachedSession.connect`` is what the app
     adopts — the exact object `lop` gives it.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     record = await _wait_for_record(runtime.config_dir, runtime.session_id)
 
-    async def factory() -> RemoteSession:
-        return await RemoteSession.connect(
+    async def factory() -> AttachedSession:
+        return await AttachedSession.connect(
             record,
             runtime.session_id,
             config_dir=runtime.config_dir,
@@ -175,7 +175,7 @@ async def test_the_app_under_test_holds_the_class_the_product_builds(
     ``Session`` injected into ``OperatorApp``) is exactly what let the inline
     ``/credential`` half-feature pass four review streams.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.session import Session
 
     runtime = _Runtime(headless_tui_env)
@@ -184,7 +184,7 @@ async def test_the_app_under_test_holds_the_class_the_product_builds(
     try:
         async with app.run_test(size=(120, 40)) as pilot:
             assert await _pump(pilot, lambda: app._session is not None), "the app never adopted"
-            assert isinstance(app._session, RemoteSession), (
+            assert isinstance(app._session, AttachedSession), (
                 "this harness must drive the class cli.viewer_factory returns; "
                 f"it holds {type(app._session).__name__}"
             )

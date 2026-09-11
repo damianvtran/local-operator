@@ -4,7 +4,7 @@ The operator reported two symptoms that ``/reload`` cures: the TUI slows down
 after running a long time with the session sidebar open, and sidebar switches
 that are fast at first get gradually slower with switch count. A root-cause
 pass on the assembled app (real ``OperatorApp`` under ``run_test``, real
-in-process runtime owners, real ``RemoteSession`` viewers over loopback) found
+in-process runtime owners, real ``AttachedSession`` viewers over loopback) found
 three independent accumulations rather than one leak:
 
 * **F1** — ``_report_startup_cleanup`` self-schedules a 1 s recheck chain for
@@ -41,9 +41,9 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import (
     RETAINED_PRESENTATIONS,
     STARTUP_CLEANUP_RECHECK_WINDOW_S,
@@ -124,7 +124,7 @@ async def test_the_startup_cleanup_recheck_chain_does_not_accumulate_across_adop
 @asynccontextmanager
 async def live_owners(
     config: Path, count: int, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[list[str], Callable[[str | None], Awaitable[RemoteSession]]]]:
+) -> AsyncIterator[tuple[list[str], Callable[[str | None], Awaitable[AttachedSession]]]]:
     """``count`` real ``RuntimeServer`` owners, each discoverable by the catalog.
 
     Production runs one session per process, so ``registry.publish`` keys the
@@ -151,7 +151,7 @@ async def live_owners(
     monkeypatch.setattr(registry, "unpublish", lambda pid, root=None: None)
 
     servers: dict[str, RuntimeServer] = {}
-    handles: list[OwnedSessionHandle] = []
+    handles: list[ServingSessionHandle] = []
     ids: list[str] = []
     try:
         for i in range(count):
@@ -163,7 +163,7 @@ async def live_owners(
                 [user_message(f"{sid} question"), assistant_message(f"{sid} saved answer")],
             )
             owner = build_session(directory, ScriptedStream([]), cwd=config)
-            handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+            handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
             handles.append(handle)
             server = RuntimeServer(handle, kind="daemon")
             await server.start_in_process()
@@ -176,9 +176,9 @@ async def live_owners(
         async def never() -> Any:
             raise AssertionError("view navigation must never take execution ownership")
 
-        async def resume(sid: str | None) -> RemoteSession:
+        async def resume(sid: str | None) -> AttachedSession:
             assert sid is not None
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 servers[sid]._record,
                 sid,
                 config_dir=config,
@@ -291,7 +291,7 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
     F3, stated structurally: with more live sessions than
     ``RETAINED_PRESENTATIONS``, prewarm used to admit a candidate, evict the
     LRU entry to respect the bound, and re-select the evicted session on the
-    next poll — one ``RemoteSession.connect`` and one dispose per candidate
+    next poll — one ``AttachedSession.connect`` and one dispose per candidate
     per poll, forever. The pre-fix tree fails this with +20 connects over
     10 idle polls.
 
@@ -319,14 +319,14 @@ async def test_an_idle_sidebar_over_a_stable_catalog_opens_no_new_sockets(
     monkeypatch.setattr(app_mod, "RETAINED_PRESENTATIONS", bound)
     async with live_owners(config, 6, monkeypatch) as (ids, resume):
         connects = 0
-        original_connect = RemoteSession.connect.__func__  # type: ignore[attr-defined]
+        original_connect = AttachedSession.connect.__func__  # type: ignore[attr-defined]
 
         async def counted_connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
             nonlocal connects
             connects += 1
             return await original_connect(cls, *args, **kwargs)
 
-        monkeypatch.setattr(RemoteSession, "connect", classmethod(counted_connect))
+        monkeypatch.setattr(AttachedSession, "connect", classmethod(counted_connect))
         app = OperatorApp(lambda: resume(ids[0]), resume_factory=resume)
         async with app.run_test(size=(120, 36)) as pilot:
             await wait_for_adoption(app, pilot)

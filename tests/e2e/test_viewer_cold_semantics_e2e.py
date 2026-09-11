@@ -31,8 +31,8 @@ from typing import Any
 import pytest
 
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 pytestmark = pytest.mark.e2e
@@ -56,13 +56,13 @@ async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 1
 async def test_is_cold_covers_a_runtime_that_died_not_only_one_never_bound(
     headless_tui_env: Path, workspace: Path
 ) -> None:
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     directory = headless_tui_env / "sessions" / "iscoldsess01"
     directory.mkdir(parents=True)
 
     # --- state 1: cold, never bound to any runtime -------------------------
-    cold = await RemoteSession.cold(
+    cold = await AttachedSession.cold(
         "iscold-never-bound",
         config_dir=headless_tui_env,
         cwd=str(workspace),
@@ -77,14 +77,14 @@ async def test_is_cold_covers_a_runtime_that_died_not_only_one_never_bound(
 
     stream = ScriptedStream([text_turn("Hello from the runtime.")])
     session = build_session(directory, stream)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
 
     viewer = None
     try:
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,

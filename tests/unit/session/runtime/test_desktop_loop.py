@@ -9,8 +9,8 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
 )
-from local_operator.session.runtime.owned import OwnedSessionHandle
-from tests.unit.session.runtime.test_owned import FakeSession
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.runtime.test_serving import FakeSession
 
 
 class LoopSession(FakeSession):
@@ -34,7 +34,7 @@ async def until(predicate):
 @pytest.mark.asyncio
 async def test_cancelling_queued_loop_does_not_abort_manual_turn(tmp_path):
     session = LoopSession()
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         await handle.prompt("manual")
         await until(lambda: session.prompt_calls == ["manual"])
@@ -60,7 +60,7 @@ async def test_replacement_owner_marks_active_loop_interrupted(tmp_path):
             session_id="abcdef123456", epoch="old", loop={"status": "running", "completed": 2}
         )
     )
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         assert session._frontend_state_store.state.loop["status"] == "interrupted"
         driver = handle._loop_driver()
@@ -75,7 +75,7 @@ async def test_replacement_owner_marks_active_loop_interrupted(tmp_path):
 @pytest.mark.parametrize("argument", ["0", "26", "3e", "-1", "1.5"])
 async def test_invalid_loop_does_not_start_work(tmp_path, argument):
     session = LoopSession()
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         result = await handle.run_slash_authoritative("loop", argument, [])
         assert result["kind"] == "error"

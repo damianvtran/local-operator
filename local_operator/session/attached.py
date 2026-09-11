@@ -1,6 +1,6 @@
 """Full-fidelity remote session facade for a follower TUI (protocol v5).
 
-``RemoteSession`` implements the same :class:`SessionProtocol` the standard
+``AttachedSession`` implements the same :class:`SessionProtocol` the standard
 ``OperatorApp`` already consumes. Durable history comes from the transcript;
 live rendering comes from the owner's raw ``AgentEvent`` relay; every mutation
 goes back over the authenticated loopback control socket. The app therefore
@@ -115,7 +115,7 @@ logger = logging.getLogger(__name__)
 #: race the gap says the same thing — never the transport's ``not attached``.
 _RECONNECTING_SLASH_NOTICE = "session is reconnecting; try /{command} again in a moment"
 
-#: The id :meth:`RemoteSession.queued_steering` substitutes when a wire item
+#: The id :meth:`AttachedSession.queued_steering` substitutes when a wire item
 #: carries none — an owner too old to put ``id`` on its queued-steer rows.
 #:
 #: EXPORTED rather than inlined because it is not an identity, and consumers
@@ -526,7 +526,7 @@ def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
     return rows
 
 
-class RemoteSession:
+class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
     Satisfies :class:`ViewerSessionProtocol`; hosts ask ``owns_runtime`` /
@@ -781,7 +781,7 @@ class RemoteSession:
         # This is the invariant that regressed in the viewer transition: the
         # TUI reads both registries off the SESSION object
         # (`_team_registry()`, `_agent_profile_rows()`), and `Session`
-        # supplied them while `RemoteSession` did not, so every `/team` and
+        # supplied them while `AttachedSession` did not, so every `/team` and
         # `/agent` surface silently answered "unavailable" once `lop` stopped
         # building a `Session`. Anything the TUI reads off the session has to
         # exist on BOTH implementations or it fails only on the viewer path.
@@ -907,7 +907,7 @@ class RemoteSession:
         takeover_factory: Callable[[], Any],
         display_window: bool = False,
         surface: str = "terminal",
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
             raise ConnectionError(
                 f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs protocol >= 5"
@@ -946,7 +946,7 @@ class RemoteSession:
         config_dir: Path,
         cwd: str,
         takeover_factory: Callable[[], Any],
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         """Expose saved rows without waiting on a runtime or loading its journal.
 
         This is a display facade, not canonical input readiness. The sidebar
@@ -1005,7 +1005,7 @@ class RemoteSession:
         surface: str = "terminal",
         initial_model: ModelSpec | None = None,
         model_selection_override: bool = False,
-    ) -> "RemoteSession":
+    ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
         The state ``lop`` boots into. There is no process to attach to yet and
@@ -1416,7 +1416,7 @@ class RemoteSession:
             except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 logger.debug("cold state could not read the configured model", exc_info=True)
             if model is None:
-                # NEVER None. ``RemoteSession.model`` raises without a spec, and
+                # NEVER None. ``AttachedSession.model`` raises without a spec, and
                 # a cold viewer is exactly the state where config may be empty
                 # (a first run, before `/login`) — so the band would crash on
                 # the very screen that exists to help the user fix it. An empty
@@ -4905,7 +4905,7 @@ class RemoteSession:
         #
         # No torn read despite the fallback: the store's property resolves
         # `effective_model or selected_model` against ONE `self._state`
-        # binding, exactly as `RemoteSession.effective_model` takes one
+        # binding, exactly as `AttachedSession.effective_model` takes one
         # snapshot for the same reason. That consistency is why the fallback
         # lives on the state model rather than being reassembled from two reads
         # here.
@@ -4932,7 +4932,7 @@ class RemoteSession:
         client = self._client
         if client is not None:
             # This protocol setter is metadata-only, unlike a user's /goal.
-            # RemoteSession declares goal_set as consumed at attachment, so a
+            # AttachedSession declares goal_set as consumed at attachment, so a
             # typed receipt leaves admission here; deliberately not rendering
             # it prevents a compatibility setter plus prompt from double-sending.
             # Bare /goal now means status on every owner, so clearing is explicit.

@@ -940,7 +940,7 @@ async def test_the_web_tool_notice_says_which_way_the_switch_went(monkeypatch, t
 async def test_only_the_process_that_owns_the_gate_prints_the_value(monkeypatch, tmp_path) -> None:
     """Design round 1, D1 — one receipt per event.
 
-    With a runtime attached, ``OwnedSessionHandle.follow_config`` moves the
+    With a runtime attached, ``ServingSessionHandle.follow_config`` moves the
     real gate and emits the accurate line every attached viewer and the phone
     see. The TUI's own value clause then made one fact into two sentences in
     two vocabularies ("tool approvals now auto" over "tool approvals: auto"),

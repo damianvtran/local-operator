@@ -5,7 +5,7 @@ WHY THIS EXISTS. ``FrontendStateStore.state`` deep-copies the ENTIRE session
 state on every read so a caller cannot mutate the store's own instance. That
 protection is correct and must stay, but its cost scales with how much the
 session has accumulated — jobs, usage components, live events, catalogue rows —
-so the per-frame accessors in ``RemoteSession`` that need ONE immutable scalar
+so the per-frame accessors in ``AttachedSession`` that need ONE immutable scalar
 got slower the longer a session ran. That is the mechanism behind "the TUI
 degrades on long sessions": the band repaints at the same rate, but each paint's
 state reads cost more every hour.
@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import patch
 
+from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
     FrontendSessionState,
@@ -56,7 +57,6 @@ from local_operator.session.frontend_state import (
     FrontendUsage,
     JobState,
 )
-from local_operator.session.remote import RemoteSession
 
 #: Roster sizes to sweep. The point of the sweep is the SHAPE, not any single
 #: cell: a cost that is flat in roster size would mean long sessions do not
@@ -76,7 +76,7 @@ FRAME_FIELDS = (
     "streaming",
 )
 
-#: The ``RemoteSession`` accessors one status-band paint calls, in the order
+#: The ``AttachedSession`` accessors one status-band paint calls, in the order
 #: ``app.py`` calls them (``_effective_label`` first, then the profile/team
 #: segments and the conversation title). This is the frame the user actually
 #: pays for, as opposed to the store-level microbenchmark above.
@@ -185,7 +185,7 @@ def deepcopy_calls(fn: Callable[[], Any]) -> int:
     return count
 
 
-def build_remote(state: FrontendSessionState) -> RemoteSession:
+def build_remote(state: FrontendSessionState) -> AttachedSession:
     """A viewer bound to a real store and nothing else.
 
     The accessors under measurement read only the store, so a socket would add
@@ -197,10 +197,10 @@ def build_remote(state: FrontendSessionState) -> RemoteSession:
         raise AssertionError("the benchmark never takes a session over")
 
     with (
-        patch("local_operator.session.remote.find_runtime_record", lambda *a, **k: (None, None)),
+        patch("local_operator.session.attached.find_runtime_record", lambda *a, **k: (None, None)),
         tempfile.TemporaryDirectory() as config_dir,
     ):
-        remote = RemoteSession(
+        remote = AttachedSession(
             config_dir=Path(config_dir),
             session_id=state.session_id,
             takeover_factory=_never,
@@ -209,13 +209,13 @@ def build_remote(state: FrontendSessionState) -> RemoteSession:
     return remote
 
 
-def band_frame_after(remote: RemoteSession) -> None:
+def band_frame_after(remote: AttachedSession) -> None:
     """One band paint through the accessors AS THEY ARE NOW."""
     for name in BAND_ACCESSORS:
         getattr(remote, name)
 
 
-def band_frame_before(remote: RemoteSession) -> None:
+def band_frame_before(remote: AttachedSession) -> None:
     """One band paint through the WHOLE-STATE CLONE each accessor used to take.
 
     Hand-rolled rather than checked out from the parent commit deliberately:
@@ -314,7 +314,7 @@ def main() -> int:
     print()
     print(f"load average (before band-frame sweep): {load_average()}")
     print()
-    print("REAL status-band frame on a RemoteSession — the accessors the band calls:")
+    print("REAL status-band frame on a AttachedSession — the accessors the band calls:")
     print(f"  {', '.join(BAND_ACCESSORS)}")
     print()
     band_header = (

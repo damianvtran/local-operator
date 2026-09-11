@@ -87,7 +87,7 @@ def _fake_tui_module() -> types.ModuleType:
     ``types.ModuleType("local_operator.tui")`` alone has no ``__path__``, so
     the moment anything imports a SUBMODULE through it Python raises
     ``ModuleNotFoundError: ... is not a package``. That is not hypothetical
-    here: the CLI's viewer factory imports ``session.remote``, which reaches
+    here: the CLI's viewer factory imports ``session.attached``, which reaches
     ``session.frontend_state``, which imports ``local_operator.tui.costs`` —
     so a bare stub turned the whole TUI launch path into an error return that
     these tests then read as "the session was never built".
@@ -1207,7 +1207,9 @@ def test_viewer_birth_config_and_model_resolution_run_off_the_event_loop(
     monkeypatch.setattr("local_operator.cli.ConfigManager", config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
-    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     with patch("sys.argv", ["program", "--hosting", "test", "--model", "captured-a"]):
         assert main() == 0
@@ -1254,7 +1256,9 @@ def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
-    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     with patch("sys.argv", ["program", "--model", "some-model"]):
         assert main() == 0
@@ -1278,7 +1282,7 @@ def test_main_interactive_tty_uses_tui(
         return sentinel_session
 
     # The TUI no longer builds a Session: `lop` boots a VIEWER, so the factory
-    # it awaits returns a RemoteSession and `create_session` is never reached
+    # it awaits returns a AttachedSession and `create_session` is never reached
     # from this path. Both are patched — `create_session` so a regression that
     # revived the owner path fails loudly here, and the viewer builder so the
     # test still observes the factory the CLI actually wires.
@@ -1289,7 +1293,9 @@ def test_main_interactive_tty_uses_tui(
         seen["viewer_session_id"] = session_id
         return sentinel_session
 
-    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
 
     fake_tui = _fake_tui_module()
 
@@ -1668,7 +1674,9 @@ def test_main_interactive_missing_api_key_warns_and_starts(
     setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
-    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", _bare_credential_manager)
@@ -1769,7 +1777,9 @@ def test_main_preflight_env_key_passes(
     setattr(fake_tui, "run_tui", fake_run_tui)
     monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
     monkeypatch.setattr("local_operator.cli.create_session", fake_create_session)
-    monkeypatch.setattr("local_operator.session.remote.RemoteSession.cold", staticmethod(fake_cold))
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
     monkeypatch.setattr("local_operator.cli.CredentialManager", MagicMock())

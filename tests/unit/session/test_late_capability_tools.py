@@ -214,7 +214,7 @@ async def test_the_detached_runtimes_session_shape_still_advertises_ask(tmp_path
     ``spawn_owned_session`` constructs with ``has_ui=False`` — correctly, since
     that flag means "this host drives a rich frontend state store", not "a human
     is present" — and then installs a real ask gate
-    (``OwnedSessionHandle._install_gates``). A human sits at the terminal (or
+    (``ServingSessionHandle._install_gates``). A human sits at the terminal (or
     reaches it over the control socket) and can answer, but the old second
     clause in ``build_ask_tool`` vetoed the tool on the flag, so ``ask`` reached
     no model on the path every interactive session has taken since 0.45.0.

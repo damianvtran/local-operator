@@ -33,9 +33,9 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import (
@@ -69,7 +69,7 @@ async def _stand_up(config: Path, ids: list[str]) -> dict[str, RuntimeServer]:
             [user_message(f"{sid} question"), assistant_message(f"{sid} saved answer")],
         )
         owner = build_session(directory, ScriptedStream([]), cwd=config)
-        handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+        handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
         server = RuntimeServer(handle, kind="daemon")
         await server.start_in_process()
         servers[sid] = server
@@ -100,7 +100,7 @@ async def test_visited_conversations_do_not_hold_their_runtimes_open(
         raise AssertionError("a sidebar viewer never takes over a session")
 
     async def resume(sid):
-        return await RemoteSession.connect(
+        return await AttachedSession.connect(
             servers[sid]._record,
             sid,
             config_dir=config,
@@ -169,7 +169,7 @@ async def test_an_empty_conversation_visited_and_left_retires_its_runtime(
     empty_dir = config / "sessions" / "untitled"
     empty_dir.mkdir(parents=True, exist_ok=True)
     owner = build_session(empty_dir, ScriptedStream([]), cwd=config)
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
     empty = RuntimeServer(handle, kind="daemon")
     await empty.start_in_process()
     servers["untitled"] = empty
@@ -184,7 +184,7 @@ async def test_an_empty_conversation_visited_and_left_retires_its_runtime(
         raise AssertionError("a sidebar viewer never takes over a session")
 
     async def resume(sid):
-        return await RemoteSession.connect(
+        return await AttachedSession.connect(
             servers[sid]._record,
             sid,
             config_dir=config,

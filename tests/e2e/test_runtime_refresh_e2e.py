@@ -8,7 +8,7 @@ the [/stop, then send again] message. The user should never need to run
 
 These tests boot the PRODUCTION ``process.py`` in a subprocess against a
 fake install prefix (``LOP_BUILD_PREFIX`` → a temp dir carrying a
-``.lop-source`` marker), attach the production ``RemoteSession`` under the
+``.lop-source`` marker), attach the production ``AttachedSession`` under the
 real ``OperatorApp``, and then FLIP the marker the way ``lop-update`` does.
 Asserted on the things a user would notice: the old pid is gone, the viewer
 is bound to a NEW pid, and nothing on screen says ``/stop``, ``interrupted``
@@ -161,7 +161,7 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
     record must name a NEW pid, the viewer must be bound (not cold), and the
     ledger must contain none of :data:`FORBIDDEN`.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     _stale_child_env(monkeypatch)
     config = headless_tui_env
@@ -185,7 +185,7 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
         assert old_pid == child.pid
         assert record.source_ref == OLD_MARKER.split()[0]
 
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record, session_id, config_dir=config, takeover_factory=_never_take_over
         )
         assert not viewer.is_cold
@@ -269,7 +269,7 @@ async def test_a_busy_runtime_waits_and_refreshes_when_its_turn_ends(
     none of :data:`FORBIDDEN` on screen at any point, and the turn's reply
     persisted (the update did not cost the work).
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     _stale_child_env(monkeypatch)
     config = headless_tui_env
@@ -292,7 +292,7 @@ async def test_a_busy_runtime_waits_and_refreshes_when_its_turn_ends(
     try:
         record = await _wait_for_record(config, session_id)
         old_pid = int(record.pid)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record, session_id, config_dir=config, takeover_factory=_never_take_over
         )
 

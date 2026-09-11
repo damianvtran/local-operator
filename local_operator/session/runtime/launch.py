@@ -496,11 +496,11 @@ async def engage_runtime(
     delivery attempt, since those are the caller's to report.
 
     PREEMPTION (``preempt`` + ``preempt_budget_s``, set together or not at
-    all). An engage started on behalf of nobody — ``RemoteSession``'s
+    all). An engage started on behalf of nobody — ``AttachedSession``'s
     background bind — runs while holding a lock that a *foreground* caller
     must queue on, so its generous ``deadline_s`` is only defensible while
     nobody is waiting. When the caller passes an event, this loop treats it
-    the way ``RemoteSession._await_frontend_preemptible`` treats the same
+    the way ``AttachedSession._await_frontend_preemptible`` treats the same
     signal: on the first pass that observes it set, the deadline is cut to
     ``now + preempt_budget_s``.
 

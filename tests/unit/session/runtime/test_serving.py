@@ -23,12 +23,12 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.session.protocol import RuntimeLocality
-from local_operator.session.runtime import owned as owned_mod
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.runtime import serving as serving_mod
+from local_operator.session.runtime.serving import ServingSessionHandle
 
 
 class FakeSession:
-    """The slice of Session the OwnedSessionHandle touches in these tests."""
+    """The slice of Session the ServingSessionHandle touches in these tests."""
 
     # Runtime role (SessionProtocol). This fake stands in for an OWNER:
     # it carries no attached runtime, which is what the absent legacy
@@ -207,7 +207,7 @@ class FakeSession:
         )
 
 
-def make_handle(auto_approve: bool = False) -> tuple[OwnedSessionHandle, FakeSession]:
+def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeSession]:
     # The handle records whichever loop it is built on; inside an async test
     # that is the running loop, and the sync construction test never awaits so
     # a fresh loop is fine. get_event_loop_policy().get_event_loop() avoids the
@@ -217,7 +217,7 @@ def make_handle(auto_approve: bool = False) -> tuple[OwnedSessionHandle, FakeSes
     except RuntimeError:
         loop = asyncio.new_event_loop()
     session = FakeSession()
-    handle = OwnedSessionHandle(session, loop, cwd="/tmp", auto_approve=auto_approve)
+    handle = ServingSessionHandle(session, loop, cwd="/tmp", auto_approve=auto_approve)
     return handle, session
 
 
@@ -489,7 +489,7 @@ async def test_dispose_rejects_queued_admissions_without_unhandled_task_error() 
 
 @pytest.mark.asyncio
 async def test_queue_overflow_rejects_before_admission(monkeypatch) -> None:
-    monkeypatch.setattr(owned_mod, "MAX_QUEUED_PROMPTS", 1)
+    monkeypatch.setattr(serving_mod, "MAX_QUEUED_PROMPTS", 1)
     handle, _ = make_handle()
     assert await handle.prompt("first") == "prompt admitted"
     with pytest.raises(RuntimeError, match="prompt queue is full"):
@@ -534,14 +534,14 @@ async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
 @pytest.mark.asyncio
 async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
     """The child drain cannot deny WAITING_INPUT ahead of its 30s policy."""
-    monkeypatch.setattr(owned_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(serving_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
     handle, _ = make_handle(auto_approve=False)
     waiting = asyncio.ensure_future(handle._approval_gate("bash", "one"))
     await asyncio.sleep(0)
     assert handle.is_busy() is True
     assert await waiting is False
     assert handle.is_busy() is False
-    assert owned_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+    assert serving_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
 
 
 @pytest.mark.asyncio
@@ -1019,7 +1019,7 @@ def test_next_wake_due_at_reads_the_live_scheduler() -> None:
         session = SimpleNamespace(
             session_id="s", wake_scheduler=scheduler, subscribe=lambda h: None
         )
-        handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+        handle = ServingSessionHandle.__new__(ServingSessionHandle)
         handle._session = session  # type: ignore[attr-defined]
         handle._loop = loop  # type: ignore[attr-defined]
         assert handle.next_wake_due_at() == 2_000
@@ -1063,7 +1063,7 @@ async def test_a_parked_gate_spawns_no_desktop_notifier_under_the_suite_gate(
         spawned.append(argv)
         return True
 
-    monkeypatch.setattr(owned_mod, "spawn_detached", _record, raising=False)
+    monkeypatch.setattr(serving_mod, "spawn_detached", _record, raising=False)
     import local_operator.tui.notify as notify_mod
 
     monkeypatch.setattr(notify_mod, "spawn_detached", _record, raising=False)
@@ -1237,7 +1237,7 @@ def test_the_toast_body_never_repeats_the_tool_name(
     import asyncio
     from types import SimpleNamespace
 
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(
@@ -1246,7 +1246,7 @@ def test_the_toast_body_never_repeats_the_tool_name(
     )
     monkeypatch.setattr("local_operator.tui.notify.notifications_enabled", lambda *a, **k: True)
 
-    handle = OwnedSessionHandle.__new__(OwnedSessionHandle)
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
     handle._session = SimpleNamespace(conversation_name="a session")  # type: ignore[attr-defined]
     handle._registrant = None  # type: ignore[attr-defined]
     handle._parked_announcement = None  # type: ignore[attr-defined]
@@ -1282,11 +1282,11 @@ async def test_a_compaction_that_refuses_corrects_its_own_receipt(tmp_path) -> N
     from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
     from local_operator.providers.clients import MockClient
     from local_operator.session.frontend_state import SlashResult
-    from local_operator.session.runtime.owned import OwnedSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
     from tests.e2e.harness import build_session
 
     session = build_session(tmp_path, MockClient().stream)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     try:
         result = await handle._slash_result("compact", "", SlashResult)
         assert result.text == "compacting context…"
@@ -1731,7 +1731,7 @@ async def test_the_receipt_names_children_that_refused_to_die(tmp_path) -> None:
 
     session.jobs.cancel = flaky_cancel  # type: ignore[assignment]
 
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     receipt = await handle.abort()
 
     # The rows are the ground truth, exactly as QA read them.
@@ -1806,7 +1806,7 @@ async def test_the_abort_op_really_terminates_live_children(tmp_path) -> None:
     await asyncio.sleep(0.2)
     assert session.running_subagents() == 3
 
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
     receipt = await handle.abort()
 
     def statuses() -> list[str]:

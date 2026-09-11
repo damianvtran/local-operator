@@ -8,7 +8,7 @@ answer with, and a signal cannot say *"stop after this ``git push`` finishes"*.
 
 This is the composition root that closes the gap, and it is deliberately the
 SAME one the daemon's phone-started sessions use: an
-:class:`~local_operator.session.runtime.owned.OwnedSessionHandle` over the exec
+:class:`~local_operator.session.runtime.serving.ServingSessionHandle` over the exec
 session, wrapped in a :class:`~local_operator.session.runtime.server.RuntimeServer`
 that publishes the record and serves the authenticated loopback socket. Nothing
 here is a third ``SessionHandle`` implementation — the whole control vocabulary
@@ -25,10 +25,10 @@ exec ledger, not discovery. Publication and gate installation are separate:
 function-local on the CLI path so parsing/help does not load the runtime stack.
 
 **What ``--control`` changes about the run itself.** The owned handle installs
-its own approval/ask gates (``OwnedSessionHandle._install_gates``), replacing
+its own approval/ask gates (``ServingSessionHandle._install_gates``), replacing
 the CLI's headless gate. A tool approval therefore PARKS for an attached
 supervisor to answer — up to
-:data:`~local_operator.session.runtime.owned.PENDING_REQUEST_TIMEOUT_S` — where
+:data:`~local_operator.session.runtime.serving.PENDING_REQUEST_TIMEOUT_S` — where
 an ordinary headless exec denies instantly for want of a tty. That is the point
 of the surface (a supervisor can now answer), but it is a real behavioural
 difference, so it is opt-in with the flag and ``--yolo`` still short-circuits
@@ -42,8 +42,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
-    from local_operator.session.runtime.owned import OwnedSessionHandle
     from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class ExecControl:
     that ordering is load-bearing rather than tidy.
     """
 
-    handle: "OwnedSessionHandle"
+    handle: "ServingSessionHandle"
     runtime: "RuntimeServer"
     session_id: str
     pid: int
@@ -168,14 +168,14 @@ async def start_exec_control(
 
     from local_operator.paths import config_dir
     from local_operator.session.runtime import registry
-    from local_operator.session.runtime.owned import (
-        OwnedSessionHandle,
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import (
+        ServingSessionHandle,
         attach_gate_config_watch,
     )
-    from local_operator.session.runtime.server import RuntimeServer
 
     loop = asyncio.get_running_loop()
-    handle = OwnedSessionHandle(
+    handle = ServingSessionHandle(
         session,
         loop,
         cwd=cwd,

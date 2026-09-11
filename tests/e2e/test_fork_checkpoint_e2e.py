@@ -10,12 +10,12 @@ un-attachable — its own switched-to viewer half-bound (RPCs landed, no state
 ever painted), every second terminal refused outright. This stage drives that
 exact shape against REAL runtime subprocesses, the way ``lop`` does:
 
-* the TUI's viewer factory (cold ``RemoteSession`` engaged into a
+* the TUI's viewer factory (cold ``AttachedSession`` engaged into a
   ``local_operator.session.runtime.process`` child by ``engage_runtime``);
 * a parent transcript whose newest checkpoint names the parent and carries a
   measured context reading;
 * ``/fork`` in switch mode, then ``/model`` on the fork;
-* a second follower ``RemoteSession.connect``-ing to the live fork.
+* a second follower ``AttachedSession.connect``-ing to the live fork.
 
 Only the provider is a mock (the ``test`` hosting). Everything else — the fork
 copy, the lease, the spawn, the socket, the sync, the band — is production.
@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.tui.app import OperatorApp
 from tests.e2e.harness import wait_for_adoption
 from tests.e2e.test_fork_e2e import _never_take_over, _pump
@@ -166,7 +166,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
     async def take_over() -> Any:
         raise RuntimeError("a viewer never takes over a session")
 
-    async def viewer_factory(resume_id: str | None) -> RemoteSession:
+    async def viewer_factory(resume_id: str | None) -> AttachedSession:
         # ``cli.viewer_factory`` in miniature: attach when a live record
         # exists, else open cold and let the mount engage start a runtime.
         session_id = resume_id or "newsession01"
@@ -174,10 +174,10 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
         if resume_id:
             record, _ = await asyncio.to_thread(find_runtime_record, config, session_id)
         if record is not None:
-            return await RemoteSession.connect(
+            return await AttachedSession.connect(
                 record, session_id, config_dir=config, takeover_factory=take_over
             )
-        return await RemoteSession.cold(
+        return await AttachedSession.cold(
             session_id, config_dir=config, cwd=str(workspace), takeover_factory=take_over
         )
 
@@ -188,7 +188,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
         provider_controller=controller,
         resume_factory=viewer_factory,
     )
-    follower: RemoteSession | None = None
+    follower: AttachedSession | None = None
     try:
         with bounded(150, "fork with inherited checkpoint binds, switches, admits a follower"):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -206,7 +206,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
                     lambda: app._session is not None and app._session.session_id != PARENT_ID,
                 )
                 fork = app._session
-                assert isinstance(fork, RemoteSession)
+                assert isinstance(fork, AttachedSession)
                 fork_id = fork.session_id
                 status = app._status
                 # THE regression: the fork's runtime must bind. Before #573
@@ -261,7 +261,7 @@ async def test_a_fork_with_an_inherited_checkpoint_binds_switches_and_admits_fol
                 # A SECOND terminal attaches as a follower (#573's report).
                 record, _ = await asyncio.to_thread(find_runtime_record, config, fork_id)
                 assert record is not None
-                follower = await RemoteSession.connect(
+                follower = await AttachedSession.connect(
                     record, fork_id, config_dir=config, takeover_factory=_never_take_over
                 )
                 assert follower.frontend_state.session_id == fork_id
@@ -304,7 +304,7 @@ async def test_a_fork_of_a_fork_serves_its_own_id(headless_tui_env: Path, worksp
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    viewer: RemoteSession | None = None
+    viewer: AttachedSession | None = None
     try:
         with bounded(90, "fork-of-a-fork runtime serves its own id"):
             record = None
@@ -318,7 +318,7 @@ async def test_a_fork_of_a_fork_serves_its_own_id(headless_tui_env: Path, worksp
             # ``find_runtime_record`` needs the liveness marker the child wrote.
             found, _ = await asyncio.to_thread(find_runtime_record, config, second)
             assert found is not None
-            viewer = await RemoteSession.connect(
+            viewer = await AttachedSession.connect(
                 found, second, config_dir=config, takeover_factory=_never_take_over
             )
             assert viewer.frontend_state.session_id == second

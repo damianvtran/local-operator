@@ -6,8 +6,8 @@ the secret, and those commands run wherever the session's turn loop runs. A
 session that runs its tools in this process therefore executes the verbs
 against its own store (``Session.credential_op``); a session that is a window
 onto a runtime routes them there
-(``RemoteSession.credential_op`` → the runtime's
-``OwnedSessionHandle.credential_op`` → this same table).
+(``AttachedSession.credential_op`` → the runtime's
+``ServingSessionHandle.credential_op`` → this same table).
 
 Before this module existed, the table lived only on the runtime's handle, and
 the capability was declared on the viewer protocol alone — so the codebase

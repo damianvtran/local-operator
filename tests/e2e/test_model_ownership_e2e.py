@@ -37,7 +37,7 @@ async def test_an_unresolved_model_flag_does_not_wedge_the_conversation(headless
     """
     import asyncio
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from tests.e2e.watchdog import bounded
 
     config = headless_tui_env
@@ -46,7 +46,7 @@ async def test_an_unresolved_model_flag_does_not_wedge_the_conversation(headless
     async def no_takeover():
         raise AssertionError("viewer must not become the owner")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "firstrunflag001",
         config_dir=config,
         cwd=str(config),
@@ -80,7 +80,7 @@ async def test_competing_cold_resumes_acknowledge_explicit_model_on_winning_owne
     import asyncio
 
     from local_operator.harness.types import ModelSpec
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from tests.e2e.watchdog import bounded
     from tests.unit.session.test_model_ownership import session
 
@@ -96,10 +96,10 @@ async def test_competing_cold_resumes_acknowledge_explicit_model_on_winning_owne
     async def no_takeover():
         raise AssertionError("viewer must not become the owner")
 
-    first = await RemoteSession.cold(
+    first = await AttachedSession.cold(
         sid, config_dir=config, cwd=str(config), takeover_factory=no_takeover
     )
-    second = await RemoteSession.cold(
+    second = await AttachedSession.cold(
         sid,
         config_dir=config,
         cwd=str(config),
@@ -336,7 +336,7 @@ async def test_cold_viewer_carries_birth_model_into_real_detached_owner(
 ):
     import asyncio
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from tests.e2e.watchdog import bounded
 
     config = ConfigManager(headless_tui_env)
@@ -346,7 +346,7 @@ async def test_cold_viewer_carries_birth_model_into_real_detached_owner(
     async def never_take_over():
         raise AssertionError("viewer must remain a viewer")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "modelbirth0001",
         config_dir=headless_tui_env,
         cwd=str(headless_tui_env),

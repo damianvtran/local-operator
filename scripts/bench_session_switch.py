@@ -433,7 +433,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     async def run() -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         with (
-            patch("local_operator.session.remote.RemoteSession", SidebarRemote),
+            patch("local_operator.session.attached.AttachedSession", SidebarRemote),
             patch("local_operator.tui.session_catalog.load_catalog", return_value=entries),
             # Prewarm reads owner records off disk; the cache states it would
             # produce are modelled explicitly by the `warm` pattern instead.

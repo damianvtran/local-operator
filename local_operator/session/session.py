@@ -2167,7 +2167,7 @@ class Session:
         #: Sync, non-raising by contract (the pipeline guards it anyway).
         self.on_turn_settled: Callable[[], None] | None = None
         #: Flips the discovery record's ``started`` bit; wired by the runtime
-        #: handle (``OwnedSessionHandle._publish_session_started``) and probed
+        #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
         self._publish_session_started: Callable[[], None] | None = None
         #: Guards the once-per-lifetime peer-inbox drain at the top of
@@ -11545,7 +11545,7 @@ class Session:
         Everything else the registry calls LIVE is already read per use
         (``fork.*``, ``web_*`` knobs, ``bash.shell``) and needs no apply here.
         ``tool_approval_mode`` is LIVE but owned by the HOST's gate
-        (``OwnedSessionHandle`` / ``OperatorApp``), not the session.
+        (``ServingSessionHandle`` / ``OperatorApp``), not the session.
         Everything the registry calls NEW_LAUNCH or NEW_SESSIONS is
         deliberately ignored.
 

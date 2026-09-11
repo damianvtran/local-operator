@@ -13,15 +13,15 @@ from typing import Any
 
 import pytest
 
-import local_operator.session.remote as remote_module
+import local_operator.session.attached as remote_module
 from local_operator.harness.types import AgentEndEvent, AgentStartEvent
+from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FrontendSessionState
-from local_operator.session.remote import RemoteSession
 
 
-def _facade(tmp_path, monkeypatch, *, can_go_cold: bool = False) -> RemoteSession:
+def _facade(tmp_path, monkeypatch, *, can_go_cold: bool = False) -> AttachedSession:
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -33,7 +33,7 @@ def _facade(tmp_path, monkeypatch, *, can_go_cold: bool = False) -> RemoteSessio
     return remote
 
 
-async def _cancel_recovery(remote: RemoteSession) -> None:
+async def _cancel_recovery(remote: AttachedSession) -> None:
     if remote._recovery_task is not None:
         remote._recovery_task.cancel()
         try:
@@ -277,12 +277,12 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
         raise RuntimeError("the lease is held by another follower")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=failing_takeover,
     )
-    # The surface the operator actually uses: RemoteSession.connect defaults
+    # The surface the operator actually uses: AttachedSession.connect defaults
     # to "terminal", so this is what a real TUI viewer looks like.
     assert remote._can_go_cold is False
     remote._streaming = True
@@ -328,7 +328,7 @@ async def test_the_terminal_bound_does_not_fire_when_no_turn_was_live(
         raise RuntimeError("no successor yet")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=failing_takeover,
@@ -468,7 +468,7 @@ def _live_record() -> Any:
     )
 
 
-def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[RemoteSession, list[float]]:
+def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[AttachedSession, list[float]]:
     """A terminal viewer whose owner accepts the dial and then never speaks.
 
     Bounds are compressed so the exits are exercised in milliseconds; every
@@ -481,7 +481,7 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[RemoteSession, list[flo
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),
@@ -506,7 +506,7 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[RemoteSession, list[flo
     return remote, dials
 
 
-async def _await_verdict(remote: RemoteSession) -> None:
+async def _await_verdict(remote: AttachedSession) -> None:
     """Wait on the STATE, never on the clock."""
     for _ in range(600):
         if not remote._recovering:
@@ -674,7 +674,7 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
         attempts.append(1)
         raise RuntimeError("the lease is held by another follower")
 
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=failing_takeover,
@@ -732,7 +732,7 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
         attempts.append(1)
         raise RuntimeError("the lease is held by another follower")
 
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=failing_takeover,
@@ -773,7 +773,7 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
     monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 60.0)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
-    remote = RemoteSession(
+    remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
         takeover_factory=lambda: asyncio.sleep(0, result=None),

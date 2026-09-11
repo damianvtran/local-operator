@@ -451,7 +451,7 @@ ladder now have one.
 | `_effort_for` refit | `configure.py:1950-1965` | More models have ladders to re-fit onto; already guards membership. | Yes |
 | `_lower_effort` (empty-truncation retreat) | `harness/loop.py:143-157` | Gains a retreat path on models that previously had none — a strict improvement. | Yes |
 | `effort_ceiling` clamp | `harness/loop.py:896-905`, `configure.py:3534` | Both index the ladder only after `in ladder` checks. | Yes |
-| `owned.set_effort` | `session/runtime/owned.py:700` | Phone can now set effort on these models. | Yes |
+| `owned.set_effort` | `session/runtime/serving.py:700` | Phone can now set effort on these models. | Yes |
 | `_ladder` / `_current_effort` | `mobile/tui_handle.py:1041-1053` | Reads the spec; already `try/except`. | Yes |
 | `Session._lowest_effort` | `session/session.py:7303-7308` | **Errand/naming calls now clamp to the bottom rung on ~99 more models.** §5.4 | Mostly — check |
 | `ModelSpec.reasoning` | `configure.py:365` → read only at `tui/app.py:20339` | Display only; one reader in the tree. | Yes |

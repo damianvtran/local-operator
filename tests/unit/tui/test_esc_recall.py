@@ -10,7 +10,7 @@ immediate edit-and-resend.
 
 The pairing is by MESSAGE ID, with object identity kept as a fast path. The
 app hands the session the very ``Message`` it queued (``steer_message``), and
-the in-process ``Session`` gives that object back — but a ``RemoteSession``
+the in-process ``Session`` gives that object back — but a ``AttachedSession``
 rebuilds its queue snapshot out of serialized frontend state, so on every
 daemon-attached session the objects differ and only the id survives. The id is
 what the recall already crosses the process boundary on (``command_id``), so
@@ -408,11 +408,11 @@ async def test_the_session_recall_is_identity_scoped(tmp_path: Path) -> None:
 
 
 class _RemoteLikeStreaming(_Streaming):
-    """A mid-turn fake with ``RemoteSession``'s queued_steering semantics.
+    """A mid-turn fake with ``AttachedSession``'s queued_steering semantics.
 
     The in-process ``Session`` drains and re-puts the very objects it was
     handed, so a snapshot's entries ARE the app's messages.
-    ``RemoteSession.queued_steering`` cannot do that: the queue lives in
+    ``AttachedSession.queued_steering`` cannot do that: the queue lives in
     another process and reaches this one as serialized frontend state, so it
     rebuilds a fresh ``Message`` per item on every call. Equal ids, never the
     same object — which is what the TUI's pointer-identity match silently
@@ -443,7 +443,7 @@ class _RemoteLikeStreaming(_Streaming):
 class _IdLessStreaming(_Streaming):
     """A follower whose OWNER is too old to put ``id`` on its queued-steer rows.
 
-    ``RemoteSession.queued_steering`` substitutes ``UNIDENTIFIED_STEER_ID`` for
+    ``AttachedSession.queued_steering`` substitutes ``UNIDENTIFIED_STEER_ID`` for
     such an item, so every id-less entry arrives under one key. Modelled with
     the real substitution rather than a hand-written literal, so a rename of
     the constant moves this fake with it.
@@ -453,7 +453,7 @@ class _IdLessStreaming(_Streaming):
         self._steering_queue.append({"text": message.text})  # no id on the wire
 
     def queued_steering(self) -> list[Any]:
-        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+        from local_operator.session.attached import UNIDENTIFIED_STEER_ID
 
         return [
             Message.user(
@@ -473,7 +473,7 @@ async def test_esc_recalls_a_steer_from_a_session_that_rebuilds_its_queue() -> N
     """The daemon case: equal-but-distinct messages must still be recallable.
 
     Pointer identity was a single-process assumption. Every session attached
-    to a ``kind=daemon`` runtime goes through ``RemoteSession``, whose
+    to a ``kind=daemon`` runtime goes through ``AttachedSession``, whose
     ``queued_steering`` rebuilds its entries, so the match found nothing and
     Esc-recall was a total, SILENT no-op there — the message stayed queued and
     was delivered anyway, while the user believed they had taken it back.
@@ -505,7 +505,7 @@ async def test_esc_recalls_a_steer_from_a_session_that_rebuilds_its_queue() -> N
 async def test_an_ambiguous_queue_id_declines_instead_of_guessing() -> None:
     """An id that names two queue entries is not an identity, so it must not match.
 
-    ``RemoteSession.queued_steering`` substitutes the literal ``remote-steer``
+    ``AttachedSession.queued_steering`` substitutes the literal ``remote-steer``
     for a wire item carrying no id, and any wire that repeats an id has the
     same shape: one key, several messages. Matching on it would unsend one
     message while handing the composer another one's text. The recall declines
@@ -620,7 +620,7 @@ async def test_an_id_less_queue_entry_is_answered_rather_than_ignored() -> None:
     """`UNIDENTIFIED_STEER_ID` names every id-less entry, so it names none.
 
     Round-1 review MAJOR-3. The guard keyed on the HELD id — always an
-    app-minted uuid4 — which can never equal the placeholder a `RemoteSession`
+    app-minted uuid4 — which can never equal the placeholder a `AttachedSession`
     substitutes for a wire item with no id. So the case the guard's own
     docstring was written around never reached it, and the press was a silent
     dropped keystroke: exactly the D1 failure the PR claimed to have closed.
@@ -630,7 +630,7 @@ async def test_an_id_less_queue_entry_is_answered_rather_than_ignored() -> None:
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
         await _submit(pilot, editor, "please stop")
-        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+        from local_operator.session.attached import UNIDENTIFIED_STEER_ID
 
         assert [m.id for m in session.queued_steering()] == [UNIDENTIFIED_STEER_ID]
         assert app._held_steer_blocks[-1][0].id != UNIDENTIFIED_STEER_ID, "ids cannot be compared"

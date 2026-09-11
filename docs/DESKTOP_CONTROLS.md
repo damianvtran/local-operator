@@ -240,7 +240,7 @@ compatibility is asserted by the credential change.
 ## Verification and remaining UI gate
 
 `tests/e2e/test_desktop_controls.py` drives actual HTTP + canonical Session,
-OwnedSessionHandle/RuntimeServer/AttachClient, command census, secret lifecycle,
+ServingSessionHandle/RuntimeServer/AttachClient, command census, secret lifecycle,
 loop count/goal/cancellation, aside/adoption, fork, selected stop and real stdio MCP.
 External model replies alone are scripted. Existing desktop session/spawn tests
 cover real detached subprocess admission, stale gate answers, replay/reconnect,

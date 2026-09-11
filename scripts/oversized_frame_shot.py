@@ -138,7 +138,7 @@ async def _real_refusal(images: list[ImageContent]) -> str:
     figure refits successfully and returns no sentence at all — which would
     read as a passing capture of a frame the product cannot reach.
     """
-    from local_operator.session.remote import _image_to_wire
+    from local_operator.session.attached import _image_to_wire
 
     frame = {
         "op": "prompt",
@@ -213,7 +213,7 @@ async def main() -> None:
                 ]
 
                 async def deliver_through_the_refit(text, images=None, **kwargs):
-                    from local_operator.session.remote import _image_to_wire
+                    from local_operator.session.attached import _image_to_wire
 
                     session.prompts.append(text)
                     await fit_request_frame(

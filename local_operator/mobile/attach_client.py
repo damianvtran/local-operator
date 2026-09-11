@@ -13,7 +13,7 @@ Design constraints baked in:
 - **No auto-reconnect.** Owner death (socket EOF) is terminal for the
   CONNECTION — never papered over by redialing a pid that may have been
   reused. The callback fires once and the client is dead. What the HOST does
-  next changed in v4: ``RemoteSession`` runs a silent reattach-or-takeover
+  next changed in v4: ``AttachedSession`` runs a silent reattach-or-takeover
   loop (re-discover the owner, or become it through the normal resume
   factory) instead of showing a decision card, but each loop iteration still
   builds a FRESH client against a freshly discovered record.
@@ -79,7 +79,7 @@ STOPPED_REASON = "owner stopped the session"
 #: from it. Distinct from :data:`STOPPED_REASON` on purpose — a stop parks the
 #: viewer in the stopped state (``/resume`` reopens it); a refresh means "a
 #: fresh runtime is owed, engage one now". Nothing was interrupted: the owner
-#: retires only when idle (``OwnedSessionHandle.may_refresh``).
+#: retires only when idle (``ServingSessionHandle.may_refresh``).
 RETIRING_REASON = "owner retired for a newer build"
 
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
@@ -245,7 +245,7 @@ _MIN_VIABLE_IMAGE_BUDGET_BYTES = 32 * 1024
 #: A context variable rather than a return value because the refit happens four
 #: call frames below the surface that renders transcripts — ``fit_request_frame``
 #: is reached through ``AttachClient._request_frame`` → ``send_command`` →
-#: ``RemoteSession.prompt``, each of which returns a receipt string with no room
+#: ``AttachedSession.prompt``, each of which returns a receipt string with no room
 #: for a second value, and widening all four signatures to carry a UI detail
 #: through the transport would put presentation concerns in three layers that
 #: currently have none.
@@ -747,7 +747,7 @@ class AttachClient:
         self._locality = locality
         # v4 events mode: subscribe to the owner's raw AgentEvent relay. The
         # callbacks receive the WIRE dicts — deserialization back into concrete
-        # AgentEvent subclasses is RemoteSession's job, so this transport stays
+        # AgentEvent subclasses is AttachedSession's job, so this transport stays
         # pydantic-free and cheap to import (module docstring contract).
         self._events = events
         self._on_event = on_event
@@ -1424,7 +1424,7 @@ class AttachClient:
         that is ABANDONING a connection it judged unusable and intends to keep
         running: there the callback reads as owner loss and starts a recovery
         that redials the same runtime. The refused-sync path in
-        ``RemoteSession`` is that case.
+        ``AttachedSession`` is that case.
         """
         self._on_disconnected = lambda _reason: None
         self.close()

@@ -4669,7 +4669,7 @@ def main() -> int:
                 return 1
 
             # Cold live-session resumes now stay on the ordinary TUI launch
-            # path. ``create_session(has_ui=True)`` returns a RemoteSession when
+            # path. ``create_session(has_ui=True)`` returns a AttachedSession when
             # another process owns the transcript, so the STANDARD OperatorApp
             # renders it with no standalone attach app, exit-75 relaunch, or
             # visible mode. The shared factory still protects the sole-writer
@@ -5207,7 +5207,7 @@ def main() -> int:
 
                 from local_operator.harness.types import ModelSpec
                 from local_operator.mobile.attach_client import find_runtime_record
-                from local_operator.session.remote import RemoteSession
+                from local_operator.session.attached import AttachedSession
                 from local_operator.session_factory import resolve_hosting_model
 
                 config_directory = config_manager.config_dir
@@ -5244,12 +5244,12 @@ def main() -> int:
                     # A viewer must never win the transcript lease — the
                     # runtime owns it, and a TUI holding one would look like a
                     # runtime to the wake supervisor's live-record rule. Kept
-                    # wired (RemoteSession requires a factory) and deliberately
+                    # wired (AttachedSession requires a factory) and deliberately
                     # unreachable: `_can_go_cold` routes owner loss to the cold
                     # state instead of to a takeover.
                     #
                     # THE OWNER PATH IS GONE FROM `lop`. This factory only ever
-                    # returns a RemoteSession — attached when a live record
+                    # returns a AttachedSession — attached when a live record
                     # exists, cold otherwise — so the TUI process never builds
                     # a `Session`, never takes the lease, and never writes the
                     # transcript. That is what makes "at most one runtime per
@@ -5271,7 +5271,7 @@ def main() -> int:
                 degraded_reason = ""
                 if record is not None:
                     try:
-                        attached = await RemoteSession.connect(
+                        attached = await AttachedSession.connect(
                             record,
                             session_id,
                             config_dir=config_directory,
@@ -5312,7 +5312,7 @@ def main() -> int:
                             session_id,
                             degraded_reason,
                         )
-                viewer = await RemoteSession.cold(
+                viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
                     cwd=os.getcwd(),

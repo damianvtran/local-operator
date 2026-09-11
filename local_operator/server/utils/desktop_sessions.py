@@ -31,6 +31,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
+from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import load_catalog
@@ -39,7 +40,6 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     sync_wire_payload,
 )
-from local_operator.session.remote import RemoteSession
 from local_operator.session.retention import DESKTOP_MARKER_NAME
 from local_operator.session.transcript import read_transcript_page
 
@@ -73,7 +73,7 @@ class DesktopSubscription:
 class DesktopSessionBridge:
     def __init__(self, root: Path, session_id: str, cwd: str) -> None:
         self.root, self.session_id, self.cwd = root, session_id, cwd
-        self.remote: RemoteSession | None = None
+        self.remote: AttachedSession | None = None
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
         self.replay: deque[tuple[dict[str, Any], int]] = deque()
@@ -89,13 +89,13 @@ class DesktopSessionBridge:
         self.attention: dict[str, Any] = {}
         self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
 
-    async def acquire(self) -> RemoteSession:
+    async def acquire(self) -> AttachedSession:
         async with self.lock:
             self.users += 1
             self.touched = time.monotonic()
             try:
                 if self.remote is None:
-                    remote = await RemoteSession.cold(
+                    remote = await AttachedSession.cold(
                         self.session_id,
                         config_dir=self.root,
                         cwd=self.cwd,

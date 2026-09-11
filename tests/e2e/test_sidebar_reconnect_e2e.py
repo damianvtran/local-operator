@@ -1,7 +1,7 @@
 """A viewer that lost its owner reconnects itself, against a real runtime.
 
 WHAT THIS STAGE ADDS OVER THE UNIT TESTS. The unit file
-(``tests/unit/tui/test_sidebar_connect_retry.py``) drives a `RemoteSession`
+(``tests/unit/tui/test_sidebar_connect_retry.py``) drives a `AttachedSession`
 subclass that reproduces the silent-bind outcome directly. It pins the policy,
 but it cannot prove the state it simulates is the one a real disruption
 produces. These tests take the disruption itself — a real `RuntimeServer`, real
@@ -37,9 +37,9 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
-from local_operator.session.runtime.owned import OwnedSessionHandle
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.types import ATTACH_MAX_CLIENTS
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
@@ -80,7 +80,7 @@ async def _runtime(config: Path, session_id: str) -> RuntimeServer:
         [user_message(f"{session_id} q"), assistant_message(f"{session_id} saved answer")],
     )
     owner = build_session(directory, ScriptedStream([]), cwd=config)
-    handle = OwnedSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
+    handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(config))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     return server
@@ -156,7 +156,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
         return (server._record, server._record.pid) if server else (None, None)
 
     async def resume(session_id):
-        return await RemoteSession.connect(
+        return await AttachedSession.connect(
             servers[session_id]._record,
             session_id,
             config_dir=config,
@@ -177,7 +177,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
             # protocol, but the recovery state under test (`is_cold`,
             # `_recovering`) is the viewer facade's.
             viewer = source.session
-            assert isinstance(viewer, RemoteSession)
+            assert isinstance(viewer, AttachedSession)
             assert not source.display_only
             assert not viewer.is_cold
             # PRECONDITION for the counter assertion below: the gate really is
@@ -190,7 +190,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
             # runtime: the ordinary shape of a multiplexed host, and enough to
             # evict the sidebar's viewer through the LRU cap.
             hogs = [
-                await RemoteSession.connect(
+                await AttachedSession.connect(
                     servers["target"]._record,
                     "target",
                     config_dir=config,
@@ -277,7 +277,7 @@ async def test_a_plain_socket_loss_reconnects_with_no_attach_pressure(
         return (server._record, server._record.pid) if requested == session_id else (None, None)
 
     with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):
-        viewer = await RemoteSession.saved_preview(
+        viewer = await AttachedSession.saved_preview(
             session_id,
             config_dir=config,
             cwd=str(config),

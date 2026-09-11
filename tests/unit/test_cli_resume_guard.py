@@ -82,7 +82,7 @@ def test_startup_import_weight_unchanged() -> None:
         "import sys, local_operator.cli; "
         "bad = [m for m in sys.modules if m.startswith('textual') "
         "or m.startswith('local_operator.mobile.attach_client') "
-        "or m.startswith('local_operator.session.remote')]; "
+        "or m.startswith('local_operator.session.attached')]; "
         "print('LEAKED:' + ','.join(bad) if bad else 'CLEAN')"
     )
     repo_root = Path(__file__).resolve().parents[2]

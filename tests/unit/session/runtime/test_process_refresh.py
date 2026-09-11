@@ -3,7 +3,7 @@ retires, announced, so the next engage runs the build on disk
 (design-runtime-autorefresh §3.2/§3.4).
 
 Same fakes as ``test_process_reaper.py``. The predicate under test is
-``OwnedSessionHandle.may_refresh`` reached through ``process._should_refresh``;
+``ServingSessionHandle.may_refresh`` reached through ``process._should_refresh``;
 the fakes carry a ``may_refresh`` of their own so the reaper's branch can be
 driven without a Session.
 """

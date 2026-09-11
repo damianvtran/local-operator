@@ -1,4 +1,4 @@
-"""``RemoteSession.set_working_directory`` — the three honest outcomes of `/move`.
+"""``AttachedSession.set_working_directory`` — the three honest outcomes of `/move`.
 
 The cwd is fixed when a runtime is spawned (``LOP_MOBILE_CHILD_CWD``), so there
 are exactly two ways to honour a change and one situation where neither is
@@ -19,13 +19,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 
 
 @pytest.fixture
 def cold_session(tmp_path):
-    async def _build(cwd: str = "/tmp") -> RemoteSession:
-        return await RemoteSession.cold(
+    async def _build(cwd: str = "/tmp") -> AttachedSession:
+        return await AttachedSession.cold(
             "session-under-test",
             config_dir=tmp_path,
             cwd=cwd,
@@ -56,7 +56,7 @@ class FakeClient:
         return self.answer
 
 
-def _bind(session: RemoteSession, client: object) -> None:
+def _bind(session: AttachedSession, client: object) -> None:
     """Make ``session`` look bound, the way ``is_cold`` actually reads it."""
     session._client = client  # type: ignore[assignment]
     session._ready_for_events = True

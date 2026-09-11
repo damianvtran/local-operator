@@ -38,7 +38,7 @@ and its pasted secret cannot be retained by sidebar bookkeeping.
 ## Opt-in durable display history
 
 An upgraded runtime advertises `display-history-window-v1`. Sidebar connections ask
-for `RemoteSession.connect(..., display_window=True)`; ordinary connections retain
+for `AttachedSession.connect(..., display_window=True)`; ordinary connections retain
 full-history initialization. The window rides the existing atomic frontend sync:
 runtime snapshot, durable cursor, window selection and subscription share one
 no-yield authoritative-loop boundary.

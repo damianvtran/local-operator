@@ -17,8 +17,8 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher
 from local_operator.harness.types import ModelSpec
+from local_operator.session.attached import AttachedSession
 from local_operator.session.model_selection import read_model_selection
-from local_operator.session.remote import RemoteSession
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.session_factory import resolve_hosting_model_with_source
@@ -106,7 +106,7 @@ async def test_explicit_resume_intent_survives_rpc_errors_and_owner_snapshots(tm
     async def no_takeover():
         raise AssertionError("viewer cannot take ownership")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "intent",
         config_dir=tmp_path,
         cwd=str(tmp_path),
@@ -231,7 +231,7 @@ async def test_an_override_with_no_resolved_model_is_nothing_to_consume(tmp_path
     async def no_takeover():
         raise AssertionError("viewer cannot take ownership")
 
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "unresolved",
         config_dir=tmp_path,
         cwd=str(tmp_path),
@@ -423,7 +423,7 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
     async def takeover():
         raise AssertionError("read-only viewer must not take ownership")
 
-    cold = await RemoteSession.cold(
+    cold = await AttachedSession.cold(
         "new", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=takeover
     )
     try:
@@ -445,7 +445,7 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
             )
         )
         assert cold._birth_model.model_id == "owner-picked"
-        newer = await RemoteSession.cold(
+        newer = await AttachedSession.cold(
             "newer", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=takeover
         )
         assert newer.model.model_id == B.model_id
@@ -456,7 +456,7 @@ async def test_cold_viewer_birth_and_resume_use_same_selection(tmp_path):
     await owner.prompt("save")
     await owner.dispose()
     config.set_config_value("hosting", "invalid")
-    resumed = await RemoteSession.cold(
+    resumed = await AttachedSession.cold(
         "saved", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=takeover
     )
     try:

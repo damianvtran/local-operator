@@ -5,7 +5,7 @@
 
 The mechanism is worth stating precisely, because it is a defect SHAPE rather
 than a typo. Since 0.46.0 a fresh `lop` boots as a viewer over a
-``RemoteSession``, so a command scoped ``authoritative_session`` runs on the
+``AttachedSession``, so a command scoped ``authoritative_session`` runs on the
 owner and comes back as a typed ``SlashResult``. ``kind="noop"`` is a legal and
 useful answer: it means *the invoking terminal hosts this interaction itself*,
 the way bare ``/model`` opens its own picker up front. The contract is that
@@ -43,7 +43,9 @@ from pathlib import Path
 import pytest
 
 _APP = Path(__file__).resolve().parents[3] / "local_operator" / "tui" / "app.py"
-_OWNED = Path(__file__).resolve().parents[3] / "local_operator" / "session" / "runtime" / "owned.py"
+_OWNED = (
+    Path(__file__).resolve().parents[3] / "local_operator" / "session" / "runtime" / "serving.py"
+)
 
 
 def _slash_result_payloads(source: str) -> set[tuple[str, str]]:
@@ -204,7 +206,7 @@ def test_the_audit_is_keyed_on_kind_not_type_alone() -> None:
     """Mutation guard for R3: a ``noop`` type consumed only by a ``block`` arm
     must be reported as orphaned.
 
-    This is the exact shape of the bare ``/agent`` bug: ``owned.py`` produced
+    This is the exact shape of the bare ``/agent`` bug: ``serving.py`` produced
     ``noop {"type": "agent_list"}`` and the renderer knew ``agent_list`` only
     under ``kind == "block"``. An audit pooling the strings said "covered".
     """
@@ -413,7 +415,7 @@ def test_no_local_config_command_asks_is_remote_directly() -> None:
     A local-config write must not key on ``is_remote``. That flag answered
     "is there a socket between me and the session", which USED to imply "the
     runtime is someone else's machine" and stopped implying it in 0.46.0, when
-    `lop` began building a ``RemoteSession`` for every local user. Every guard
+    `lop` began building a ``AttachedSession`` for every local user. Every guard
     still asking it refuses the exact person it was written to serve.
 
     This has now been fixed three times independently, each site-locally:
@@ -473,13 +475,13 @@ async def test_a_cold_viewer_may_still_set_its_default_model(tmp_path, monkeypat
     anything.
 
     The first fix keyed on an EMPTY ``session_id`` and was dead code: `cli.py`
-    mints the id before ``RemoteSession.cold(...)`` is built, so no production
+    mints the id before ``AttachedSession.cold(...)`` is built, so no production
     viewer ever has an empty one (review round 1, R1; QA Q1; UX U7 — three
     independent reproductions on the real object). Hence this asserts on the
-    exact object `lop` builds — a ``RemoteSession.cold`` with a minted id in
+    exact object `lop` builds — a ``AttachedSession.cold`` with a minted id in
     an isolated config dir — not on a stub whose shape production never has.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -488,7 +490,7 @@ async def test_a_cold_viewer_may_still_set_its_default_model(tmp_path, monkeypat
         raise AssertionError("a viewer never takes over")
 
     # The id is minted the way `cli.py` mints it: non-empty, no record for it.
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         uuid.uuid4().hex[:12], config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     try:

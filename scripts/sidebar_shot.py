@@ -20,7 +20,7 @@ resumed — so a single frame answers both questions this change is about:
 the fixed runtime now publishes for them — which means they render ``●`` in
 this script against BOTH trees, and a before/after pair of these frames is not
 evidence for the activity fix (round 1, D3). The change those rows stand for
-happens upstream, where ``OwnedSessionHandle`` decides whether to publish
+happens upstream, where ``ServingSessionHandle`` decides whether to publish
 ``busy`` at all; it is proven by
 ``tests/unit/session/runtime/test_activity_vs_residency.py`` and by the live
 probe described on the PR, not here. To see the pre-fix rendering of those

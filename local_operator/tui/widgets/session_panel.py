@@ -151,7 +151,7 @@ class SessionDiagnostics:
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
-        # The canonical frontend snapshot is already mirrored on RemoteSession.
+        # The canonical frontend snapshot is already mirrored on AttachedSession.
         # Reduced SDK facades need not have it; don't traverse private context or
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)

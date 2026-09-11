@@ -8,7 +8,7 @@ already — ``resume_session`` is a session-runtime op with a working handler
 
 Why not: ``RuntimeServer`` binds its listener and publishes its record in the
 same step (``server.py::_serve``), and ``OperatorApp._mobile_adopted`` closes
-the whole registrant the moment the app follows a ``RemoteSession``. Following a
+the whole registrant the moment the app follows a ``AttachedSession``. Following a
 remote session is the *normal* sidebar state, so a sidebar user's TUI is
 listening on nothing. Keeping the RuntimeServer alive instead is not available:
 its own comment records that a second registrant for one transcript corrupts

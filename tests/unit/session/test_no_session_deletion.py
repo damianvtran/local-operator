@@ -546,12 +546,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- in-memory .replace(), not the filesystem ---------------------------
     (
-        "local_operator/session/remote.py::RemoteSession._install_frontend",
+        "local_operator/session/attached.py::AttachedSession._install_frontend",
         "<path>.replace",
         "store facade .replace()",
     ),
     (
-        "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",
+        "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",
         "<path>.replace",
         "facade .replace() on in-memory state",
         4,
@@ -812,7 +812,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         4,
     ),
     (
-        "local_operator/session/runtime/owned.py::OwnedSessionHandle._cancel_loop_turn",
+        "local_operator/session/runtime/serving.py::ServingSessionHandle._cancel_loop_turn",
         "<path>.remove",
         "self._prompt_queue.remove(command): deque[_PromptCommand].remove, dropping "
         "one queued in-memory prompt so a cancelled loop leaves no iteration behind",
@@ -843,7 +843,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "in-memory .replace",
     ),
     (
-        "local_operator/session/remote.py::RemoteSession.subscribe.unsubscribe",
+        "local_operator/session/attached.py::AttachedSession.subscribe.unsubscribe",
         "<path>.remove",
         "list.remove",
     ),
@@ -1104,8 +1104,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # self.replace(state) = in-memory snapshot swap
         "local_operator/session/frontend_state.py::FrontendStateStore.replace_and_notify",
         "local_operator/session/frontend_state.py::FrontendStateStore.checkpoint",  # tmp -> FILE
-        "local_operator/session/remote.py::RemoteSession._install_frontend",  # facade
-        "local_operator/session/remote.py::RemoteSession._apply_frontend_facades",  # facade
+        "local_operator/session/attached.py::AttachedSession._install_frontend",  # facade
+        "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::publish",  # tmp -> registry FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE

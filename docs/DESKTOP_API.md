@@ -122,7 +122,7 @@ residency. The runtime's existing heartbeat re-evaluates expired leases and
 restores parked-gate OS fallback. A valid desktop notification lease suppresses
 that fallback, so one gate does not produce both an Electron and runtime toast.
 
-`RemoteSession(surface="desktop")` carries this metadata through its existing
+`AttachedSession(surface="desktop")` carries this metadata through its existing
 runtime binding/recovery path. It goes cold rather than becoming the runtime
 in the HTTP process; reconnect does not resurrect an expired desktop lease. Its
 `bind_runtime`, `update_desktop_watch`, and identity-checked `answer_gate` helpers
@@ -191,7 +191,7 @@ The renderer must not independently re-submit that consumed request.
 A200 message receipt means the canonical runtime acknowledged admission, not
 that the model succeeded or the turn completed. The runtime's canonical events
 and durable history are the authority for completion and side effects. Explicit
-mutations use `RemoteSession.bind_runtime` / existing `engage_runtime` lease
+mutations use `AttachedSession.bind_runtime` / existing `engage_runtime` lease
 arbitration. A cold read or stream attaches only to an already-live runtime.
 HTTP shutdown/last-reader cleanup only disposes the viewer; it never stops work.
 
@@ -246,7 +246,7 @@ by these backend routes.
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
-Session/OwnedSessionHandle/RuntimeServer/AttachClient with only the provider
+Session/ServingSessionHandle/RuntimeServer/AttachClient with only the provider
 stream scripted: same-session terminal controls, consumed team prompt, durable
 single admission, actual runtime ask/approval futures, invalid/stale answers,
 ordered replay, session isolation, disconnect/watch cleanup and reopen.

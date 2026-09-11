@@ -16,7 +16,7 @@ historically unknown prices into invented dollar amounts.
 
 All execution used an isolated HOME and LOCAL_OPERATOR_CONFIG_DIR. The worktree
 has its own Python 3.12 editable venv. Production Session, child runner, bash,
-transcripts, OwnedSessionHandle, RuntimeServer TCP socket, RemoteSession and
+transcripts, ServingSessionHandle, RuntimeServer TCP socket, AttachedSession and
 OperatorApp were exercised. Only provider events and runtime model-listing prices
 were scripted; this proves application accounting, not vendor invoice accuracy.
 
@@ -67,7 +67,7 @@ ledger before ownership transfers, matching real runner ordering.
 
 ## Rendered frames
 
-Real OperatorApp with its stylesheet, `run_test(130×35)` over RemoteSession;
+Real OperatorApp with its stylesheet, `run_test(130×35)` over AttachedSession;
 SVG stills rendered to PNG and viewed. Independent QA captured consecutive
 settled frames. No layout, control or navigation change is intended.
 

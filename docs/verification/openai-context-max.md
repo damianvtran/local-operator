@@ -136,7 +136,7 @@ The tracked local HTTP harness was rerun after integration: catalogue GET200,
 Codex POST200, 34.4%/872k, explicit 400k trigger, no maximum wire flag.
 Independent remediation QA executed 20 successful observations with actual
 loopback HTTP, persisted legacy checkpoints, real AuthStore and repeated
-`RemoteSession.cold` calls after an assembled app warmed the executor. The
+`AttachedSession.cold` calls after an assembled app warmed the executor. The
 online cold composer remains 34.4%/872k; offline/missing-account/missing-auth
 legacy 1,050,000-token checkpoints retain the fresh conservative 128,000 limit.
 The resulting 234.4% reading is intentionally not clamped. Both PNGs were viewed.

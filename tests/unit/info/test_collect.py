@@ -957,9 +957,9 @@ def test_nested_subagents_are_counted_once() -> None:
 
 
 def test_a_follower_session_reports_its_own_subagents() -> None:
-    """The §1.3 regression: a ``RemoteSession``-backed window showed ZERO.
+    """The §1.3 regression: a ``AttachedSession``-backed window showed ZERO.
 
-    ``collect_live`` reads the PUBLIC ``subagent_comms``; ``RemoteSession`` only
+    ``collect_live`` reads the PUBLIC ``subagent_comms``; ``AttachedSession`` only
     held ``_subagent_comms``, so the branch was skipped, the counts stayed 0 and
     nothing was recorded as degraded. Every attached window is on this path, so
     the screen said "no subagents" on a host full of them.
@@ -968,10 +968,10 @@ def test_a_follower_session_reports_its_own_subagents() -> None:
     ``nodes()`` without projecting ``status``) makes the tree appear while the
     tally stays 0 and every row renders ``unknown``.
     """
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import JobState, SnapshotSubagentComms
-    from local_operator.session.remote import RemoteSession
 
-    assert hasattr(RemoteSession, "subagent_comms"), "the public name is the contract"
+    assert hasattr(AttachedSession, "subagent_comms"), "the public name is the contract"
 
     comms = SnapshotSubagentComms(
         [
@@ -981,7 +981,7 @@ def test_a_follower_session_reports_its_own_subagents() -> None:
             JobState(id="j4", type="task", status="completed", label="coder"),
         ]
     )
-    follower = RemoteSession.__new__(RemoteSession)
+    follower = AttachedSession.__new__(AttachedSession)
     follower._subagent_comms = comms
 
     live = collect_live(follower)

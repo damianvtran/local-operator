@@ -18,7 +18,7 @@ published `capabilities: []` and hung up on every viewer.
 Both are reasonable in isolation and together they left the seam this release
 is *about* with no coverage. So the rule these tests follow is: **the
 production handle class, the production server, a real loopback socket, and
-the production `RemoteSession` client.** Nothing here may substitute a stub
+the production `AttachedSession` client.** Nothing here may substitute a stub
 for the object under test — a stub that declares the capability is precisely
 what hid the defect.
 
@@ -36,8 +36,8 @@ from typing import Any, cast
 import pytest
 
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 pytestmark = pytest.mark.e2e
@@ -60,7 +60,7 @@ async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 1
 
 async def _runtime(
     directory: Path, replies: list[str]
-) -> tuple[Any, OwnedSessionHandle, RuntimeServer]:
+) -> tuple[Any, ServingSessionHandle, RuntimeServer]:
     """A real Session behind the production handle behind the production server."""
 
     # ScriptedStream is the harness's own provider double: one async
@@ -68,7 +68,7 @@ async def _runtime(
     # contract has. A bare list is not iterable with `async for`.
     stream = ScriptedStream([text_turn(reply) for reply in replies] or [text_turn("ok")])
     session = build_session(directory, stream)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     return session, handle, server
 
@@ -105,11 +105,11 @@ async def test_a_viewer_attaches_over_a_real_socket_and_runs_a_turn(
     """The full path the product depends on: attach, prompt, stream, persist.
 
     This is the test whose absence let the outage ship. It performs the exact
-    handshake `RemoteSession` performs in production (`frontend_state=True`),
+    handshake `AttachedSession` performs in production (`frontend_state=True`),
     against the exact handle the runtime builds, and then drives a turn to a
     durable transcript row.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     directory = headless_tui_env / "sessions" / "attachsess01"
     directory.mkdir(parents=True)
@@ -122,7 +122,7 @@ async def test_a_viewer_attaches_over_a_real_socket_and_runs_a_turn(
         # The production client, asking for what the production viewer asks
         # for. Before the fix this raised ConnectionError("owner closed the
         # connection") right here.
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,
@@ -168,7 +168,7 @@ async def test_the_event_relay_reaches_an_attached_viewer(
     nothing ever streams. Asserted on events the VIEWER received, so it fails
     if the relay is wired but not delivering.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     directory = headless_tui_env / "sessions" / "relaysess001"
     directory.mkdir(parents=True)
@@ -177,7 +177,7 @@ async def test_the_event_relay_reaches_an_attached_viewer(
     viewer = None
     try:
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,
@@ -208,7 +208,7 @@ async def test_a_viewer_runs_a_team_and_holds_a_credential(
 
     Both were reported by the operator as "nothing happens". They share one
     mechanism — state that lives on ``Session`` and has no seam on
-    ``RemoteSession`` — and both are asserted here on the OWNER's state, which
+    ``AttachedSession`` — and both are asserted here on the OWNER's state, which
     is the half a viewer cannot fake.
 
     ``/team``: the mutating form used to return an unconsumed
@@ -222,7 +222,7 @@ async def test_a_viewer_runs_a_team_and_holds_a_credential(
     a real child process's environment. Never by printing it: the length is
     proof enough and the value must not enter a log or a transcript.
     """
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
     registry = TeamRegistry(headless_tui_env)
@@ -243,7 +243,7 @@ async def test_a_viewer_runs_a_team_and_holds_a_credential(
     viewer = None
     try:
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,
@@ -320,9 +320,9 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
     between the runtime and retirement.
 
     Driven end to end with nothing stubbed on the runtime side: a production
-    ``OwnedSessionHandle`` behind a production ``RuntimeServer`` (the same
+    ``ServingSessionHandle`` behind a production ``RuntimeServer`` (the same
     ``is_pristine`` probe and the same refusal path a real child runs), a real
-    ``RemoteSession.cold(<minted id>)`` whose ``engage_runtime`` is pointed at
+    ``AttachedSession.cold(<minted id>)`` whose ``engage_runtime`` is pointed at
     that server, the real ``OperatorApp`` submitting the command as one paste
     + Enter and then quitting on the very next tick.
     """
@@ -331,7 +331,7 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
 
     from textual import events
 
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime import launch as launch_module
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
     from local_operator.tui.app import OperatorApp
@@ -383,8 +383,8 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
     launch_module.engage_runtime = engage_here  # type: ignore[assignment]
     try:
 
-        async def factory() -> RemoteSession:
-            return await RemoteSession.cold(
+        async def factory() -> AttachedSession:
+            return await AttachedSession.cold(
                 session_id,
                 config_dir=headless_tui_env,
                 cwd=str(directory),
@@ -399,7 +399,7 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
                 if app._session is not None:
                     break
             viewer = app._session
-            assert isinstance(viewer, RemoteSession)
+            assert isinstance(viewer, AttachedSession)
             editor = app.query_one(Editor)
             editor.focus()
             await pilot.pause()
@@ -686,7 +686,7 @@ async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
     paints the assistant row once.
     """
     from local_operator.harness.types import AgentTool, TextContent, ToolResult
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.tool_card import ToolCard
     from tests.e2e.harness import (
@@ -734,7 +734,7 @@ async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
         ]
     )
     session = build_session(directory, stream, tools=[hang], cwd=workspace)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     import os
@@ -743,7 +743,7 @@ async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
     viewer = None
     try:
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,
@@ -751,7 +751,7 @@ async def test_a_transient_viewer_drop_mid_turn_does_not_paint_interrupted(
         )
         pid_before = viewer.runtime_pid
 
-        async def factory() -> RemoteSession:
+        async def factory() -> AttachedSession:
             assert viewer is not None
             return viewer
 
@@ -851,9 +851,9 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
     taken and can ONLY reach the viewer through the seed. If the seed is
     skipped — the MAJOR-1 defect — B's card never exists.
     """
-    import local_operator.session.remote as remote_module
+    import local_operator.session.attached as remote_module
     from local_operator.harness.types import AgentTool, TextContent, ToolResult
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.tool_card import ToolCard
     from tests.e2e.harness import (
@@ -922,7 +922,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
         ]
     )
     session = build_session(directory, stream, tools=[step], cwd=workspace)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     import os
@@ -943,7 +943,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
     viewer = None
     try:
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,
@@ -951,7 +951,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
         )
         pid_before = viewer.runtime_pid
 
-        async def factory() -> RemoteSession:
+        async def factory() -> AttachedSession:
             assert viewer is not None
             return viewer
 
@@ -1052,7 +1052,7 @@ async def test_a_tool_started_during_the_gap_paints_and_completes_after_rebind(
 # painted `⊘ interrupted` on three calls that SUCCEEDED.
 #
 # Driven against the production handle, the production server, a real socket
-# and the production ``RemoteSession`` for the reason this module's docstring
+# and the production ``AttachedSession`` for the reason this module's docstring
 # gives: a stub that declares the capability is what hid the last outage.
 # ---------------------------------------------------------------------------
 
@@ -1137,7 +1137,7 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
     import os
 
     from local_operator.harness.types import AgentTool, TextContent, ToolResult
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from tests.e2e.harness import text_turn
 
     tools_done = asyncio.Event()
@@ -1194,7 +1194,7 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
     directory = headless_tui_env / "sessions" / f"join{shape[:8]}"
     directory.mkdir(parents=True)
     session = build_session(directory, _Stream(), tools=[probe], cwd=workspace)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
     server = RuntimeServer(handle, kind="daemon")
     await server.start_in_process()
     # A real runtime process writes this; without it `find_runtime_record` cannot
@@ -1207,7 +1207,7 @@ async def test_a_joiner_after_the_tools_end_paints_no_interrupted_card(
         await asyncio.wait_for(tools_done.wait(), timeout=30)
 
         record = await _wait_for_record(headless_tui_env, session.session_id)
-        viewer = await RemoteSession.connect(
+        viewer = await AttachedSession.connect(
             record,
             session.session_id,
             config_dir=headless_tui_env,

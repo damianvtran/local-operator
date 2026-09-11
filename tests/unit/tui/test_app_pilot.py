@@ -383,7 +383,7 @@ class FakeSession:
         #: reads it: a switch made mid-turn says when it starts applying, and a
         #: hard-coded False could never exercise that branch.
         self.streaming = False
-        #: The server-paging cursor a `RemoteSession` exposes: non-None means
+        #: The server-paging cursor a `AttachedSession` exposes: non-None means
         #: "older history continues on the server". Declared here (rather than
         #: set ad hoc by the one test that needs it) because the resume fill
         #: branches on it, and a fake that lacks the attribute silently sends
@@ -1476,7 +1476,7 @@ async def test_follower_mcp_grant_routes_instead_of_crashing_on_snapshot_manager
 
     class RoutedSession(FakeSession):
         frontend_state: FrontendSessionState
-        # The read-only facade the production RemoteSession hands the app — the
+        # The read-only facade the production AttachedSession hands the app — the
         # one whose get_server_config absence crashed the local /mcp handler.
         mcp_manager: Any
 
@@ -1811,7 +1811,7 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
         await pilot.press("escape")
         await pilot.pause()
         # The owner call FAILS: the resolver the second press installed gets
-        # the failure sentinel, exactly as RemoteSession._resolve_cancel
+        # the failure sentinel, exactly as AttachedSession._resolve_cancel
         # delivers it on a socket/owner exception. Staged after the presses
         # rather than inside cancel_subagents so the app's own resolver is
         # what receives it (the real seam is asynchronous).
@@ -2131,13 +2131,13 @@ async def test_model_picker_first_frame_is_initial_catalogue_not_live() -> None:
 
 @pytest.mark.asyncio
 async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, tmp_path) -> None:
-    """A live owner becomes a RemoteSession in the existing OperatorApp.
+    """A live owner becomes a AttachedSession in the existing OperatorApp.
 
     There is no pushed screen or attach vocabulary: the standard transcript and
     composer remain the only surface, and the old local writer is disposed.
     """
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime import registry as mobile_registry
     from local_operator.tui.widgets.transcript import NoticeBlock
 
@@ -2166,7 +2166,7 @@ async def test_resume_owned_session_adopts_remote_in_standard_app(monkeypatch, t
     async def connect(*args, **kwargs):  # noqa: ANN002, ANN003
         return remote
 
-    monkeypatch.setattr(RemoteSession, "connect", connect)
+    monkeypatch.setattr(AttachedSession, "connect", connect)
     app = OperatorApp(lambda: _factory(session), resume_factory=resume_factory)
     owner = os.getppid()
     marker_dir = config_dir() / "sessions" / "sess-owned"
@@ -2212,7 +2212,7 @@ async def test_live_resume_atomically_gates_submission_then_recovers_success_and
 ) -> None:
     """Pending live resume never routes a draft to the session being left."""
     from local_operator.mobile.types import PROTOCOL_VERSION, SessionRecord
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.runtime import registry as mobile_registry
 
     old = FakeSession()
@@ -2233,7 +2233,7 @@ async def test_live_resume_atomically_gates_submission_then_recovers_success_and
             return replacement
         raise ConnectionError("owner sync failed")
 
-    monkeypatch.setattr(RemoteSession, "connect", connect)
+    monkeypatch.setattr(AttachedSession, "connect", connect)
     app = OperatorApp(lambda: _factory(old), resume_factory=resume_factory)
     owner = os.getppid()
     marker_dir = config_dir() / "sessions" / "sess-transition"
@@ -4718,7 +4718,7 @@ async def test_failovers_before_the_session_attaches_warns(monkeypatch, tmp_path
 
 @pytest.mark.asyncio
 async def test_failovers_on_a_follower_whose_model_raises_warns(monkeypatch, tmp_path) -> None:
-    """`RemoteSession.model` is a property that RAISES before the owner syncs.
+    """`AttachedSession.model` is a property that RAISES before the owner syncs.
 
     `getattr(session, "model", None)` does NOT suppress an exception raised
     inside a property, so this used to surface as `failover list failed: owner
@@ -9680,7 +9680,7 @@ async def test_a_mid_turn_switch_says_when_it_starts_applying() -> None:
 
 
 class _AsyncLabelSession(FakeSession):
-    """A session whose label follows ``set_model`` only LATER, as ``RemoteSession``'s
+    """A session whose label follows ``set_model`` only LATER, as ``AttachedSession``'s
     does: there ``set_model`` schedules the owner request as a task and
     ``model_label`` reads the frontend-state sync that lands on a later tick.
     The label here never moves on its own, which is the sharpest form of that
@@ -9709,7 +9709,7 @@ async def test_switch_receipt_names_the_destination_before_a_remote_label_lands(
     ``/model anthropic/claude-fable-5-1`` printed ``model: anthropic/claude-opus-5
     → anthropic/claude-opus-5 (this session)`` while the band and the
     model-switch incident correctly showed the new model. The receipt re-read
-    ``session.model_label`` after ``set_model``, which on a ``RemoteSession`` is
+    ``session.model_label`` after ``set_model``, which on a ``AttachedSession`` is
     still the pre-switch value; the destination has to come from the spec the
     command resolved.
     """
@@ -9749,7 +9749,7 @@ async def test_mid_turn_switch_row_prints_before_a_remote_label_lands() -> None:
 
 
 class _ColdAsyncLabelSession(_AsyncLabelSession):
-    """The async-label fake as a COLD viewer: ``RemoteSession.set_model`` with no
+    """The async-label fake as a COLD viewer: ``AttachedSession.set_model`` with no
     client returns without sending anything, so nothing here is requested."""
 
     @property
@@ -9787,7 +9787,7 @@ class _GaveUpRecoveryLabelSession(_ColdAsyncLabelSession):
     CARRIES ``_ensure_bound``, and that attribute is the entire point of this
     stub. ``_needs_runtime_first`` routes a cold, non-recovering, non-stopped
     session on ``callable(getattr(session, "_ensure_bound", None))``, so a fake
-    that omits it takes a route the real ``RemoteSession`` — which always
+    that omits it takes a route the real ``AttachedSession`` — which always
     defines it — cannot. An earlier revision of this file pinned a cold-arm
     notice with such a fake and was green against a branch that never executed
     in production (review round 1 R1, design round 1 D1).
@@ -9812,7 +9812,7 @@ class _GaveUpRecoveryLabelSession(_ColdAsyncLabelSession):
 async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> None:
     """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
-    The state ``RemoteSession._recover_runtime`` reaches at
+    The state ``AttachedSession._recover_runtime`` reaches at
     ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
     exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
     So the cold ladder in ``_activate_resolved_model`` is never consulted from

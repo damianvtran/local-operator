@@ -236,11 +236,11 @@ async def test_session_adopts_request_metadata_without_changing_compaction(tmp_p
 async def test_cold_resume_does_not_restore_pre_maximum_window(tmp_path, monkeypatch):
     from local_operator.config import ConfigManager
     from local_operator.providers import failover
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import (
         FrontendModelSpec,
         FrontendSessionState,
     )
-    from local_operator.session.remote import RemoteSession
 
     catalogue(monkeypatch)
     config = ConfigManager(config_dir=tmp_path)
@@ -252,7 +252,7 @@ async def test_cold_resume_does_not_restore_pre_maximum_window(tmp_path, monkeyp
         return OAuthAccess("secret-a", 1, account_id="account-a")
 
     monkeypatch.setattr(failover, "_resolve_access_for_provider", access)
-    remote = RemoteSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
+    remote = AttachedSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
     state = await remote._synthesise_cold_state(str(tmp_path))
     assert state.selected_model is not None
     assert state.selected_model.context_window == 872000
@@ -328,11 +328,11 @@ def test_api_route_recovers_public_limit_after_unavailable_oauth(monkeypatch):
 async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkeypatch, access_kind):
     from local_operator.config import ConfigManager
     from local_operator.providers import failover
+    from local_operator.session.attached import AttachedSession
     from local_operator.session.frontend_state import (
         FrontendModelSpec,
         FrontendSessionState,
     )
-    from local_operator.session.remote import RemoteSession
 
     monkeypatch.setattr(discovery, "available_models", lambda *args, **kwargs: ([], "static"))
     config = ConfigManager(config_dir=tmp_path)
@@ -345,7 +345,7 @@ async def test_fresh_unknown_cold_state_rejects_legacy_capacity(tmp_path, monkey
         return OAuthAccess("oauth", 1, account_id="account" if access_kind == "offline" else None)
 
     monkeypatch.setattr(failover, "_resolve_access_for_provider", resolve)
-    remote = RemoteSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
+    remote = AttachedSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
     state = await remote._synthesise_cold_state(str(tmp_path))
     assert state.selected_model is not None
     assert state.selected_model.context_window == 128000
@@ -371,7 +371,7 @@ async def test_cold_auth_lifetime_stays_on_one_worker(tmp_path, monkeypatch):
 
     from local_operator.config import ConfigManager
     from local_operator.providers import auth_store, failover
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     owners = []
 
@@ -399,7 +399,7 @@ async def test_cold_auth_lifetime_stays_on_one_worker(tmp_path, monkeypatch):
     config.set_config_value("model_name", "gpt-5.6-sol")
     barrier = threading.Barrier(4)
     await asyncio.gather(*(asyncio.to_thread(barrier.wait) for _ in range(4)))
-    remote = RemoteSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
+    remote = AttachedSession(config_dir=tmp_path, session_id="cold", takeover_factory=lambda: None)
     state = await remote._synthesise_cold_state(str(tmp_path))
     assert state.selected_model is not None
     assert state.selected_model.context_metadata_resolved

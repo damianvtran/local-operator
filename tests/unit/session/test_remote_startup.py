@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -41,7 +41,7 @@ async def test_initial_sync_blocks_mutations_and_replays_new_epoch_updates(
                 await asyncio.sleep(0.01)
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     reached = asyncio.Event()
@@ -130,7 +130,7 @@ async def test_interrupted_initial_sync_closes_socket_and_retries(
                 await asyncio.sleep(0.01)
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     reached = asyncio.Event()
@@ -205,7 +205,7 @@ async def test_recovery_sync_is_the_only_binding_for_waiting_turns(
                 await asyncio.sleep(0.01)
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
-    viewer = await RemoteSession.cold(
+    viewer = await AttachedSession.cold(
         "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
     reached = asyncio.Event()

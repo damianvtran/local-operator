@@ -1,7 +1,7 @@
 """A slash command that needs a runtime engages one on a cold viewer.
 
 **Why this file exists.** Every fresh `lop` since 0.46.0 boots as a COLD
-viewer: a ``RemoteSession.cold(<minted id>)`` bound to no runtime, advertising
+viewer: a ``AttachedSession.cold(<minted id>)`` bound to no runtime, advertising
 zero ``slash_capabilities``. The first keystroke starts a speculative warm
 engage that takes 1.1–2.8 s (measured, QA round 1). A user who pastes
 ``/team lopdev ship it`` and presses Enter at t=0 — or types faster than the
@@ -11,14 +11,14 @@ Three review tracks reproduced it independently (review R2, QA Q2, UX U1) and
 the credential shape was worse: the masked paste opened, accepted the secret,
 and then reported nowhere to put it (UX U3).
 
-The rule these pin is the one a PROMPT already follows: ``RemoteSession.
+The rule these pin is the one a PROMPT already follows: ``AttachedSession.
 prompt()`` calls ``_ensure_bound()`` first. A slash whose effect lives on the
 runtime — the mutating ``/team``/``/agent`` forms and every ``/credential``
 verb — now does the same (``_needs_runtime_first`` → ``_bind_then_dispatch``),
 and is dispatched AGAIN against the capabilities the bound viewer adopts.
 
 **The object under test is the one `lop` builds**, not a stub: a real
-``OperatorApp`` over a real ``RemoteSession.cold`` with a minted id, in an
+``OperatorApp`` over a real ``AttachedSession.cold`` with a minted id, in an
 isolated config dir. ``engage_runtime`` is the one seam stubbed, exactly as
 ``tests/unit/session/test_remote_cold.py`` stubs it, to start an in-process
 ``RuntimeServer`` over a real loopback socket instead of spawning a python
@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 from textual import events
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.tui.app import OperatorApp
@@ -137,8 +137,8 @@ def _stub_engage(monkeypatch: pytest.MonkeyPatch, server: RuntimeServer) -> list
 def _cold_app(config_dir: Path, session_id: str) -> OperatorApp:
     """The viewer factory shaped exactly as ``cli.py`` builds it: id minted first."""
 
-    async def factory() -> RemoteSession:
-        return await RemoteSession.cold(
+    async def factory() -> AttachedSession:
+        return await AttachedSession.cold(
             session_id, config_dir=config_dir, cwd=str(config_dir), takeover_factory=_never
         )
 
@@ -156,13 +156,13 @@ def _rig(
     return _cold_app(config_dir, session_id), handle, server, engagements
 
 
-async def _boot(app: OperatorApp, pilot: Any) -> RemoteSession:
+async def _boot(app: OperatorApp, pilot: Any) -> AttachedSession:
     for _ in range(200):
         await pilot.pause()
         if app._session is not None:
             break
     session = app._session
-    assert isinstance(session, RemoteSession)
+    assert isinstance(session, AttachedSession)
     # Since #622 the mount engage is already in flight here (the stub delays
     # it), so this is the state a real `lop` is in for its first 1–3 s: cold,
     # advertising nothing, with a runtime on the way. The submit below lands
@@ -451,7 +451,7 @@ async def test_a_busy_runtime_is_reported_as_reachable_later_not_as_a_boot_failu
     not `info`: this row is the only receipt for a command that was dropped,
     which is NoticeBlock's own definition of the middle tier (D2).
     """
-    from local_operator.session.remote import (
+    from local_operator.session.attached import (
         _SYNC_UNRESPONSIVE_REASON,
         RuntimeUnresponsiveError,
     )

@@ -2896,7 +2896,7 @@ class AgentLoop:
             # The bookkeeping stamp lives in ``Message.tool_result`` rather
             # than here. Stamping it at this call site is what let the OTHER
             # callers of that constructor lose it: the viewer's live row
-            # (``RemoteSession._remember_live``) went through the same
+            # (``AttachedSession._remember_live``) went through the same
             # constructor and silently carried no duration, so a resumed card
             # painted a blank column. One definition, so every producer of a
             # tool row agrees by construction.

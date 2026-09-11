@@ -10976,7 +10976,7 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
     at the terminal ready to answer. ``ask`` reached no model there at all.
 
     Flipping that construction to ``has_ui=True`` instead is not available:
-    ``session_factory`` keys the RemoteSession takeover branch on
+    ``session_factory`` keys the AttachedSession takeover branch on
     ``has_ui and resume_id is not None`` and ``spawn_owned_session`` passes
     ``resume``, so the daemon's writer path would divert into follower takeover.
 

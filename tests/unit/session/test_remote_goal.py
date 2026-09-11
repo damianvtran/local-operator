@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from local_operator.session.remote import RemoteSession
+from local_operator.session.attached import AttachedSession
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,7 @@ async def test_remote_goal_setter_uses_consumed_receipt_and_explicit_clear():
         async def slash(self, command, text):
             raise AssertionError("the legacy slash RPC would also submit a turn")
 
-    remote = object.__new__(RemoteSession)
+    remote = object.__new__(AttachedSession)
     remote._client = cast(Any, Client())
     assert remote.set_goal(" ship it ") == "ship it"
     await asyncio.sleep(0)

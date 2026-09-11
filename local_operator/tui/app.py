@@ -1329,7 +1329,7 @@ ASIDE_SCROLL_FORWARD_KEY = "ctrl+pagedown"
 #: `_admit_sidebar_presentation`), which is what refuses the pathological
 #: 200 MB-journal case regardless of this count. The count exists to bound
 #: the number of live viewer sockets (a parked presentation pins its leased
-#: `RemoteSession` and its frontend subscription) and mounted transcript
+#: `AttachedSession` and its frontend subscription) and mounted transcript
 #: trees, so it has to be sized to the WORKING SET — the conversations a user
 #: alternates between — or every switch past it is a cold rebuild: connect,
 #: history window, replay, MOUNT, layout wait, teardown, on the event loop.
@@ -1538,14 +1538,14 @@ def _attempts_outlasting(span_s: float) -> int:
 
 def _sidebar_connect_attempts() -> int:
     # IMPORTED HERE, AND THIS DOES NOT DEFER ANYTHING. The call below is at
-    # module scope, so `session.remote` (five modules, ~6.7 ms) loads whenever
+    # module scope, so `session.attached` (five modules, ~6.7 ms) loads whenever
     # `tui.app` does — an earlier version of this comment claimed the local
     # import avoided that cost, which its own call site falsified. Kept local
     # only because it reads at the one place that needs the constant; the honest
-    # statement of the cost is that `tui.app` now pulls in `session.remote` at
+    # statement of the cost is that `tui.app` now pulls in `session.attached` at
     # import. No user-facing boot regression: the CLI defers `tui.app` itself, so
     # `import local_operator.cli` loads neither — verified on both trees.
-    from local_operator.session.remote import COLD_FALLBACK_S
+    from local_operator.session.attached import COLD_FALLBACK_S
 
     # 50% margin over the recovery bound: the last attempt must land clearly
     # after `_go_cold`, not in a photo finish with it on a loaded machine.
@@ -2012,7 +2012,7 @@ class _PendingUserEcho(NamedTuple):
     internally, so registering one here would key the entry to an id no
     announcement can carry and paint every row twice. Such an entry keeps the
     historical text match, limit included. Both in-tree sessions accept the
-    keyword (``Session``, and ``RemoteSession`` — the class an attached
+    keyword (``Session``, and ``AttachedSession`` — the class an attached
     follower TUI drives, which kept the #228 swallow until it did); the
     fallback covers implementations outside the protocol's guarantee, not a
     shipping path.
@@ -3557,7 +3557,7 @@ class OperatorApp(App[None]):
         self._approvals_default_auto: bool = False
         # The mode the user typed with `/approvals` in THIS pane, or None.
         # Deliberately the same shape as `Session._explicit_model_choice` (and
-        # `OwnedSessionHandle._explicit_approvals_mode`, which is the authority
+        # `ServingSessionHandle._explicit_approvals_mode`, which is the authority
         # whenever a runtime is attached), and the symmetry is the point: a
         # config edit may not revoke a hardening a human typed here, exactly as
         # it may not revoke an explicit `/model` pick.
@@ -4699,7 +4699,7 @@ class OperatorApp(App[None]):
     ) -> SessionInteraction:
         from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.paths import config_dir
-        from local_operator.session.remote import RemoteSession
+        from local_operator.session.attached import AttachedSession
 
         source = self._sidebar_sources.get(session_id)
         if source is not None and not source.retired:
@@ -4713,7 +4713,7 @@ class OperatorApp(App[None]):
             raise RuntimeError("a sidebar viewer never takes over a session")
 
         if not speculative:
-            remote = await RemoteSession.saved_preview(
+            remote = await AttachedSession.saved_preview(
                 session_id,
                 config_dir=directory,
                 cwd=str(getattr(self._session, "cwd", "")),
@@ -4723,7 +4723,7 @@ class OperatorApp(App[None]):
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
                 raise RuntimeError("The prepared owner is no longer active")
-            remote = await RemoteSession.connect(
+            remote = await AttachedSession.connect(
                 record,
                 session_id,
                 config_dir=directory,
@@ -4813,7 +4813,7 @@ class OperatorApp(App[None]):
             #
             # THIS CAN NOW FIRE WHERE IT PREVIOUSLY COULD NOT, and it is benign.
             # v0.52.16 (#849) bounds `_recover_runtime` at 90s, so a
-            # `RemoteSession` can reach a TERMINAL cold state on a path that
+            # `AttachedSession` can reach a TERMINAL cold state on a path that
             # used to retry forever; a speculative prepare can therefore meet
             # `is_cold` for real rather than only in transit. Verified by
             # execution against a terminally cold session rather than reasoned
@@ -6884,7 +6884,7 @@ class OperatorApp(App[None]):
         respect ``RETAINED_PRESENTATIONS``, and the evicted session — still
         live, still top-ranked, no longer cached — matched this filter again on
         the very next poll. Once live sessions outnumbered the bound that was
-        a real ``RemoteSession.connect`` plus a dispose per candidate per 2 s
+        a real ``AttachedSession.connect`` plus a dispose per candidate per 2 s
         poll, forever: measured 60 connects + 60 disposes over 30 polls at 10
         live sessions, poll loop-CPU 9.5 → 110 ms, paid for as long as the
         sidebar was open and gone the moment it was closed — which is the
@@ -7405,7 +7405,7 @@ class OperatorApp(App[None]):
             # The double-Esc cancel reads the synchronous count the protocol
             # returns, but a follower's REAL count resolves on the owner. The
             # resolver is installed per-press by the Esc handler; arming the
-            # seam here is what lets RemoteSession reach back to rewrite the
+            # seam here is what lets AttachedSession reach back to rewrite the
             # optimistic notice with the authoritative number.
             set_cancel_resolution = getattr(session, "set_cancel_resolution", None)
             if callable(set_cancel_resolution):
@@ -7442,7 +7442,7 @@ class OperatorApp(App[None]):
         ):
             # A follower's remembered local effort must not silently rewrite
             # the shared owner's model. The owner projection is authoritative;
-            # explicit /effort remains routed through RemoteSession.
+            # explicit /effort remains routed through AttachedSession.
             #
             # Fast mode rides the SAME restore for the same reason: a `/reload`
             # or `/new` that dropped the dial would repaint the band without a
@@ -7506,7 +7506,7 @@ class OperatorApp(App[None]):
             # on every surface that names a conversation, because its own
             # `conversation_name` is deliberately empty — so the tab would
             # otherwise read identically to the parent's in a window switcher.
-            # `getattr` because a reduced facade (embedded SDK, RemoteSession,
+            # `getattr` because a reduced facade (embedded SDK, AttachedSession,
             # a pilot double) need not expose the property, and "not a fork" is
             # the answer that leaves such a host exactly as it was.
             forked=bool(getattr(session, "wears_inherited_title", False)),
@@ -7947,7 +7947,7 @@ class OperatorApp(App[None]):
 
         ``call_later`` runs under Textual's active-app context; creating the
         handler task there is what makes widget composition legal. The relay
-        future mirrors completion/cancellation back to RemoteSession without
+        future mirrors completion/cancellation back to AttachedSession without
         letting a late card settle a cancelled owner request.
         """
         source = source or self._interaction
@@ -11040,7 +11040,7 @@ class OperatorApp(App[None]):
         identically. Failures inside the new factory surface through
         ``_on_boot_failed`` exactly as a bad ``--resume`` does.
 
-        A session already live elsewhere is represented by RemoteSession and
+        A session already live elsewhere is represented by AttachedSession and
         adopted through this SAME full-app path. The owner remains the sole
         transcript writer; this TUI consumes durable history plus relayed
         AgentEvents and sends mutations over the authenticated loopback socket.
@@ -11374,14 +11374,14 @@ class OperatorApp(App[None]):
         return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
     async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
-        """Build a RemoteSession and adopt it like any ordinary resume.
+        """Build a AttachedSession and adopt it like any ordinary resume.
 
         Protocol <4 has no full event stream. The degraded projection view was
         deliberately deleted, so a mixed-version owner gets a precise upgrade
         refusal rather than silently falling back to a divergent UI.
         """
         from local_operator.mobile.attach_client import find_runtime_record
-        from local_operator.session.remote import RemoteSession
+        from local_operator.session.attached import AttachedSession
 
         record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
         if record is None or found_owner != owner or record.protocol < 4:
@@ -11398,7 +11398,7 @@ class OperatorApp(App[None]):
             return await self._resume_factory(concrete)
 
         try:
-            remote = await RemoteSession.connect(
+            remote = await AttachedSession.connect(
                 record,
                 concrete,
                 config_dir=config_root,
@@ -11684,7 +11684,7 @@ class OperatorApp(App[None]):
         second to observe a flag that changes twice a session.
 
         Defensive on both sides: a host whose session has no ``has_pending_fork``
-        (the lightweight facades, ``RemoteSession``) simply never lights the
+        (the lightweight facades, ``AttachedSession``) simply never lights the
         segment, which is the same behaviour it had before the indicator
         existed.
         """
@@ -12405,7 +12405,7 @@ class OperatorApp(App[None]):
             # wrong persona answering confidently is worse than a refusal,
             # because nothing on screen tells the user which one they got.
             #
-            # Reachable on a viewer (`RemoteSession`), which serves the teams
+            # Reachable on a viewer (`AttachedSession`), which serves the teams
             # LISTING from local config but has no seam to stamp an attachment
             # onto the runtime that will build the turn. The wording says
             # exactly that: the teams are fine, attaching them here is what is
@@ -13057,7 +13057,7 @@ class OperatorApp(App[None]):
         ``session.mcp_startup`` is a frozen BOOT SNAPSHOT, and this method runs
         on every adoption — boot, ``/new``, ``/resume``, a remote takeover, and
         every sidebar click, which re-adopts a session and replays a snapshot
-        taken minutes ago (``RemoteSession`` even rehydrates the OWNER's round,
+        taken minutes ago (``AttachedSession`` even rehydrates the OWNER's round,
         so attaching to a peer replayed a round this process never ran). MCP
         servers are process-wide and shared, so re-confirming "12 servers, 425
         tools" on each sidebar click is pure noise over the user's work.
@@ -13133,7 +13133,7 @@ class OperatorApp(App[None]):
         # rather than assumed: all three `_report_mcp_startup` callers are on
         # the adopted-session path, `SessionProtocol.session_id` returns `str`,
         # `Session` falls back to the transcript directory name,
-        # `RemoteSession` takes the id as a constructor argument, and the one
+        # `AttachedSession` takes the id as a constructor argument, and the one
         # `str | None` implementation (`headless_print`) is never adopted by
         # this app. Keying id-less hosts by `id(session)` would close the lane
         # but buy nothing reachable, so the honest statement is that a keyless
@@ -14725,7 +14725,7 @@ class OperatorApp(App[None]):
 
         A viewer that quits right after this offers its runtime back
         (``_retire_unused_runtime``); the runtime refuses because the attach
-        journalled ``attachment.json``, which ``OwnedSessionHandle.is_pristine``
+        journalled ``attachment.json``, which ``ServingSessionHandle.is_pristine``
         consults alongside the transcript — a bare ``/team <name>`` writes no
         row, so the sidecar is the only thing that makes it durable (review
         round 2, R7). The request form is additionally held by its in-flight
@@ -14850,7 +14850,7 @@ class OperatorApp(App[None]):
         finish AFTER the swap had disposed its viewer, attaching a socket to a
         dead facade that then held the old runtime resident for the life of
         the process (review round 1, MAJOR-1). Cancelling at the swap closes
-        that from this side; `RemoteSession._ensure_bound` refusing to bind a
+        that from this side; `AttachedSession._ensure_bound` refusing to bind a
         disposed facade closes it from the other, for callers that are not
         this app.
         """
@@ -19317,7 +19317,7 @@ class OperatorApp(App[None]):
 
         WHY THIS IS NOT PART OF ``_mobile_adopted``. That method manages a
         SESSION-scoped registrant and tears it down whenever the app follows a
-        ``RemoteSession`` — which is the normal sidebar state — because a second
+        ``AttachedSession`` — which is the normal sidebar state — because a second
         registrant for one transcript corrupts daemon routing. Correct, and it
         leaves a sidebar user's TUI listening on nothing, which is why a
         notification click had no live process to route to and spawned a whole
@@ -19680,7 +19680,7 @@ class OperatorApp(App[None]):
         be a startup gate for the terminal. The lazy import keeps the mobile
         package off the CLI path for every run that never mounts the app.
         """
-        # A RemoteSession is already a client of the owner's registrant. Starting
+        # A AttachedSession is already a client of the owner's registrant. Starting
         # another registrant here would publish a second record for the same
         # transcript and corrupt daemon routing. If this process previously
         # owned a local session, tear its record down while following remotely;
@@ -20258,7 +20258,7 @@ class OperatorApp(App[None]):
             # `steer_message` takes the Message OBJECT, so the id is carried by
             # the thing queued rather than offered alongside it. Both in-tree
             # sessions preserve it — `Session` announces the queued object
-            # itself at the drain, and `RemoteSession` sends
+            # itself at the drain, and `AttachedSession` sends
             # `command_id=message.id`, which the owner adopts as the Message id.
             #
             # That is the contract this registration relies on, and it is
@@ -20400,7 +20400,7 @@ class OperatorApp(App[None]):
         # long after the announcement, so the correlation key has to travel
         # outward. The keyword is optional on `SessionProtocol`, so a session
         # without it mints its own id and the entry registers id-less, falling
-        # back to text. Both in-tree sessions accept it -- `RemoteSession`
+        # back to text. Both in-tree sessions accept it -- `AttachedSession`
         # included, which is what an attached follower TUI drives and which
         # swallowed cross-surface prompts until it did (round 1, F1).
         source.turn.operation += 1
@@ -20626,7 +20626,7 @@ class OperatorApp(App[None]):
                 # event-driven, not timed.
                 #
                 # Accepted residual: the owner ACKs on the durable append BEFORE
-                # `agent_start` (`runtime/owned.py` `prompt` vs `harness/loop.py`
+                # `agent_start` (`runtime/serving.py` `prompt` vs `harness/loop.py`
                 # `_run_turn`), so a `finally` that runs inside that gap reads
                 # `is_streaming` False and clears the band — a working→idle→
                 # working blip bounded by the owner's prompt preparation, not by
@@ -20668,7 +20668,7 @@ class OperatorApp(App[None]):
         premise that `/loop` always routes to the owner; it does not on a COLD
         viewer, whose `_synthesise_cold_state` advertises no
         `slash_capabilities`, so the `route_shared_slash` branch is not taken
-        and the LOCAL worker drives the `RemoteSession` (see the corrected
+        and the LOCAL worker drives the `AttachedSession` (see the corrected
         note in `_run_slash_command`'s routing branch).
 
         WITHHELD on a follower whose owner is still streaming: that worker
@@ -20708,7 +20708,7 @@ class OperatorApp(App[None]):
         `_finalize_turn` directly would run AHEAD of the queued real end.
 
         WHETHER THE WORKER KNOWS THE OUTCOME is carried separately from what the
-        outcome was, because on a FOLLOWER it does not know. `RemoteSession`'s
+        outcome was, because on a FOLLOWER it does not know. `AttachedSession`'s
         `prompt()` returns on the owner's ACK ("prompt admitted"), so this
         worker's `finally` runs MID-TURN with `error=None` — which means "I have
         no error to report", not "the turn succeeded". Reported as a clean
@@ -20757,7 +20757,7 @@ class OperatorApp(App[None]):
             return
         if not session.owns_runtime:
             # NAMING BELONGS TO THE RUNTIME NOW.
-            # ``OwnedSessionHandle.prompt`` calls its own
+            # ``ServingSessionHandle.prompt`` calls its own
             # ``_maybe_name_conversation``, so the title is generated beside
             # the transcript that stores it, by the process that owns the
             # provider. A viewer must not race that: its ``complete_once``
@@ -21359,7 +21359,7 @@ class OperatorApp(App[None]):
         """Point the session at ``destination``, rebuilding its runtime if bound.
 
         The two outcomes are the session's to decide, not this app's — see
-        ``RemoteSession.set_working_directory``, which owns the reasoning about
+        ``AttachedSession.set_working_directory``, which owns the reasoning about
         why a cold viewer is a field assignment and a bound one is a runtime
         rebind. This method is the UI half: it reports what happened, keeps the
         band in step, and re-engages the successor.
@@ -21406,7 +21406,7 @@ class OperatorApp(App[None]):
 
         if outcome == "rebound":
             # NOTHING to re-engage here. The runtime leaves by the `retiring`
-            # route (see `RemoteSession.set_working_directory`), which the
+            # route (see `AttachedSession.set_working_directory`), which the
             # facade turns into `_go_cold(refresh=True)` and the refresh
             # callback this app already installs — `_on_runtime_refreshed` —
             # engages the successor eagerly. Starting a second engage from here
@@ -23171,7 +23171,7 @@ class OperatorApp(App[None]):
         change is the contract; the subscription is dropped on unmount.
 
         Goes through :func:`process_watcher` rather than the session because a
-        ``RemoteSession`` follower has no watcher of its own, yet its user
+        ``AttachedSession`` follower has no watcher of its own, yet its user
         still edits config and still deserves the notice. ``start`` is
         idempotent, so calling it here is what makes a follower-only process
         poll at all.
@@ -23360,7 +23360,7 @@ class OperatorApp(App[None]):
         if "tool_approval_mode" in changed:
             # ONE receipt per event, from the process that owns the gate
             # (design round 1, D1). When a runtime is attached the gate lives
-            # there, `OwnedSessionHandle.follow_config` moves it and emits the
+            # there, `ServingSessionHandle.follow_config` moves it and emits the
             # accurate line, and a value clause here was a second sentence
             # about one fact in a second vocabulary ("tool approvals now auto"
             # over "tool approvals: auto") — read as two events, with the
@@ -23453,7 +23453,7 @@ class OperatorApp(App[None]):
         round 2, D8).
 
         **The rule is asymmetric** (review round 1 R1, UX round 1 U1), and it
-        is the same rule ``OwnedSessionHandle.follow_config`` applies, stated
+        is the same rule ``ServingSessionHandle.follow_config`` applies, stated
         once there in full:
 
         * tightening (``auto`` → ``ask``) follows the file unconditionally;
@@ -23554,7 +23554,7 @@ class OperatorApp(App[None]):
     def _gate_is_owned_elsewhere(self) -> bool:
         """Whether an attached RUNTIME, not this app, owns the approval gate.
 
-        When it does, ``OwnedSessionHandle.follow_config`` moves the real gate
+        When it does, ``ServingSessionHandle.follow_config`` moves the real gate
         and emits the receipt every attached viewer and the phone already see,
         so a second value clause from here is one event told twice (design
         round 1, D1). This app's own ``_approve_all`` still tracks the mode —
@@ -24052,7 +24052,7 @@ class OperatorApp(App[None]):
             # Every ``noop`` MUST correspond to a surface this terminal opens
             # on its own. ``team_mutate``/``agent_mutate`` did not — they were
             # produced and never consumed, so the command vanished (see
-            # ``owned.py::_team_slash``). ``tests/unit/tui/test_noop_consumers.py``
+            # ``serving.py::_team_slash``). ``tests/unit/tui/test_noop_consumers.py``
             # now fails CI on any ``data.type`` that reaches here with no
             # handler, so a future producer cannot reintroduce the silence.
             if data.get("type") == "agent_list":
@@ -24150,7 +24150,7 @@ class OperatorApp(App[None]):
         # is written by the one path that writes user rows. Order matters: the
         # receipt prints first, then the turn starts beneath it.
         # Spelled as LITERALS, deliberately, and kept in step with
-        # ``SLASH_ACTION_RECEIPTS`` — the set ``RemoteSession`` declares in its
+        # ``SLASH_ACTION_RECEIPTS`` — the set ``AttachedSession`` declares in its
         # auth frame — by ``test_noop_consumers``, which reads these strings
         # statically out of this function. Importing the constant here would
         # blind that audit to the very seam it guards: a type declared on the
@@ -24275,7 +24275,7 @@ class OperatorApp(App[None]):
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
-        # A RemoteSession keeps process/terminal commands local, but every
+        # A AttachedSession keeps process/terminal commands local, but every
         # command the owner advertises as ``authoritative_session`` in its
         # capability list runs on the owner through the routing seam below —
         # the owner's capability scope, not a hardcoded command list, decides.
@@ -24678,7 +24678,7 @@ class OperatorApp(App[None]):
         ownership to a runtime), so "stop" here is deny gates → abort →
         dispose the in-process session → show it cold: the transcript stays
         on screen and the app reports the session ended and ``/resume``
-        reopens it. On a follower (a RemoteSession) the same command sends
+        reopens it. On a follower (a AttachedSession) the same command sends
         the graceful ``stop`` op to the owner and paints the receipt.
 
         ``/stop <target>`` uses the `send` target vocabulary — pid, session
@@ -24926,7 +24926,7 @@ class OperatorApp(App[None]):
             # nothing. Left latched, the NEXT stop — a stranger's — was
             # reported as the user's own (round-5 MINOR-5), the same latching
             # class as round-3 MAJOR-1 and unlatched the same way
-            # `RemoteSession.request_stop` does.
+            # `AttachedSession.request_stop` does.
             self._issued_own_stop = False
             self._system_notice(
                 "cannot stop this session's owner — the owner is an older process; "
@@ -25588,7 +25588,7 @@ class OperatorApp(App[None]):
         # The DESTINATION is derived from the spec this command resolved, never
         # re-read from ``session.model_label`` after ``set_model``. On a local
         # ``Session`` the two agree — ``set_model`` assigns synchronously — but
-        # on a ``RemoteSession`` (a terminal attached to another owner's
+        # on a ``AttachedSession`` (a terminal attached to another owner's
         # session) ``set_model`` only schedules the request as a task and
         # ``model_label`` keeps reading the owner's frontend-state sync, which
         # lands on a later tick. Re-reading there printed
@@ -25600,7 +25600,7 @@ class OperatorApp(App[None]):
         if not persist_default and bool(getattr(session, "is_cold", False)):
             # A COLD viewer (every fresh `lop` for its first 1-3 s, and every
             # viewer after `/stop`) is bound to no runtime, and
-            # ``RemoteSession.set_model`` with no client RETURNS without doing
+            # ``AttachedSession.set_model`` with no client RETURNS without doing
             # anything — the same silent drop its ``set_goal`` and
             # ``set_conversation_name`` siblings perform, and deliberately not
             # changed there: the facade cannot raise from a synchronous setter
@@ -25632,7 +25632,7 @@ class OperatorApp(App[None]):
                 )
             else:
                 # NO give-up-specific arm here, and that is deliberate — see
-                # `RECOVERY_GIVE_UP_S` in `session/remote.py`. A viewer that
+                # `RECOVERY_GIVE_UP_S` in `session/attached.py`. A viewer that
                 # gave up on a
                 # live-but-silent owner is cold with a callable `_ensure_bound`,
                 # which is exactly the shape `_needs_runtime_first` diverts into
@@ -28413,7 +28413,7 @@ class OperatorApp(App[None]):
         try:
             selected = _model_spec(session)
         except Exception:
-            # `RemoteSession.model` is a PROPERTY THAT RAISES when the owner has
+            # `AttachedSession.model` is a PROPERTY THAT RAISES when the owner has
             # no selected spec yet, and `getattr(..., None)` does not suppress an
             # exception raised inside a property. Unguarded, a follower attached
             # before the owner's model syncs got `failover list failed: owner has
@@ -28441,7 +28441,7 @@ class OperatorApp(App[None]):
         )
 
         # The model ACTUALLY serving, via `effective_model` rather than the
-        # route's `active_fallback`: RemoteSession implements `effective_model`
+        # route's `active_fallback`: AttachedSession implements `effective_model`
         # but not the route state, so this is the one comparison that is correct
         # on both the owning terminal and an attached follower.
         try:
@@ -31960,8 +31960,8 @@ class OperatorApp(App[None]):
 
         A session is owned either by a detached runtime or by THIS app, and
         both hosts must agree — the same mirror contract
-        ``_team_attach_slash_result`` keeps with ``owned.py``. So the rule is
-        identical to ``OwnedSessionHandle._complete_unconsumed_action``: a
+        ``_team_attach_slash_result`` keeps with ``serving.py``. So the rule is
+        identical to ``ServingSessionHandle._complete_unconsumed_action``: a
         request-carrying attach receipt whose type the client did NOT declare
         is submitted here, because that client will not submit it and would
         otherwise drop it in silence.
@@ -32366,7 +32366,7 @@ class OperatorApp(App[None]):
             ]
             return SlashResult(kind="block", data={"type": "team_list", "items": items})
         # The attach runs HERE, on the authoritative session, for the same
-        # reason ``owned.py::_team_slash`` does it: stamping the roster and the
+        # reason ``serving.py::_team_slash`` does it: stamping the roster and the
         # briefs mutates session state the follower does not have. This used to
         # return an unconsumed ``noop {"type": "team_mutate"}``, so a follower
         # attached to a TUI-hosted session got the same silence a viewer got
@@ -32388,7 +32388,7 @@ class OperatorApp(App[None]):
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
         """``/team <name> [<request>]`` for a follower of THIS TUI's session.
 
-        The mirror of ``owned.py::_team_attach_slash``; the two exist because
+        The mirror of ``serving.py::_team_attach_slash``; the two exist because
         a session can be hosted either by a detached runtime or by this app,
         and a follower must get the same answer from both.
 
@@ -32567,7 +32567,7 @@ class OperatorApp(App[None]):
             )
         old_label = session.model_label
         # Destination from the RESOLVED spec, not a re-read of the session's
-        # label — same reason as in ``_cmd_model``: a ``RemoteSession`` applies
+        # label — same reason as in ``_cmd_model``: a ``AttachedSession`` applies
         # ``set_model`` asynchronously and its label follows the owner's sync.
         new_label = f"{spec.provider}/{spec.model_id}"
         session.set_model(
@@ -33691,7 +33691,7 @@ class OperatorApp(App[None]):
         turn got two "interrupted" notices.
 
         That order is not hypothetical, it is the FOLLOWER order.
-        `RemoteSession._on_wire_event` clears `_streaming` and only then emits
+        `AttachedSession._on_wire_event` clears `_streaming` and only then emits
         `agent_end`, on the socket read pump — a different task from Textual's
         message pump. So the owner's end can land inside the post-to-dispatch
         window: guard 2 reads a just-cleared `False`, the fallback proceeds, and
@@ -33868,7 +33868,7 @@ class OperatorApp(App[None]):
         # NOT a silence hole: a follower whose owner dies, is stopped, or whose
         # viewer goes cold with no successor (`_go_cold`, #642) gets a real
         # aborted `AgentEndEvent` synthesised locally
-        # (`RemoteSession._end_turn_locally`), which reaches this method through
+        # (`AttachedSession._end_turn_locally`), which reaches this method through
         # `on_turn_ended` and settles the ladder. The abandoned route is the
         # fallback for a turn NOBODY ends, and on a follower that is precisely
         # the case where this app has no outcome to report.
@@ -34376,7 +34376,7 @@ class OperatorApp(App[None]):
         registering ours would produce an entry no announcement can ever match
         — every prompt would then paint twice. Probed rather than assumed
         because `SessionProtocol` does not require the keyword and the mobile
-        handles already probe the same seam the same way (`owned.py`,
+        handles already probe the same seam the same way (`serving.py`,
         `tui_handle.py`); a session that cannot be introspected is treated as
         the older shape, which is the safe direction.
         """
@@ -34855,7 +34855,7 @@ class OperatorApp(App[None]):
         MATCHED BY MESSAGE ID, not by pointer identity. Pointer identity was a
         single-process assumption that held only for the in-process `Session`,
         whose `queued_steering` drains and re-puts the very objects the app
-        queued. `RemoteSession.queued_steering` rebuilds brand-new `Message`
+        queued. `AttachedSession.queued_steering` rebuilds brand-new `Message`
         objects out of the serialized frontend state on every call, so on any
         daemon-attached session — which is how a `kind=daemon` runtime is
         always driven — no snapshot entry could ever BE the held object and
@@ -34866,8 +34866,8 @@ class OperatorApp(App[None]):
 
         The id is the seam's real identity, and it already is everywhere else
         that crosses the process boundary: `_send_steer_when_ready` sends
-        `command_id=message.id`, `owned.py::recall_steer` finds the queued
-        message by that id, and `RemoteSession.recall_steering` matches on it.
+        `command_id=message.id`, `serving.py::recall_steer` finds the queued
+        message by that id, and `AttachedSession.recall_steering` matches on it.
         The TUI was the one place still reading pointers. Identity is kept as
         the fast path so the in-process session, where the objects genuinely
         are shared, never depends on the id round trip at all.
@@ -34875,7 +34875,7 @@ class OperatorApp(App[None]):
         An id only counts as an identity when it NAMES ONE ENTRY. Two things
         break that, and both are the same hazard: a snapshot carrying the id
         twice, and `UNIDENTIFIED_STEER_ID` — the placeholder
-        `RemoteSession.queued_steering` substitutes for a wire item with no id
+        `AttachedSession.queued_steering` substitutes for a wire item with no id
         of its own, which by construction names every id-less entry rather
         than any one of them. Matching either would let a recall unsend one
         message while handing the composer another's text, so neither is an
@@ -34904,10 +34904,10 @@ class OperatorApp(App[None]):
         not happened. The message then rides the next boundary, which is the
         behaviour the user had before they pressed Esc.
         """
-        # Function-local like every other `session.remote` import in this file:
+        # Function-local like every other `session.attached` import in this file:
         # the module imports the TUI's own types, so a top-level import here is
         # a cycle.
-        from local_operator.session.remote import UNIDENTIFIED_STEER_ID
+        from local_operator.session.attached import UNIDENTIFIED_STEER_ID
 
         session = self._session
         if session is None or not self._held_steer_blocks:
@@ -35032,7 +35032,7 @@ class OperatorApp(App[None]):
             # REACHABLE, and no longer merely defensive. That claim held while
             # the only host was the in-process `Session`, where this handler
             # runs on the session's own loop and nothing can drain the queue
-            # between the snapshot above and here. A `RemoteSession` reads a
+            # between the snapshot above and here. A `AttachedSession` reads a
             # REPLICATED `frontend_state` that the socket pump may have last
             # written arbitrarily long ago, so a False here is an ordinary
             # stale-snapshot outcome — and it is also how a viewer with no
@@ -35096,7 +35096,7 @@ class OperatorApp(App[None]):
     def _on_recall_rejected(self, session: Any, command_id: str) -> None:
         """The owner did not honour a recall this app already committed.
 
-        A follower's recall is optimistic (`RemoteSession.recall_steering`):
+        A follower's recall is optimistic (`AttachedSession.recall_steering`):
         the composer has the text and the steer's rows have left the
         transcript before the owner answers. When the answer is a refusal —
         the drain took the message first — the message really was delivered
@@ -35512,7 +35512,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     """Whether this session is a VIEWER, and narrow it to the viewer surface.
 
     The one place the TUI decides "may I reach the viewer members on this
-    object". Sixteen sites asked it as ``isinstance(session, RemoteSession)``,
+    object". Sixteen sites asked it as ``isinstance(session, AttachedSession)``,
     which coupled the front end to a concrete class, and a further seventeen
     asked ``getattr(session, "is_remote", False)`` — an undeclared attribute
     whose ``False`` default silently meant "in-process".
@@ -35524,7 +35524,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     an arm64 host, CPython 3.12.13, min-of-seven over 2,000 iterations:
 
     ==============================================  ===============
-    ``isinstance(viewer, RemoteSession)``            0.014-0.015 us
+    ``isinstance(viewer, AttachedSession)``            0.014-0.015 us
     ``isinstance(viewer, ViewerSessionProtocol)``      55-58 us
     ``not session.owns_runtime``                     0.021-0.024 us
     ==============================================  ===============
@@ -35535,7 +35535,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     mostly timing-loop overhead (one host measured its empty-lambda floor at 34%
     of the reading). Quote the microseconds and treat the ratio as ~10^3x, which
     is all the decision needs. Re-measuring needs a fully constructed
-    ``RemoteSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
+    ``AttachedSession`` — a ``MagicMock(spec=…)`` or a bare ``__new__`` instance is
     NOT a positive and times the cheap negative path instead, which is how the
     same row has now been "re-measured" to three different values. See
     ``ViewerSessionProtocol`` for the method, the table of what each stand-in
@@ -35552,7 +35552,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **What makes it sound.** ``owns_runtime`` is DECLARED on ``SessionProtocol``
     and implemented as a constant on both classes (``Session`` True,
-    ``RemoteSession`` False), so pyright checks the read and the two classes
+    ``AttachedSession`` False), so pyright checks the read and the two classes
     partition exactly — asserted as a pair by
     ``tests/unit/session/test_viewer_protocol.py``. The ``TypeGuard`` return is
     what keeps the viewer members statically checked at all sixteen call sites:
@@ -35609,9 +35609,9 @@ def _session_subject(session: Any) -> str:
     byte-identical paragraphs, which reads as the app printing one line twice
     (design review round 1, D1).
     """
-    # GUARDED, not merely defaulted. On a real ``RemoteSession`` this property
+    # GUARDED, not merely defaulted. On a real ``AttachedSession`` this property
     # reads ``frontend_state``, which RAISES ``RuntimeError`` until the first
-    # sync completes (``session/remote.py``) \u2014 and the refresh callback calls
+    # sync completes (``session/attached.py``) \u2014 and the refresh callback calls
     # this BEFORE it re-engages, so a raise there costs the eager re-engage
     # this feature exists to provide and leaves the viewer cold until the next
     # keystroke. ``_go_cold``'s guard swallows the exception, which makes the

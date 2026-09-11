@@ -13,8 +13,8 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from local_operator.mcp.manager import McpConnectionError, McpManager
 from local_operator.server.app import app
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session
 from tests.e2e.test_desktop_controls import request_id, until
 from tests.e2e.test_desktop_radient import serve
@@ -160,7 +160,9 @@ async def test_mcp_oauth_controls(headless_tui_env, workspace, monkeypatch):
                 session = build_session(root / "sessions" / sid, ScriptedStream([]), cwd=workspace)
                 manager = McpManager(str(workspace), auth_store=store)
                 session.mcp_manager = manager
-                handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+                handle = ServingSessionHandle(
+                    session, asyncio.get_running_loop(), cwd=str(workspace)
+                )
                 runtime = RuntimeServer(handle, kind="daemon")
                 await runtime.start_in_process()
                 (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))

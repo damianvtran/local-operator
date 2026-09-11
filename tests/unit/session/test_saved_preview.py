@@ -38,7 +38,7 @@ def test_existing_empty_journal_is_a_valid_empty_preview(tmp_path):
 
 @pytest.mark.asyncio
 async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path, monkeypatch):
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     record = SimpleNamespace(cwd="/synthetic-owner")
     monkeypatch.setattr(
@@ -48,7 +48,7 @@ async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path,
     async def no_takeover():
         raise AssertionError("a preview must not become an execution owner")
 
-    remote = await RemoteSession.saved_preview(
+    remote = await AttachedSession.saved_preview(
         "unstarted", config_dir=tmp_path, cwd="/other", takeover_factory=no_takeover
     )
     try:
@@ -62,7 +62,7 @@ async def test_unmaterialized_empty_view_requires_a_discoverable_owner(tmp_path,
 
 @pytest.mark.asyncio
 async def test_absent_owner_and_journal_refuse_before_building_facade(tmp_path, monkeypatch):
-    from local_operator.session.remote import RemoteSession
+    from local_operator.session.attached import AttachedSession
 
     monkeypatch.setattr(
         "local_operator.mobile.attach_client.find_runtime_record", lambda *args: (None, None)
@@ -72,7 +72,7 @@ async def test_absent_owner_and_journal_refuse_before_building_facade(tmp_path, 
         raise AssertionError("a missing target must not launch an owner")
 
     with pytest.raises(FileNotFoundError, match="no longer available"):
-        await RemoteSession.saved_preview(
+        await AttachedSession.saved_preview(
             "deleted", config_dir=tmp_path, cwd="/other", takeover_factory=no_takeover
         )
     assert not (tmp_path / "sessions" / "deleted").exists()

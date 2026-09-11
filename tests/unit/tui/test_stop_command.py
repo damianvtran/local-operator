@@ -117,7 +117,7 @@ async def test_stop_with_no_session_is_a_warning() -> None:
 
 @pytest.mark.asyncio
 async def test_follower_stop_sends_the_op_to_the_owner() -> None:
-    """On a RemoteSession bare ``/stop`` forwards the graceful op and paints
+    """On a AttachedSession bare ``/stop`` forwards the graceful op and paints
     the owner's ack — never disposes locally, never signals."""
     from local_operator.session.frontend_state import FrontendSessionState
 
@@ -1218,7 +1218,7 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
             "local_operator.mobile.attach_client.find_runtime_record",
             lambda root, concrete: (remote_record, 90909),
         )
-        monkeypatch.setattr("local_operator.session.remote.RemoteSession.connect", fake_connect)
+        monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", fake_connect)
         app._resume_factory = fake_find  # type: ignore[assignment]
 
         with pytest.raises(RuntimeError):

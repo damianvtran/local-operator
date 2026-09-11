@@ -3,7 +3,7 @@
 **This file exists because a session that had finished talking still wore a
 spinner in the sidebar.** The reported symptom was a "done" conversation
 ("Article-search-svc…") that kept showing the working indicator; the measured
-cause was that `OwnedSessionHandle.is_busy()` — the *reaper's* residency
+cause was that `ServingSessionHandle.is_busy()` — the *reaper's* residency
 predicate — was published verbatim as `SessionRecord.busy`, which every
 surface renders as "a turn is running".
 
@@ -40,12 +40,14 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.runtime.owned import OwnedSessionHandle
 from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
 
-async def _rig(directory: Path, replies: int = 2) -> tuple[Any, OwnedSessionHandle, RuntimeServer]:
+async def _rig(
+    directory: Path, replies: int = 2
+) -> tuple[Any, ServingSessionHandle, RuntimeServer]:
     """A real Session under the production handle and server.
 
     Same rig as ``test_busy_settles``: the seam under test is the one
@@ -55,7 +57,7 @@ async def _rig(directory: Path, replies: int = 2) -> tuple[Any, OwnedSessionHand
     directory.mkdir(parents=True, exist_ok=True)
     stream = ScriptedStream([text_turn(f"reply {i}") for i in range(replies)])
     session = build_session(directory, stream)
-    handle = OwnedSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
     server = RuntimeServer(handle, kind="daemon")
     handle.subscribe(server._schedule_push)
     return session, handle, server
