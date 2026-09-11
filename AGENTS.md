@@ -1996,6 +1996,64 @@ user.** §9 of the design is explicit and the guide repeats it: it defeats the
 running as the operator that is willing to run `lop` can still read every
 secret. A comment or a docstring that promises more than that is wrong.
 
+## The QwenCloud console ticket (`lop qwencloud-ticket`)
+
+**What it is.** `login_qwencloud_ticket`, the QwenCloud console's browser
+session cookie. Not a scoped API key — it is a FULL-ACCOUNT console session,
+the broadest credential in `auth.db`.
+
+**Why it exists at all.** The personal Token Plan window is invisible to the
+BSS gateway the official CLI calls: for a live account that gateway answers
+`IsGray: true` with an empty seat summary and zero instances on every
+commodity. The console gateway the web UI itself calls does report the window,
+and it authenticates on exactly one thing — this cookie. No login flow can mint
+it, because a browser session cookie cannot be refreshed headlessly.
+
+**Storing it.** Stdin only, never argv — a command line is readable by any
+process running as you and lands in shell history:
+
+```sh
+printf %s '<TICKET>' | lop qwencloud-ticket set
+lop qwencloud-ticket status   # presence, length and age; never the value
+lop qwencloud-ticket rm
+```
+
+There is deliberately no `get` verb. The one consumer is inside the process.
+
+**The row is namespaced, not registered.** It is stored under provider id
+`qwencloud-console`, which is deliberately absent from `PROVIDER_REGISTRY` —
+the same trick `mcp-oauth` uses. A row under `alibaba-token-plan` would satisfy
+`ProviderController.has_any_credential` (it matches the provider column with no
+type or field filter) and local-operator would conclude it can run CHAT traffic
+on a read-only console cookie. The value is stored under `data["ticket"]` and
+never `data["key"]`, because the API-key cascade reads `key` and would hand a
+full-account browser cookie to DashScope as an inference bearer.
+
+**The symptom when it expires.** `/usage` simply stops showing the 7 Day
+Credits window for alibaba-token-plan — no error, no "sign-in expired" note,
+because this is not an OAuth row and cannot set `credential_invalid`. An
+expired ticket also returns HTTP **200**, carrying
+`data.errorCode == "BailianGateway.Login.NotLogined"`. The fix is one line:
+capture a fresh cookie and re-run `set`.
+
+**Cache lag.** The stored ticket is deliberately not part of the usage cache
+fingerprint — hashing a full-account session cookie into a cache key is the
+worse trade — so replacing an expired ticket can take up to the 5-minute TTL to
+show. Press `r` in the panel to force it.
+
+**The update hazard.** `lop /update` or `uv tool upgrade` reinstalls from PyPI
+and silently reverts a locally built console fetcher while leaving the row in
+place: nothing reads it, and the credential still looks healthy.
+`lop qwencloud-ticket status` reports that state explicitly.
+
+**Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
+SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
+broader than every other row in it. `set` refuses to write when the store's
+directory is wider than 0700, and `status` flags a ticket older than about a
+week. Note that `AuthStore._connect` re-chmods the db file to 0600 on every
+open, so the file-mode branch of that check is a backstop for a store opened
+some other way, not something the CLI path can normally hit.
+
 ## Usage analytics (`local_operator/analytics/`)
 
 Every provider call across every session contributes to one shared, on-disk
