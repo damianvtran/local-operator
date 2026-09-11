@@ -1954,7 +1954,7 @@ class PeerMessageBlock(ExpandableActionBlock):
         #: ONCE here rather than on every repaint.
         #:
         #: `_refresh_row` runs on hover, focus, expand/collapse, `retheme`,
-        #: `on_resize` AND `_invalidate_name_col` — and that last one repaints
+        #: `on_resize` AND the name-column resync — and that last one repaints
         #: every ledger block when the shared name column moves, so one peer
         #: card's cost is paid by the whole ledger. The strip is a regex plus a
         #: per-character `unicodedata.category` scan, and it runs over the
@@ -3095,6 +3095,14 @@ class TranscriptView(ScrollableContainer):
         # is read once per card per repaint and only changes when the set of tool
         # names on screen does.
         self._name_col_cache: int | None = None
+        # The width the ledger's ROWS were last published with — what their
+        # summaries were actually laid out against. Deliberately separate from
+        # the cache: every path that can move the column DROPS the cache, so the
+        # cache cannot answer "did this actually change", and a resync comparing
+        # against it would read `None` as "nothing to do" while rows sat at the
+        # old offset. `None` here means no row has been painted under a published
+        # column yet, so there is nobody to be stale.
+        self._name_col_applied: int | None = None
         #: The block held at the BOTTOM as later blocks arrive (the working
         #: line). Pinned rather than re-appended so it is never unmounted and
         #: remounted mid-turn, which would restart its timer and its clock.
@@ -3279,6 +3287,12 @@ class TranscriptView(ScrollableContainer):
         was_at_tail = self._tail_anchor.following or self.is_near_bottom()
         release_revision = self._tail_anchor.release_revision
         self.mount_all(blocks)
+        # A batch arrives as ONE ledger change, so it gets one resync rather than
+        # the per-append fast path's reading of it: the newcomers were held out
+        # of the container while they were appended, and the column their names
+        # imply has to be published to the rows already on screen in the same
+        # breath.
+        self._resync_name_col()
         self.call_after_refresh(self._settle_gaps, blocks)
         self._remeasure_empty_state()
         # Then land on the tail, AFTER the settle pass above.
@@ -3453,7 +3467,12 @@ class TranscriptView(ScrollableContainer):
         else:
             self.mount(*additions, before=before)
         self._blocks[index:index] = additions
-        self._name_col_cache = None
+        # Revealed rows are part of the ledger now, and a page can carry tool
+        # names longer than anything already on screen. Re-derive and repaint in
+        # the same pass as the mount: dropping the cache alone left the rows
+        # already painted at the old offset while the first newcomer to paint
+        # derived the wider column, which is the tear a reader saw on scroll-up.
+        self._resync_name_col()
         # The mount itself may not have triggered a resize yet; correct now so
         # no frame can be painted at the displaced offset even once.
         self._reanchor_insert()
@@ -3561,10 +3580,14 @@ class TranscriptView(ScrollableContainer):
         is the ledger's size that decides whether it matters). The two ways the
         column can SHRINK keep the full re-derivation, because only a re-scan
         can say how far: a rename, through :meth:`invalidate_name_col`, and a
-        removal, which drops the cache outright.
+        removal, which goes through :meth:`_resync_name_col`.
+
+        Whether it widened is asked of :attr:`_name_col_applied` — the width the
+        rows HOLD — not of the cache. This runs while the cache may be unset, and
+        the early return that read `None` as "nothing to do" is exactly the
+        defect: rows already painted kept the narrow offset while whichever row
+        painted next derived the wider one.
         """
-        if self._name_col_cache is None:
-            return  # nothing cached to widen; `tool_name_col` will derive it
         # The same two exclusions `tool_name_col` applies, and for the reasons
         # argued there: a pending approval and a call the model is still
         # dictating are not rows the spine is measured against.
@@ -3578,11 +3601,60 @@ class TranscriptView(ScrollableContainer):
         from local_operator.tui.glyphs import display_name
 
         width = max(TOOL_NAME_COL, min(cell_len(display_name(name)), TOOL_NAME_COL_MAX))
-        if width <= self._name_col_cache:
+        # `None` published means no row is holding a column yet, so the floor is
+        # the widest any of them can be showing.
+        applied = self._name_col_applied
+        if width <= (TOOL_NAME_COL if applied is None else applied):
             return
         self._name_col_cache = width
-        for existing in self._blocks:
-            repaint = getattr(existing, "refresh_row", None)
+        self._name_col_applied = width
+        self._repaint_ledger_rows()
+
+    def _resync_name_col(self) -> None:
+        """Re-derive the shared name column and repaint the ledger if it moved.
+
+        THE one funnel for every path that can move the column: an append's
+        growth (through :meth:`_widen_name_col`, which keeps its O(1) fast path),
+        pagination, a rename, a removal, a clear, and a batch mount. Each of
+        those used to carry its own idea of what to do — most dropped the derived
+        width and repainted nobody, and the append's growth path returned early
+        whenever the width was unset, which is exactly the state those drops
+        leave — so rows kept the old offset until a pointer happened to hover
+        them. That is the tear a reader saw moving the cursor down the ledger,
+        and again on revealing an older page.
+
+        The comparison is against the width the rows were actually published
+        with, :attr:`_name_col_applied` — never against the cache, which the
+        caller has just dropped and which would therefore read as "unchanged".
+        """
+        previous = self._name_col_applied
+        self._name_col_cache = None
+        width = self.tool_name_col
+        if previous == width:
+            return
+        self._name_col_applied = width
+        self._repaint_ledger_rows()
+
+    def _repaint_ledger_rows(self) -> None:
+        """Re-render every ledger row against the current column.
+
+        Every ``LEDGER_ROW``, not only the ones on screen: a row is rebuilt from
+        the data it holds rather than from the frame it is on, so one scrolled
+        out of view is already correct when the reader reveals it. Repainting
+        just what is visible would move the same tear one page further out.
+        """
+        for block in self._blocks:
+            if not getattr(block, "LEDGER_ROW", False):
+                continue
+            if block.parent is not self:
+                # A row that has not been mounted has not been painted, so it
+                # holds no stale offset — and rebuilding it here, with no parent
+                # to ask for the shared column, would fit it to the console rung
+                # and paint one frame at the old width before its own layout
+                # pass corrected it. It derives the column on that pass, like
+                # any other newcomer.
+                continue
+            repaint = getattr(block, "refresh_row", None)
             if callable(repaint):
                 repaint()
 
@@ -3684,6 +3756,13 @@ class TranscriptView(ScrollableContainer):
                 if isinstance(name, str) and name:
                     longest = max(longest, cell_len(display_name(name)))
             self._name_col_cache = max(TOOL_NAME_COL, min(longest, TOOL_NAME_COL_MAX))
+            # Deriving IS publishing: this is the width every row paints with
+            # from here on, so it is also what a later resync has to compare
+            # against. Recorded at the derivation rather than only at a repaint
+            # broadcast so a resync can skip the repaint when the column did not
+            # move — a fresh ledger's first derivation has nobody to repaint, and
+            # a reveal that changes nothing must not walk every row.
+            self._name_col_applied = self._name_col_cache
         return self._name_col_cache
 
     def invalidate_name_col(self) -> None:
@@ -3693,21 +3772,7 @@ class TranscriptView(ScrollableContainer):
         column is derived from those names — without this the first fragment's
         width outlived it for the rest of the session.
         """
-        self._invalidate_name_col()
-
-    def _invalidate_name_col(self) -> None:
-        """Forget the cached column and repaint the ledger if it moved.
-
-        Only the cards repaint, and only when the number actually changed: a
-        ledger that reflowed on every append would undo the point of a spine.
-        """
-        previous = self._name_col_cache
-        self._name_col_cache = None
-        if previous is not None and previous != self.tool_name_col:
-            for block in self._blocks:
-                repaint = getattr(block, "refresh_row", None)
-                if callable(repaint):
-                    repaint()
+        self._resync_name_col()
 
     def refresh_gap_after(self, block: TranscriptBlock) -> None:
         """Re-decide the gap for the first real block below ``block``.
@@ -3820,10 +3885,12 @@ class TranscriptView(ScrollableContainer):
         if self._tail is block:
             self._tail = None
         block.remove()
-        # Same reason `clear_blocks` does it: the name column is derived FROM the
-        # blocks, so a removal can only ever make it too wide.
+        # The name column is derived FROM the blocks, so removing one can only
+        # make it too wide — but it is the rows LEFT BEHIND that have to hear
+        # about it. Dropping the cache alone let them keep the wide offset until
+        # something else repainted them.
         if getattr(block, "LEDGER_ROW", False):
-            self._name_col_cache = None
+            self._resync_name_col()
         # Whatever fell into the removed block's place now has a different
         # neighbour above it — most visibly the very first block, which must
         # never carry a gap once the boot hint is lifted off the top.
@@ -3868,10 +3935,12 @@ class TranscriptView(ScrollableContainer):
         self._blocks.clear()
         # Every derived measurement goes with them. The name column is computed
         # FROM the blocks, so a stale one made the next ledger inherit the width
-        # of a transcript the user just cleared. The pin goes too — the block it
-        # named was just removed, and the hook below is where a live turn's
-        # working line is mounted again.
-        self._name_col_cache = None
+        # of a transcript the user just cleared — re-deriving here publishes the
+        # floor of the empty ledger instead of leaving the answer to whichever
+        # row paints next. The pin goes too — the block it named was just
+        # removed, and the hook below is where a live turn's working line is
+        # mounted again.
+        self._resync_name_col()
         self._tail = None
         # An insert settling into the transcript that just went away has no
         # reader to hold. `_reanchor_insert` would notice the anchor is

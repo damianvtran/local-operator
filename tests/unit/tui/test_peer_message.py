@@ -1005,7 +1005,7 @@ async def test_a_repaint_does_not_rescan_the_whole_body() -> None:
     """The snippet is sanitized once at construction, not per repaint.
 
     `_refresh_row` runs on hover, focus, expand, retheme, resize and — through
-    `_invalidate_name_col` — on every ledger block when the shared name column
+    the name-column resync — on every ledger block when the shared name column
     moves. The strip is a regex plus a per-character `unicodedata.category`
     scan; run over a body at the 256 KiB wire cap it measured 23.9 ms of
     loop-thread CPU *per repaint*, so one card taxed the whole ledger.
