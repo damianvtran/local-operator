@@ -55,9 +55,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Awaitable, Sequence, cast
+
+#: Naming never speaks to the terminal: it is decoration running beside a live
+#: turn, so its failures go to the log file and its outcomes to a receipt.
+logger = logging.getLogger(__name__)
 
 #: A history entry as the theme sampler reads it. Deliberately ``Any`` and
 #: duck-typed via ``getattr`` rather than a ``Protocol`` or an import of the
@@ -648,27 +653,60 @@ def provisional_title(text: str) -> str:
     return label
 
 
-async def _ask_for_title(system: str, prompt: str, complete_fn, timeout: float) -> str | None:
-    """One bounded call, every failure resolving to ``None``.
+#: Returned by :func:`_ask_for_title` when the CALL failed, as opposed to the
+#: model answering "no title". Both still resolve to ``None`` for the automatic
+#: callers — the instruction to them is identical, leave the title alone — but a
+#: user who typed a command is owed the difference between "the name still fits"
+#: and "the model could not be reached", because only one of those is worth
+#: retrying. A sentinel rather than an exception keeps the isolation absolute:
+#: nothing propagates out of a naming call into the turn beside it.
+CALL_FAILED = object()
 
-    Shared by :func:`generate_title` and :func:`generate_retitle` so the two
-    have exactly one error policy between them. There is no retry here and
-    none underneath (the session marks the request single-attempt), so the
-    timeout is the entire budget.
+#: Returned when the naming call was CANCELLED rather than failing on its own.
+#: Separate from :data:`CALL_FAILED` because the two have opposite meanings for
+#: the two kinds of caller: a detached worker must swallow both (its cancel is a
+#: routine shutdown), while an awaited caller must re-raise this one — its
+#: cancel is the client that asked going away, and a receipt for a request
+#: nobody is holding is worse than no answer. Both collapse to "no title".
+CALL_CANCELLED = object()
+
+
+async def _ask_for_title(
+    system: str, prompt: str, complete_fn, timeout: float
+) -> str | object | None:
+    """One bounded call. ``None`` is "no title"; :data:`CALL_FAILED` is a failure.
+
+    Shared by :func:`generate_title`, :func:`generate_retitle` and
+    :func:`refresh_title` so they have exactly one error policy between them.
+    There is no retry here and none underneath (the session marks the request
+    single-attempt), so the timeout is the entire budget.
+
+    The two automatic callers collapse :data:`CALL_FAILED` back onto ``None``,
+    which is what they have always done and still correct: a failed check and an
+    unchanged subject are the same instruction to them. Only ``refresh_title``
+    keeps the distinction, because only it has a user waiting for an answer.
     """
     try:
         raw = await asyncio.wait_for(complete_fn(system, prompt), timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        # CancelledError is caught deliberately: the naming task is detached
-        # and routinely cancelled at shutdown, and letting that propagate
-        # would surface a teardown traceback for a feature nobody waited on.
-        return None
+    except asyncio.TimeoutError:
+        return CALL_FAILED
+    except asyncio.CancelledError:
+        # Swallowed, deliberately and load-bearingly: the automatic naming task
+        # is DETACHED and routinely cancelled at shutdown, so propagating would
+        # surface a teardown traceback for a feature nobody waited on.
+        #
+        # Reported apart from a timeout all the same, because a caller that IS
+        # awaited (:func:`routed_refresh`) has the opposite obligation: a cancel
+        # there is its own caller going away, and reporting that as a title
+        # outcome would answer a request nobody is listening to. It re-raises on
+        # this sentinel; the detached callers collapse it like any failure.
+        return CALL_CANCELLED
     except Exception:
         # EVERY provider failure, 429 included. The turn is running alongside
         # this call and must never learn it happened; the request is `isolated`
         # so the failure cannot have moved the turn's route or credential
         # either. See ``ChatRequest.isolated``.
-        return None
+        return CALL_FAILED
     return parse_title(str(raw or ""))
 
 
@@ -817,7 +855,10 @@ async def generate_title(
     """
     if is_low_signal(text):
         return None
-    return await _ask_for_title(TITLE_SYSTEM_PROMPT, _errand_prompt(text), complete_fn, timeout)
+    title = await _ask_for_title(TITLE_SYSTEM_PROMPT, _errand_prompt(text), complete_fn, timeout)
+    # A failed call collapses back onto "no title": this caller has no user
+    # waiting and no receipt to write, so the two are one instruction to it.
+    return title if isinstance(title, str) else None
 
 
 async def generate_retitle(
@@ -866,7 +907,9 @@ async def generate_retitle(
     if not context:
         return None
     title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
-    if title is None:
+    if not isinstance(title, str):
+        # Both "no change" and a failed call: the same instruction to an
+        # automatic caller, which is why this path keeps the collapse.
         return None
     # A model that "changes" the title to the one it already has has answered
     # "no change" in the expensive spelling. Treat it as the sentinel so the
@@ -875,6 +918,365 @@ async def generate_retitle(
     if title.casefold() == current.casefold():
         return None
     return title
+
+
+#: Argument words that mean "work the title out again" rather than "make the
+#: title these words". Several spellings because the command's own vocabulary
+#: does not tell a user which one it wants: ``/title refresh`` is what the help
+#: row and the argument list advertise, and someone who types ``update`` or
+#: ``retitle`` from another tool's habit has expressed the same intention
+#: exactly — answering that with a conversation literally renamed "update" would
+#: be a hostile reading of an unambiguous request. ``rename`` is deliberately
+#: NOT here: it is this command's other spelling, so ``/title rename`` is at
+#: least as likely to be a user starting to type a name as it is a verb.
+#:
+#: The collision is real but not close: a user who genuinely wants a title
+#: spelled "refresh" is asking for a one-word name that is also this command's
+#: only verb, and ``/title "refresh"`` (quoted) is not a syntax this registry
+#: has. They can reach it in one more keystroke with ``/title refresh cache``,
+#: or by naming it anything longer. Weighed against every user who types the
+#: natural word and expects the natural thing, the reserved words win — the same
+#: trade ``/goal clear`` and ``/model default`` already make.
+#:
+#: The vocabulary is matched on the ARGUMENT regardless of which spelling of the
+#: command carried it, so ``/rename refresh`` refreshes exactly as ``/title
+#: refresh`` does. That is deliberate and not an oversight: they are ONE registry
+#: entry, and an alias that behaved differently from its primary name would be
+#: the drift ``test_an_alias_inherits_its_command_policy`` exists to forbid. A
+#: user who reaches the feature through the older spelling gets the feature.
+#:
+#: HERE rather than in ``tui/app.py`` because three surfaces read it — the TUI
+#: handler, the routed ``slash_result`` path, and the detached runtime's own
+#: handler — and the last of those must never import Textual (see the module
+#: note on ``slash_commands.py``). A second copy in a second module is how a
+#: word ends up accepted on a terminal and typed into a title on a phone.
+TITLE_REFRESH_WORDS = frozenset({"refresh", "update", "retitle"})
+
+#: The same verbs in flag spelling, for the user who already knows the word and
+#: reaches for the shape every other command taught them.
+#:
+#: ``--update`` and ``--retitle`` are here for the reason their bare
+#: counterparts are in :data:`TITLE_REFRESH_WORDS`: a user who learned
+#: ``update`` from the argument picker and typed ``--update`` must not have that
+#: become the conversation's title. The prefix makes the failure worse, not
+#: better — nobody types a real title that starts with ``--``, so silently
+#: storing one is unambiguously wrong rather than merely unlucky.
+TITLE_REFRESH_FLAGS = frozenset({"--refresh", "--auto", "--update", "--retitle"})
+
+
+def parse_title_arg(arg: str) -> tuple[bool, str]:
+    """Classify a ``/title`` argument as a refresh request or literal title text.
+
+    Returns ``(is_refresh, title_text)``. ``--`` terminates option parsing, so
+    ``/title -- --refresh`` sets the literal title ``--refresh``; that is the
+    escape hatch keeping a ``--``-leading title reachable, and it is the idiom
+    :func:`~local_operator.spawn.policy.parse_fork_args` already establishes for
+    a free-text command.
+
+    Matching is on the WHOLE stripped, casefolded argument, so
+    ``--refresh the billing importer`` is a title rather than a refresh — the
+    near-miss rule the bare vocabulary already follows. An unknown
+    ``--``-leading token raises rather than being stored, because a title
+    nobody could have meant to type is a typo, and storing it is the failure
+    this whole vocabulary exists to prevent.
+
+    :raises ValueError: on an unknown leading flag.
+    """
+    text = arg.strip()
+    if text.startswith("--"):
+        # split(None, 1) also admits tabs/newlines between the option and prose.
+        parts = text.split(None, 1)
+        flag = parts[0]
+        remainder = parts[1] if len(parts) > 1 else ""
+        if flag == "--":
+            return False, remainder
+        # Only a BARE flag is the verb: with prose after it the whole argument
+        # is a title, matching the bare words' near-miss rule.
+        if not remainder and flag.casefold() in TITLE_REFRESH_FLAGS:
+            return True, ""
+        if not remainder:
+            raise ValueError(
+                f"unknown title option {flag}; use --refresh, --auto, or -- before text"
+            )
+        return False, text
+    if text.casefold() in TITLE_REFRESH_WORDS:
+        return True, ""
+    return False, text
+
+
+def is_refresh_request(arg: str) -> bool:
+    """``True`` when ``arg`` asks for a refresh rather than naming a title.
+
+    The thin predicate over :func:`parse_title_arg` for callers that have
+    already excluded the raising case; it shares the one parser so a spelling
+    accepted on one surface cannot be typed into a title on another.
+    """
+    return parse_title_arg(arg)[0]
+
+
+#: The refresh budget for a call made INSIDE a request/response op — the routed
+#: ``slash_result`` path and the detached runtime's, where a follower or a phone
+#: is holding a socket open waiting for the receipt.
+#:
+#: Sized against that client's deadline, not against the model. An attach client
+#: abandons its request at ``ACK_TIMEOUT_S`` (15 s), which is also
+#: :data:`TITLE_TIMEOUT_S` — so a routed refresh on the slow tail would store the
+#: new title, republish the record, and STILL report `owner connection lost`,
+#: because the answer arrived after nobody was listening. Reporting failure for
+#: work that succeeded is worse than a shorter ceiling: the title is decoration,
+#: the receipt is what the user reads.
+#:
+#: 8 s is the budget for the WHOLE handler, not for the naming call alone, and
+#: the callers must wrap both awaits in it. The history read that precedes the
+#: call is the unbounded part — ``RemoteSession.materialize_history`` pages a
+#: remote journal with no ceiling of its own — so bounding only the second await
+#: leaves the op at "unbounded + 8 s" and reintroduces exactly the overrun this
+#: constant exists to prevent. A timeout that fires resolves to
+#: :data:`TITLE_UNAVAILABLE`, which is an honest receipt inside the ack window.
+#:
+#: The TUI worker keeps the full :data:`TITLE_TIMEOUT_S`: it paints into its own
+#: transcript whenever the answer arrives and nothing is holding a socket for it.
+ROUTED_TITLE_TIMEOUT_S = 8.0
+
+#: What an on-demand refresh did, for a receipt that has to tell the user
+#: something true. The automatic path collapses all of these onto ``None``,
+#: correctly: its only instruction to itself is "leave the title alone", and
+#: every outcome below says that. A user who typed the command is owed more.
+#:
+#: The distinction that costs the most to get wrong is UNAVAILABLE against
+#: UNCHANGED. Told "the name still fits", a user has been given a judgement
+#: about their conversation and no reason to try again; told the model could
+#: not be reached, they know the judgement never happened. Reporting a wedged
+#: provider as the former is the one outcome here that actively misinforms, so
+#: ``_ask_for_title`` distinguishes a failed CALL from a declined rename (see
+#: :data:`CALL_FAILED`) even though the isolation itself is unchanged — nothing
+#: propagates out of a naming call either way.
+TITLE_REFRESHED = "refreshed"
+TITLE_UNCHANGED = "unchanged"
+TITLE_UNAVAILABLE = "unavailable"
+TITLE_NOTHING_YET = "nothing-yet"
+
+#: The call was cancelled. Never a user-facing outcome, but that is a rule every
+#: caller must KEEP rather than one the type system enforces: `_ask_for_title`
+#: swallows the cancel and returns, so a caller's own ``except CancelledError``
+#: never fires and it resumes here with `changed` False — one fallthrough away
+#: from painting "title unchanged" at a user who just cancelled. Both callers
+#: therefore test for this outcome explicitly: :func:`routed_refresh` maps it to
+#: a receipt or a re-raise, and the TUI worker returns silently.
+#: See :data:`CALL_CANCELLED`.
+TITLE_CANCELLED = "cancelled"
+
+
+#: The receipt each outcome earns, in the words every surface says them in.
+#: ONE spelling for three handlers (the TUI worker, the routed ``slash_result``
+#: path, the detached runtime), for the reason :data:`TITLE_REFRESH_WORDS` lives
+#: here: the change deliberately shares the CALL and the release rule across
+#: those surfaces so a phone and a terminal cannot drift, and the strings are
+#: the one part that still could — while being the only part the user reads.
+def refresh_receipt(result: "TitleRefresh", standing: str, *, stored: bool = True) -> str:
+    """The user-facing line for ``result``, given the title now in force.
+
+    ``standing`` rather than ``result.title`` because most branches report a
+    name the refresh did NOT choose: an unchanged answer names what is staying,
+    and a declined store names whatever won instead.
+
+    ``stored`` is what separates the two REFRESHED cases, and it has to be the
+    caller's word rather than something inferred here. The model producing a new
+    title and that title reaching the conversation are different events: a
+    ``/rename`` landing mid-call outranks the answer, so the caller declines the
+    store — and a receipt reading "title refreshed: <the rename>" would credit
+    this command with a name it did not choose and claim a store that never
+    happened. Same outcome, opposite receipts.
+    """
+    if result.outcome == TITLE_REFRESHED and stored and standing:
+        return f"title refreshed: {standing}"
+    if result.outcome == TITLE_UNAVAILABLE:
+        # Honest with or without a name: it reports that no judgement happened
+        # rather than asserting one the dead provider never made.
+        return "could not reach the model — the title is unchanged"
+    if not standing or result.outcome == TITLE_NOTHING_YET:
+        # Two ways to have no title worth quoting, one wording. Every remaining
+        # branch quotes the name in force: without one, a superseded refresh on
+        # a never-named conversation rendered "title unchanged: " with nothing
+        # after the colon. The nothing-yet wording is the truth for both —
+        # there is no title, and the way to get one by hand is the same.
+        return "nothing to title yet — /title <words> names it by hand"
+    return f"title unchanged: {standing}"
+
+
+@dataclass(frozen=True)
+class TitleRefresh:
+    """The outcome of one on-demand refresh: a title, or why there is none."""
+
+    outcome: str
+    title: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.outcome == TITLE_REFRESHED
+
+
+async def refresh_title(
+    current: str,
+    complete_fn,
+    *,
+    turns: Sequence[_Turn] | None = None,
+    newest: str = "",
+    timeout: float = TITLE_TIMEOUT_S,
+) -> TitleRefresh:
+    """Re-read the whole trajectory and title it NOW, because the user asked.
+
+    The on-demand twin of :func:`generate_retitle`, and the differences are all
+    consequences of one fact: a person typed the command. The automatic path
+    exists to spend as few provider calls as it can get away with, so it is
+    gated on transcript growth, on a refresh budget, on a churn floor, and on
+    the newest message being substantive. None of those gates mean anything
+    here — they are guesses about whether a refresh is WANTED, and this caller
+    already knows.
+
+    Three specific gates are therefore dropped rather than relaxed:
+
+    * **A current title is not required.** ``generate_retitle`` returns early
+      without one because it has no anchor to judge drift against, but a
+      session whose opening naming call failed is unnamed and is exactly the
+      one a user reaches for this command on. With no anchor the sampled
+      context simply carries no ``<current-title>``, and the model writes a
+      fresh name from the trajectory.
+    * **The newest message is not consulted for signal.** The automatic path
+      fires at SUBMIT and its trigger IS that message, so "thanks" must not
+      spend a call. This fires on a command, with no message in hand at all;
+      ``newest`` is optional and only rounds out the tail when the caller has
+      something not yet in history.
+    * **"Unchanged" is an answer, not a failure.** The automatic path folds a
+      verbatim restatement of the anchor onto ``None`` because both mean "do
+      not repaint". A user who asked is owed the distinction, so it comes back
+      as :data:`TITLE_UNCHANGED` and the receipt can say the name still fits.
+
+    What is deliberately NOT dropped is the isolation: this is the same single
+    bounded tools-free call through :func:`_ask_for_title`, so a provider
+    failure surfaces as :data:`TITLE_UNAVAILABLE` and can never reach the turn
+    running alongside it as an exception.
+    """
+    context = build_theme_context(turns or (), newest, current_title=current)
+    if not context:
+        # Nothing titleable: a session with no user/assistant turns yet. Named
+        # apart from a provider failure because the fix is different — this one
+        # resolves itself as soon as the conversation has content.
+        return TitleRefresh(TITLE_NOTHING_YET)
+    title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
+    if title is CALL_CANCELLED:
+        # Reported rather than collapsed into a verdict, because the cancel was
+        # swallowed below and this is the only remaining evidence of it. Every
+        # caller must branch on it — see :data:`TITLE_CANCELLED` for why the
+        # `except CancelledError` they already have cannot do the job.
+        return TitleRefresh(TITLE_CANCELLED)
+    if title is CALL_FAILED:
+        # The model was never reached. Reported apart from "unchanged" because
+        # the two differ in the only way that matters to someone who typed a
+        # command: "the name still fits" is a judgement that happened and is
+        # not worth retrying, while this one never happened and is.
+        return TitleRefresh(TITLE_UNAVAILABLE)
+    if title is None:
+        # The ``<title/>`` sentinel: the model declined to rename. With a title
+        # in force that means "the name still fits"; with none it means there
+        # was nothing worth titling, which is the nothing-yet case arriving from
+        # the model rather than from an empty transcript.
+        return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
+    # narrowed: CALL_CANCELLED, CALL_FAILED and None all returned above
+    assert isinstance(title, str)
+    if current and title.casefold() == current.casefold():
+        return TitleRefresh(TITLE_UNCHANGED, current)
+    return TitleRefresh(TITLE_REFRESHED, title)
+
+
+async def routed_refresh(current: str, session: Any) -> TitleRefresh:
+    """:func:`refresh_title` for a handler answering inside a request/response op.
+
+    Both routed handlers need the same three things, and each was got wrong once
+    by being written twice:
+
+    * **One budget over BOTH awaits.** Reading the history is not inside
+      :func:`refresh_title`'s timeout and has no ceiling of its own
+      (``RemoteSession.materialize_history`` pages a remote journal in a
+      ``while token:`` loop), so bounding only the naming call left the op at
+      "unbounded + 8 s" against a client that abandons it at ``ACK_TIMEOUT_S``
+      — the overrun :data:`ROUTED_TITLE_TIMEOUT_S` exists to prevent, surviving
+      the fix meant to remove it. Worse, the op could store the title and STILL
+      report failure.
+    * **Every failure resolving to a receipt**, never to an exception escaping
+      into a routed op: a timeout, a reconnect race mid-materialize, or a dead
+      provider all mean the same thing to the user, and the title stands.
+    * **The same history seam.** ``materialize_history`` when the facade has one,
+      ``history()`` when it does not.
+
+    The TUI worker deliberately does NOT use this: nothing holds a socket for it,
+    so it keeps the full :data:`TITLE_TIMEOUT_S` and paints whenever the answer
+    arrives.
+    """
+
+    async def _gather() -> TitleRefresh:
+        materialize = getattr(session, "materialize_history", None)
+        if callable(materialize):
+            # `session` is a duck-typed facade here (a real session, a remote
+            # one, or a test double), so the awaitable is cast rather than
+            # assumed — the probe-then-cast the runtime's optional ops use.
+            turns = await cast("Awaitable[list[Any]]", materialize())
+        else:
+            turns = list(session.history()) if hasattr(session, "history") else []
+        # The inner budget cannot fire FIRST — it starts from the same
+        # ROUTED_TITLE_TIMEOUT_S as the block below and starts strictly later,
+        # after the history read — so it is a backstop, not the deadline. Kept
+        # deliberately: it is what bounds the naming call if `_gather` is ever
+        # awaited without the budget below, and it stops `refresh_title`'s own
+        # default (TITLE_TIMEOUT_S, the TUI worker's much looser ceiling) from
+        # applying to a routed op that a client is holding a socket for.
+        return await refresh_title(
+            current, session.complete_once, turns=turns, timeout=ROUTED_TITLE_TIMEOUT_S
+        )
+
+    # `asyncio.timeout`, NOT `wait_for`, and the difference is load-bearing.
+    # Both enforce a deadline by CANCELLING the body — but `_ask_for_title`
+    # deliberately swallows `CancelledError` (it must: the detached naming
+    # worker is cancelled at shutdown), and a swallowed cancel defeats
+    # `wait_for` outright: it returns the sentinel instead of raising
+    # `TimeoutError`, so the commonest failure here — a slow provider — escaped
+    # as a raised `CancelledError` rather than a receipt. That unwinds past the
+    # runtime's `except Exception` (it is a BaseException), costing the caller
+    # its ack and its connection.
+    #
+    # `cm.expired()` is the one thing that still tells the two cases apart
+    # through that swallow: True when OUR deadline fired, False when the caller
+    # cancelled us. Bound BEFORE the `try` so the handlers can always read it.
+    cm = asyncio.timeout(ROUTED_TITLE_TIMEOUT_S)
+    try:
+        async with cm:
+            result = await _gather()
+    except asyncio.CancelledError:
+        if cm.expired():
+            # Our own deadline, surfacing as a cancel because the body did not
+            # swallow it. A receipt, never an exception — see the contract above.
+            logger.debug("routed title refresh timed out")
+            return TitleRefresh(TITLE_UNAVAILABLE)
+        # A genuine caller-cancel: the op's caller has gone away, and a receipt
+        # for a request nobody holds is worse than no answer.
+        raise
+    except TimeoutError:
+        # The same deadline, arriving as `__aexit__`'s translation of it.
+        logger.debug("routed title refresh timed out")
+        return TitleRefresh(TITLE_UNAVAILABLE)
+    except Exception:  # noqa: BLE001 — naming is decoration; never fail the op
+        logger.debug("routed title refresh could not complete", exc_info=True)
+        return TitleRefresh(TITLE_UNAVAILABLE)
+    if result.outcome == TITLE_CANCELLED:
+        # A cancel landing in the NAMING call is swallowed down there and
+        # surfaces as this outcome instead. Which cancel it was decides the
+        # answer: our expired deadline is a failed op and earns a receipt, and
+        # only a caller that went away gets the exception.
+        if cm.expired():
+            logger.debug("routed title refresh timed out inside the naming call")
+            return TitleRefresh(TITLE_UNAVAILABLE)
+        raise asyncio.CancelledError
+    return result
 
 
 @dataclass
@@ -922,6 +1324,29 @@ class ConversationName:
         if user_set:
             self.user_set = True
         return self.text
+
+    def release_user_set(self) -> bool:
+        """Withdraw the human's claim on this title; True when one was held.
+
+        The ONE way ``user_set`` goes back to False, and it exists because the
+        flag is otherwise a one-way latch: ``set`` only ever turns it on, so a
+        conversation renamed by hand could never be handed back to automatic
+        naming for the rest of its life. That is right as a PRECEDENCE rule —
+        no generated title may quietly overwrite a name the user typed — but it
+        is wrong as a permanent sentence, because the user who typed the name
+        is also the one entitled to withdraw it.
+
+        So the release is deliberately not reachable from any generated path.
+        Only an explicit ``/title refresh`` calls it, which is the user saying
+        "stop using my words, work it out again" in the same breath as asking
+        for the new title. The text is left alone: the refresh call needs the
+        standing title as its ``<current-title>`` anchor, and a cleared name
+        would blank the band for as long as the call takes and leave the
+        conversation unnamed if it failed.
+        """
+        held = self.user_set
+        self.user_set = False
+        return held
 
     def claim_request(self) -> bool:
         """Reserve the one naming attempt; False when it is already spent."""

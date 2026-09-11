@@ -151,9 +151,31 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # terminal tab, never into anything the model is told — and the receipt
     # quotes the title that ended up in force, which is strictly more than the
     # typed words (the store trims and caps them).
+    #
+    # `/title` is an ALIAS, not a second entry, and that is the whole design of
+    # the refresh word. The two things a user wants to do to a conversation's
+    # name — say what it is, or ask for it to be worked out again — are one
+    # subject, and splitting them across `/rename` and a sibling `/retitle`
+    # would put two nearly-identical rows in `/help` whose difference is four
+    # letters in the middle of the word. One entry with `refresh` as its
+    # argument states the relationship instead: `/title <words>` is the
+    # imperative, `/title refresh` is the request, and a bare `/title` reports.
+    #
+    # OPTIONAL rather than NONE now that an argument has a value list: the space
+    # offers `refresh` to a user who does not know the word exists, and Enter on
+    # the bare command still reports the current name — the exact distinction
+    # `/approvals` and `/effort` draw against `/login`'s REQUIRED. Free typing
+    # is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
-        "Rename this conversation; auto-naming never overrides it",
+        # 43 cells, inside the ~55 at which the description column wraps and
+        # renders a phantom command name in `/help` (see `/model`, `/theme`).
+        # The `refresh` word has to be HERE because the help table is where a
+        # user learns the command exists at all, and the capability it names is
+        # the reason this entry changed.
+        "Name this conversation, or refresh the name",
+        aliases=("title",),
+        arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.rename",
     ),
     # Beside the session-transition family because it is one: /fork is the entry
@@ -572,3 +594,23 @@ def slash_command_for(text: str) -> SlashCommand | None:
         return None
     name = token[1:]
     return next((entry for entry in SLASH_COMMANDS if name in entry.names), None)
+
+
+def primary_slash_name(command: str) -> str:
+    """``command`` as its registry PRIMARY name; unchanged when nothing matches.
+
+    The bare-word counterpart to :func:`slash_command_for`, for the dispatchers
+    that receive a command NAME off the wire rather than a typed line. Both
+    routed dispatchers (``OperatorApp._slash_result`` and the detached
+    runtime's) match string literals, so without this an ALIAS — ``/title``,
+    ``/models``, ``/recall`` — falls past every branch and is answered with an
+    unsupported-command refusal for a command the owner in fact implements.
+    That is the same bug ``slash_command_for`` was introduced to fix on the
+    LOCAL path, which had already shipped once: the registry advertises the
+    alias, the picker completes it, and running it says "unknown command".
+
+    Unknown words pass through untouched so the caller's own fallback still
+    sees what was actually asked for.
+    """
+    entry = slash_command_for(f"/{command}")
+    return entry.name if entry is not None else command
