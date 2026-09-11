@@ -282,7 +282,14 @@ class TestUsageIsPerAccount:
         seen: list[tuple[str, str | None]] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append((provider, account_id))
             return UsageReport(provider=provider, limits=[])
@@ -303,7 +310,14 @@ class TestUsageIsPerAccount:
         ]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return UsageReport(provider=provider, limits=[])
 
@@ -322,7 +336,14 @@ class TestUsageIsPerAccount:
         ]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if account_id == "acct-1":
                 raise RuntimeError("quota endpoint exploded")
@@ -349,7 +370,14 @@ class TestUsageIsPerAccount:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -766,7 +794,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -789,7 +824,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -819,7 +861,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -855,7 +904,14 @@ class TestUsageCache:
         fail = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if fail:
                 return None  # what a 429/outage actually looks like to callers
@@ -896,7 +952,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -938,7 +1001,14 @@ class TestUsageCache:
         store.api_keys["openrouter"] = "sk-or-1"
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return None  # blank answer, endpoint reachable
 
@@ -1035,7 +1105,14 @@ class TestPerAccountLastKnown:
         fail_gominerva = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if fail_gominerva and account_id == "acct-gominerva":
                 return None
@@ -1090,7 +1167,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [self._account("new@example.com", "acct-new")]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return None
 
@@ -1136,7 +1220,14 @@ class TestPerAccountLastKnown:
         succeed = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -1217,7 +1308,14 @@ class TestPerAccountLastKnown:
         succeed = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if succeed:
                 return self._report("me@example.com", 23.0)
@@ -1276,7 +1374,14 @@ class TestPerAccountLastKnown:
         fail = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append(account_id)
             if fail and account_id == "acct-fail":
@@ -1343,7 +1448,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [self._account("live@example.com", "acct-live")]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("live@example.com", 22.0)
 
@@ -1376,7 +1488,14 @@ class TestPerAccountLastKnown:
         probed: list[str | None] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             probed.append(account_id)
             raise AssertionError("a dead grant must never be probed")
@@ -1409,7 +1528,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 61.0)
 
@@ -1441,7 +1567,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 5.0)
 
@@ -1478,7 +1611,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 7.0)
 
@@ -1561,7 +1701,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             raise AssertionError("a dead grant must not be probed")
 
@@ -1648,7 +1795,14 @@ class TestPerAccountLastKnown:
         seen: list[tuple[str | None, str | None]] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append((api_key, account_id))
             return UsageReport(
