@@ -55,8 +55,11 @@ from local_operator.harness.types import (
 )
 from local_operator.mcp.auth import (
     REFRESH_CONTENTION,
+    REFRESH_REFUSAL_UNCONFIRMED,
     McpAuthChallengeError,
     McpAuthRequiredError,
+    McpRefreshContendedError,
+    McpRefreshUnconfirmedError,
 )
 from local_operator.mcp.config import (
     MCPHttpServerConfig,
@@ -1739,7 +1742,15 @@ class McpManager:
             # and only when this cancellation did NOT come from outside — a
             # record armed by a refused unlocked refresh must never turn a
             # genuine dispose/epoch teardown into a reconnect.
-            contended = REFRESH_CONTENTION.pop(url) if isinstance(url, str) and url else False
+            #
+            # NOTE the pop happens only in the cancellation arm, not on every
+            # failure path: a record can only be CONSUMED here, and popping
+            # earlier threw one away on ordinary failures — with a single slot
+            # per server that silently killed a concurrent connect's retry. The
+            # ledger holds one record per refusal (several per server), so a
+            # second concurrent connect's refusal is still there for it, and a
+            # record this arm does not believe is still discarded (see below),
+            # never left to be misattributed to a later cancellation.
             # A GENUINE external cancellation (dispose/reload/esc) keeps its
             # priority even when the teardown surfaced a grouped auth error:
             # the task itself was asked to cancel (``cancelling() > 0``), and
@@ -1748,6 +1759,21 @@ class McpManager:
             # internal delivery — the auth flow failing inside the transport's
             # task group — raises CancelledError WITHOUT marking this task as
             # cancelling, which is exactly what lets the two be told apart.
+            # Consume ONE record for this server the moment the cancellation is
+            # recognised, and decide what it is WORTH below. Gating the pop on
+            # the exception type is deliberate: only this arm can use a record,
+            # and popping it on every failure path threw it away for nothing —
+            # with a single slot per server that silently killed a concurrent
+            # connect's retry. Consuming it here also means it is discarded even
+            # when the guard below (a genuine dispose) outranks it, so it cannot
+            # be misattributed to a later, unrelated cancellation of the same
+            # server. The ledger holds one record per refusal, so a second
+            # concurrent connect's refusal is still there for its own arm.
+            refusal = (
+                REFRESH_CONTENTION.pop(url)
+                if isinstance(exc, asyncio.CancelledError) and isinstance(url, str) and url
+                else None
+            )
             current = asyncio.current_task()
             externally_cancelled = (
                 current is not None
@@ -1776,17 +1802,22 @@ class McpManager:
             # cancellation's priority, so a recorded abandonment here can be
             # re-voiced as the receipt the user reads.
             if isinstance(exc, asyncio.CancelledError):
-                # The refusal arm comes FIRST: a coordinator that declined to
-                # spend the refresh token without exclusivity recorded that on
-                # its way out, and the transport rewrote the reason into this
-                # bare cancellation. Re-voicing it is what lands it in
+                # A refusal re-voice comes FIRST among the things a bare
+                # cancellation can mean: the coordinator declined to spend the
+                # refresh token and recorded WHY on its way out, and the
+                # transport rewrote that reason into this bare
+                # ``CancelledError``. Re-voicing it is what lands it in
                 # ``_reconnect``'s generic arm (backoff retry, no auth block)
-                # instead of looking like a dispose.
-                if contended:
-                    from local_operator.mcp.auth import McpRefreshContendedError
-
+                # instead of looking like a dispose — or, for a token that may
+                # already be spent, what makes the user-visible reason the
+                # actionable reauth command instead of "authorization expired".
+                # The externally_cancelled guard above has already run, so a
+                # genuine teardown never reaches here.
+                if refusal is not None:
                     assert isinstance(url, str)
-                    raise McpRefreshContendedError(url) from exc
+                    if refusal == REFRESH_REFUSAL_UNCONFIRMED:
+                        raise McpRefreshUnconfirmedError(url) from exc
+                    raise McpRefreshContendedError(url, refusal=refusal) from exc
                 from local_operator.mcp.auth import (
                     ABANDONED_GRANTS,
                     McpLoginCancelledError,
@@ -2123,8 +2154,15 @@ class McpManager:
             from local_operator.mcp.auth import server_has_stored_grant
 
             has_stored_grant = server_has_stored_grant(exc.server_url)
+        # ``detail`` is the ONE place a reason more specific than "expired" can
+        # reach this line, and it is rendered as the tail so the command still
+        # leads. Only a refresh that was SENT but never confirmed carries one
+        # today (see McpRefreshUnconfirmedError): calling that an expired
+        # authorization would send the user looking for a grant that is
+        # perfectly valid on disk.
+        detail = getattr(exc, "detail", None)
         if has_stored_grant:
-            return f"run /mcp reauth {name} — authorization expired"
+            return f"run /mcp reauth {name} — {detail or 'authorization expired'}"
         return f"run /mcp login {name} to authorize"
 
     @staticmethod

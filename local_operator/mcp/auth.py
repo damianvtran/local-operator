@@ -10,9 +10,12 @@ Flow (official SDK PKCE + RFC 7591 DCR under the hood):
   server's OAuth metadata (PRM + ASM discovery). This is what stops a day-old
   token from forcing a browser grant on startup for providers whose token
   endpoint is not ``<server_base>/token`` (the SDK's fallback guess 404s for
-  e.g. Datadog). The refresh is serialized across processes with a file lock
-  and the token is re-read under it, so concurrently starting sessions cannot
-  spend a rotating refresh token twice.
+  e.g. Datadog). The refresh is serialized across processes with a file lock,
+  and the exchange task OWNS that lock from its acquire to its store write —
+  the connect only passes the handle over — so a cancelled or over-budget
+  connect cannot free it while the POST is still on the wire, and the token is
+  re-read under it, so concurrently starting sessions cannot spend a rotating
+  refresh token twice.
 - ``wire_oauth_auth(server_url, cfg)`` returns the ``OAuthClientProvider``
   kwargs: client metadata with a loopback redirect URI, a token storage bound
   to the shared credential store, and a :class:`LoopbackAuthFlow` that
@@ -60,6 +63,8 @@ from local_operator.callback_page import callback_response
 from local_operator.interpreter import python_argv
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     # The SDK is an optional extra: these names are needed for annotations
     # only, so importing them here keeps this module importable without it.
     from mcp.shared.auth import (
@@ -118,17 +123,51 @@ TOKENS_OBTAINED_AT_KEY = "tokens_obtained_at"
 #:
 #: Living in the row payload makes it atomic with the grant it describes:
 #: :meth:`McpTokenStorage.clear` deletes it with the row, and
-#: :meth:`McpTokenStorage.set_tokens` clears it on any successful token write, so
+#: :meth:`McpTokenStorage.set_tokens` clears it on an INTERACTIVE token write, so
 #: there is no way to leave a tombstone pointing at a token that no longer
 #: exists. It needs no migration — the payload already round-trips unknown keys.
+#:
+#: :meth:`McpTokenStorage.store_refresh_result` deliberately does NOT clear it.
+#: Only an interactive grant (login/reauth) may un-dead a grant: a token minted
+#: by a refresh belongs to the family the marker says the authorization server
+#: revoked, so a late refresh response landing after a tombstone must leave the
+#: grant reading DEAD rather than resurrect it.
 GRANT_DEAD_AT_KEY = "grant_dead_at"
 
-#: Outcome of one locked refresh attempt. Three-valued rather than ``bool``
-#: because the coordinator must tell a DEAD grant (never present this token
+#: Payload key recording that THIS row's refresh token was PRESENTED by an
+#: exchange whose outcome never arrived — the request may have been written and
+#: the token spent, and re-presenting a spent token is the reuse-detection POST
+#: that revokes the whole family. Value is
+#: ``{"digest": <short digest of the presented token>, "at": <epoch seconds>}``.
+#:
+#: Why a DIGEST rather than the token: the marker only ever answers "is the
+#: token in this row the one an exchange is unsure about?", and a digest keeps
+#: the payload from carrying the same live credential twice. It is not a
+#: confidentiality measure — the token itself lives in the same row.
+#:
+#: Why it is ARMED BEFORE THE POST: a process that dies mid-request takes its
+#: in-memory knowledge with it, and the next boot would present a token that may
+#: already be spent. The write-ahead marker is the only channel that survives
+#: that death. The price is a false positive in the narrow window between the
+#: arm and the wire, which is why the marker EXPIRES
+#: (:data:`UNCONFIRMED_SEND_TTL_S`) and why a connect-phase failure clears it.
+GRANT_UNCONFIRMED_SEND_KEY = "grant_refresh_unconfirmed"
+
+#: Outcome of one refresh attempt. Six-valued rather than ``bool`` because each
+#: refusal has its OWN truthful user-visible message (lock contention, a budget
+#: overrun, a server refusal, a possibly-spent token needing a fresh sign-in)
+#: and because the coordinator must tell a DEAD grant (never present this token
 #: again) from a merely FAILED one (transient; today's behaviour is correct).
-#: CAUTION: ``"failed"`` is a truthy string — every call site must compare
+#: CAUTION: every member is a truthy string — every call site must compare
 #: against a member explicitly, never test truthiness.
-RefreshOutcome = Literal["refreshed", "failed", "dead"]
+RefreshOutcome = Literal[
+    "refreshed",
+    "failed",
+    "dead",
+    "contended",
+    "overran",
+    "unacknowledged",
+]
 
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
 #: starts with a token dying in ten seconds would otherwise open with a 401 and
@@ -142,49 +181,81 @@ REFRESH_SKEW_S = 60.0
 REFRESH_HTTP_TIMEOUT_S = 10.0
 
 #: How long PAST the refresh budget a token response is still accepted and
-#: persisted. The budget above caps how long a CONNECT — and the cross-process
-#: lock it holds — waits for a refresh. It must not also cap how long the
-#: response stays welcome, because for a rotating provider the response is the
-#: ONLY copy of the new refresh token: discarding a rotation the server has
-#: already performed leaves a spent token stored, and the next presentation of
-#: that token is a reuse-detection double-spend that revokes the whole family.
-#:
-#: WHAT IT BOUNDS, precisely: the response READ of one exchange task that has
-#: outlived the connect that started it. It is not a lock budget and not a
-#: connect budget. The lock is still held for at most ``REFRESH_HTTP_TIMEOUT_S``
-#: (``_refresh_oauth_token_locked`` shields the exchange behind
-#: ``asyncio.timeout(REFRESH_HTTP_TIMEOUT_S)`` and returns at that bound), so
-#: ``LOCK_ACQUIRE_TIMEOUT_S``'s derivation — that the critical section cannot
-#: outlast the POST cap — still holds and is unaffected by this constant. A
-#: CANCELLED connect waits only for the REMAINDER of the budget while a rotation
-#: is actually in flight, never for this grace, so teardown is never held longer
-#: than it already could be; by the time this grace is running, no connect and
-#: no lock is waiting on the result.
+#: persisted. What it bounds, precisely: the response READ of the exchange task
+#: once the connect that started it has given up waiting. It is not a connect
+#: budget. The exchange still OWNS the refresh lock while this grace runs (the
+#: lock is acquired and released INSIDE the exchange task — see
+#: :func:`_perform_refresh_exchange` — precisely so a waiter's cancellation or
+#: timeout cannot free it mid-POST), so a holder's critical section is bounded by
+#: ``REFRESH_HTTP_TIMEOUT_S + REFRESH_LATE_RESPONSE_GRACE_S``; that is longer
+#: than ``LOCK_ACQUIRE_TIMEOUT_S``, deliberately, and the derivation comment
+#: there states why giving up instead of waiting is safe. A CANCELLED connect
+#: detaches immediately and never waits for this grace, so teardown latency is
+#: not paid out of the budget any more.
 #:
 #: Finite on purpose: a server that never answers must not leave a task reading
 #: a socket for the life of the process.
 REFRESH_LATE_RESPONSE_GRACE_S = 30.0
 
-#: Bound on ACQUIRING the cross-process refresh lock, derived from the budget of
-#: the critical section it guards: one token POST plus a couple of SQLite reads.
-#: That derivation is only sound because the POST is capped in TOTAL wall time
-#: (see the ``asyncio.timeout`` in :func:`_refresh_oauth_token_locked`) —
-#: ``httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)`` alone does NOT bound a request:
+#: How long a "presented but unacknowledged" send marker stays live (see
+#: :data:`GRANT_UNCONFIRMED_SEND_KEY`).
+#:
+#: The marker exists to stop us re-presenting a token an exchange may already
+#: have spent, and the price of believing it is one interactive sign-in, so it
+#: must be BOUNDED. A marker armed in the window between the marker write and
+#: the request reaching the wire (a crash, a refused connection) describes a
+#: token nothing ever presented, and a marker that never expired would suppress
+#: that server's refresh until the user happened to re-auth — the "bricked
+#: server" failure mode. An hour covers a restart, a slow session or a user who
+#: stepped away, and after it lapses we present the stored token again, which is
+#: exactly the behaviour every boot had BEFORE this marker existed. So the
+#: expiry can only degrade to the status quo ante, never to something worse.
+UNCONFIRMED_SEND_TTL_S = 3600.0
+
+#: Why a refresh was refused — one value per truthful user-visible message (see
+#: :class:`McpRefreshContendedError` and :class:`McpRefreshUnconfirmedError`).
+#: The manager re-voices a transport-mangled cancellation from these and the
+#: tests assert the rendered copy verbatim, so the set is closed and short.
+#:
+#: * ``REFRESH_REFUSAL_LOCK`` — no exclusivity, so nothing was presented.
+#: * ``REFRESH_REFUSAL_INFLIGHT`` — the exchange outran the connect's budget and
+#:   is still running; a late rotation will still be persisted.
+#: * ``REFRESH_REFUSAL_ENDPOINT`` — the exchange ran and the authorization
+#:   server's answer was not a usable token.
+#: * ``REFRESH_REFUSAL_UNCONFIRMED`` — a token may already be spent (it was
+#:   presented, or an earlier presentation was never acknowledged), so nothing
+#:   may be presented until an interactive grant replaces it.
+REFRESH_REFUSAL_LOCK = "lock"
+REFRESH_REFUSAL_INFLIGHT = "inflight"
+REFRESH_REFUSAL_ENDPOINT = "endpoint"
+REFRESH_REFUSAL_UNCONFIRMED = "unconfirmed"
+
+#: Bound on ACQUIRING the cross-process refresh lock. The critical section it
+#: guards is one token POST, the response read that may outlive it, and a couple
+#: of SQLite reads — and since the exchange task owns the lock for all of that,
+#: its worst case is ``REFRESH_HTTP_TIMEOUT_S + REFRESH_LATE_RESPONSE_GRACE_S``
+#: (40s), which EXCEEDS this bound. That inversion is deliberate and safe, and
+#: it is why this constant can no longer be derived as "longer than the work".
+#: A waiter that gives up here does not proceed unlocked: it takes the contended
+#: path (strip the in-memory refresh token, raise
+#: :class:`McpRefreshContendedError`), which the manager retries on its backoff
+#: ladder, and the holder's rotation still reaches the store. Presenting a
+#: rotating token without exclusivity is the family-revoking POST, so waiting is
+#: never the safe option; bounding the wait is.
+#:
+#: The POST is still capped in TOTAL wall time (``asyncio.timeout`` in
+#: :func:`_refresh_oauth_token_locked`, which bounds how long the caller waits)
+#: — ``httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)`` alone does NOT bound a request:
 #: it is per operation, and its read timeout is per socket read, so a dribbling
-#: server measured 140.7s inside a nominal 10s timeout. The lock's critical
-#: section is therefore bounded by the ``asyncio.timeout`` in
-#: ``_refresh_oauth_token_locked`` instead — the exchange runs as a shielded
-#: task and the coroutine that HOLDS THE LOCK returns at that bound. Keep the
-#: two in step: if the POST's overall cap is ever raised or removed, this bound
-#: stops being honest and a slow-but-working peer starts getting timed out by
-#: its own siblings. (The exchange task may keep READING its response past that
-#: bound — ``REFRESH_LATE_RESPONSE_GRACE_S`` — but by then it holds no lock and
-#: nobody is waiting on it, which is why the derivation still holds.)
-#: Overrunning this bound therefore means the holder really is not working — a
-#: leaked lock from a killed process, or a peer wedged on something that is not
-#: our problem. Waiting longer than the work can possibly take buys nothing and
-#: costs a hung connect, so we give up and degrade (see
-#: :func:`_oauth_refresh_lock`, which yields False rather than raising).
+#: server measured 140.7s inside a nominal 10s timeout.
+#:
+#: Overrunning this bound therefore means the holder is either doing the one
+#: thing it may legitimately do for longer than we will wait (a late response
+#: read) or is not working at all — a leaked lock from a killed process, or a
+#: peer wedged on something that is not our problem. Both are answered the same
+#: way: give up and degrade (see :func:`_oauth_refresh_lock`, which yields a
+#: FALSY handle rather than raising), because a hung connect is worse than a
+#: retried one.
 LOCK_ACQUIRE_TIMEOUT_S = 15.0
 
 #: FIRST gap between non-blocking lock attempts, and the cancellation
@@ -212,26 +283,46 @@ class McpAuthRequiredError(RuntimeError):
     sessions starting at once would each pop one. The connect fails with an
     actionable message instead; ``/mcp login <name>`` (or
     ``local-operator mcp login <name>``) runs the same grant deliberately.
+
+    ``detail`` names WHY the grant is unusable when the reason is specific
+    enough to be worth telling the user — today only a token refresh that was
+    SENT but never confirmed (:class:`McpRefreshUnconfirmedError`). The
+    manager's ``_auth_required_text`` renders it as the tail of the actionable
+    line, so the command still comes first. ``None`` (the default) keeps the
+    generic "authorization expired" wording, which is the truthful summary for
+    every other route into this error: the stored grant could not be refreshed.
     """
 
-    def __init__(self, server_url: str) -> None:
-        super().__init__(f"MCP OAuth authorization required for {server_url}")
+    def __init__(self, server_url: str, *, detail: str | None = None) -> None:
+        message = f"MCP OAuth authorization required for {server_url}"
+        if detail is not None:
+            message = f"{message}: {detail}"
+        super().__init__(message)
         self.server_url = server_url
+        self.detail = detail
 
 
 class McpRefreshContendedError(RuntimeError):
-    """A refresh could not be performed under the refresh lock this time.
+    """A refresh was NOT performed this time, and why.
 
     Raised instead of falling through to the SDK's own UNLOCKED refresh, which
     reads the in-memory token directly and would present a possibly-already-
     rotated refresh token — the family-revoking request this subsystem exists to
     prevent. Deliberately NOT a subclass of :class:`McpAuthRequiredError` and
-    deliberately not raised anywhere near a grant that is known dead: this is a
-    CONTENTION/transient outcome, so the manager's generic reconnect arm retries
-    it with backoff and never takes an auth block on it. The in-memory refresh
-    token is stripped before the raise (see
+    deliberately never raised for a grant that is known dead: this is a
+    transient outcome, so the manager's generic reconnect arm retries it with
+    backoff and never takes an auth block on it. The in-memory refresh token is
+    stripped before the raise (see
     ``_RefreshCoordinatingOAuthProvider._refuse_unlocked_refresh``) so the
     suppressed SDK refresh cannot run either way.
+
+    One message per ``refusal``, because the three paths that reach it say
+    different things and a single string was untrue on two of them: the lock
+    being held elsewhere is not a server refusal, and a server that ANSWERED
+    500 did not fail "under the refresh lock". It also deliberately does NOT
+    promise a retry: the mid-session reconnect path does retry with backoff,
+    but the startup gate renders this same string as the reason a server is
+    unavailable and schedules no retry there.
 
     This type reaches the manager INDIRECTLY. The MCP streamable-HTTP transport
     runs the request inside anyio cancel scopes, so an exception raised out of
@@ -243,12 +334,60 @@ class McpRefreshContendedError(RuntimeError):
     caller) see the raise itself.
     """
 
+    def __init__(self, server_url: str, *, refusal: str = REFRESH_REFUSAL_LOCK) -> None:
+        if refusal == REFRESH_REFUSAL_INFLIGHT:
+            message = (
+                f"MCP OAuth token refresh for {server_url} did not finish in time; "
+                "a rotation is kept if the response lands"
+            )
+        elif refusal == REFRESH_REFUSAL_ENDPOINT:
+            message = (
+                f"MCP OAuth token refresh for {server_url} was rejected by the "
+                "authorization server"
+            )
+        else:
+            message = (
+                f"MCP OAuth token refresh for {server_url} was skipped: another "
+                "session holds the refresh lock"
+            )
+        super().__init__(message)
+        self.server_url = server_url
+        self.refusal = refusal
+
+
+class McpRefreshUnconfirmedError(McpAuthRequiredError):
+    """A refresh token was PRESENTED by an exchange whose outcome never arrived.
+
+    The one thing a rotating provider must never see again is a token that may
+    already have been spent: re-presenting it is the reuse-detection POST that
+    revokes the entire family, every session included. So the refresh path
+    refuses to POST while its row still holds a token an unacknowledged exchange
+    presented (see :data:`GRANT_UNCONFIRMED_SEND_KEY`), and this error is the
+    honest alternative to a retry: a transient retry would spend the token
+    again, so the recovery is one interactive sign-in.
+
+    Subclassing :class:`McpAuthRequiredError` rather than standing alone is the
+    point, not a shortcut: the disposition IS "this server needs an interactive
+    grant", so it takes the auth block, the actionable toast and the abandoned
+    auto-reconnect that every other auth requirement takes. ``detail`` is what
+    keeps the toast truthful — a refresh that was SENT but never confirmed is not
+    an expired authorization.
+    """
+
     def __init__(self, server_url: str) -> None:
         super().__init__(
-            f"MCP OAuth token refresh for {server_url} could not be performed "
-            "under the refresh lock; retrying"
+            server_url,
+            detail="a token refresh was sent but never confirmed",
         )
-        self.server_url = server_url
+        # We necessarily HOLD a grant for this server (the refusal exists because
+        # its stored refresh token may have been spent), so the user-visible
+        # command is ``reauth`` — replace the credential — not ``login``, which
+        # would leave the stale one in place. Carried on the error rather than
+        # left to ``_auth_required_text``'s store lookup for the reason that
+        # helper documents: the lookup answers about the DEFAULT store, while
+        # this fact was established against the store this connect is actually
+        # using (F4).
+        self.has_stored_grant = True
 
 
 class McpAuthChallengeError(RuntimeError):
@@ -659,13 +798,19 @@ class McpTokenStorage:
     async def set_tokens(self, tokens: OAuthToken) -> None:
         """Persist fresh/refreshed tokens (access + refresh together).
 
-        This is the SDK's ``TokenStorage`` write and stays UNCONDITIONAL: the
-        SDK's own refresh, a completed browser grant and a pinned-client seed
-        all land here, and none of them has a rotation to compare against. That
-        leaves a residual race recorded in the PR rather than fixed here: a
-        sibling that persists its own rotation between this read and this write
-        loses it. It cannot tombstone a live grant (the marker write is the one
-        that does that, and it compares — see :meth:`mark_grant_dead`).
+        This is the SDK's ``TokenStorage`` write, and after this PR it is the
+        INTERACTIVE funnel: a completed browser grant, a pinned-client seed, and
+        the SDK's own in-flow refresh (which the coordinating provider suppresses
+        — see :class:`McpRefreshContendedError`). It stays UNCONDITIONAL because
+        none of those has a rotation to compare against, and clearing the
+        dead-grant tombstone is correct for all of them: they all mean "a working
+        grant was obtained", which is the one thing that may un-dead a server.
+
+        The refresh path does NOT come through here: it calls
+        :meth:`store_refresh_result`, which conditions its write on the grant it
+        was computed from and never clears the tombstone. Routing a refresh
+        response through this method is what let a detached exchange's late HTTP
+        200 resurrect a family the authorization server had already revoked.
 
         The issuing WALL-CLOCK time is written alongside them. ``OAuthToken``
         carries only the relative ``expires_in`` the server quoted, which is
@@ -684,7 +829,154 @@ class McpTokenStorage:
         # browser grant, and a refresh that unexpectedly succeeds), so a login
         # path added later cannot forget to un-stick a suppressed server.
         creds.pop(GRANT_DEAD_AT_KEY, None)
+        # A new interactive grant also answers any outstanding "was that token
+        # spent?" question, so the send marker goes with it. Keeping it would
+        # suppress the FIRST refresh of the brand-new grant — a false positive
+        # the user pays for with another browser visit.
+        creds.pop(GRANT_UNCONFIRMED_SEND_KEY, None)
         self._write(creds)
+
+    def store_refresh_result(self, tokens: OAuthToken, *, presented_refresh_token: str) -> bool:
+        """Persist a refresh response, but only into the grant it was computed from.
+
+        The refresh path used to write through :meth:`set_tokens`, which is
+        unconditional, so a response that landed after a later, better-informed
+        verdict overwrote it. Two measured consequences, both the reuse-storm
+        this module exists to prevent: a detached exchange's late HTTP 200
+        cleared a tombstone another exchange had just written (a revoked family
+        reading ALIVE, so every later boot re-POSTed it), and the same late write
+        erased a rotation a peer had persisted in between. An error BEFORE this
+        path could not fix it either: with two slow exchanges the tombstone's own
+        compare-and-skip saw the row moved and never wrote the marker at all,
+        because the row it inspected had itself been moved by an exchange the
+        revocation invalidated.
+
+        So the write re-reads the row immediately before writing and persists
+        only while the payload still holds the refresh token THIS exchange
+        presented. A row that is gone entirely is re-created: absence is not
+        evidence that somebody replaced the grant, and the rotation is still
+        ours to keep.
+
+        Two disciplines separate this from :meth:`set_tokens`:
+
+        * the dead-grant marker is NEVER cleared here. Only an interactive grant
+          may un-dead a grant; a refresh-derived token is exactly the thing the
+          marker says the authorization server revoked, so clearing it would
+          resurrect a family it has already killed. The write still happens —
+          the rotation is real and worth keeping for support — and the marker
+          keeps it from ever being presented.
+        * a dropped write is logged at INFO, naming this writer. A lost rotation
+          is what support has to be able to read out of the log after an
+          incident; it is never a debug detail.
+
+        Caller: :func:`_perform_refresh_exchange`, which holds the refresh lock
+        across this call, so the only writers it races are the ones that
+        deliberately do not take the lock (a completed interactive login, the
+        SDK's client-info writes).
+
+        Returns ``True`` when the response was written.
+        """
+        creds = self._read()
+        if creds is not None and not _payload_holds_refresh_token(creds, presented_refresh_token):
+            logger.info(
+                "MCP token refresh for %s was NOT persisted: the stored grant moved on "
+                "(another writer rotated it first), so the newer state is left "
+                "untouched [writer: McpTokenStorage.store_refresh_result]",
+                self.server_url,
+            )
+            return False
+        creds = creds or {}
+        creds["tokens"] = tokens.model_dump(mode="json")
+        creds[TOKENS_OBTAINED_AT_KEY] = time.time()
+        # The exchange DID get an answer, so any write-ahead send marker is
+        # resolved by construction: the response is the acknowledgement.
+        creds.pop(GRANT_UNCONFIRMED_SEND_KEY, None)
+        if GRANT_DEAD_AT_KEY in creds:
+            logger.info(
+                "MCP token refresh for %s persisted a rotation while its grant is marked "
+                "dead; the dead-grant marker is KEPT so the token is never presented "
+                "[writer: McpTokenStorage.store_refresh_result]",
+                self.server_url,
+            )
+        self._write(creds)
+        return True
+
+    def mark_send_unconfirmed(self, presented_refresh_token: str) -> None:
+        """Arm the write-ahead marker for a token an exchange is about to present.
+
+        Called BEFORE the POST is written, while the refresh lock is held: that
+        ordering is the whole point. A process that dies between the write and
+        the response takes all in-memory knowledge with it, and the next boot
+        would present a token the server may already have spent — the
+        reuse-detection POST that revokes the family. The marker is the only
+        channel that survives that death.
+
+        Best-effort like every other write here: a store failure must not stop
+        the POST, and losing the marker just restores the pre-marker behaviour.
+        """
+        creds = self._read() or {}
+        creds[GRANT_UNCONFIRMED_SEND_KEY] = {
+            "digest": _refresh_token_digest(presented_refresh_token),
+            "at": time.time(),
+        }
+        self._write(creds)
+
+    def clear_send_unconfirmed(self) -> None:
+        """Resolve the send marker: the exchange reached an ANSWER for its token.
+
+        Called for any HTTP response (the server answered, so it either
+        rotated-and-told-us or refused without rotating) and for a connect-phase
+        failure (the token never reached the wire). Deliberately NOT called when
+        the request was written and no answer arrived, which is exactly the state
+        the marker describes.
+        """
+        creds = self._read()
+        if creds is None or GRANT_UNCONFIRMED_SEND_KEY not in creds:
+            return
+        creds.pop(GRANT_UNCONFIRMED_SEND_KEY, None)
+        self._write(creds)
+
+    def send_unconfirmed(self, refresh_token: str | None = None) -> bool:
+        """Whether a LIVE marker says ``refresh_token`` may already be spent.
+
+        ``refresh_token`` defaults to the stored one, which is the question the
+        refresh path asks before it POSTs. A marker whose digest does not match
+        is STALE — a peer has rotated the row since — and is cleared on the way
+        past rather than believed: suppressing a healthy, newly rotated token
+        because of an unrelated send is a false positive the user pays for with a
+        browser visit. Expiry is applied the same way, so a marker that never
+        resolved cannot suppress a server's refresh indefinitely (see
+        :data:`UNCONFIRMED_SEND_TTL_S`).
+
+        Read-modify-write, like :meth:`mark_grant_dead` and for the same reason:
+        clearing a stale marker is part of answering the question, and a stale
+        marker left in place would be re-evaluated (and re-cleared) forever.
+        """
+        creds = self._read()
+        if creds is None:
+            return False
+        marker = creds.get(GRANT_UNCONFIRMED_SEND_KEY)
+        if not isinstance(marker, dict):
+            if marker is not None:
+                # A malformed marker cannot be compared against anything, so it
+                # can never be believed; drop it rather than keep consulting it.
+                self.clear_send_unconfirmed()
+            return False
+        target = refresh_token
+        if target is None:
+            stored = creds.get("tokens")
+            target = stored.get("refresh_token") if isinstance(stored, dict) else None
+        at = marker.get("at")
+        digest = marker.get("digest")
+        live = (
+            isinstance(at, (int, float))
+            and not isinstance(at, bool)
+            and 0 <= time.time() - at <= UNCONFIRMED_SEND_TTL_S
+        )
+        if live and isinstance(target, str) and target and digest == _refresh_token_digest(target):
+            return True
+        self.clear_send_unconfirmed()
+        return False
 
     def grant_marker(self) -> tuple[float, bool] | None:
         """``(tokens_obtained_at, grant_is_dead)``, or ``None`` if unreadable.
@@ -777,12 +1069,17 @@ class McpTokenStorage:
         Returns ``True`` when the marker was written, ``False`` when it was
         skipped or the write failed.
 
-        Its caller :func:`_refresh_oauth_token_locked` holds
-        :func:`_oauth_refresh_lock`; the remaining gap is against writers that
+        Its caller :func:`_perform_refresh_exchange` holds
+        :func:`_oauth_refresh_lock` for the whole call, and writes through the
+        same lock the FRESHNESS-conditioned sibling write uses
+        (:meth:`store_refresh_result`), so the two can never disagree about
+        which writer owns the grant; the remaining gap is against writers that
         deliberately do NOT take the lock — the interactive-login completion and
         the client-info writes that go through the SDK — so this narrows the
         window to the microseconds between the compare and the write instead of
-        the whole exchange.
+        the whole exchange. The gap used to be bounded by
+        :data:`REFRESH_LATE_RESPONSE_GRACE_S`, not by microseconds, because the
+        detached exchange wrote with no lock at all; it does not any more.
         """
         try:
             creds = self._read() or {}
@@ -1036,6 +1333,70 @@ def _payload_holds_refresh_token(payload: dict[str, Any] | None, refresh_token: 
     if not isinstance(tokens, dict):
         return False
     return tokens.get("refresh_token") == refresh_token
+
+
+def _refresh_token_digest(refresh_token: str) -> str:
+    """Short stable digest of one refresh token, for the send marker.
+
+    Never a credential in its own right: it only ever answers "is the token in
+    this row the one an exchange presented?", so keeping the digest rather than a
+    second copy of the token keeps the payload from carrying the same live secret
+    twice. Truncated, because the question compares a handful of our own tokens
+    rather than searching an adversarial keyspace.
+    """
+    import hashlib
+
+    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()[:16]
+
+
+def _refresh_request_never_sent(exc: BaseException) -> bool:
+    """Whether an httpx failure happened BEFORE the request reached the wire.
+
+    The distinction is load-bearing and httpx's own, not a guess: a refresh
+    token presented to a rotating provider is spent by the REQUEST, so a failure
+    that happened before the request was written leaves the token untouched and
+    is an ordinary transient retry, while one that happened after may have spent
+    it and must not be retried without an interactive sign-in.
+
+    Pre-send, per httpx's taxonomy: ``ConnectError`` (refused, DNS, TLS
+    handshake), ``ConnectTimeout`` / ``PoolTimeout`` (waiting for a connection
+    or a pool slot), ``UnsupportedProtocol`` and ``LocalProtocolError`` (the
+    request was never even formatted for a socket). Everything else —
+    ``ReadTimeout``, ``ReadError``, ``WriteError``, ``WriteTimeout``,
+    ``RemoteProtocolError`` — can have been written, so it is treated as suspect.
+    That asymmetry is deliberate: a wrongly-suspect failure costs one interactive
+    sign-in, a wrongly-trusted one costs the whole token family.
+    """
+    import httpx
+
+    return isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.PoolTimeout,
+            httpx.UnsupportedProtocol,
+            httpx.LocalProtocolError,
+        ),
+    )
+
+
+def _stored_token_is_fresh(storage: "McpTokenStorage", tokens: Any) -> bool:
+    """Whether the STORED access token is still comfortably usable.
+
+    The shared answer to "is a refresh needed?" for the proactive site and for
+    the exchange inside its lock, so the two cannot drift: the exchange asks it
+    to notice that a peer rotated the grant while it waited for the lock, and the
+    proactive site asks it to skip the lock entirely in the common case.
+
+    An expiry of ``None`` means "no opinion" (see
+    :meth:`McpTokenStorage.stored_token_expiry`) and reads as fresh, because a
+    provider that quotes no lifetime must not be re-authorized on a guess.
+    """
+    if tokens is None or not getattr(tokens, "access_token", None):
+        return False
+    expiry = storage.stored_token_expiry()
+    return expiry is None or time.time() < expiry - REFRESH_SKEW_S
 
 
 def server_rejects_oauth(cfg: MCPServerConfig) -> bool:
@@ -1514,7 +1875,7 @@ _REFRESH_CONTENTION_TTL_S = 5.0
 
 
 class RefreshContentionLedger:
-    """Servers whose coordinator refused to spend a refresh token UNLOCKED.
+    """Servers whose coordinator refused to spend a refresh token, and WHY.
 
     The side channel that survives the transport, and it exists for exactly the
     reason :class:`AbandonedGrantLedger` does: an ordinary exception raised out
@@ -1529,36 +1890,60 @@ class RefreshContentionLedger:
     The manager consults this ledger to tell "we refused to refresh without
     exclusivity" apart from "this connect was disposed", because the two need
     opposite treatment: the first is contention and must be retried with
-    backoff, the second must never be converted into a retry.
+    backoff, the second must never be converted into a retry. It also carries the
+    REASON, because the alternative is one string that is untrue on two of the
+    three paths (see :class:`McpRefreshContendedError`) and one that promises a
+    fresh sign-in without saying why.
 
-    Keyed by server URL and SINGLE-USE (``pop`` semantics): one refusal re-voices
-    at most one cancellation, never two. Records also age out, so a record whose
-    cancellation never reached the manager cannot be attributed to an unrelated
-    cancellation later.
+    Keyed by server URL. Each record is SINGLE-USE (``pop`` semantics: one
+    refusal re-voices at most one cancellation, never two), but a server may hold
+    SEVERAL live records at once — two concurrent connects for the same URL can
+    both refuse, and a single slot let the second one's refusal vanish, which
+    reaches ``_reconnect`` as a bare ``CancelledError``, is not an ``Exception``,
+    and therefore kills the reconnect task silently instead of retrying it.
+    Records also age out, so a record whose cancellation never reached the
+    manager cannot be attributed to an unrelated cancellation later.
     """
 
     def __init__(self) -> None:
-        self._records: dict[str, float] = {}
+        #: url -> oldest-first ``(monotonic armed-at, refusal reason)``.
+        self._records: dict[str, list[tuple[float, str]]] = {}
 
-    def record(self, server_url: str) -> None:
-        """Arm one server's record, pruning anything past the horizon."""
+    def record(self, server_url: str, reason: str = REFRESH_REFUSAL_LOCK) -> None:
+        """Append one server's record, pruning anything past the horizon."""
         now = time.monotonic()
-        for old_url, at in list(self._records.items()):
-            if now - at > _REFRESH_CONTENTION_TTL_S:
+        for old_url, entries in list(self._records.items()):
+            kept = [entry for entry in entries if now - entry[0] <= _REFRESH_CONTENTION_TTL_S]
+            if kept:
+                self._records[old_url] = kept
+            else:
                 self._records.pop(old_url, None)
-        self._records[server_url] = now
+        self._records.setdefault(server_url, []).append((now, reason))
 
-    def pop(self, server_url: str) -> bool:
-        """Consume one server's record; ``True`` when a FRESH one was there.
+    def pop(self, server_url: str) -> str | None:
+        """Consume one server's OLDEST record; its reason when FRESH, else ``None``.
 
-        Always removes the entry, fresh or stale: the caller uses a single
-        answer for the whole classification, so leaving a stale record behind
-        would only let it be misattributed later.
+        Stale records are dropped rather than returned: a record older than the
+        horizon belongs to a cancellation that was swallowed somewhere else, and
+        believing it would turn an unrelated teardown into a retry. Consuming
+        one record leaves any later ones in place, which is what lets a second
+        concurrent refusal for the same server still be re-voiced.
         """
-        at = self._records.pop(server_url, None)
-        if at is None:
-            return False
-        return time.monotonic() - at <= _REFRESH_CONTENTION_TTL_S
+        now = time.monotonic()
+        entries = [
+            entry
+            for entry in self._records.get(server_url, [])
+            if now - entry[0] <= _REFRESH_CONTENTION_TTL_S
+        ]
+        if not entries:
+            self._records.pop(server_url, None)
+            return None
+        _, reason = entries.pop(0)
+        if entries:
+            self._records[server_url] = entries
+        else:
+            self._records.pop(server_url, None)
+        return reason
 
     def clear(self) -> None:
         """Drop every record. Used by test isolation; no production caller.
@@ -2273,7 +2658,7 @@ def _oauth_refresh_lock_path(server_url: str) -> Path:
 
 
 @contextlib.asynccontextmanager
-async def _oauth_refresh_lock(server_url: str):
+async def _oauth_refresh_lock(server_url: str) -> AsyncIterator["_OAuthRefreshLock"]:
     """Serialize the refresh exchange across processes for one server.
 
     Rotating refresh tokens make concurrent refreshes destructive: whichever
@@ -2286,19 +2671,27 @@ async def _oauth_refresh_lock(server_url: str):
     flocked, never read or written for content (on Windows it holds a single
     padding byte, which ``msvcrt.locking`` requires to have a range to lock).
 
-    Yields True when the lock was taken and False when the bounded acquire gave
-    up. A False body must still be SAFE to run, and that is now a narrower
-    promise than "best-effort": it may NOT perform the refresh exchange, because
-    an unexclusive exchange is the family-revoking double-spend this lock
-    exists to prevent. :func:`ensure_mcp_oauth_fresh` can afford to skip the
-    refresh on a False lock (its caller still connects and will re-read under
-    the lock on the next attempt), and
+    Yields a HANDLE that is truthy when the lock was taken and falsy when the
+    bounded acquire gave up (see :class:`_OAuthRefreshLock`). A falsy body must
+    still be SAFE to run, and that is now a narrower promise than "best-effort":
+    it may NOT perform the refresh exchange, because an unexclusive exchange is
+    the family-revoking double-spend this lock exists to prevent.
+    :func:`ensure_mcp_oauth_fresh` can afford to skip the refresh on a falsy
+    handle (its caller still connects and will re-read under the lock on the
+    next attempt), and
     ``_RefreshCoordinatingOAuthProvider._coordinate_inflight_refresh`` must not
     fall through to the SDK's unlocked refresh either — it refuses with
     :class:`McpRefreshContendedError` instead. Blocking the connect while
     waiting for exclusivity is still not an option: it would trade a rare
     double-spend for a guaranteed hang, which is the freeze this function was
     rewritten to remove.
+
+    The handle exists (rather than a plain ``bool``) because the ownership of
+    the RELEASE has to be transferable: an exchange that outlives its connect
+    keeps this lock until it has persisted its rotation
+    (``_OAuthRefreshLock.transfer``), so neither a waiter's cancellation nor a
+    budget overrun can free it while the POST is still on the wire — the window
+    that let a sibling re-present the spent token and revoke the family.
 
     Two rules this function exists to enforce, both learned from a freeze that
     took the whole TUI down:
@@ -2336,21 +2729,100 @@ async def _oauth_refresh_lock(server_url: str):
         acquire.add_done_callback(_close_abandoned_lock_fd)
         raise
     if fd is None:
-        logger.debug(
-            "MCP OAuth refresh lock not acquired within %.0fs for %s; proceeding unlocked",
+        # INFO, not debug: this is a refusal that costs a connect its proactive
+        # refresh, and the caller's next step (contention refusal or a skipped
+        # optimisation) is easier to read next to its cause.
+        logger.info(
+            "MCP OAuth refresh lock not acquired within %.0fs for %s; no token " "was presented",
             LOCK_ACQUIRE_TIMEOUT_S,
             server_url,
         )
-        yield False
+        handle = _OAuthRefreshLock(None)
+        try:
+            yield handle
+        finally:
+            handle.release_in_scope()
         return
+    handle = _OAuthRefreshLock(fd)
     try:
-        yield True
+        yield handle
     finally:
-        # Safe to close on this thread: the worker returned the fd only after
-        # its lock call completed, so no thread is parked on it.
+        handle.release_in_scope()
+
+
+class _OAuthRefreshLock:
+    """One held refresh lock whose RELEASE can be handed to another task.
+
+    A plain ``async with`` would release the lock when the COROUTINE holding it
+    returns, and the exchange task outlives that coroutine by design: it is
+    detached at the budget and keeps reading a response for up to
+    :data:`REFRESH_LATE_RESPONSE_GRACE_S`. Releasing there meant a sibling could
+    acquire the lock, re-read the store (still holding the token this exchange
+    had already presented) and POST it again — the reuse-detection request that
+    revokes the whole family, measured against the real fixture.
+
+    So the lock has an owner rather than a scope. The connect acquires it,
+    decides, hands the POST to a task, and TRANSFERS the release to that task
+    before its first cancellable await: from then on the exchange owns it and
+    frees it only in its own ``finally``, after the store write. Nothing about
+    the acquire changes — a waiter still either takes the lock within
+    ``LOCK_ACQUIRE_TIMEOUT_S`` or gives up and takes the contended path.
+
+    ``release`` is idempotent and safe to call from the event loop: the fd was
+    handed over by the worker thread only after its last lock syscall completed
+    (see :func:`_oauth_refresh_lock`).
+    """
+
+    __slots__ = ("_fd", "_deferred")
+
+    def __init__(self, fd: int | None) -> None:
+        self._fd = fd
+        #: Set by :meth:`transfer`: the ``async with`` that produced this handle
+        #: must NOT release it, because the exchange task owns the release now.
+        self._deferred = False
+
+    def __bool__(self) -> bool:
+        """Whether the lock is HELD — by anyone, including a transferred owner.
+
+        Truthiness is the caller's only signal (``if not lock: take the
+        contended path``), and after :meth:`transfer` the honest answer is still
+        "held": the exchange is holding it, and a second POST would be the
+        double-spend the lock exists to prevent.
+        """
+        return self._fd is not None
+
+    def transfer(self) -> None:
+        """Hand the release to whoever owns this handle next.
+
+        Called by the connect once the exchange task has been created and
+        before it awaits: after this, the ``async with`` block it was created in
+        releases nothing, and the task's own ``finally`` does.
+        """
+        self._deferred = True
+
+    def release_in_scope(self) -> None:
+        """Release on behalf of the ``async with`` that created this handle.
+
+        A no-op when the release was transferred to an exchange task — which is
+        the difference between this and a plain ``__exit__``: releasing here
+        after a transfer would free the lock while the POST it guards is still
+        on the wire.
+        """
+        if self._deferred:
+            return
+        self.release()
+
+    def release(self) -> None:
+        """Drop the lock. No-op once released, and safe to call twice."""
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
         with contextlib.suppress(Exception):
             _unlock(fd)
-        os.close(fd)
+        # Safe to close on this thread: the worker returned the fd only after
+        # its lock call completed, so no thread is parked on it.
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _close_abandoned_lock_fd(task: asyncio.Task[int | None]) -> None:
@@ -2469,105 +2941,92 @@ async def _refresh_oauth_token_locked(
     server_url: str,
     storage: McpTokenStorage,
     endpoints: DiscoveredOAuthEndpoints,
+    *,
+    lock: _OAuthRefreshLock | None = None,
+    peer_refresh_is_success: bool = False,
 ) -> RefreshOutcome:
     """Spend the stored refresh token against the DISCOVERED token endpoint.
 
-    Returns ``"refreshed"`` when a fresh access token was persisted, ``"dead"``
-    when the authorization server rejected the grant with ``invalid_grant`` (a
-    tombstone is written and the token must never be presented again), and
-    ``"failed"`` for every other outcome, including "nothing to refresh".
-    Callers MUST compare against a member: ``"failed"`` is truthy.
+    Outcome is the whole result, and each member has its own caller treatment:
+    ``"refreshed"`` (a fresh access token is in the store), ``"dead"`` (the
+    authorization server rejected the grant with ``invalid_grant``; a tombstone
+    is written and the token must never be presented again), ``"contended"``
+    (no exclusivity, so NOTHING was presented), ``"overran"`` (the budget was
+    spent with the exchange still running; a rotation that still lands is
+    persisted), ``"unacknowledged"`` (a token may already be spent, so nothing
+    was or may be presented until an interactive grant), and ``"failed"`` for
+    every other outcome, including "nothing to refresh". Callers MUST compare
+    against a member: every member is a truthy string.
 
-    The caller holds
-    the cross-process refresh lock, so exactly one process performs this
-    exchange even when several sessions start together. Mirrors the SDK's
-    refresh request exactly (grant type, client auth methods, RFC 6749 §6
-    carry-forward) so a provider cannot tell the two apart.
+    The caller holds the cross-process refresh lock and passes its HANDLE, which
+    this function hands to the exchange task before its first cancellable await.
+    That transfer is the point of the whole shape: the task owns the lock until
+    it has persisted, so neither a cancellation of this connect nor the budget
+    expiring can free it while the POST is still on the wire. Releasing it there
+    let a sibling acquire the lock, re-read the store (still holding the token
+    this exchange had already presented) and POST it a second time — the
+    reuse-detection request that revokes the whole family.
+
+    ``peer_refresh_is_success`` is for the PROACTIVE site, whose re-read under
+    the lock exists to notice that a peer already refreshed while it waited: with
+    it set, an already-fresh store is reported as ``"refreshed"`` without a
+    POST. It is deliberately off for the other two callers, where a locally fresh
+    token is exactly the state that needs spending (a session holding a
+    locally-valid access token the server has since revoked).
     """
-    import base64
-    from urllib.parse import quote
-
-    from mcp.shared.auth_utils import resource_url_from_server_url
-
-    tokens = await storage.get_tokens()
-    client_info = await storage.get_client_info()
-    if tokens is None or not tokens.refresh_token or client_info is None:
-        # Nothing to spend — a missing token is not evidence that the grant is
-        # dead, so this must never tombstone.
-        return "failed"
-
-    token_endpoint = str(endpoints.oauth_metadata.token_endpoint)
-    data: dict[str, str] = {
-        "grant_type": "refresh_token",
-        "refresh_token": tokens.refresh_token,
-        "client_id": client_info.client_id,
-    }
-    # RFC 8707 resource indicator: included when the server publishes protected
-    # resource metadata, matching the SDK's ``should_include_resource_param``.
-    if endpoints.protected_resource_metadata is not None:
-        data["resource"] = resource_url_from_server_url(server_url)
-
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        # Explicit UA, not httpx's default. mcp.notion.com sits behind
-        # Cloudflare, whose bot heuristics return HTTP 403 "error code 1010"
-        # to a refresh POST carrying NO User-Agent (observed live this cycle:
-        # httpx's built-in UA slips through, a missing one is blocked). Pinning
-        # our own identifier means a future httpx default change or a stricter
-        # Cloudflare rule cannot silently turn every refresh into a 403 and
-        # force a browser grant on the whole fleet.
-        "User-Agent": _refresh_user_agent(),
-    }
-    auth_method = client_info.token_endpoint_auth_method
-    if auth_method == "client_secret_post" and client_info.client_secret:
-        data["client_secret"] = client_info.client_secret
-    elif auth_method == "client_secret_basic" and client_info.client_secret:
-        cid = quote(client_info.client_id, safe="")
-        csecret = quote(client_info.client_secret, safe="")
-        encoded = base64.b64encode(f"{cid}:{csecret}".encode()).decode()
-        headers["Authorization"] = f"Basic {encoded}"
-
     # The exchange runs in its OWN task, and the await below is a SHIELD around
-    # it: neither a cancellation of this connect nor the total timeout can
-    # abort the POST. For a rotating provider the response is the only copy of
-    # the new refresh token, so an aborted request does not just fail a refresh
-    # — the server has already spent the token we presented, and the store is
-    # left holding a spent one whose next presentation is a reuse-detection
-    # double-spend that logs out the whole fleet. The task persists its result
-    # itself, so the rotation survives whichever of the three ways this ends:
-    # completed in time, cancelled mid-flight, or landed after the bound.
-    #
-    # The cap stays what it was: the LOCK is never held for longer than
-    # ``REFRESH_HTTP_TIMEOUT_S``. Only the response read gets the late grace.
+    # it: neither a cancellation of this connect nor the total timeout can abort
+    # the POST. For a rotating provider the response is the only copy of the new
+    # refresh token, so an aborted request does not just fail a refresh — the
+    # server has already spent the token we presented, and the store is left
+    # holding a spent one whose next presentation is a reuse-detection
+    # double-spend that logs out the whole fleet. The task persists its own
+    # result and releases the lock itself, so the rotation survives whichever of
+    # the three ways this ends: completed in time, cancelled mid-flight, or
+    # landed after the bound.
     exchange: asyncio.Task[RefreshOutcome] = asyncio.ensure_future(
-        _perform_refresh_exchange(server_url, storage, tokens, token_endpoint, data, headers)
+        _perform_refresh_exchange(
+            server_url,
+            storage,
+            endpoints,
+            lock=lock,
+            peer_refresh_is_success=peer_refresh_is_success,
+        )
     )
-    started = time.monotonic()
+    if lock is not None:
+        # BEFORE the first await: from here the exchange owns the release, so
+        # whichever way this coroutine leaves — return, timeout, cancellation —
+        # the lock stays held until the rotation is in the store. ``getattr``
+        # because the test doubles for ``_oauth_refresh_lock`` are plain bools.
+        transfer = getattr(lock, "transfer", None)
+        if transfer is not None:
+            transfer()
     try:
         async with asyncio.timeout(REFRESH_HTTP_TIMEOUT_S):
             return await asyncio.shield(exchange)
     except TimeoutError:
         # The budget is spent, so this connect is done with it; the exchange is
         # not, and its persistence is the whole point of detaching it.
-        logger.debug(
-            "MCP token refresh overran its %.0fs budget for %s; a response that still "
-            "lands will be persisted",
-            REFRESH_HTTP_TIMEOUT_S,
+        logger.info(
+            "MCP token refresh for %s overran its %.0fs budget; the exchange still "
+            "holds the refresh lock and a rotation that lands will be persisted "
+            "[writer: detached refresh exchange]",
             server_url,
+            REFRESH_HTTP_TIMEOUT_S,
         )
         _detach_refresh_exchange(exchange, server_url)
-        return "failed"
+        return "overran"
     except asyncio.CancelledError:
         # Routine teardown: every sidebar switch disposes a manager and cancels
-        # its in-flight connects. Wait out the REMAINDER of the budget for the
-        # response so the rotation reaches the store BEFORE the caller's lock
-        # is released — leaving it to a detached task would let a sibling
-        # acquire the lock first and spend the token this exchange already
-        # spent. Never longer than the bound, so teardown is never held longer
-        # than it already could be.
-        remaining = max(0.0, REFRESH_HTTP_TIMEOUT_S - (time.monotonic() - started))
-        with contextlib.suppress(BaseException):
-            await asyncio.wait_for(asyncio.shield(exchange), remaining)
+        # its in-flight connects. Nothing is waited for here, deliberately — the
+        # exchange owns the lock and persists its own result, so this coroutine
+        # has nothing left to do but leave. Waiting out the remainder of the
+        # budget used to be the only thing keeping a sibling from acquiring the
+        # lock mid-POST, and it did not do that anyway (measured: the flock was
+        # already free at the instant of the cancel, because the response read
+        # outlived the remainder); the ownership transfer replaces it, and
+        # teardown is now immediate instead of blocked for up to
+        # ``REFRESH_HTTP_TIMEOUT_S``.
         _detach_refresh_exchange(exchange, server_url)
         raise
 
@@ -2579,6 +3038,10 @@ def _detach_refresh_exchange(exchange: "asyncio.Task[RefreshOutcome]", server_ur
     so nothing here consumes a value: this exists so a task nobody awaits is
     not reported as "exception was never retrieved" when the loop closes, and
     so a failure inside it is logged against the server it belongs to.
+
+    INFO, not debug, for the same reason the write paths say so: an exchange
+    nobody awaited is exactly the state whose rotation support has to be able to
+    read out of a log after the fact.
     """
 
     def _settle(finished: "asyncio.Task[RefreshOutcome]") -> None:
@@ -2587,7 +3050,21 @@ def _detach_refresh_exchange(exchange: "asyncio.Task[RefreshOutcome]", server_ur
         with contextlib.suppress(BaseException):
             exc = finished.exception()
             if exc is not None:
-                logger.debug("detached MCP token refresh for %s failed", server_url, exc_info=exc)
+                logger.info(
+                    "detached MCP token refresh for %s failed"
+                    " [writer: detached refresh exchange]",
+                    server_url,
+                    exc_info=exc,
+                )
+                return
+            outcome = finished.result()
+            if outcome != "refreshed":
+                logger.info(
+                    "detached MCP token refresh for %s ended %r without persisting"
+                    " [writer: detached refresh exchange]",
+                    server_url,
+                    outcome,
+                )
 
     exchange.add_done_callback(_settle)
 
@@ -2595,87 +3072,258 @@ def _detach_refresh_exchange(exchange: "asyncio.Task[RefreshOutcome]", server_ur
 async def _perform_refresh_exchange(
     server_url: str,
     storage: McpTokenStorage,
-    tokens: OAuthToken,
-    token_endpoint: str,
-    data: dict[str, str],
-    headers: dict[str, str],
+    endpoints: DiscoveredOAuthEndpoints,
+    *,
+    lock: _OAuthRefreshLock | None = None,
+    peer_refresh_is_success: bool = False,
 ) -> RefreshOutcome:
-    """POST one refresh grant and persist whatever the authorization server decided.
+    """POST one refresh grant and persist whatever the server decided.
 
-    Owns the whole exchange — request, classification, persistence — so it can
-    be detached from the connect that started it without any part of the result
+    Owns the whole exchange — the locked re-read, the request, the
+    classification, the persistence AND the release of ``lock`` — so it can be
+    detached from the connect that started it with no part of the result
     depending on a listener. Split out of :func:`_refresh_oauth_token_locked`
     for exactly that reason: the response is the only copy of a rotated refresh
-    token, and every path that used to drop it (cancellation, the total
-    timeout) did so by cancelling the request rather than by deciding against
-    it.
+    token, and every path that used to drop it (cancellation, the total timeout)
+    did so by cancelling the request rather than by deciding against it.
+
+    Holding the lock to the very END is what the reviewer's M2 was about. The
+    caller-releases-it variant let a sibling in during the response read, where
+    the store still holds the token this exchange has already spent — the
+    reuse-detection POST that revokes the family.
+
+    The request is also WRITE-AHEAD MARKED
+    (:meth:`McpTokenStorage.mark_send_unconfirmed`) immediately before the POST,
+    because the token is spent by the REQUEST and a process that dies mid-flight
+    takes all in-memory knowledge with it. A failure BEFORE the request was
+    written clears the marker again (the token was never presented, so that is
+    an ordinary transient retry); anything later leaves it armed, and the
+    refresh path then refuses to present that token until an interactive grant
+    replaces it (see :data:`GRANT_UNCONFIRMED_SEND_KEY`).
+
+    ``lock=None`` means the CALLER owns exclusivity (the direct-call path used
+    by the unit tests and by nothing else); a caller that hands over a handle it
+    could not acquire gets a refusal instead of a POST.
     """
+    import base64
+    from urllib.parse import quote
+
+    if lock is not None and not lock:
+        # Defence in depth for the one mistake that costs a token family: an
+        # exchange must never run against a handle that says "no exclusivity".
+        # The callers refuse earlier so this is not the path a user sees, but a
+        # future call site that forgets the check fails closed here. Note the
+        # test doubles for ``_oauth_refresh_lock`` are plain bools, so this reads
+        # truthiness rather than an attribute.
+        logger.info(
+            "MCP token refresh for %s refused: no refresh lock was held, so nothing "
+            "was presented [writer: locked refresh exchange]",
+            server_url,
+        )
+        return "contended"
+
     import httpx
     from mcp.shared.auth import OAuthToken
+    from mcp.shared.auth_utils import resource_url_from_server_url
 
     try:
-        # ``read`` is the LATE GRACE, not the budget: a response that lands
-        # after the awaiting connect has given up is still a rotation we must
-        # not throw away. Connect/write/pool keep the budget, so a server that
-        # never accepts the request still fails fast.
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S, read=REFRESH_LATE_RESPONSE_GRACE_S)
-        ) as client:
-            response = await client.post(token_endpoint, data=data, headers=headers)
-    except (httpx.HTTPError, TimeoutError):
-        # ``asyncio.timeout`` raises TimeoutError (which ``httpx.HTTPError``
-        # does not cover); a refresh that overran its budget is simply a failed
-        # refresh, handled exactly like a transport error.
-        logger.debug("MCP token refresh request failed for %s", server_url, exc_info=True)
-        return "failed"
-    if response.status_code != 200:
-        # A revoked-grant rejection is qualitatively different from a transient
-        # one and must be logged as such: for a rotating provider that runs
-        # refresh-token REUSE DETECTION (Notion), presenting an already-rotated
-        # refresh token returns HTTP 400 {"error":"invalid_grant"} and revokes
-        # the ENTIRE token family, logging out every session at once. When that
-        # happens the only recovery is an interactive login, so the log names
-        # that action instead of implying a retry will heal it. We never
-        # auto-retry here regardless: returning "dead" lets the connect surface
-        # McpAuthRequiredError, which the manager turns into a suspended
-        # reconnect (see manager._reconnect's McpAuthRequiredError arm) rather
-        # than hammering a dead grant.
-        if response.status_code == 400 and _is_invalid_grant(response.content):
+        # Re-read UNDER the lock, inside the task that owns it: whatever we
+        # spend must be what the store holds NOW, not what it held when the
+        # connect decided to refresh.
+        tokens = await storage.get_tokens()
+        client_info = await storage.get_client_info()
+        if tokens is None or not tokens.refresh_token or client_info is None:
+            # Nothing to spend — a missing token is not evidence that the grant
+            # is dead, so this must never tombstone.
+            return "failed"
+
+        if storage.grant_is_dead():
+            # A grant the authorization server already rejected must cost no
+            # POST at all. The callers check this before taking the lock; this
+            # is the same question asked again under it, for the case where a
+            # sibling tombstoned the grant while we waited for exclusivity.
+            return "dead"
+
+        if peer_refresh_is_success and _stored_token_is_fresh(storage, tokens):
+            # Somebody rotated the grant while we waited for the lock. Spending
+            # the token we read before the lock would present a spent one; the
+            # caller re-reads the store and uses what the peer persisted.
+            return "refreshed"
+
+        if storage.send_unconfirmed(tokens.refresh_token):
+            # The token in this row was presented by an exchange whose answer
+            # never arrived, so it MAY already be spent, and re-presenting a
+            # spent token is the reuse-detection POST that revokes the whole
+            # family. Refuse, and say so at INFO: this state costs the user an
+            # interactive sign-in, and that has to be readable in a log rather
+            # than inferred from an unexplained failure.
             logger.info(
-                "MCP OAuth grant revoked for %s (invalid_grant); run /mcp login to restore it",
+                "MCP token refresh for %s refused: this refresh token was already "
+                "presented by an exchange that was never acknowledged, and presenting "
+                "it again may revoke the whole token family — run /mcp reauth to sign "
+                "in again [writer: locked refresh exchange]",
                 server_url,
             )
-            # Tombstone from HERE and nowhere else: this is the only site that
-            # has proof (a PARSED ``invalid_grant`` body, never a bare HTTP 400)
-            # that the grant itself is gone rather than the server having a bad
-            # minute. Misclassifying a transient 400 would permanently suppress
-            # refresh on a live grant until the user ran an interactive login.
-            # The rejected token travels with the marker so the write can check
-            # the grant has not moved on without us — see
-            # :meth:`McpTokenStorage.mark_grant_dead`.
-            storage.mark_grant_dead(rejected_refresh_token=tokens.refresh_token)
-            return "dead"
-        # Informational, not debug: a rejected refresh is the thing that turns
-        # into a login prompt, so its cause belongs in the readable log.
-        logger.info("MCP token refresh rejected for %s: HTTP %s", server_url, response.status_code)
-        return "failed"
-    try:
-        new_tokens = OAuthToken.model_validate_json(response.content)
-    except Exception:  # noqa: BLE001 — an unparseable token is a failed refresh
-        logger.debug(
-            "MCP token refresh returned an invalid token for %s", server_url, exc_info=True
-        )
-        return "failed"
+            return "unacknowledged"
 
-    # RFC 6749 §6: a refresh response may omit ``scope`` (unchanged) and
-    # ``refresh_token`` (not rotated). Carry both forward so the persisted row
-    # stays self-describing and can refresh again next time.
-    if new_tokens.scope is None and tokens.scope is not None:
-        new_tokens.scope = tokens.scope
-    if new_tokens.refresh_token is None:
-        new_tokens.refresh_token = tokens.refresh_token
-    await storage.set_tokens(new_tokens)
-    return "refreshed"
+        token_endpoint = str(endpoints.oauth_metadata.token_endpoint)
+        data: dict[str, str] = {
+            "grant_type": "refresh_token",
+            "refresh_token": tokens.refresh_token,
+            "client_id": client_info.client_id,
+        }
+        # RFC 8707 resource indicator: included when the server publishes
+        # protected resource metadata, matching the SDK's
+        # ``should_include_resource_param``.
+        if endpoints.protected_resource_metadata is not None:
+            data["resource"] = resource_url_from_server_url(server_url)
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            # Explicit UA, not httpx's default. mcp.notion.com sits behind
+            # Cloudflare, whose bot heuristics return HTTP 403 "error code 1010"
+            # to a refresh POST carrying NO User-Agent (observed live this cycle:
+            # httpx's built-in UA slips through, a missing one is blocked).
+            # Pinning our own identifier means a future httpx default change or a
+            # stricter Cloudflare rule cannot silently turn every refresh into a
+            # 403 and force a browser grant on the whole fleet.
+            "User-Agent": _refresh_user_agent(),
+        }
+        auth_method = client_info.token_endpoint_auth_method
+        if auth_method == "client_secret_post" and client_info.client_secret:
+            data["client_secret"] = client_info.client_secret
+        elif auth_method == "client_secret_basic" and client_info.client_secret:
+            cid = quote(client_info.client_id, safe="")
+            csecret = quote(client_info.client_secret, safe="")
+            encoded = base64.b64encode(f"{cid}:{csecret}".encode()).decode()
+            headers["Authorization"] = f"Basic {encoded}"
+
+        # WRITE-AHEAD, before the request can be on the wire: from this instant
+        # the row records that this token may have been spent, so a crash or a
+        # kill between here and the response cannot leave a spent token looking
+        # untouched to the next boot.
+        storage.mark_send_unconfirmed(tokens.refresh_token)
+        try:
+            # ``read`` is the LATE GRACE, not the budget: a response that lands
+            # after the awaiting connect has given up is still a rotation we
+            # must not throw away. Connect/write/pool keep the budget, so a
+            # server that never accepts the request still fails fast.
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(REFRESH_HTTP_TIMEOUT_S, read=REFRESH_LATE_RESPONSE_GRACE_S)
+            ) as client:
+                response = await client.post(token_endpoint, data=data, headers=headers)
+        except (httpx.HTTPError, TimeoutError) as exc:
+            # ``asyncio.timeout`` raises TimeoutError, which ``httpx.HTTPError``
+            # does not cover; an exchange that overran its budget inside the
+            # httpx call is handled exactly like a transport error. httpx's own
+            # taxonomy decides whether the request ever reached the wire, which
+            # is the difference between "no harm done" and "this token may be
+            # gone" (see :func:`_refresh_request_never_sent`): guessing either
+            # way is guessing about the family.
+            if _refresh_request_never_sent(exc):
+                storage.clear_send_unconfirmed()
+                logger.info(
+                    "MCP token refresh for %s could not reach the authorization server "
+                    "(%s); the refresh token was never presented "
+                    "[writer: locked refresh exchange]",
+                    server_url,
+                    type(exc).__name__,
+                )
+                return "failed"
+            # SENT and never answered: the token may already be spent, so a
+            # retry is exactly the reuse-detection POST. The request already
+            # armed the marker, and this outcome is what makes the caller take
+            # the honest non-POST path — strip the in-memory token and raise the
+            # auth error that names the fresh sign-in, rather than pretending
+            # this was a transient failure the manager can retry.
+            logger.info(
+                "MCP token refresh for %s got no answer after the request was sent "
+                "(%s); this refresh token may already be spent, so it will not be "
+                "presented again and the server needs a fresh sign-in "
+                "[writer: locked refresh exchange]",
+                server_url,
+                type(exc).__name__,
+            )
+            return "unacknowledged"
+
+        if response.status_code != 200:
+            # The authorization server ANSWERED, so the request is resolved
+            # either way: it rotated-and-told-us (a 200) or it refused without
+            # rotating. An answer also means the marker's question is answered.
+            storage.clear_send_unconfirmed()
+            # A revoked-grant rejection is qualitatively different from a
+            # transient one and must be logged as such: for a rotating provider
+            # that runs refresh-token REUSE DETECTION (Notion), presenting an
+            # already-rotated refresh token returns HTTP 400
+            # {"error":"invalid_grant"} and revokes the ENTIRE token family,
+            # logging out every session at once. When that happens the only
+            # recovery is an interactive login, so the log names that action
+            # instead of implying a retry will heal it. We never auto-retry here
+            # regardless: returning "dead" lets the connect surface
+            # McpAuthRequiredError, which the manager turns into a suspended
+            # reconnect (see manager._reconnect's McpAuthRequiredError arm)
+            # rather than hammering a dead grant.
+            if response.status_code == 400 and _is_invalid_grant(response.content):
+                logger.info(
+                    "MCP OAuth grant revoked for %s (invalid_grant); run /mcp login to "
+                    "restore it",
+                    server_url,
+                )
+                # Tombstone from HERE and nowhere else: this is the only site
+                # that has proof (a PARSED ``invalid_grant`` body, never a bare
+                # HTTP 400) that the grant itself is gone rather than the server
+                # having a bad minute. Misclassifying a transient 400 would
+                # permanently suppress refresh on a live grant until the user ran
+                # an interactive login. The rejected token travels with the
+                # marker so the write can check the grant has not moved on
+                # without us — see :meth:`McpTokenStorage.mark_grant_dead`. The
+                # lock is held here for all of it, which is what keeps that
+                # compare-then-write window at the microseconds between the two
+                # calls.
+                storage.mark_grant_dead(rejected_refresh_token=tokens.refresh_token)
+                return "dead"
+            # Informational, not debug: a rejected refresh is the thing that
+            # turns into a login prompt, so its cause belongs in the readable
+            # log.
+            logger.info(
+                "MCP token refresh rejected for %s: HTTP %s", server_url, response.status_code
+            )
+            return "failed"
+        try:
+            new_tokens = OAuthToken.model_validate_json(response.content)
+        except Exception:  # noqa: BLE001 — an unparseable token is a failed refresh
+            # HTTP 200 with a body we cannot read is NOT a clean failure: the
+            # server processed the exchange and rotated, and the new token is
+            # unreadable, so the token in the store IS spent. The marker stays
+            # armed rather than being cleared, because presenting that token
+            # again is a definite double-spend — this is the one case the
+            # "presented but never acknowledged" state describes exactly.
+            logger.info(
+                "MCP token refresh for %s returned HTTP 200 with an unusable body; the "
+                "presented token is spent and will not be presented again — run "
+                "/mcp reauth [writer: locked refresh exchange]",
+                server_url,
+            )
+            return "unacknowledged"
+        storage.clear_send_unconfirmed()
+
+        # RFC 6749 §6: a refresh response may omit ``scope`` (unchanged) and
+        # ``refresh_token`` (not rotated). Carry both forward so the persisted
+        # row stays self-describing and can refresh again next time.
+        if new_tokens.scope is None and tokens.scope is not None:
+            new_tokens.scope = tokens.scope
+        if new_tokens.refresh_token is None:
+            new_tokens.refresh_token = tokens.refresh_token
+        # The refresh path's OWN write, never ``set_tokens``: it is conditioned
+        # on the grant this exchange was computed from and it never clears the
+        # dead-grant marker (see :meth:`McpTokenStorage.store_refresh_result`).
+        storage.store_refresh_result(new_tokens, presented_refresh_token=tokens.refresh_token)
+        return "refreshed"
+    finally:
+        # The lock is released HERE, after the persist, whatever the outcome.
+        # This is the ownership the connect transferred before its first await.
+        if lock is not None:
+            lock.release()
 
 
 async def ensure_mcp_oauth_fresh(
@@ -2717,14 +3365,7 @@ async def ensure_mcp_oauth_fresh(
     storage = McpTokenStorage(server_url, store)
     endpoints = await discover_oauth_endpoints(server_url)
 
-    def _still_good(expiry: float | None, tokens: Any) -> bool:
-        # ``expiry is None`` means "no lifetime recorded" — the SDK treats such
-        # a token as valid, so we must not force a refresh on it.
-        return bool(tokens is not None and tokens.access_token) and (
-            expiry is None or time.time() < expiry - REFRESH_SKEW_S
-        )
-
-    if _still_good(storage.stored_token_expiry(), await storage.get_tokens()):
+    if _stored_token_is_fresh(storage, await storage.get_tokens()):
         return endpoints
 
     if storage.grant_is_dead():
@@ -2759,8 +3400,8 @@ async def ensure_mcp_oauth_fresh(
     ):
         return endpoints
 
-    async with _oauth_refresh_lock(server_url) as locked:
-        if not locked:
+    async with _oauth_refresh_lock(server_url) as lock:
+        if not lock:
             # The bounded acquire gave up, so we cannot claim exclusivity and
             # must not spend the rotating refresh token on a guess. Skip the
             # PROACTIVE refresh and connect anyway: this function does not leak
@@ -2771,11 +3412,19 @@ async def ensure_mcp_oauth_fresh(
             # (:class:`McpRefreshContendedError`). A skipped optimisation costs
             # a round trip; blocking the connect costs the whole session.
             return endpoints
-        # Re-read under the lock: another session may have refreshed while we
-        # waited. Spending a rotated refresh token a second time is exactly the
-        # race this lock exists to prevent.
-        if not _still_good(storage.stored_token_expiry(), await storage.get_tokens()):
-            await _refresh_oauth_token_locked(server_url, storage, endpoints)
+        # The exchange re-reads the store UNDER this lock (and takes the release
+        # over: see :func:`_refresh_oauth_token_locked`). Handing it the lock we
+        # already hold is what keeps a cancelled or over-budget connect from
+        # freeing it while the POST is still on the wire.
+        outcome = await _refresh_oauth_token_locked(
+            server_url, storage, endpoints, lock=lock, peer_refresh_is_success=True
+        )
+        if outcome in ("contended", "overran", "failed", "unacknowledged"):
+            # Best-effort by contract: the connect proceeds and re-reads under
+            # the lock on its next attempt. Each refusal already logged its own
+            # reason at INFO, naming that writer — no second line here, because
+            # a duplicate would read as a second failure.
+            logger.debug("MCP proactive refresh for %s ended %r", server_url, outcome)
     return endpoints
 
 
@@ -3001,121 +3650,133 @@ def _make_refresh_coordinating_provider(
                 # handler turns into an actionable McpAuthRequiredError.
                 self._strip_in_memory_refresh_token(ctx)
                 return
+            outcome: RefreshOutcome | None = None
             try:
-                async with _oauth_refresh_lock(self._refresh_coord_server_url) as locked:
+                async with _oauth_refresh_lock(self._refresh_coord_server_url) as lock:
                     # Re-read under the lock: a sibling process may have rotated
                     # the token while we waited. Adopting its result is what
                     # turns a double-spend into a no-op.
                     await self._resync_from_store(ctx)
-                    if not locked:
-                        # No exclusivity, so we must not perform the exchange
-                        # ourselves. The re-read above still upholds the
-                        # invariant that matters most (the SDK never spends an
-                        # in-memory refresh token older than storage's).
-                        #
-                        # It no longer DEGRADES to the SDK's unlocked refresh:
-                        # that was the main route by which a stale rotating
-                        # refresh token reached the wire outside
-                        # ``_oauth_refresh_lock`` (the SDK POSTs the in-memory
-                        # token directly, with no re-read), which for a
-                        # reuse-detecting provider is the family-revoking
-                        # request. The post-condition at the end of this method
-                        # turns "still invalid and still refreshable" into a
-                        # transient error the manager retries with backoff,
-                        # instead of an unlocked spend.
-                        pass
-                    elif ctx.is_token_valid():
+                    if ctx.is_token_valid():
                         return  # a peer already refreshed; do not spend again
+                    if not lock:
+                        # No exclusivity, so nothing may be presented — not even
+                        # by the exchange, whose whole contract is that the
+                        # caller hands it a HELD lock. The refusal below decides
+                        # what the user sees; the exchange is never entered, so a
+                        # refusal costs zero POSTs.
+                        outcome = "contended"
                     else:
                         # The invariant this whole block exists to guarantee: the
                         # SDK's own ``_refresh_token`` must NEVER run with an
-                        # in-memory refresh token older than the one in storage. The
-                        # SDK loads the token once at ``_initialize`` and spends it
-                        # unlocked; a sibling that rotated it in between leaves us
-                        # holding a stale refresh token, and presenting that to a
-                        # reuse-detecting provider (Notion) returns
-                        # ``invalid_grant`` and revokes the ENTIRE token family —
-                        # logging out every session at once. So we always perform
-                        # the refresh ourselves, UNDER THE LOCK, with a fresh
-                        # re-read; the SDK's unlocked path is never reached with a
-                        # stale token.
+                        # in-memory refresh token older than the one in storage.
+                        # The SDK loads the token once at ``_initialize`` and
+                        # spends it unlocked; a sibling that rotated it in
+                        # between leaves us holding a stale refresh token, and
+                        # presenting that to a reuse-detecting provider (Notion)
+                        # returns ``invalid_grant`` and revokes the ENTIRE token
+                        # family — logging out every session at once. So we
+                        # always perform the refresh ourselves, UNDER THE LOCK,
+                        # with a fresh re-read; the SDK's unlocked path is never
+                        # reached with a stale token.
                         endpoints = self._refresh_coord_endpoints
                         if endpoints is None:
-                            # Discovery failed at startup, but we must still refresh
-                            # under the lock rather than fall through to the SDK's
-                            # UNLOCKED refresh (which would spend the possibly-stale
-                            # boot-time token and risk the family revocation above).
-                            # Synthesize the exact endpoint the SDK itself would
-                            # fall back to (``<scheme>://<netloc>/token``) so the
-                            # locked, re-reading refresh targets the same URL the
-                            # unlocked path would have.
+                            # Discovery failed at startup, but we must still
+                            # refresh under the lock rather than fall through to
+                            # the SDK's UNLOCKED refresh (which would spend the
+                            # possibly-stale boot-time token and risk the family
+                            # revocation above). Synthesize the exact endpoint the
+                            # SDK itself would fall back to
+                            # (``<scheme>://<netloc>/token``) so the locked,
+                            # re-reading refresh targets the same URL the unlocked
+                            # path would have.
                             endpoints = _fallback_endpoints_for(self._refresh_coord_server_url)
+                        # The exchange re-reads the store UNDER this lock and
+                        # takes the release over before its first await, so the
+                        # token it spends is the one on disk at the moment of the
+                        # POST — not the one this read saw — and no waiter's
+                        # cancellation or timeout can free the lock while that
+                        # POST is on the wire.
                         outcome = await _refresh_oauth_token_locked(
                             self._refresh_coord_server_url,
                             self._refresh_coord_storage,
                             endpoints,
+                            lock=lock,
                         )
-                        # Compare explicitly: ``"failed"`` is a truthy string, so a
-                        # ``if outcome:`` here would invert this branch silently and
-                        # pyright would not catch it.
-                        if outcome == "refreshed":
-                            await self._resync_from_store(ctx)
-                        elif outcome == "dead":
-                            # The third POST of the per-boot triple, and the one that
-                            # actually revokes the token family. Returning here still
-                            # falls through to the SDK's own UNLOCKED _refresh_token,
-                            # which would spend the token the authorization server
-                            # just rejected. Dropping the in-memory refresh token
-                            # makes the SDK's can_refresh_token() read False, so it
-                            # skips its refresh branch entirely and goes to the
-                            # authorization branch — which our non-interactive
-                            # redirect handler already turns into an actionable
-                            # McpAuthRequiredError. Same user-visible outcome, one
-                            # fewer family-revoking POST.
-                            self._strip_in_memory_refresh_token(ctx)
-                        # ``outcome == "failed"`` deliberately has NO arm here any
-                        # more. Silently falling out of this block used to hand the
-                        # SDK's unlocked _refresh_token a still-refreshable stale
-                        # token — the live route the incident logs show (14+
-                        # ``httpx2 ... /token 400``). The post-condition below
-                        # decides it instead: stripped and retried as transient.
             except Exception:  # noqa: BLE001 — coordination is best-effort
                 # A failed re-read/refresh must never break the request. But we
                 # must NOT let the SDK's unlocked refresh then spend a stale
-                # boot-time token: re-read storage one final time under the lock
-                # and overwrite the in-memory token with whatever is persisted,
-                # so whatever the SDK spends next is at least the freshest
-                # stored refresh token, never an older one a sibling already
-                # rotated away. This upholds the same invariant on the exception
-                # fall-through path (a raised locked-refresh, a transient store
-                # error) as the success path does.
+                # boot-time token: re-read storage one final time and overwrite
+                # the in-memory token with whatever is persisted, so whatever the
+                # SDK spends next is at least the freshest stored refresh token,
+                # never an older one a sibling already rotated away. This upholds
+                # the same invariant on the exception fall-through path (a
+                # transient store error, an unexpected raise) as the success path
+                # does.
                 logger.debug(
                     "MCP in-flight refresh coordination failed for %s",
                     self._refresh_coord_server_url,
                     exc_info=True,
                 )
                 await self._adopt_freshest_stored_token(ctx)
+                outcome = "failed"
+            # The OUTCOMES are decided out here, deliberately: a refusal is a
+            # DECISION, not a failure, and raising it inside the ``try`` above
+            # would let the ``except Exception`` arm swallow it — which would put
+            # the SDK's unlocked refresh back on the wire, the one thing this
+            # method exists to prevent.
+            #
+            # Compare explicitly: every member is a truthy string, so a
+            # ``if outcome:`` here would invert these branches silently and
+            # pyright would not catch it.
+            if outcome == "refreshed":
+                await self._resync_from_store(ctx)
+            elif outcome == "dead":
+                # The one POST that actually revokes the token family is the
+                # replay; returning here still falls through to the SDK's own
+                # UNLOCKED _refresh_token, which would spend the token the
+                # authorization server just rejected. Dropping the in-memory
+                # refresh token makes the SDK's can_refresh_token() read False,
+                # so it skips its refresh branch entirely and goes to the
+                # authorization branch — which our non-interactive redirect
+                # handler already turns into an actionable McpAuthRequiredError.
+                # Same user-visible outcome, one fewer family-revoking POST.
+                self._strip_in_memory_refresh_token(ctx)
+            elif outcome == "unacknowledged":
+                # A token that was presented (or may have been) and never
+                # acknowledged must not be presented again: that is the
+                # reuse-detection POST. The honest disposition is an interactive
+                # sign-in, not a retry — see McpRefreshUnconfirmedError.
+                self._refuse_unconfirmed_exchange(ctx)
+            elif outcome in ("contended", "overran", "failed"):
+                self._refuse_unlocked_refresh(ctx, outcome)
             # POST-CONDITION, in ONE place so no exit path can miss it: we are
             # about to return into ``async_auth_flow``, whose very next act is to
             # hand the context to the SDK's ``async_auth_flow``. If the token is
             # still invalid AND still refreshable at that point, the SDK will
             # POST its in-memory refresh token with no lock and no re-read — the
             # unlocked spend this whole method exists to prevent. Refuse instead.
-            self._refuse_unlocked_refresh(ctx)
+            #
+            # ``"failed"`` is the default reason rather than the lock: this arm
+            # is reached when the exchange ran (or could not be attributed to a
+            # single cause) and left nothing usable, and the message says the
+            # authorization server's answer was not a usable token.
+            self._refuse_unlocked_refresh(ctx, "failed")
 
-        def _refuse_unlocked_refresh(self, ctx: Any) -> None:
+        def _refuse_unlocked_refresh(self, ctx: Any, outcome: str = "failed") -> None:
             """Never hand the SDK an in-memory refresh token we failed to refresh.
 
             The post-condition of :meth:`_coordinate_inflight_refresh`, called
             once at the end so no exit path can skip it. Reaching here with an
             invalid-but-refreshable context means coordination did not produce
-            a working token this time (the lock was unavailable, the locked
-            refresh returned ``"failed"``, or the fall-through could not find a
-            fresher stored one). ``async_auth_flow`` returns straight into the
-            SDK's own flow at that point, and the SDK's ``_refresh_token``
-            POSTs ``ctx.current_tokens.refresh_token`` DIRECTLY — no lock, no
-            re-read — so the next thing on the wire would be a possibly
-            already-rotated token, which a reuse-detecting provider answers with
+            a working token this time (the lock was unavailable, the exchange
+            overran the connect's budget, the refresh returned ``"failed"``, or
+            the fall-through could not find a fresher stored one).
+            ``async_auth_flow`` returns straight into the SDK's own flow at that
+            point, and the SDK's ``_refresh_token`` POSTs
+            ``ctx.current_tokens.refresh_token`` DIRECTLY — no lock, no re-read —
+            so the next thing on the wire would be a possibly already-rotated
+            token, which a reuse-detecting provider answers with
             ``invalid_grant`` AND a family revocation.
 
             So strip it and raise a TRANSIENT error instead. Two properties are
@@ -3126,23 +3787,53 @@ def _make_refresh_coordinating_provider(
               and
             * the error is not an auth error, so it reaches the manager's
               generic reconnect arm — backoff and retry — rather than
-              ``_block_on_auth``. Being unable to take a lock is contention,
-              not a dead grant: blocking on auth here would strand a healthy
-              server on a login prompt the user has no reason to run.
+              ``_block_on_auth``. Being unable to refresh is contention or a
+              server fault, not a dead grant: blocking on auth here would
+              strand a healthy server on a login prompt the user has no reason
+              to run.
+
+            ``outcome`` becomes the refusal REASON, which is what makes the
+            user-visible string truthful per path: unable to take the lock, a
+            budget overrun, and a rejected refresh are three different things
+            and were one sentence before (design review input). The reason is
+            carried onto the ledger so the manager's re-voiced error says the
+            same thing.
             """
             if not ctx.can_refresh_token() or ctx.is_token_valid():
                 return
             self._strip_in_memory_refresh_token(ctx)
+            refusal = {
+                "contended": REFRESH_REFUSAL_LOCK,
+                "overran": REFRESH_REFUSAL_INFLIGHT,
+            }.get(outcome, REFRESH_REFUSAL_ENDPOINT)
             # ARM THE SIDE CHANNEL BEFORE RAISING, and do it here rather than in
             # the raise's caller: the MCP transport will NOT deliver this error.
             # It runs the request inside anyio cancel scopes, so the raise
             # cancels the scope and reaches ``_connect_server`` as a bare
             # ``CancelledError('Cancelled via cancel scope …')``. The manager
-            # re-voices that cancellation using this record — and only when the
-            # cancellation was NOT a genuine external one, so a dispose still
-            # wins. See :class:`RefreshContentionLedger`.
-            REFRESH_CONTENTION.record(self._refresh_coord_server_url)
-            raise McpRefreshContendedError(self._refresh_coord_server_url)
+            # re-voices that cancellation using this record — reason and all —
+            # and only when the cancellation was NOT a genuine external one, so
+            # a dispose still wins. See :class:`RefreshContentionLedger`.
+            REFRESH_CONTENTION.record(self._refresh_coord_server_url, refusal)
+            raise McpRefreshContendedError(self._refresh_coord_server_url, refusal=refusal)
+
+        def _refuse_unconfirmed_exchange(self, ctx: Any) -> None:
+            """Refuse to re-present a refresh token that may already be spent.
+
+            The disposition for ``outcome == "unacknowledged"``: the store holds
+            a token an exchange presented and never got an answer for, so
+            another POST of it is the reuse-detection request that revokes the
+            whole family. A retry would spend it again, which is why this raises
+            an AUTH error (the honest recovery is ``/mcp reauth``) rather than a
+            transient one the manager would retry on its backoff ladder.
+
+            Stripping the in-memory token first is the same load-bearing step as
+            in :meth:`_refuse_unlocked_refresh`: without it the SDK's unlocked
+            ``_refresh_token`` would present exactly the token we refused.
+            """
+            self._strip_in_memory_refresh_token(ctx)
+            REFRESH_CONTENTION.record(self._refresh_coord_server_url, REFRESH_REFUSAL_UNCONFIRMED)
+            raise McpRefreshUnconfirmedError(self._refresh_coord_server_url)
 
         async def _resync_from_store(self, ctx: Any) -> None:
             """Overwrite the in-memory token with the persisted one.
@@ -3346,12 +4037,12 @@ def _make_refresh_coordinating_provider(
               sibling rotated the grant; copy it and retry. Adoption spends
               nothing, so it can never double-spend, and the lock only
               serializes the re-read against a concurrent rotation.
-            * **Refresh** (new): the store holds the SAME token (or none) and
-              the grant is still refreshable. A 401 is then NOT evidence of a
-              dead grant — it is evidence that nobody has rotated yet — so the
-              refresh is performed HERE, under the lock, with the same re-read
-              and endpoint discipline as the pre-request coordinator. Before
-              this existed, this case fell straight through to the SDK, whose
+            * **Refresh**: the store holds the SAME token (or none) and the grant
+              is still refreshable. A 401 is then NOT evidence of a dead grant —
+              it is evidence that nobody has rotated yet — so the refresh is
+              performed HERE, under the lock, with the same re-read and endpoint
+              discipline as the pre-request coordinator. Before this existed,
+              this case fell straight through to the SDK, whose
               ``async_auth_flow`` POSTs ``current_tokens.refresh_token``
               directly: no lock, no re-read, and with the sibling's rotation
               already spent the request is a reuse-detection double-spend. It is
@@ -3360,16 +4051,26 @@ def _make_refresh_coordinating_provider(
               parsed ``invalid_grant``, which this path previously never
               reached, so every later boot re-POSTed the same rejected token.
 
-            On ``"dead"`` and on ``"failed"`` the in-memory refresh token is
-            stripped and ``None`` is returned, so the SDK's own unlockable
-            refresh cannot run either way. ``"dead"`` went through the refresh
-            (the marker is written); ``"failed"`` is transient and deliberately
-            writes NO tombstone.
+            ``"dead"``, ``"failed"``, ``"contended"`` and ``"overran"`` all
+            strip the in-memory refresh token and return ``None``: the SDK's own
+            unlockable refresh cannot run either way, and the 401 reaches the
+            SDK's authorization branch. They are deliberately NOT converted into
+            a retryable error on this path — after a 401 the manager's
+            ``_AuthChallengeWatcher`` has already latched, so a raise here is
+            reclassified as McpAuthChallengeError and blocks on auth regardless.
+
+            ``"unacknowledged"`` is the exception, and it is raised: the
+            disposition is the same (auth is required), but the challenge text
+            ("authorization expired") would be untrue for a refresh that was
+            SENT and never confirmed, and that string is what the user reads.
+            The raise carries the same ledger-backed re-voicing as the
+            coordinator's refusal, so the manager renders the honest reason.
             """
             from local_operator.mcp import auth as auth_mod
 
+            outcome: RefreshOutcome | None = None
             try:
-                async with _oauth_refresh_lock(self._refresh_coord_server_url) as locked:
+                async with _oauth_refresh_lock(self._refresh_coord_server_url) as lock:
                     stored = await self.context.storage.get_tokens()
                     current = self.context.current_tokens
                     if (
@@ -3394,47 +4095,33 @@ def _make_refresh_coordinating_provider(
                         # SDK's full authorization branch is the right answer,
                         # and with no refresh token it cannot POST one.
                         return None
-                    if not locked:
-                        # We do not hold exclusivity, so we must not perform the
-                        # exchange. Strip the in-memory refresh token anyway so
-                        # the SDK cannot make the unlocked POST we just declined
-                        # to make ourselves, and let the 401 reach its
-                        # authorization branch.
-                        self._strip_in_memory_refresh_token(self.context)
-                        return None
                     endpoints = self._refresh_coord_endpoints
                     if endpoints is None:
                         endpoints = auth_mod._fallback_endpoints_for(self._refresh_coord_server_url)
+                    # The exchange re-reads under this lock and takes the release
+                    # over, exactly as at the other two sites: nothing a waiter's
+                    # cancellation or timeout does can free it mid-POST.
                     outcome = await _refresh_oauth_token_locked(
                         self._refresh_coord_server_url,
                         self._refresh_coord_storage,
                         endpoints,
+                        lock=lock,
                     )
                     if outcome == "refreshed":
                         await self._resync_from_store(self.context)
                         fresh = self.context.current_tokens
-                        if fresh is None or not fresh.access_token:
-                            # The refresh reported success but nothing
-                            # persistable came back; let the SDK handle the 401.
-                            self._strip_in_memory_refresh_token(self.context)
-                            return None
-                        original_request.headers["Authorization"] = f"Bearer {fresh.access_token}"
-                        logger.debug(
-                            "MCP 401 for %s: retrying after a locked refresh",
-                            self._refresh_coord_server_url,
-                        )
-                        return original_request
-                    # ``"dead"`` (marker written by the refresh) and ``"failed"``
-                    # (transient, no marker) both end here: strip so the SDK's
-                    # unlocked refresh cannot spend the token, then let the 401
-                    # through. Deliberately NOT converted into a retryable error
-                    # on this path: after a 401 the manager's
-                    # ``_AuthChallengeWatcher`` has already latched, so a raise
-                    # here is reclassified as McpAuthChallengeError and blocks on
-                    # auth regardless. Changing that needs manager surgery, not a
-                    # different exception from here.
-                    self._strip_in_memory_refresh_token(self.context)
-                    return None
+                        if fresh is not None and fresh.access_token:
+                            original_request.headers["Authorization"] = (
+                                f"Bearer {fresh.access_token}"
+                            )
+                            logger.debug(
+                                "MCP 401 for %s: retrying after a locked refresh",
+                                self._refresh_coord_server_url,
+                            )
+                            return original_request
+                        # The refresh reported success but nothing persistable came
+                        # back; fall through to the refusal below and let the
+                        # authorization branch handle the 401.
             except Exception:  # noqa: BLE001 — best-effort; never break the request
                 # A failed re-read/refresh must not break the flow, and it must
                 # not leave a refreshable token for the SDK to POST unlocked
@@ -3446,6 +4133,14 @@ def _make_refresh_coordinating_provider(
                 )
                 self._strip_in_memory_refresh_token(self.context)
                 return None
+            # Refusals are decided OUT HERE so the ``except Exception``
+            # best-effort arm above cannot swallow them (it would put the SDK's
+            # unlocked refresh back on the wire, which is the one outcome this
+            # whole provider exists to prevent).
+            self._strip_in_memory_refresh_token(self.context)
+            if outcome == "unacknowledged":
+                self._refuse_unconfirmed_exchange(self.context)
+            return None
 
         @staticmethod
         def _strip_in_memory_refresh_token(ctx: Any) -> None:
