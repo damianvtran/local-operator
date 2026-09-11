@@ -3357,6 +3357,132 @@ async def test_edit_no_region_hint_uses_the_anchor_line_when_given(
     assert "closest text" not in result.text
 
 
+def test_own_text_on_disk_is_an_identity_test_not_a_metric() -> None:
+    """The gate itself (review round 3, R13): text, never a similarity figure.
+
+    ``_overlap_percent`` is bag-of-words, so a punctuation-only rewrite of the
+    same words scores exactly 100% and the clause ("this is this hunk's own
+    text") would be false. This pins the gate directly, because the two
+    repro shapes are also covered by the no-difference-pair guard and would
+    therefore survive a metric-based gate on their own.
+    """
+    disk = "alpha, beta gamma\nmoved line\n"
+    current = "alpha, beta gamma\nmoved line\nrewritten\n"
+    # Same word bag, different text: NOT the hunk's own text.
+    assert builtin._own_text_on_disk(disk, current, "alpha beta gamma\n") is False
+    # A one-word drop from a 120-token line: raw overlap 0.9958, which ROUNDS to
+    # 100% and so fired the old percentage gate. The window is still not the
+    # hunk's text, which is what the gate has to answer.
+    long_line = " ".join(f"token{i}" for i in range(1, 121))
+    without_one = " ".join(word for word in long_line.split() if word != "token60")
+    assert (
+        builtin._own_text_on_disk(
+            long_line + "\nrewritten\n", long_line + "\nrewritten\n", without_one + "\n"
+        )
+        is False
+    )
+    # The genuine case: byte-identical on disk, moved on in the batch.
+    assert builtin._own_text_on_disk("target text\nother\n", "other\n", "target text\n") is True
+    # Frames identical: nothing was consumed, so there is no clause to make.
+    assert builtin._own_text_on_disk("target text\n", "target text\n", "target text\n") is False
+
+
+@pytest.mark.asyncio
+async def test_edit_self_match_clause_needs_text_identity_not_a_similarity(
+    tools, context, tmp_path
+) -> None:
+    """Review round 3, R13 / design round 2, D8: identity, not 100% overlap.
+
+    A bag-of-words figure reaches 100% for a punctuation-only rewrite or a
+    reordered list, which is exactly when the clause ("this is this hunk's own
+    text") was false — and false in the same block as the difference pair that
+    disproved it.
+    """
+    # (a) punctuation only: the same word bag, different text. Hunk 1 APPLIES,
+    # so the frames differ and only the identity test can withhold the clause —
+    # the shape both streams reproduced.
+    punctuation = tmp_path / "punctuation.txt"
+    punctuation.write_text("alpha, beta gamma\nother line\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "punctuation.txt",
+            "edits": [
+                {"old_text": "other line\n", "new_text": "OTHER LINE\n"},
+                {"old_text": "alpha beta gamma\n", "new_text": "y\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "100% word overlap" in result.text, result.text
+    assert "unchanged on disk" not in result.text, result.text
+    # ... and the block stays self-consistent: the pair that disproves the
+    # identity is right there, which is what made the clause self-contradictory.
+    assert "first difference" in result.text, result.text
+    assert punctuation.read_text() == "alpha, beta gamma\nother line\n"
+
+    # (b) one word dropped from a 120-token line: the designer's shape, where
+    # raw overlap is 0.9958 and therefore ROUNDS to 100% — the case that made a
+    # percentage gate fire on text that is not the hunk's.
+    long_line = " ".join(f"token{i}" for i in range(1, 121))
+    without_one = " ".join(word for word in long_line.split() if word != "token60")
+    body = f"{long_line}\na second line, so the batch has something to apply\n"
+    drifted = tmp_path / "drifted.txt"
+    drifted.write_text(body)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "drifted.txt",
+            "edits": [
+                {
+                    "old_text": "a second line, so the batch has something to apply\n",
+                    "new_text": "a second line, rewritten\n",
+                },
+                {"old_text": without_one + "\n", "new_text": "y\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "100% word overlap" in result.text, result.text
+    assert "unchanged on disk" not in result.text, result.text
+    assert drifted.read_text() == body
+
+
+@pytest.mark.asyncio
+async def test_edit_self_match_clause_is_short_and_leads_with_the_cause(
+    tools, context, tmp_path
+) -> None:
+    """Design round 2, D9: the clause must fit a narrow card, cause first.
+
+    At 60 columns the message body has ~50 visible cells and the card clips
+    every row from the right, so a 149-character clause lost the reason
+    entirely.
+    """
+    line = "the whole quote chain must verify before any plaintext leaves the stage\n"
+    path = tmp_path / "short.txt"
+    path.write_text(line)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "short.txt",
+            "edits": [
+                {"old_text": line, "new_text": "the replacement chain must verify\n"},
+                {"old_text": line, "new_text": "another chain must verify\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    clause = next(row.strip() for row in result.text.splitlines() if "unchanged on disk" in row)
+    assert len(clause) <= 70, clause
+    assert clause.startswith("(") and "earlier hunks" in clause[:30], clause
+
+
 @pytest.mark.asyncio
 async def test_edit_consumed_hunk_says_its_text_is_still_on_disk(tools, context, tmp_path) -> None:
     """Review round 2, R10: "not found" must not sit beside 100% of your own text.
