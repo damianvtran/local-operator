@@ -291,7 +291,7 @@
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -305,21 +305,21 @@
         2,
         5,
         81,
-        118
+        114
       ],
       "content_region": [
         2,
         5,
         81,
-        118
+        114
       ],
       "size": [
         81,
-        118
+        114
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -416,21 +416,21 @@
       "region": [
         2,
         36,
-        8,
+        15,
         1
       ],
       "content_region": [
         2,
         36,
-        8,
+        15,
         1
       ],
       "size": [
-        8,
+        15,
         1
       ],
       "virtual_size": [
-        8,
+        15,
         1
       ],
       "scrollbar": [
@@ -442,23 +442,23 @@
       "widget": "HintButton",
       "id": null,
       "region": [
-        10,
+        17,
         36,
-        16,
+        14,
         1
       ],
       "content_region": [
-        10,
+        17,
         36,
-        16,
+        14,
         1
       ],
       "size": [
-        16,
+        14,
         1
       ],
       "virtual_size": [
-        16,
+        14,
         1
       ],
       "scrollbar": [
@@ -470,13 +470,13 @@
       "widget": "HintButton",
       "id": null,
       "region": [
-        26,
+        31,
         36,
         12,
         1
       ],
       "content_region": [
-        26,
+        31,
         36,
         12,
         1
@@ -498,13 +498,13 @@
       "widget": "HintButton",
       "id": null,
       "region": [
-        38,
+        43,
         36,
         13,
         1
       ],
       "content_region": [
-        38,
+        43,
         36,
         13,
         1

@@ -291,7 +291,7 @@
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -305,21 +305,21 @@
         2,
         5,
         81,
-        118
+        114
       ],
       "content_region": [
         2,
         5,
         81,
-        118
+        114
       ],
       "size": [
         81,
-        118
+        114
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -500,21 +500,21 @@
       "region": [
         38,
         36,
-        13,
+        27,
         1
       ],
       "content_region": [
         38,
         36,
-        13,
+        27,
         1
       ],
       "size": [
-        13,
+        27,
         1
       ],
       "virtual_size": [
-        13,
+        27,
         1
       ],
       "scrollbar": [

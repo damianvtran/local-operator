@@ -4508,8 +4508,52 @@ async def test_openrouter_body_omits_provider_key_when_unconfigured() -> None:
     assert "provider" not in captured["body"]
 
 
+async def test_openrouter_provider_and_prompt_cache_key_coexist_on_one_body() -> None:
+    """The two OpenRouter wire stamps share `_build_body` without clobbering.
+
+    #938 stamps `prompt_cache_key` (sticky routing: keep DeepSeek's prompt
+    cache warm on one host); the routing preferences stamp `provider` (a
+    routing policy that may override that stickiness). A body carrying both
+    is the legitimate combined state — a user with a price policy on a
+    cache-capable model — and each is ONE top-level key assignment, so
+    neither may replace the other or any sibling (`model`, `messages`)."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            content=_sse([{"choices": [{"delta": {"content": "ok"}, "index": 0}]}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    spec = _spec("openrouter", "deepseek/deepseek-chat")
+    spec.supports_prompt_cache = True
+    client = OpenAICompatClient(
+        "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openrouter_provider_preferences={"sort": "price"},
+    )
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                messages=[Message.user("hi")],
+                prompt_cache_key="lineage-123",
+            ),
+            "sk-test",
+        )
+    )
+
+    assert captured["body"]["provider"] == {"sort": "price"}
+    assert captured["body"]["prompt_cache_key"] == "lineage-123"
+    assert captured["body"]["model"] == "deepseek/deepseek-chat"
+    assert captured["body"]["messages"]
+
+
 def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() -> None:
-    prefs = {"sort": "price"}
+    # `max_price` nests — the shape the deep-copy isolation asserts below need.
+    prefs = {"sort": "price", "max_price": {"prompt": 1}}
 
     openrouter = client_for_spec(
         _spec(provider="openrouter", model_id="deepseek/deepseek-chat"),
@@ -4535,9 +4579,17 @@ def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() ->
     assert kimi._openrouter_provider_preferences is None
 
     # The constructor copies the mapping: mutating the caller's dict afterwards
-    # must not leak into later request bodies.
+    # must not leak into later request bodies. DEEP copy — the object nests
+    # (`max_price` is a mapping), and a shallow `dict(...)` shared that inner
+    # dict, so a caller mutating its own price cap reached later bodies
+    # (review round 1, m1).
     prefs["sort"] = "latency"
-    assert openrouter._openrouter_provider_preferences == {"sort": "price"}
+    assert openrouter._openrouter_provider_preferences == {
+        "sort": "price",
+        "max_price": {"prompt": 1},
+    }
+    prefs["max_price"]["prompt"] = 99
+    assert openrouter._openrouter_provider_preferences["max_price"] == {"prompt": 1}
 
 
 async def test_anthropic_usage_parses_cache_creation_ttl_split() -> None:

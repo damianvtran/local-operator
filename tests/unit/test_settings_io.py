@@ -539,16 +539,38 @@ def test_openrouter_rows_round_trip(manager: ConfigManager) -> None:
     ignore = settings_io.BY_KEY["providers.openrouter.ignore"]
     settings_io.write_setting(manager, ignore, ["groq"])
     assert settings_io.read_setting(manager, ignore) == ["groq"]
-    assert settings_io.validate(ignore, ["not-a-host"]) is not None
+    # The host lists are an OPEN namespace (review round 1, M1): any non-empty
+    # slug validates — including slugs outside any list this repo might hold
+    # and regional/variant tokens the upstream docs themselves use. Only the
+    # empty TOKEN is refused (a trailing or doubled comma, not a host).
+    assert settings_io.validate(ignore, ["deepinfra"]) is None
+    assert settings_io.validate(ignore, ["google-vertex/us-east5", "deepinfra/turbo"]) is None
+    assert settings_io.coerce(ignore, "deepinfra, novita") == ["deepinfra", "novita"]
+    assert settings_io.validate(ignore, ["groq", ""]) is not None
     # Unlike web_search.providers, an EMPTY routing list is "no opinion" and
     # must be writable — the resolver emits nothing for it.
     assert settings_io.validate(ignore, []) is None
     settings_io.write_setting(manager, ignore, [])
     assert settings_io.read_setting(manager, ignore) == []
 
+    # The tri-state switches round-trip as ENUM strings (design round 1, D5):
+    # "" is no opinion, "true"/"false" is the literal the wire carries.
     zdr = settings_io.BY_KEY["providers.openrouter.zdr"]
-    settings_io.write_setting(manager, zdr, True)
-    assert settings_io.read_setting(manager, zdr) is True
+    settings_io.write_setting(manager, zdr, "true")
+    assert settings_io.read_setting(manager, zdr) == "true"
+    assert settings_io.validate(zdr, "bogus") is not None
+    fallbacks = settings_io.BY_KEY["providers.openrouter.allow_fallbacks"]
+    settings_io.write_setting(manager, fallbacks, "false")
+    assert settings_io.read_setting(manager, fallbacks) == "false"
+
+
+def test_openrouter_quantizations_accept_the_documented_extras() -> None:
+    """The closed quantization set carries the full documented vocabulary
+    (review round 1, m2): mxfp4/nvfp4/mxfp8 sit beside the classic levels."""
+    setting = settings_io.BY_KEY["providers.openrouter.quantizations"]
+    for member in ("int8", "fp8", "mxfp4", "nvfp4", "mxfp8", "unknown"):
+        assert settings_io.validate(setting, [member]) is None, member
+    assert settings_io.validate(setting, ["not-a-level"]) is not None
 
 
 def test_openrouter_max_price_validation(manager: ConfigManager) -> None:

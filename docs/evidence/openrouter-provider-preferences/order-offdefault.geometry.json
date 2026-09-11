@@ -291,7 +291,7 @@
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -305,21 +305,21 @@
         2,
         5,
         81,
-        118
+        114
       ],
       "content_region": [
         2,
         5,
         81,
-        118
+        114
       ],
       "size": [
         81,
-        118
+        114
       ],
       "virtual_size": [
         81,
-        118
+        114
       ],
       "scrollbar": [
         false,
@@ -472,11 +472,39 @@
       "region": [
         26,
         36,
-        12,
+        13,
         1
       ],
       "content_region": [
         26,
+        36,
+        13,
+        1
+      ],
+      "size": [
+        13,
+        1
+      ],
+      "virtual_size": [
+        13,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "HintButton",
+      "id": null,
+      "region": [
+        39,
+        36,
+        12,
+        1
+      ],
+      "content_region": [
+        39,
         36,
         12,
         1
@@ -498,23 +526,23 @@
       "widget": "HintButton",
       "id": null,
       "region": [
-        38,
+        51,
         36,
-        13,
+        27,
         1
       ],
       "content_region": [
-        38,
+        51,
         36,
-        13,
+        27,
         1
       ],
       "size": [
-        13,
+        27,
         1
       ],
       "virtual_size": [
-        13,
+        27,
         1
       ],
       "scrollbar": [

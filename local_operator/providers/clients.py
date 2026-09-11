@@ -19,6 +19,7 @@ retryable/auth flags for the failover layer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import email.utils
 import json
 import logging
@@ -1949,14 +1950,19 @@ class OpenAICompatClient:
         self._base_url = base_url.rstrip("/")
         # The OpenRouter `provider` routing object, resolved by the CALLER from
         # settings (this class is deliberately settings-free) and stored as a
-        # private copy: `_build_body` merges it into the request body verbatim,
-        # so a caller mutating its dict afterwards must not leak into requests.
+        # private copy: `_build_body` assigns it onto the request body
+        # verbatim, so a caller mutating its dict afterwards must not leak
+        # into requests. DEEP, not `dict(...)`: the object nests (`max_price`
+        # is a mapping), and a shallow copy shared the nested dict — mutating
+        # the caller's `max_price` reached later bodies (review round 1, m1).
         # None (the default) means no preference was configured and the body
         # carries no `provider` key at all — OpenRouter's sticky routing, which
         # keeps a long conversation's prompt cache warm on one host, is left
         # untouched.
         self._openrouter_provider_preferences = (
-            dict(openrouter_provider_preferences) if openrouter_provider_preferences else None
+            copy.deepcopy(openrouter_provider_preferences)
+            if openrouter_provider_preferences
+            else None
         )
         # Some providers serve subscription OAuth and pay-as-you-go API keys
         # from different hosts (see ``ProviderDefinition.oauth_base_url``). The

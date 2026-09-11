@@ -189,7 +189,29 @@ class Setting:
     minimum: float | None = None
     maximum: float | None = None
     #: Members a LIST setting may contain, in the order they are offered.
+    #: A CLOSED allow-list: :func:`validate`/:func:`coerce` reject anything
+    #: else, which is right only where this repo owns the vocabulary
+    #: (``web_search.providers``). For a LIST over an OPEN, upstream-owned
+    #: namespace (the OpenRouter host slugs), leave ``members`` empty — any
+    #: non-empty token validates — and seed the editor with :attr:`placeholder`
+    #: instead, so common values are visible without becoming a reject list.
     members: tuple[str, ...] = ()
+    #: Ghost text painted in the EMPTY inline editor (faint, never part of the
+    #: buffer, never committed). Two jobs, both about the empty state being
+    #: the default the user must not disturb: show the vocabulary an open LIST
+    #: accepts (``deepseek, groq, …``) and show the SHAPE a structured TEXT
+    #: field expects (the ``max_price`` JSON example). Plain prose help lives
+    #: in :attr:`help`; this is the one-line answer to "what would I type?".
+    placeholder: str = ""
+    #: A HARD consequence clause, painted in the page's danger ink AHEAD of
+    #: :attr:`help` and never shed from the detail line — including when the
+    #: row is off-default and the state clause (``default: …``) competes for
+    #: the row. For the one setting whose stored value is itself the hazard
+    #: (``providers.openrouter.order`` disables sticky routing): the warning
+    #: must be on screen exactly when the dangerous value is stored, which is
+    #: the state the ordinary shed ladder sacrifices help for. SOFT notes stay
+    #: in ``help`` with the faint ink, so the two ranks cannot be confused.
+    warning: str = ""
     #: An empty text field CLEARS the key rather than storing "". Off for
     #: settings whose empty string is a real value (``searxng_endpoint``
     #: unset IS ""), on where empty means "no opinion" (``hosting``).
@@ -298,6 +320,23 @@ SECTIONS: tuple[Section, ...] = (
         "Wire protocol",
         Scope.LIVE,
         "How direct provider connections are made: API surface and cache TTL.",
+    ),
+    # The OpenRouter chat-completions ``provider`` routing object has its own
+    # section rather than living under "Wire protocol" (design round 1, D1):
+    # thirteen rows grafted onto the three protocol knobs made two different
+    # jobs share one header, and every label carrying an "OpenRouter " prefix
+    # to disambiguate itself from the OpenAI/Anthropic neighbours hid the
+    # distinguishing words past the 29-cell label budget. A section of its
+    # own names the job once in the header, so the rows can drop the prefix.
+    # LIVE for the same reason as ``providers``: ``SessionStreamFn`` resolves
+    # the object from the REBOUND settings mapping every time it builds a
+    # client (``model.configure._openrouter_provider_preferences``), so an
+    # edit lands on the next call — no ``/new``, no relaunch.
+    Section(
+        "openrouter",
+        "OpenRouter routing",
+        Scope.LIVE,
+        "How OpenRouter picks a host; unset = sticky routing.",
     ),
     # LIVE: every ``retry.*`` key routes through ``RetrySettings.from_settings``
     # PER CALL on the mapping ``SessionStreamFn`` holds, and the config watcher
@@ -624,11 +663,17 @@ SETTINGS: tuple[Setting, ...] = (
     # below is "no opinion", and the resolver emits NO ``provider`` object at
     # all until the user sets at least one of them. Do not give ``sort`` an
     # explicit default: an always-on sort is an always-on cache miss.
+    #
+    # Row order is the reading order the object's own docs use (design round 1,
+    # D1): the primary control (sort), then the three host lists, then privacy,
+    # then price/perf. Labels carry no "OpenRouter " prefix — the section
+    # header already says it, and the prefix pushed the distinguishing words
+    # past the 29-cell label budget (design round 1, D5).
     Setting(
         key="providers.openrouter.sort",
         path=("providers", "openrouter", "sort"),
-        section="providers",
-        label="OpenRouter routing policy",
+        section="openrouter",
+        label="routing policy",
         kind=Kind.ENUM,
         # "" is the unset member: the schema must know a stored empty string
         # means "no opinion", and the resolver treats it exactly like a missing
@@ -650,30 +695,29 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.openrouter.order",
         path=("providers", "openrouter", "order"),
-        section="providers",
-        label="OpenRouter host order",
+        section="openrouter",
+        label="host order",
         kind=Kind.LIST,
         default=[],
+        # The consequence LEADS the detail line in the page's danger ink and is
+        # never shed from it — including on the off-default row, where the
+        # `default:` reset clause used to crowd it out exactly when the
+        # dangerous value was stored (QA round 1 Q1 / design round 1 D2). The
+        # help below stays SOFT faint ink so the two ranks read apart.
+        warning="disables sticky routing — prompt cache goes cold",
+        # Empty-first (design round 1, D3): empty is the default that must not
+        # be disturbed, so the detail names what empty MEANS before the how-to.
         help=(
-            "Comma-separated host slugs tried in this exact order. WARNING: "
-            "disables sticky routing — DeepSeek's prompt cache goes COLD on "
-            "long conversations, repaying the full prefix cost every turn. "
-            "Leave empty unless you need a pinned host sequence."
+            "Empty = no opinion (sticky routing stays). Comma-separated host "
+            "slugs tried in this exact order."
         ),
-        members=(
-            "deepseek",
-            "google-ai-studio",
-            "google-vertex",
-            "anthropic",
-            "openai",
-            "azure",
-            "amazon-bedrock",
-            "together",
-            "fireworks",
-            "groq",
-            "mistral",
-            "cohere",
-        ),
+        # OPEN namespace — deliberately no `members`. OpenRouter owns the slug
+        # vocabulary and grows it without notice (deepinfra, novita, regional
+        # variants like google-vertex/us-east5), so a closed list would reject
+        # hosts the upstream docs themselves use. Any non-empty slug token
+        # validates; the placeholder seeds the common hosts without gating
+        # the write.
+        placeholder="deepseek, groq, mistral, …",
         # An empty routing order is "no opinion", not a validation error —
         # unlike web_search.providers, nothing breaks with zero entries.
         empty_unsets=True,
@@ -681,88 +725,86 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.openrouter.only",
         path=("providers", "openrouter", "only"),
-        section="providers",
-        label="OpenRouter allowed hosts",
+        section="openrouter",
+        label="allowed hosts",
         kind=Kind.LIST,
         default=[],
         help=(
-            "Comma-separated allow-list of host slugs; all others are excluded. "
-            "May route away from a warm prompt cache — a forced cold start. "
-            "Empty means every host is eligible."
+            "Empty = no opinion (sticky routing stays). Comma-separated "
+            "allow-list of host slugs; every other host is excluded — a "
+            "forced cold start if the warm host is not on it."
         ),
-        members=(
-            "deepseek",
-            "google-ai-studio",
-            "google-vertex",
-            "anthropic",
-            "openai",
-            "azure",
-            "amazon-bedrock",
-            "together",
-            "fireworks",
-            "groq",
-            "mistral",
-            "cohere",
-        ),
+        # Open namespace, same reason as `order` above.
+        placeholder="deepseek, groq, mistral, …",
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.ignore",
         path=("providers", "openrouter", "ignore"),
-        section="providers",
-        label="OpenRouter ignored hosts",
+        section="openrouter",
+        label="ignored hosts",
         kind=Kind.LIST,
         default=[],
         help=(
-            "Comma-separated block-list of host slugs to omit (e.g. a host "
-            "that is failing right now). May route away from a warm prompt "
-            "cache — a forced cold start. Empty means nothing is excluded."
+            "Empty = no opinion (sticky routing stays). Comma-separated "
+            "block-list of host slugs to omit (e.g. a host that is failing "
+            "right now) — may cost you the warm prompt cache."
         ),
-        members=(
-            "deepseek",
-            "google-ai-studio",
-            "google-vertex",
-            "anthropic",
-            "openai",
-            "azure",
-            "amazon-bedrock",
-            "together",
-            "fireworks",
-            "groq",
-            "mistral",
-            "cohere",
-        ),
+        # Open namespace, same reason as `order` above.
+        placeholder="deepseek, groq, mistral, …",
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.allow_fallbacks",
         path=("providers", "openrouter", "allow_fallbacks"),
-        section="providers",
-        label="OpenRouter fallbacks",
-        kind=Kind.BOOL,
-        default=True,
-        help="Off: fail rather than fall through to a host outside your preferences.",
-        choices=_bool_choices("fall back when the preferred host fails", "fail instead"),
+        section="openrouter",
+        label="fallbacks",
+        # ENUM, not BOOL (design round 1, D5/N3): at the wire this is tri-state
+        # — OpenRouter's own default is "fall through", the only meaningful
+        # override is "fail instead", and the resolver omits the key entirely
+        # while at default. A BOOL defaulted to True painted the resting row
+        # as a configured `on` when nothing is sent, the one row in the
+        # section that looked set on a fresh install. `default`/`false` keeps
+        # the no-opinion vocabulary the other rows use: `—` at rest. The
+        # choice VALUE is the literal sent ("false"), so what the expansion
+        # shows is what `lop config edit` accepts.
+        kind=Kind.ENUM,
+        default="",
+        help=(
+            "'default' sends nothing (OpenRouter falls through to another "
+            "host when the preferred one fails); 'false' fails rather than "
+            "fall through to a host outside your preferences."
+        ),
+        choices=(
+            Choice("", "default", "no preference — OpenRouter's default (fall through)"),
+            Choice("false", "false", "fail rather than fall through"),
+        ),
     ),
     Setting(
         key="providers.openrouter.require_parameters",
         path=("providers", "openrouter", "require_parameters"),
-        section="providers",
-        label="OpenRouter require parameters",
-        kind=Kind.BOOL,
-        default=False,
+        section="openrouter",
+        label="require parameters",
+        # ENUM for the same tri-state reason as `allow_fallbacks`: False in a
+        # BOOL read as "parameter dropping is off" while the wire truth is
+        # "no preference sent"; "" restores the shared no-opinion `—`.
+        kind=Kind.ENUM,
+        default="",
         help=(
-            "On: only use hosts that support every parameter you send "
-            "(tools, structured output). Off (default): OpenRouter silently "
-            "drops unsupported parameters."
+            "'true' restricts to hosts that support every parameter you send "
+            "(tools, structured output); 'default' lets OpenRouter silently "
+            "drop unsupported ones."
         ),
-        choices=_bool_choices("only hosts that support every parameter", "drop unsupported ones"),
+        choices=(
+            Choice("", "default", "no preference — unsupported parameters may be dropped"),
+            Choice("true", "true", "only hosts that support every parameter"),
+        ),
     ),
     Setting(
         key="providers.openrouter.data_collection",
         path=("providers", "openrouter", "data_collection"),
-        section="providers",
-        label="OpenRouter data collection",
+        section="openrouter",
+        label="data collection",
         kind=Kind.ENUM,
         default="",
         help=(
@@ -778,62 +820,92 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.openrouter.zdr",
         path=("providers", "openrouter", "zdr"),
-        section="providers",
-        label="OpenRouter zero data retention",
-        kind=Kind.BOOL,
-        # Tri-state: False = unset (no preference sent), True = ZDR hosts only.
-        # A None default would make the row read as "off" while meaning "unset".
-        default=False,
-        help="On: restrict to zero-data-retention endpoints. Off: no preference sent.",
-        choices=_bool_choices("ZDR endpoints only", "no preference"),
+        section="openrouter",
+        label="zero data retention",
+        kind=Kind.ENUM,
+        # ENUM, not BOOL (design round 1, D5): the wire key is tri-state —
+        # absent means "no preference" (OpenRouter's default stands), `true`
+        # means ZDR hosts only, and there is no meaningful `false` to send.
+        # A BOOL had to fake the unset state as `off`, which read as "ZDR
+        # disabled" beside ENUM rows showing `—` for the same state.
+        default="",
+        help="'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+        choices=(
+            Choice("", "default", "no preference sent"),
+            Choice("true", "true", "zero-data-retention endpoints only"),
+        ),
     ),
     Setting(
         key="providers.openrouter.enforce_distillable_text",
         path=("providers", "openrouter", "enforce_distillable_text"),
-        section="providers",
-        label="OpenRouter distillable text",
-        kind=Kind.BOOL,
-        default=False,
+        section="openrouter",
+        label="distillable text",
+        # ENUM for the same tri-state reason as `zdr` directly above.
+        kind=Kind.ENUM,
+        default="",
         help=(
-            "On: restrict to endpoints whose text output may be distilled. "
-            "Off: no preference sent."
+            "'true': restrict to endpoints whose text output may be "
+            "distilled. 'default': nothing sent."
         ),
-        choices=_bool_choices("distillable-text endpoints only", "no preference"),
+        choices=(
+            Choice("", "default", "no preference sent"),
+            Choice("true", "true", "distillable-text endpoints only"),
+        ),
     ),
     Setting(
         key="providers.openrouter.quantizations",
         path=("providers", "openrouter", "quantizations"),
-        section="providers",
-        label="OpenRouter quantizations",
+        section="openrouter",
+        label="quantizations",
         kind=Kind.LIST,
         default=[],
         help=(
-            "Comma-separated quantization levels the served model may use "
-            "(e.g. int8, fp8). Empty means any."
+            "Empty = no opinion. Comma-separated quantization levels the "
+            "served model may use (e.g. int8, fp8, mxfp4)."
         ),
-        members=("int4", "int8", "fp4", "fp6", "fp8", "fp16", "bf16", "fp32"),
+        # CLOSED here (unlike the host lists): this vocabulary is a documented
+        # finite set, not a growing upstream namespace. mxfp4/nvfp4/mxfp8 and
+        # `unknown` are in the OpenRouter docs beside the classic levels
+        # (review round 1, m2).
+        members=(
+            "int4",
+            "int8",
+            "fp4",
+            "fp6",
+            "fp8",
+            "fp16",
+            "bf16",
+            "fp32",
+            "mxfp4",
+            "nvfp4",
+            "mxfp8",
+            "unknown",
+        ),
+        placeholder="int8, fp8, mxfp4, …",
         empty_unsets=True,
     ),
     Setting(
         key="providers.openrouter.max_price",
         path=("providers", "openrouter", "max_price"),
-        section="providers",
-        label="OpenRouter max price",
+        section="openrouter",
+        label="max price",
         kind=Kind.TEXT,
         default="",
-        help=(
-            'JSON object capping price, e.g. {"prompt": 1, "completion": 2} '
-            '(USD per million tokens; also "request" per request and "image" '
-            "per image). Empty sends no cap."
-        ),
+        # Example-first and short (design round 1, D4): the old prose pushed
+        # the units past the ellipsis at 120 columns, and for a JSON-in-TEXT
+        # row the example IS the documentation. The empty editor ghosts the
+        # same example; the four accepted field names are enumerated by the
+        # validator's own rejection message.
+        help='{"prompt": 1, "completion": 2} — USD / million tokens',
+        placeholder='{"prompt": 1, "completion": 2}',
         empty_unsets=True,
         validate_value=_validate_openrouter_max_price,
     ),
     Setting(
         key="providers.openrouter.preferred_min_throughput",
         path=("providers", "openrouter", "preferred_min_throughput"),
-        section="providers",
-        label="OpenRouter min throughput (tok/s)",
+        section="openrouter",
+        label="min throughput (tok/s)",
         kind=Kind.FLOAT,
         default=0.0,
         help=(
@@ -847,8 +919,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         key="providers.openrouter.preferred_max_latency",
         path=("providers", "openrouter", "preferred_max_latency"),
-        section="providers",
-        label="OpenRouter max latency (s)",
+        section="openrouter",
+        label="max latency (s)",
         kind=Kind.FLOAT,
         default=0.0,
         help=(
@@ -1913,10 +1985,17 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError("expected a number") from None
     if setting.kind is Kind.LIST:
         items = [part.strip() for part in text.split(",") if part.strip()]
-        unknown = [item for item in items if item not in setting.members]
-        if unknown:
-            offered = ", ".join(setting.members)
-            raise ValueError(f"unknown: {', '.join(unknown)} — pick from {offered}")
+        # `members` is the CLOSED allow-list and only gates where this repo
+        # owns the vocabulary (web_search.providers). An empty tuple is an
+        # OPEN list (the OpenRouter host slugs — an upstream-owned namespace
+        # that grows without notice): every non-empty token is accepted, so
+        # `deepinfra`, `novita` or `google-vertex/us-east5` cannot be rejected
+        # by a list that was merely out of date (review round 1, M1).
+        if setting.members:
+            unknown = [item for item in items if item not in setting.members]
+            if unknown:
+                offered = ", ".join(setting.members)
+                raise ValueError(f"unknown: {', '.join(unknown)} — pick from {offered}")
         # Stable de-duplication, matching `coerce_search_settings`: a repeated
         # provider is a typo, not a request to weight it twice.
         return list(dict.fromkeys(items))
@@ -1995,10 +2074,16 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         if not isinstance(value, list):
             return "expected a comma-separated list"
         if any(not isinstance(item, str) for item in value):
-            return "expected a list of provider names"
-        unknown = [item for item in value if item not in setting.members]
-        if unknown:
-            return f"unknown: {', '.join(str(item) for item in unknown)}"
+            return "expected a list of names"
+        # `members` gates only the CLOSED lists (see `coerce`); an OPEN list
+        # still bounds each token itself — an empty slug is a trailing or
+        # doubled comma, not a host any router knows.
+        if setting.members:
+            unknown = [item for item in value if item not in setting.members]
+            if unknown:
+                return f"unknown: {', '.join(str(item) for item in unknown)}"
+        elif any(not item.strip() for item in value):
+            return "expected non-empty names, separated by commas"
         if not value and not setting.empty_unsets:
             # An empty list is an error only where the consumer NEEDS at least
             # one entry (web_search.providers). Where empty means "no opinion"

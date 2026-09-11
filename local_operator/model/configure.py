@@ -2458,15 +2458,18 @@ def _openrouter_provider_preferences(settings: Mapping[str, Any] | None) -> dict
     if isinstance(quantizations, list) and quantizations:
         prefs["quantizations"] = [str(item) for item in quantizations]
 
-    # The four booleans are tri-state at the wire level: False in the shipped
-    # config means "unset" (OpenRouter's own default stands), only an explicit
-    # True is ever sent. `allow_fallbacks` inverts that: True is OpenRouter's
-    # default, so only an explicit False reaches the body.
+    # The four switches are tri-state at the wire level: the registry stores
+    # "" for "no opinion" (ENUM, like ``sort``) and only an explicit
+    # opt-in/opt-out ever reaches the body. ``allow_fallbacks`` inverts the
+    # sense: OpenRouter's own default is "fall through", so only an explicit
+    # off is sent. The bool forms are still honoured — a hand-edited YAML
+    # ``zdr: true`` parses as bool True and must keep meaning what it said.
     allow_fallbacks = openrouter.get("allow_fallbacks")
-    if allow_fallbacks is False:
+    if allow_fallbacks is False or allow_fallbacks == "false":
         prefs["allow_fallbacks"] = False
     for key in ("require_parameters", "zdr", "enforce_distillable_text"):
-        if openrouter.get(key) is True:
+        value = openrouter.get(key)
+        if value is True or value == "true":
             prefs[key] = True
 
     # `max_price` is stored verbatim as the user typed it — a JSON string from
