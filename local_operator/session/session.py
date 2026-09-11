@@ -139,6 +139,9 @@ from local_operator.incidents import (
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    format_cut_off_notice,
+    format_cut_off_raw,
+    render_cut_off_reason,
 )
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
@@ -201,6 +204,33 @@ SUBAGENT_ROSTER_CUSTOM_TYPE = "subagent_roster"
 SUBAGENT_ROSTER_SIDECAR = "subagent-roster.v1.json"
 _SUBAGENT_ROSTER_VERSION = 1
 _SUBAGENT_SUMMARY_CHARS = 500
+
+#: The build THIS PROCESS loaded, read once and memoised. Compared against the
+#: install on disk by ``update.classify_import_failure``, which is the only way
+#: to tell a lazy import that lost a name to a HALF-REPLACED install from a
+#: genuine packaging bug: without a baseline the comparison can only ever say
+#: "equal", and every real defect would be mislabelled an install race.
+#:
+#: Read lazily rather than at import (importing this module must do no file I/O)
+#: and stamped in ``Session.__init__`` so in every runtime the FIRST read happens
+#: at process start, before an install can move under us.
+_PROCESS_BOOT_BUILD: Any = None
+_PROCESS_BOOT_BUILD_READ = False
+
+
+def _process_boot_build() -> Any:
+    """The ``BuildStamp`` this process booted from, or ``None`` if unreadable."""
+    global _PROCESS_BOOT_BUILD, _PROCESS_BOOT_BUILD_READ
+    if not _PROCESS_BOOT_BUILD_READ:
+        _PROCESS_BOOT_BUILD_READ = True
+        try:
+            from local_operator.update import installed_build
+
+            _PROCESS_BOOT_BUILD = installed_build()
+        except Exception:  # noqa: BLE001 — an unreadable stamp classifies nothing
+            _PROCESS_BOOT_BUILD = None
+    return _PROCESS_BOOT_BUILD
+
 
 #: Transcript custom-entry type holding the session's todo list. The todo tool
 #: keeps the live list in a module-level table keyed by session id (see
@@ -1792,10 +1822,14 @@ class Session:
         # rather than above it, and it is the path
         # `test_a_broken_attention_import_cannot_stop_a_session_from_loading`
         # exercises.
+        #
+        # Initialised BEFORE the attempt so a failure leaves it ``None`` rather
+        # than unset: ``_journal_restored_cut_off`` reads it on every boot.
+        self._restored_cut_off: tuple[str, str, str, str] | None = None
         try:
             from local_operator.session.attention import bootstrap_transcript
 
-            bootstrap_transcript(transcript)
+            self._restored_cut_off = bootstrap_transcript(transcript)
         except Exception as exc:  # noqa: BLE001 — must not break session boot
             logger.warning(
                 "attention bootstrap failed for %s (%r); continuing without it",
@@ -1822,10 +1856,27 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # Stamp the build THIS process loaded, before any lazy import can meet a
+        # replaced tree: every later ``_note_import_failure`` compares against
+        # this value (see ``_process_boot_build``).
+        _process_boot_build()
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
         self._attention_run_token: str | None = None
+        #: Whether the CURRENT run's end has been CONSUMED for publication.
+        #: Set False at every turn start and True the moment
+        #: ``_publish_attention_outcome`` takes the end event, so a teardown can
+        #: tell "this run already said how it ended" from "it never got to" —
+        #: the distinction that decides whether dispose has to publish one.
+        self._attention_run_settled: bool = True
         self._attention_restored = False
+        #: Set by the ``bootstrap_transcript`` call ABOVE (see the attention
+        #: block) to the ``(kind, cause, reason, token)`` this boot classified
+        #: and published for an ORPHANED run, and journaled from ``async_init``
+        #: / ``refresh_attention`` because ``journal_incident`` awaits a
+        #: transcript write and ``__init__`` is synchronous. Deliberately NOT
+        #: re-initialised here — an initialiser at this point would overwrite
+        #: the value the bootstrap just produced.
         self._agent_id = agent_id
         # The goal rides the prompt's volatile tail; the holder is shared with
         # the system-blocks provider so an edit applies from the next turn.
@@ -2149,6 +2200,31 @@ class Session:
         #: user prompt (compaction continuations hold the end until the
         #: pipeline flushes).
         self._last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+        #: The rendered reason for the last cut-off turn, mirrored onto the
+        #: canonical snapshot beside ``_last_turn_outcome``. A rebinding viewer
+        #: uses it to synthesise a real diagnostic (``_settle_suspect_turn``)
+        #: instead of the class placeholder ``"turn failed"``.
+        self._last_turn_cut_off: str = ""
+        #: Why the CURRENT turn is being cut off, as a machine token from
+        #: ``incidents.CUT_OFF_CAUSES``, or ``""`` when it is ending on its own
+        #: or was deliberately stopped. Set by the runtime's own exit paths (a
+        #: retire that caught a live turn, a termination signal, disposal) and
+        #: consumed by :meth:`_classify_cut_off` and
+        #: :meth:`_publish_attention_outcome`.
+        #:
+        #: Deliberately NOT derived from ``AbortSignal.reason``:
+        #: ``abort("session disposed")`` is produced by BOTH a user's `/stop` and
+        #: a SIGTERM, so the reason STRING cannot classify the trigger — only the
+        #: exit path that raised it can.
+        self._cut_off_cause: str = ""
+        #: Optional parenthetical riding with ``_cut_off_cause`` (a build pair, a
+        #: pid, a start time) — why the reason is specific instead of generic.
+        self._cut_off_detail: str = ""
+        #: Positive evidence that THIS turn was stopped on purpose. Once set, a
+        #: later ``note_cut_off`` is ignored: `lop stop` and SIGTERM converge on
+        #: the same clean-exit ordering, so the dispose rung always runs and
+        #: would otherwise relabel a user's own cancel as an error.
+        self._deliberate_stop_noted: bool = False
         # The loop's held end owns billing, but a later post-turn compaction owns
         # occupancy. Carry that newer level to the boundary without rewriting the
         # usage objects that lifetime cost and analytics still need.
@@ -3246,6 +3322,10 @@ class Session:
             self._tg_stack = stack
         self._handle_missed_wakes()
         await self._wake.pump()
+        # Narrate a cut-off this boot repaired BEFORE anything can open a turn,
+        # so the notice is in the live context the first turn reads. Deduped on
+        # the token, so a second open of the same session is silent.
+        await self._journal_restored_cut_off()
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -6054,6 +6134,124 @@ class Session:
         if store is not None:
             store.refresh_jobs(self)
 
+    def note_cut_off(self, cause: str, detail: str = "") -> None:
+        """Record WHY the current turn is being cut off, before it ends.
+
+        Called by the runtime's own exit paths — the dispose rung, a termination
+        signal, a retirement that caught a live turn — which are the only
+        writers that can classify the trigger. Deliberately suppressed once a
+        DELIBERATE stop was recorded for this turn: ``lop stop`` and SIGTERM
+        converge on the same clean-exit ordering (``ServingSessionHandle``), so
+        the dispose rung always runs and would otherwise relabel a user's own
+        cancel as an error — the one misclassification this taxonomy calls
+        worse than the bug it fixes.
+
+        A no-op on an idle session: the cause is consumed only by an
+        ``AgentEndEvent`` for the turn that was running, and it is cleared at
+        the head of the next one.
+
+        FIRST WRITER WINS. An exit is a sequence of rungs (a retirement latch,
+        then the stop rung, then the dispose), and the EARLIEST note is the
+        most specific one — a retirement that reaches disposal would otherwise
+        be relabelled a generic ``runtime-shutdown`` by the rung that merely
+        finishes the job. The one thing that outranks all of them is a
+        deliberate stop, which clears rather than fills (see
+        ``note_deliberate_stop``).
+        """
+        if not cause or self._deliberate_stop_noted or self._cut_off_cause:
+            return
+        self._cut_off_cause = cause
+        self._cut_off_detail = detail
+
+    def note_deliberate_stop(self) -> None:
+        """Record positive evidence that THIS turn is a user's own stop.
+
+        The taxonomy flips the default: with no evidence a cut-off is an ERROR,
+        and ``interrupted`` now has to be earned. This is how the stop rung
+        earns it, and it is why it must run BEFORE the dispose rung (which
+        notes an involuntary cause). Cleared per turn with
+        ``_cut_off_cause``.
+        """
+        self._deliberate_stop_noted = True
+        self._cut_off_cause = ""
+        self._cut_off_detail = ""
+
+    def _classify_cut_off(self, event: AgentEndEvent) -> AgentEndEvent:
+        """Re-label an involuntary abort as a CUT-OFF error before it is emitted.
+
+        A deliberate stop keeps today's shape (``aborted=True, error=None`` →
+        ``interrupted``). An involuntary one is rewritten to ``aborted=False,
+        error=<sentence>`` so every existing surface does the right thing
+        without being taught a new field: ``on_turn_ended`` appends its error
+        notice, ``_finalize_turn`` does NOT append the ``interrupted`` notice,
+        the title takes the ✗ mark (``failed=bool(error) and not aborted``),
+        ``_last_turn_outcome`` becomes ``"error"``, and
+        ``_publish_attention_outcome`` publishes ``error``. An OLD viewer that
+        has never heard of ``cut_off`` gets the same behaviour, which is the
+        backwards-compatibility requirement.
+
+        The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
+        name the cause precisely without re-deriving it from the vocabulary.
+
+        A turn that ALREADY ended with a real provider/tool error is left alone:
+        that error is a more specific diagnosis than "the runtime went away",
+        and overwriting it would throw away the only text that names the actual
+        fault.
+        """
+        cause = self._cut_off_cause
+        if not cause:
+            return event
+        if event.error and not event.aborted:
+            return event
+        detail = self._cut_off_detail
+        return event.model_copy(
+            update={
+                "aborted": False,
+                "error": format_cut_off_notice(cause, detail=detail),
+                "cut_off": render_cut_off_reason(cause, detail=detail),
+                "cut_off_cause": cause,
+            }
+        )
+
+    async def _journal_restored_cut_off(self) -> None:
+        """Narrate the cut-off this boot repaired, once per orphaned run."""
+        restored = self._restored_cut_off
+        if restored is None:
+            return
+        _kind, cause, reason, token = restored
+        await self._journal_cut_off_once(token, reason, cause)
+
+    def _note_import_failure(self, exc: BaseException, module: str) -> bool:
+        """Record a lazy import that lost a name to a HALF-REPLACED install.
+
+        Conservative on purpose: ``update.classify_import_failure`` names the
+        cause ONLY when the install on disk has moved away from the build this
+        process booted from, so a genuine packaging bug keeps its ordinary
+        traceback instead of being mislabelled an install race. Returns whether
+        the cause was named.
+        """
+        from local_operator.update import classify_import_failure
+
+        reason = classify_import_failure(exc, module, boot=_process_boot_build())
+        if reason is None:
+            return False
+        logger.error("turn aborted by a mid-install import failure: %s", reason, exc_info=exc)
+        boot = _process_boot_build()
+        current = None
+        try:
+            from local_operator.update import installed_build
+
+            current = installed_build()
+        except Exception:  # noqa: BLE001 — the detail is a nicety
+            current = None
+        detail = (
+            f" ({boot.label()} → {current.label()})"
+            if boot is not None and current is not None and current.label() != boot.label()
+            else ""
+        )
+        self.note_cut_off("install-mid-update", detail)
+        return True
+
     async def refresh_attention(self) -> dict[str, Any]:
         """Reconcile cross-process receipts without changing the read watermark."""
         from local_operator.session.attention import (
@@ -6072,9 +6270,19 @@ class Session:
                 and saved.get("eligible", True)
             ):
                 await asyncio.to_thread(
-                    store.publish, identity, saved["token"], saved["anchor"], saved["kind"]
+                    store.publish,
+                    identity,
+                    saved["token"],
+                    saved["anchor"],
+                    saved["kind"],
+                    reason=str(saved.get("reason") or ""),
+                    cause=str(saved.get("cause") or ""),
                 )
             self._attention_restored = True
+        # The in-process TUI never calls ``async_init``, so this is its only
+        # route to the restored cut-off notice. Deduped on the token, so the
+        # runtime path (which calls both) narrates exactly once.
+        await self._journal_restored_cut_off()
         state = await asyncio.to_thread(store.state, identity)
         if state != self._attention:
             self._attention = state
@@ -6106,6 +6314,7 @@ class Session:
         self._attention_outcome = None
         if outcome is None:
             return
+        self._attention_run_settled = True
         # A delegating parent's first idle boundary is not a finished task.
         delegated = any(job.type == "task" and job.status == "running" for job in self.jobs.list())
         messages = [
@@ -6115,8 +6324,33 @@ class Session:
             and getattr(message, "role", None) == "assistant"
             and getattr(message, "text", "")
         ]
-        kind = "error" if outcome.error else "interrupted" if outcome.aborted else "complete"
+        # The classifier (``_classify_cut_off``) has already rewritten an
+        # unwanted cut-off into ``aborted=False, error=<notice>``, so this reads
+        # the two facts it needs rather than re-deriving them: ``cut_off`` says
+        # the end marker is an involuntary stop, and ``aborted`` alone still
+        # means the deliberate one.
+        cut_off = bool(self._cut_off_cause)
+        kind = (
+            "error"
+            if (outcome.error or cut_off)
+            else "interrupted" if outcome.aborted else "complete"
+        )
         token = self._attention_run_token or str(uuid.uuid4())
+        # The DURABLE reason. For a cut-off it is the harness-authored cause
+        # sentence, never the live notice's longer framing: this string is what
+        # the sidebar, the phone and the next incident card print, and the
+        # tooltip has one line. A provider error keeps its own message, and a
+        # deliberate stop names itself so a later restore can tell it apart from
+        # an unexplained cut-off.
+        if cut_off:
+            cause = self._cut_off_cause
+            reason = render_cut_off_reason(cause, detail=self._cut_off_detail)
+        elif kind == "interrupted":
+            cause = "user-stop"
+            reason = render_cut_off_reason(cause)
+        else:
+            cause = ""
+            reason = outcome.error or ""
         if kind == "complete" and (not messages or delegated):
             await self._transcript.append_custom(
                 ATTENTION_CUSTOM_TYPE,
@@ -6139,6 +6373,8 @@ class Session:
                 "token": token,
                 "anchor": anchor,
                 "kind": kind,
+                "cause": cause,
+                "reason": reason,
             },
         )
         self._attention = await asyncio.to_thread(
@@ -6147,7 +6383,15 @@ class Session:
             token,
             anchor,
             kind,
+            reason=reason,
+            cause=cause,
         )
+        # The model has to learn WHY even when this process survives the
+        # cut-off (a graceful termination signal aborts the turn and then exits,
+        # but a retirement that caught a live turn does not). Deduped on the
+        # token so a restore of the same run does not narrate it twice.
+        if cut_off:
+            await self._journal_cut_off_once(token, reason, cause)
         self.refresh_frontend_state()
 
     @property
@@ -6395,6 +6639,13 @@ class Session:
 
     async def _emit(self, event: AgentEvent) -> None:
         if isinstance(event, AgentEndEvent):
+            # BEFORE the handler fan-out and before the outcome fold: an
+            # involuntary cut-off is re-labelled here as a plain error with a
+            # named reason, so every existing consumer (the TUI's error notice,
+            # the title's ✗, the snapshot's ``last_turn_outcome``, the durable
+            # publish) does the right thing without being taught a new field. A
+            # deliberate stop is left exactly as it was.
+            event = self._classify_cut_off(event)
             self._attention_outcome = event
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
@@ -6406,6 +6657,10 @@ class Session:
                 self._last_turn_outcome = "aborted"
             else:
                 self._last_turn_outcome = "completed"
+            # Rides the snapshot beside the outcome so a viewer that rebinds
+            # after the turn settled can name the cause instead of the "turn
+            # failed" placeholder.
+            self._last_turn_cut_off = event.cut_off
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -6666,6 +6921,16 @@ class Session:
             begin_message()
         self._attention_outcome = None
         self._attention_run_token = str(uuid.uuid4())
+        # This run has not yet said how it ended; a teardown that finds it so
+        # must publish the outcome itself (see ``Session.dispose``).
+        self._attention_run_settled = False
+        # Cleared at the head of EVERY turn, alongside the outcome, so a cause
+        # noted for a previous turn cannot label this one: the end event that
+        # consumes it is emitted from THIS turn's finally, and a stale cause
+        # would otherwise turn a healthy turn into an error.
+        self._cut_off_cause = ""
+        self._cut_off_detail = ""
+        self._deliberate_stop_noted = False
         from local_operator.session.attention import conversation_identity
 
         # A process dying after result persistence but before outcome publication
@@ -6687,6 +6952,16 @@ class Session:
                 may_drop=may_drop,
             )
             await self._drain_continuation()
+        except ImportError as exc:
+            # A lazy import against a HALF-REPLACED install is the one failure
+            # whose cause the traceback cannot state: ``lop-update`` replaces
+            # the installed tree in place, so the module may resolve while the
+            # NAME does not (design §1.6/§5.2). Named here — and re-raised, so
+            # today's error reporting is unchanged — because this is the only
+            # point in the turn that sees the exception without a provider
+            # adapter having already flattened it into a message.
+            self._note_import_failure(exc, "local_operator.session.session")
+            raise
         finally:
             self._turn_task = None
             await self._flush_held_end()
@@ -7520,7 +7795,7 @@ class Session:
         if parked:
             self._context.messages.extend(parked)
 
-    async def journal_incident(self, raw: str) -> None:
+    async def journal_incident(self, raw: str, *, token: str = "", rendered: str = "") -> None:
         """Persist and surface WHY the session last failed.
 
         The failover cascade rotates credentials and models and its notices
@@ -7531,6 +7806,13 @@ class Session:
         appended to the LIVE context so the very next turn sees it, and
         persisted so ``--resume`` replays it.
 
+        ``rendered`` overrides the classifier's own text for the one caller
+        whose incident is harness-authored rather than provider-derived: a
+        cut-off has no vendor text to classify, so its reason is built from
+        ``incidents.CUT_OFF_CAUSES`` and must not be pushed back through the
+        substring rules. ``token`` rides in ``details`` so the same orphaned
+        run is narrated at most once (see ``_journal_cut_off_once``).
+
         Holds ``_journal_lock`` across the persist-then-append pair so a
         notice fired immediately after cannot overtake it: this method awaits a
         transcript write and :meth:`journal_mcp_recovery` awaits nothing, so
@@ -7540,11 +7822,14 @@ class Session:
 
         if self._disposed or not raw:
             return
-        text = format_incident_message(raw, self._model.provider, self._model.model_id)
+        text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
+        if token:
+            details["token"] = token
         message = CustomMessage(
             custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
             attribution="system",
-            details={"text": text, "raw": raw[:1000]},
+            details=details,
         )
         try:
             async with self._journal_lock:
@@ -7552,6 +7837,41 @@ class Session:
                 self._append_or_park_journal(message)
         except OSError:
             logger.warning("could not journal session incident", exc_info=True)
+
+    async def _journal_cut_off_once(self, token: str, reason: str, cause: str) -> None:
+        """Narrate one run's cut-off into the transcript, at most once.
+
+        The dedupe is on the TOKEN, and it is load-bearing rather than tidy:
+        an orphaned ``attention_started`` stays in the transcript forever (its
+        repair lives in the attention store, not the journal), so
+        ``_import_transcript_outcome`` re-classifies the same run on every boot.
+        Without this the model would be told about one cut-off once per open,
+        each time as if it were news.
+
+        The scan is over the transcript's own rows rather than a
+        ``latest_custom`` call, and that is a correction to the design rather
+        than a stylistic choice: ``Transcript._index_entry`` only indexes
+        ``ENTRY_CUSTOM`` rows for ``latest_custom``, while an incident is
+        written as a ``CustomMessage`` — a ``message`` row carrying
+        ``custom_type`` in its payload — precisely so the model sees it in the
+        live context. A ``latest_custom`` probe therefore returns ``None`` for
+        every incident this code has ever written and would let each boot
+        narrate again (measured: two identical rows after two boots). Scanning
+        the payloads also removes the design's accepted weakness that a later
+        incident of any kind would hide an older cut-off's token.
+        """
+        if self._disposed or not token:
+            return
+        try:
+            for entry in self._transcript.entries():
+                if entry.payload.get("custom_type") != SESSION_INCIDENT_MESSAGE_TYPE:
+                    continue
+                details = entry.payload.get("details")
+                if isinstance(details, dict) and str(details.get("token") or "") == token:
+                    return
+        except Exception:  # noqa: BLE001 — a dedupe read must not block the notice
+            pass
+        await self.journal_incident(reason, token=token, rendered=format_cut_off_raw(reason))
 
     async def journal_model_switch(
         self,
@@ -12161,6 +12481,14 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
+        # In-process disposal is a cut-off for whatever turn is running: this
+        # path is reached by a host tearing a session down directly (the
+        # runtime's own handle disposes through ``ServingSessionHandle``, which
+        # notes its more specific cause FIRST, and first-wins keeps that one).
+        # Harmless when nothing is in flight — the cause is consumed only by the
+        # running turn's end event — and suppressed outright after a deliberate
+        # stop, so a user's own cancel is never relabelled.
+        self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -12194,6 +12522,33 @@ class Session:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
                 except BaseException:  # noqa: BLE001 — dispose must always proceed
                     pass
+            if self._attention_run_token is not None and not self._attention_run_settled:
+                # STILL OWES AN OUTCOME, and nothing else will write one. A turn
+                # parked in a TOOL is cancelled at its await, so the loop never
+                # reaches the ``AgentEndEvent`` it would otherwise yield: the
+                # pipeline's finally runs `_publish_attention_outcome` with
+                # `_attention_outcome` unset and the run leaves NO durable
+                # outcome. A restore then reclassified it from absence and
+                # reported a user's own `/stop` as an unexplained cut-off —
+                # reproduced on a real runtime, so the design's "the deliberate
+                # stop is recorded in the outcome marker itself" did not hold
+                # for the one shape the operator actually hits.
+                #
+                # Keyed on the RUN and its settled flag rather than on the turn
+                # TASK being live: a prompt dispatched over the control socket is
+                # cancelled when that socket closes, so by the time dispose looks
+                # the task is already done and "was a turn live?" answers no for
+                # exactly the case this exists for. Synthesising the end goes
+                # through the SAME classifier and publisher, so the
+                # deliberate/error split is still decided in one place.
+                try:
+                    if self._attention_outcome is None:
+                        self._attention_outcome = self._classify_cut_off(
+                            AgentEndEvent(messages=[], aborted=True)
+                        )
+                    await self._publish_attention_outcome()
+                except Exception:  # noqa: BLE001 — teardown must always proceed
+                    logger.warning("could not publish a disposed turn's outcome", exc_info=True)
             # The browser surface is session-scoped and lives in the user's own
             # browser, so an unclosed one is a tab THEY have to close by hand.
             # After the turn has stopped (so nothing is mid-navigation on it)

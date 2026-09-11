@@ -579,6 +579,13 @@ class SessionPresentation:
     #: poller append a second `Interrupted` under the live `interrupted` — the
     #: duplicate row `OperatorApp._adopt_own_interrupt_notice` exists to remove.
     own_interrupt_notice: Any = None
+    #: Which outcome kind ``own_interrupt_notice`` was painted for — "interrupted"
+    #: or "error". The adoption must refuse when the published kind differs from
+    #: the row it holds, and the block cannot be asked (its kind is consumed into
+    #: a token and a glyph at construction). Carried WITH the block, because the
+    #: pair is what makes the dedupe survive a session switch: the block alone
+    #: would come back unable to recognise its own outcome.
+    own_interrupt_kind: str = ""
     welcome: Any = None
     welcome_visible: bool | None = False
 

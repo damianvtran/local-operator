@@ -388,6 +388,12 @@ class ServingSessionHandle(SessionHandle):
         self._command_reservations = CommandReservations(session)
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
+        #: Set once this handle has COMMITTED to retiring, by
+        #: :meth:`begin_retire`. Non-empty means the admission paths refuse (see
+        #: that method) — a runtime that is leaving must not start a turn it
+        #: will abort one await later. Deliberately never cleared: a retirement
+        #: is a one-way door for the process.
+        self._retiring_cause: str = ""
         #: Installed by the runtime process (``process.amain``): fires the
         #: process's stop event so a socket ``stop`` op exits the way SIGTERM
         #: does. ``None`` under a host that has no process to exit.
@@ -811,6 +817,17 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # The dispose rung of EVERY exit that is not a viewer-driven retirement:
+        # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
+        # that disposes in place. Recorded BEFORE the abort below so the turn's
+        # end event carries it (``_classify_cut_off`` reads it from the emitted
+        # event), and suppressed when a deliberate stop was already noted for
+        # this turn — the graceful ``stop`` op reaches here too, and relabelling
+        # a user's own cancel as an error is the worse mistake.
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause or "runtime-shutdown")
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1061,6 +1078,44 @@ class ServingSessionHandle(SessionHandle):
             return False
         return True
 
+    def begin_retire(self, cause: str, detail: str = "") -> bool:
+        """Commit this runtime to retiring, iff it is idle RIGHT NOW.
+
+        Sets ``_retiring_cause`` in the SAME synchronous step that asks
+        :meth:`may_refresh`, and from that instant the admission paths
+        (:meth:`prompt`, :meth:`receive_peer_message`) REFUSE rather than queue.
+        That is the whole point: both retire paths sample the predicate and then
+        act across an ``await`` — the reaper's stagger plus ``announce_retiring``
+        (which drains each viewer's writer), and ``dispose`` is async — so the
+        "idle" claim was only ever true at ONE instant, and a ``prompt`` or a
+        ``peer_message`` arriving in the gap opened a turn the dispose then
+        aborted (design §5.1). The latch makes the claim true by construction
+        rather than by timing.
+
+        ``cause`` names the retirement for the refusal and the log; the session
+        is told as well, so a turn aborted while retiring is labelled with the
+        retirement rather than a generic shutdown.
+        """
+        try:
+            reason = str(self.may_refresh() or "")
+        except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+            reason = "busy probe failed"
+        if reason:
+            return False
+        self._retiring_cause = cause or "retiring"
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause, detail)
+        return True
+
+    def _retiring_refusal(self) -> str:
+        """The refusal an admission gets once this runtime has committed to leaving."""
+        return (
+            f"the session runtime is retiring ({self._retiring_cause}); the message "
+            "was not admitted — send it again and the next engage runs the new build"
+        )
+
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
         ``""`` when it may.
@@ -1145,7 +1200,19 @@ class ServingSessionHandle(SessionHandle):
 
         Sync and non-raising by contract (see SessionHandle): called on the
         runtime loop from the ``stop`` dispatch, which acks right after.
+
+        DELIBERATE STOP vs PLANNED RETIREMENT, told apart HERE because both
+        reach this one rung. A retirement is driven by the runtime itself and
+        has already latched the handle (``begin_retire``) before calling this;
+        an un-latched call is therefore the user's own ``/stop`` or
+        ``lop stop``, and it must be recorded as such or the taxonomy (which
+        now requires positive evidence for ``interrupted``) would have to guess.
         """
+        if not self._retiring_cause:
+            session = getattr(self, "_session", None)
+            note = getattr(session, "note_deliberate_stop", None)
+            if callable(note):
+                note()
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -1386,6 +1453,12 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        if self._retiring_cause:
+            # Refused, not queued: a turn admitted here is aborted one await
+            # later by the dispose that is already on its way, after the
+            # provider has been paid for whatever it managed to stream.
+            self._command_reservations.reject(command_id)
+            raise RuntimeError(self._retiring_refusal())
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             self._command_reservations.reject(command_id)
             raise RuntimeError(
@@ -1775,6 +1848,12 @@ class ServingSessionHandle(SessionHandle):
         # steer() does, so an attached phone paints the peer card immediately
         # rather than waiting for the next MessageStartEvent.
         self._check_loop_thread()
+        # A retiring runtime must not START a turn it will abort one await
+        # later. The QUIET record-only delivery (``mailbox``, no wake) is
+        # deliberately still admitted: it opens no turn, and refusing it would
+        # drop a durable note the sender was promised it had delivered.
+        if self._retiring_cause and (wake or mode != "mailbox"):
+            raise RuntimeError(self._retiring_refusal())
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}
         )

@@ -15,8 +15,17 @@ through their authenticated runtime connection, not through their own PID.
 The logical run journals its token before execution. A settled eligible outcome
 is journaled after durable message persistence and imported idempotently into
 SQLite. Error and interrupted outcomes can have an explicit outcome marker even
-when no assistant message exists. Resuming an unfinished journaled run records an
-interruption rather than treating its output as unknown pre-upgrade history.
+when no assistant message exists; an outcome marker carries an additive `cause`
+(a machine token, from the harness's own cut-off vocabulary) and `reason` (one
+operator-facing sentence) whenever it knows why the turn ended.
+
+**The default flipped for an unfinished run.** Resuming an unfinished journaled
+run records an **error** naming the cause, not an interruption: a cut-off the
+harness cannot explain is not a stop. Only POSITIVE evidence of a deliberate act
+— a recorded stop marker, or the stop rung's own `user-stop` cause — records an
+`interrupted`. The one exception is a run that published its own outcome before
+the process went away: that marker is replayed verbatim, so a deliberate stop
+that settled is still an interruption.
 Copied fork journals cannot reuse another conversation's token.
 
 A receipt advances through the supplied token's sequence using a monotonic
@@ -36,6 +45,9 @@ contains:
 
 - `conversation_id`
 - `completion_token`, `anchor_id`, `kind` (`complete`, `error`, `interrupted`)
+- `cause`, `reason` — the machine token and the operator-facing sentence for a
+  non-`complete` outcome, both `""` when there is nothing to say (every
+  completion, and every row written before this vocabulary existed)
 - `unseen`
 - `revision: [completion_sequence, acknowledged_sequence]`
 

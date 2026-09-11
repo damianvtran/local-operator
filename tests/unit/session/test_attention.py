@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.session.attention import AttentionStore, conversation_identity
+from local_operator.session.transcript import Transcript
 
 
 def _provisional_anchor(token: str) -> str:
@@ -195,8 +200,15 @@ async def test_crash_and_fork_journal_identity(tmp_path: Path) -> None:
         Message(role="assistant", content=[TextContent(text="durable result")])
     )
     bootstrap_transcript(owner, store)
-    assert store.state("session/owner")["kind"] == "interrupted"
-    assert store.state("session/owner")["unseen"]
+    # An in-flight run whose owner is GONE and whose record left no evidence is
+    # an ERROR naming the uncertainty, not an interruption: the taxonomy's
+    # default flipped because a cut-off we cannot explain is not a stop. This
+    # assertion read ``interrupted`` before the cut-off work.
+    crashed = store.state("session/owner")
+    assert crashed["kind"] == "error"
+    assert crashed["cause"] == "runtime-killed"
+    assert "the cause could not be determined" in crashed["reason"]
+    assert crashed["unseen"]
     store.acknowledge("session/owner", token)
     bootstrap_transcript(owner, store)
     assert not store.state("session/owner")["unseen"]
@@ -722,3 +734,217 @@ def test_the_desktop_is_just_another_claimant_with_no_special_path(tmp_path: Pat
     store.publish("session/a", newer, "result-2", "complete")
     assert AttentionStore(path).claim_delivery("session/a", newer, "desktop") is True
     assert AttentionStore(path).claim_delivery("session/a", newer, "cmux") is False
+
+
+# -- the cut-off taxonomy's restore path (design §3.4/§8.1 tests 2-6) ---------
+
+
+def _record_json(session_id: str, pid: int) -> dict[str, Any]:
+    """One discovery record naming ``session_id``, in the shape the runtime writes."""
+    return {
+        "pid": pid,
+        "kind": "daemon",
+        "session_id": session_id,
+        "conversation_name": session_id,
+        "cwd": "/tmp",
+        "model_label": "test/mock",
+        "control_port": 1,
+        "control_key": "k",
+        "version": "1.2.3",
+        "source_ref": "abcdef0",
+    }
+
+
+def _seed_started(root: Path, session_id: str) -> str:
+    """An ``attention_started`` with no outcome, as a killed runtime leaves it."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    token = str(uuid.uuid4())
+    transcript = Transcript(directory)
+    asyncio.run(
+        transcript.append_custom(
+            "attention_started", {"conversation_id": f"session/{session_id}", "token": token}
+        )
+    )
+    return token
+
+
+def _write_record(root: Path, session_id: str, pid: int) -> None:
+    run = root / "run" / "mobile"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / f"{pid}.json").write_text(json.dumps(_record_json(session_id, pid)), encoding="utf-8")
+
+
+def test_an_orphaned_run_without_evidence_is_an_error_with_a_named_uncertainty(
+    tmp_path: Path,
+) -> None:
+    """Design test 1: no live owner, no record, no stop marker."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "orphan1"
+    token = _seed_started(tmp_path, session_id)
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, _reason, returned = result
+    assert (kind, cause, returned) == ("error", "runtime-killed", token)
+    state = store.state(f"session/{session_id}")
+    assert state["kind"] == "error"
+    assert state["cause"] == "runtime-killed"
+    assert "could not be determined" in state["reason"]
+    assert state["unseen"] is True
+
+
+def test_a_live_owner_stops_the_import_from_publishing_anything(tmp_path: Path) -> None:
+    """Design test 2 — the false-alarm guard, and the load-bearing part of this PR.
+
+    A daemon sweep (or a resume) that runs mid-turn must publish NOTHING: a
+    provisional ``error`` written for a healthy run would be believed by every
+    surface and hidden by the busy-suppression, which is the worst combination.
+    A FOREIGN live pid is the case; our own must NOT count, or a successor
+    runtime could never classify its predecessor's orphaned run.
+    """
+    import subprocess
+    import sys
+
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "live1"
+    _seed_started(tmp_path, session_id)
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_record(tmp_path, session_id, foreign.pid)
+        store = AttentionStore(tmp_path / "attention.db")
+        result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+        assert result is None
+        assert store.state(f"session/{session_id}")["kind"] is None
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=10)
+
+
+def test_our_own_record_does_not_block_the_classification(tmp_path: Path) -> None:
+    """A successor publishes its own record BEFORE it builds its Session."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "successor1"
+    _seed_started(tmp_path, session_id)
+    _write_record(tmp_path, session_id, os.getpid())
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None, "a runtime must be able to classify its predecessor's run"
+
+
+def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
+    """Design test 3: the record's build, pid and start time ride the detail."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "dead1"
+    _seed_started(tmp_path, session_id)
+    dead_pid = 2**22 + 7
+    _write_record(tmp_path, session_id, dead_pid)
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, reason, _token = result
+    assert (kind, cause) == ("error", "runtime-killed")
+    assert f"pid {dead_pid}" in reason
+    assert "1.2.3@abcdef0" in reason
+
+
+def test_a_recorded_stop_marker_keeps_an_interruption(tmp_path: Path) -> None:
+    """Design test 4: positive evidence of a deliberate act, honoured after death."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import write_entry
+
+    session_id = "stopped1"
+    _seed_started(tmp_path, session_id)
+    schedule = {"id": "w1", "message": "later", "next_due_at": 1, "created_at": 1}
+    write_entry(
+        tmp_path,
+        session_id,
+        cwd=str(tmp_path),
+        schedules=[schedule],
+        preserve={"stopped_at": 12345},
+    )
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, reason, _token = result
+    assert (kind, cause) == ("interrupted", "user-stop")
+    assert "stopped by the user" in reason
+    assert store.state(f"session/{session_id}")["kind"] == "interrupted"
+
+
+def test_a_provisional_error_is_still_superseded_by_the_real_completion(
+    tmp_path: Path,
+) -> None:
+    """Design test 5: the anchor, not the kind, is the replaceable signal.
+
+    Requiring ``stored_kind == "interrupted"`` here would brick exactly the
+    session the store's own docstring describes: the provisional record is now
+    published as an ``error``, and the same token's real ``complete`` must still
+    heal it.
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, _provisional_anchor(token), "error", reason="boom")
+    assert store.state("session/a")["kind"] == "error"
+    store.publish("session/a", token, "the-real-entry", "complete")
+    state = store.state("session/a")
+    assert state["kind"] == "complete"
+    assert state["anchor_id"] == "the-real-entry"
+
+
+def test_reason_and_cause_round_trip_and_an_old_database_migrates(
+    tmp_path: Path,
+) -> None:
+    """Design test 6: the additive columns, plus the pre-change schema."""
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish(
+        "session/a", token, "anchor", "error", reason="the runtime went away", cause="runtime-killed"
+    )
+    state = store.state("session/a")
+    assert state["reason"] == "the runtime went away"
+    assert state["cause"] == "runtime-killed"
+    assert store.state_many(["session/a"])["session/a"]["reason"] == "the runtime went away"
+
+    # An OLD database: the pre-taxonomy schema, with a row already in it.
+    old = tmp_path / "old.db"
+    with sqlite3.connect(old) as conn:
+        conn.execute(
+            "CREATE TABLE completions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, anchor TEXT NOT NULL, "
+            "kind TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE receipts (conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
+        )
+        old_token = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+            ("session/old", old_token, "anchor", "interrupted"),
+        )
+    migrated = AttentionStore(old)
+    old_state = migrated.state("session/old")
+    assert old_state["kind"] == "interrupted"
+    assert old_state["reason"] == ""
+    assert old_state["cause"] == ""
+    # A READ did not migrate it: the read-only path must never alter a schema.
+    with sqlite3.connect(old) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+    assert "reason" not in columns
+    # A WRITE migrates it, additively, and the new fields then round-trip.
+    new_token = str(uuid.uuid4())
+    migrated.publish("session/old", new_token, "anchor2", "error", reason="r", cause="c")
+    assert migrated.state("session/old")["cause"] == "c"
+    with sqlite3.connect(old) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+    assert {"reason", "cause"} <= columns
