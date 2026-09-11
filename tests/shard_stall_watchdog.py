@@ -77,24 +77,30 @@ in milliseconds. The first real CI occurrence (job 103135419093, shard 2) is the
 measurement: the raw step printed 3088 ``exceeded 240s`` lines across four
 files, exactly four of them backed by a real :data:`FIRED_MARKER`, and the one
 genuine timeout was indistinguishable among the rest. :data:`FIRED_MARKER` is
-the single source of truth for "this is evidence", so it is applied in exactly
-one place and the step reuses it.
+the single source of truth for "this is evidence", and it is read through one
+function (:func:`_fired_lines`) that the live controller report, the cleanup and
+this step's report all call -- so the rule cannot drift between them.
 
 WHAT IT DOES NOT INSTRUMENT, AND WHY THAT IS ACCEPTABLE
 -------------------------------------------------------
 Only a worker arms a C timer; the controller's sole witness is its Python poll
 thread. That is weaker than it sounds -- the poll thread does the printing too,
 so a worker wedged inside a syscall is fully covered without the controller's
-main thread making progress -- but it leaves the mirror case open: a park
-*inside the controller process*. It is left open deliberately, because the
-obvious repair does not close it. Arming a controller-side
-``dump_traceback_later`` "when a report fires" still needs a Python frame to arm
-it, and the only thread that could do so is the reporter thread itself --
-precisely the thread a kernel-level park of the controller would take out. A
-wall-clock controller timer armed at startup would instead fire on every healthy
-long run and keep a file, which breaks the rule that a file's existence means
-something fired. The shard job also runs no test body on the controller, so the
-uninstrumented surface is pytest/xdist orchestration, not the suite.
+main thread making progress. The mirror case, a park *inside the controller
+process*, is left unwired deliberately, but for a narrower reason than
+"impossible". A report-time arm WOULD cover a park that releases the GIL: the
+report is emitted by the reporter thread, which therefore has a live frame at
+that moment, and the dump would add the parked main thread's stacks. What it
+cannot cover is a park that holds the GIL -- but then no report is emitted
+either, which is the separately acknowledged "no report at all" path. So the
+report-time arm buys the GIL-releasing half of a case the shard job does not
+reach (the controller runs no test body; its only Python is pytest/xdist
+orchestration), at the cost of a second timer and a new file class in the
+report. That trade is not obviously worth taking, but it is a judgement, not an
+impossibility -- if a controller-side park is ever seen in CI, a report-time arm
+is the repair. A wall-clock controller timer armed at startup is NOT an
+alternative: it would fire on every healthy long run and keep a file, breaking
+the rule that a file's existence means something fired.
 
 THE OTHER C TIMER IN THIS REPO
 ------------------------------
@@ -120,6 +126,7 @@ from __future__ import annotations
 
 import contextlib
 import faulthandler
+import math
 import os
 import sys
 import threading
@@ -151,6 +158,15 @@ ARM_MARKER = "[shard stall] "
 #: before it is the one a reader will see.
 REPORT_INTERVAL_S = 30.0
 
+#: The largest bound the C timer can hold. ``faulthandler``'s timeout becomes a
+#: signed 64-bit count of nanoseconds, so 2**63 ns is the ceiling: a larger (or
+#: infinite) value raises ``OverflowError: timestamp out of range for platform
+#: time_t`` the first time a test starts, i.e. inside a pytest hook, where it is
+#: an ``INTERNALERROR`` that fails the shard with ``no tests ran``. Any bound CI
+#: could mean is minutes, so a value at or above this is a typo and is treated
+#: as one -- see :func:`enabled_seconds`.
+MAX_BOUND_S = 2**63 / 1e9
+
 #: Poll granularity. Small enough that the first report lands promptly, large
 #: enough that the thread is invisible next to a 4-worker test run.
 POLL_INTERVAL_S = 2.0
@@ -162,24 +178,36 @@ POLL_INTERVAL_S = 2.0
 STACK_EXCERPT_LINES = 400
 
 
-def _first_snapshot(text: str) -> list[str]:
-    """The first complete stack dump in ``text``, as lines.
+def _fired_lines(text: str) -> list[str] | None:
+    """The first complete stack dump in ``text``, or ``None`` if none fired.
+
+    This is the single definition of "this file is evidence", so the live
+    controller report, the cleanup and the workflow's report all agree by
+    construction.
+
+    The marker is matched at the START OF A LINE, not anywhere in the text.
+    ``faulthandler`` always writes it as its own line, while a worker's header
+    embeds a node id -- a path plus a test name -- which in principle could
+    contain the literal marker text; anchoring the match is what makes it
+    impossible for a header-only file to be classified as fired.
 
     ``repeat=True`` appends another full dump every interval, so a file that
-    tripped early holds several near-identical snapshots. Taking everything
-    would repeat the same stacks until the cap, and taking a fixed number of
-    lines from one end is not enough either: the thread that matters is not at
-    a predictable end -- faulthandler groups threads its own way, and the
-    worker under test is usually NOT the first block, because the session
-    runtime and the viewer endpoint have threads of their own. Splitting on the
-    marker keeps ONE snapshot whole, so every thread is present.
+    tripped early holds several near-identical snapshots. One snapshot is the run
+    of lines from its marker up to the next marker (or the end), and taking
+    exactly that keeps it whole: the thread that matters is not at a predictable
+    end, because the session runtime and the viewer endpoint have threads of
+    their own and faulthandler groups them its own way. The result is capped at
+    :data:`STACK_EXCERPT_LINES` so a file full of repeated dumps cannot push the
+    live report past the log's tail.
     """
-    parts = text.split(FIRED_MARKER)
-    if len(parts) < 2:
-        return text.splitlines()
-    body = FIRED_MARKER + parts[1]
-    lines = body.splitlines()
-    return lines[:STACK_EXCERPT_LINES]
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(FIRED_MARKER)), None)
+    if start is None:
+        return None
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith(FIRED_MARKER):
+        end += 1
+    return lines[start:end][:STACK_EXCERPT_LINES]
 
 
 def enabled_seconds() -> float | None:
@@ -189,6 +217,12 @@ def enabled_seconds() -> float | None:
     ``pytest_configure``, so a typo in a workflow env var must not be able to
     take out the whole suite. It also cannot silently become a *shorter* bound
     than intended, because a value that does not parse is not used at all.
+
+    "Malformed" includes a value that parses but no timer can hold. ``inf`` and
+    ``nan`` parse as floats, and any finite value at or above :data:`MAX_BOUND_S`
+    overflows the ``time_t`` the C timer converts to -- an ``INTERNALERROR`` from
+    inside the first test's hook, which is the same failure this function exists
+    to prevent, arriving through the one door a parse-only check leaves open.
     """
     raw = os.environ.get(ENV_SECONDS, "").strip()
     if not raw:
@@ -197,7 +231,9 @@ def enabled_seconds() -> float | None:
         seconds = float(raw)
     except ValueError:
         return None
-    return seconds if seconds > 0 else None
+    if not math.isfinite(seconds) or seconds <= 0 or seconds >= MAX_BOUND_S:
+        return None
+    return seconds
 
 
 def _dump_path(tag: str) -> Path:
@@ -248,6 +284,12 @@ class _WorkerTimer:
         pytest hook, so an exception is an ``INTERNALERROR`` that fails the
         shard -- the diagnostic is not allowed to be the reason a run goes red,
         and a run whose dump directory is unusable is still a run worth having.
+
+        ``OverflowError`` is in the tuple even though :func:`enabled_seconds`
+        already refuses a bound no timer can hold: the value can also arrive
+        here from a direct construction, and this is the one call whose failure
+        mode is the whole shard. Belt and braces, because the cost of the extra
+        name is zero and the cost of missing it is a red run.
         """
         if self._armed or self._disabled:
             return
@@ -264,7 +306,7 @@ class _WorkerTimer:
             faulthandler.dump_traceback_later(
                 self.seconds, file=self._handle, repeat=True, exit=False
             )
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, OverflowError):
             self._disabled = True
             return
         self._armed = True
@@ -389,9 +431,9 @@ class _Controller:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if FIRED_MARKER not in text:
+            lines = _fired_lines(text)
+            if lines is None:
                 continue
-            lines = _first_snapshot(text)
             out.append(f"--- {path} (first snapshot, {len(lines)} lines) ---")
             out.extend(lines)
         return out
@@ -409,7 +451,7 @@ class _Controller:
             return
         for path in paths:
             try:
-                if FIRED_MARKER in path.read_text(encoding="utf-8", errors="replace"):
+                if _fired_lines(path.read_text(encoding="utf-8", errors="replace")) is not None:
                     continue
             except OSError:
                 pass
@@ -482,25 +524,44 @@ def _armed_nodeids(text: str) -> list[str]:
     """Node ids from arm-time headers, in the order the worker armed them.
 
     The last entry is the test that worker had started most recently, which is
-    the most useful thing an unfired file can say once the job is gone.
+    the most useful thing an unfired file can say once the job is gone. Reading
+    stops at the first fired marker, because a worker keeps arming timers after
+    a dump: on a fired file the last id before the marker is the test the timer
+    fired on, while ids after it belong to later tests and would misattribute
+    the snapshot.
     """
     out: list[str] = []
     for line in text.splitlines():
+        if line.startswith(FIRED_MARKER):
+            break
         if line.startswith(ARM_MARKER):
             out.append(line[len(ARM_MARKER) :].split(" exceeded ", 1)[0].strip())
     return out
 
 
 def _report_file(path: Path) -> list[str]:
-    """One dump file for :func:`report_dumps`, labelled for what it is."""
+    """One dump file for :func:`report_dumps`, labelled for what it is.
+
+    Every block names the test it is about, because that is the whole point of
+    the instrument: the stacks say what was parked, but a reader coming to a
+    cancelled run needs the node id first. The arm headers are the only record
+    of it, and the file already has them -- in the fired case the header above
+    the marker is the test that was running when the timer fired, in the unfired
+    case the last one is the test in flight at the cancel.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return [f"===== {path} : unreadable ({exc.__class__.__name__}) ====="]
-    if FIRED_MARKER in text:
-        lines = _first_snapshot(text)
-        return [f"===== {path} (fired, first snapshot, {len(lines)} lines) =====", *lines]
     armed = _armed_nodeids(text)
+    snapshot = _fired_lines(text)
+    if snapshot is not None:
+        who = armed[-1] if armed else "(unrecorded)"
+        return [
+            f"===== {path} (fired, first snapshot, {len(snapshot)} lines) =====",
+            f"in flight when the timer fired: {who}",
+            *snapshot,
+        ]
     if not armed:
         return [f"===== {path} : empty (armed, no test recorded) ====="]
     return [
@@ -520,9 +581,9 @@ def report_dumps(directory: Path | None = None) -> str:
     lines all reading "<nodeid> exceeded 240s" with the one real timeout
     indistinguishable among them (measured: 3088 lines, 4 of them fired, on this
     module's first real CI occurrence). :data:`FIRED_MARKER` is the single source
-    of truth for "this snapshot is evidence", so it is applied once -- in
-    :meth:`_Controller._stack_excerpts` for the live report, and in
-    :func:`_report_file` for this one.
+    of truth for "this snapshot is evidence", read through one function
+    (:func:`_fired_lines`) that the live report, the cleanup and this report all
+    call.
 
     An empty or missing directory is not an error: the step runs on every shard,
     including the ones with nothing to report.
