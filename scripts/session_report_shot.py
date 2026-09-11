@@ -3,6 +3,22 @@
 Usage: python scripts/session_report_shot.py OUTDIR 80x24 populated|empty|unavailable
 Copy this script into a preserved base worktree to capture the pre-command path
 with the same fixture. No provider request, live session or operator config is used.
+
+The ``opener-only`` / ``stored-title`` / ``provisional`` scenarios are the
+NAMING evidence: they boot the same app against a session whose store of record
+is empty, which is the state a live conversation is in until its generated title
+lands, and one a RESUMED conversation that never got one stays in. Each parks the
+ledger read so ``first-frame.svg`` is a fact about the app's ordering — the
+header is painted from memory before any disk result can land — rather than about
+which side of a race the capture won.
+
+``reported-as-is`` regenerates the headline frame of the PR that added these
+scenarios: the reported conversation's state once its generated title had landed.
+The transcript that frame came from is the operator's own live session, so the
+scenario seeds the records the header resolves against — the opener and the
+journalled title — through the same real ``Transcript`` writer, rather than a
+byte copy that would not be committable. The report-time shape (same opener, no
+title yet) is the ``opener-only`` scenario.
 """
 
 from __future__ import annotations
@@ -21,12 +37,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import asyncio  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import threading  # noqa: E402
 from dataclasses import replace  # noqa: E402
+from typing import Any  # noqa: E402
 
 import scripts.probe_isolation  # noqa: E402, F401
 from local_operator.analytics.store import AnalyticsStore, default_db_path  # noqa: E402
-from local_operator.harness.types import ModelSpec  # noqa: E402
+from local_operator.harness.types import Message, ModelSpec, TextContent  # noqa: E402
+from local_operator.paths import config_dir  # noqa: E402
 from local_operator.session.frontend_state import FrontendSessionState  # noqa: E402
+from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE  # noqa: E402
+from local_operator.session.transcript import Transcript  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.editor import Editor  # noqa: E402
 from scripts.visual_capture import save_capture  # noqa: E402
@@ -155,6 +176,66 @@ def seed_populated(session_id: str) -> None:
     store.close()
 
 
+#: The reported conversation's shape: opened with a question the sidebar names
+#: the row by, never renamed, and named by a model call that landed nothing.
+SESSION_OPENER = "There seems to be a weird issue where on resume certain tools stay open"
+#: The one a naming call (or `/rename`) did store — the case the header already
+#: handled, captured so the pair shows the store of record is still in charge.
+SESSION_TITLE = "Resume keeps stale tool rows"
+#: The title the REPORTED conversation's naming call actually stored, journalled
+#: exactly as the errand writes it. The reported session is the operator's own
+#: live conversation, so its transcript cannot be committed; these are the two
+#: records the header resolves against (see ``seed_transcript``), which is what
+#: makes the headline frame regenerable from the branch by anyone.
+SESSION_REPORTED_TITLE = "Resume Duplicate Tools Frozen Calls"
+#: Scenarios whose store of record is deliberately EMPTY.
+NAMING_SCENARIOS = ("opener-only", "stored-title", "provisional", "reported-as-is")
+
+
+async def seed_transcript(session_id: str, opener: str, *, title: str | None = None) -> None:
+    """Write this session's transcript into the isolated store, and nothing else.
+
+    Through the real ``Transcript`` writer, so the header is proved against the
+    bytes a running session leaves behind and read back through the same helper
+    the sidebar builds its rows with (``resume.session_name``). ``title`` is
+    journalled exactly as the naming errand journals it; with no title the
+    transcript is the session that was closed before its naming call landed,
+    which is every session resumed from before titles were stored.
+    """
+    transcript = Transcript(config_dir() / "sessions" / session_id)
+    await transcript.append_message(Message(role="user", content=[TextContent(text=opener)]))
+    if title is not None:
+        await transcript.append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": title, "user_set": True}
+        )
+
+
+class _ParkedLedger:
+    """``AnalyticsStore.session_report`` held open until the capture releases it.
+
+    A plain object rather than a bound method, because it REPLACES the class
+    attribute: an instance without ``__get__`` is not a descriptor, so the call
+    arrives here unbound — hence the fresh store, and the source-compatible shape
+    for both the pre-fix and post-fix worker.
+    """
+
+    def __init__(self, real: Any, release: threading.Event) -> None:  # noqa: ANN401
+        self._real = real
+        self._release = release
+
+    def __call__(self, session_id: str, **kwargs: Any) -> Any:  # noqa: ANN401
+        assert self._release.wait(10)
+        return self._real(AnalyticsStore(), session_id, **kwargs)
+
+
+def _header_line(app: OperatorApp) -> str:
+    """The screen's own first line: the conversation label under review."""
+    body = getattr(app.screen, "_body", None)
+    if body is None:
+        return ""
+    return str(body.render()).split("\n", 1)[0]
+
+
 async def main() -> None:
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -162,7 +243,8 @@ async def main() -> None:
     size = (int(cols), int(rows))
     scenario = sys.argv[3] if len(sys.argv) > 3 else "populated"
     session = DiagnosticSession()
-    session.set_conversation_name("Investigate request latency")
+    if scenario not in NAMING_SCENARIOS:
+        session.set_conversation_name("Investigate request latency")
     session.frontend_state = FrontendSessionState(
         session_id=session.session_id,
         epoch="capture",
@@ -177,13 +259,54 @@ async def main() -> None:
         path = default_db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("synthetic corrupt ledger")
+    elif scenario == "opener-only":
+        await seed_transcript(session.session_id, SESSION_OPENER)
+    elif scenario == "stored-title":
+        await seed_transcript(session.session_id, SESSION_OPENER, title=SESSION_TITLE)
+    elif scenario == "reported-as-is":
+        # The frame the PR body shows for the reported session once its naming
+        # call landed: the same opener the sidebar names the row by, plus the
+        # generated title. Regenerable from the branch because both records are
+        # constants here — the live transcript they were read from is not.
+        await seed_transcript(session.session_id, SESSION_OPENER, title=SESSION_REPORTED_TITLE)
+    elif scenario == "provisional":
+        # A live conversation naming never returned for: the transcript carries
+        # the opener AND the host wears its own stand-in. The header must prefer
+        # the stand-in (it is what the band and the tab are showing), and the
+        # transcript is what a resumed reload of the same session would use.
+        await seed_transcript(session.session_id, SESSION_OPENER)
     ledger = default_db_path()
     before_digest = hashlib.sha256(ledger.read_bytes()).hexdigest() if ledger.exists() else None
     app = OperatorApp(lambda: _factory(session))
+    # Parked for the naming scenarios only: see ``_ParkedLedger``.
+    park = threading.Event() if scenario in NAMING_SCENARIOS else None
+    real_session_report = AnalyticsStore.session_report
+    if park is not None:
+        AnalyticsStore.session_report = _ParkedLedger(  # type: ignore[method-assign]
+            real_session_report, park
+        )
+    first_frame_header: str | None = None
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
+        if scenario == "provisional":
+            # Exactly what `_submit_prompt` does with the opening message,
+            # before the turn runs: the stand-in the band wears.
+            app._show_provisional_name(SESSION_OPENER)
         await _submit(pilot, app, "/session")
+        if park is not None:
+            # THE FIRST FRAME: the screen is pushed and painted from memory while
+            # the disk read is still parked. Pre-fix this read "Untitled session"
+            # and corrected itself once the worker answered — the flash, and the
+            # whole reason the stand-in is handed in before the push.
+            save_capture(app, str(out / "first-frame.svg"))
+            first_frame_header = _header_line(app)
+            park.set()
         await app.workers.wait_for_complete()
+        # Unpatched the moment the read it parked has finished: the rest of the
+        # run — the ledger digest, the closed state — must exercise the real
+        # store. No try/finally: a raise here is a capture that produced no
+        # evidence, and nothing downstream reads the patched attribute.
+        setattr(AnalyticsStore, "session_report", real_session_report)
         await pilot.pause()
         save_capture(app, str(out / "opened.svg"))
         await pilot.pause()
@@ -202,6 +325,11 @@ async def main() -> None:
             "source": str(Path(__file__).resolve().parents[1]),
             "scenario": scenario,
             "size": size,
+            # The surface this PR is about, as bytes: the header's own line from
+            # the frame the screen is PUSHED with (before any worker result) and
+            # from the settled frame, so the stills have a machine-checkable twin.
+            "first_frame_header": first_frame_header,
+            "settled_header": _header_line(app),
             "screen": type(screen).__name__,
             "screen_geometry": {
                 "size": list(screen.size),

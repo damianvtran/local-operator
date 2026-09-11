@@ -150,10 +150,16 @@ def test_probe_isolation_refuses_a_late_import(tmp_path: Path) -> None:
         [
             sys.executable,
             "-c",
+            # The CMUX assertion is the N1 pin: an inherited live workspace id
+            # must not survive the import, however the caller set it. A headless
+            # pilot that kept one has renamed the operator's real workspaces.
+            "import os; os.environ['CMUX_WORKSPACE_ID'] = 'live-workspace'; "
             "import scripts.probe_isolation as p, os; "
             "from local_operator.paths import config_dir; "
             "assert str(config_dir()).startswith(str(p.SANDBOX)), config_dir(); "
-            "assert os.environ['HOME'] == str(p.SANDBOX); print('ok')",
+            "assert os.environ['HOME'] == str(p.SANDBOX); "
+            "assert 'CMUX_WORKSPACE_ID' not in os.environ, os.environ.get('CMUX_WORKSPACE_ID'); "
+            "print('ok')",
         ],
         cwd=root,
         capture_output=True,

@@ -20,6 +20,11 @@ mechanical:
 * ``HOME`` and ``LOCAL_OPERATOR_CONFIG_DIR`` → a fresh temp dir, always,
   even if the caller set them (a stale export pointing at the real dir is
   exactly the mistake).
+* every ``CMUX_*`` variable is dropped. A TUI-booting harness that inherits the
+  operator's live ``CMUX_WORKSPACE_ID`` can rename their real cmux workspaces —
+  a headless test did exactly that, and the shell rule ("unset these first")
+  is the kind of instruction the next runner forgets. Scrubbed here it cannot
+  leak, and scrubbing on import also lands before any application code reads it.
 * ``NO_COLOR`` unset, ``TERM=xterm-256color``, shimmer/notifications/title
   off — the same sandbox ``visual_capture.isolate_capture`` builds, so the
   two cannot drift.
@@ -46,6 +51,12 @@ if _already:
 
 _TEMP = tempfile.TemporaryDirectory(prefix="lop-probe-")
 SANDBOX = Path(_TEMP.name)
+# Before any application import (and above the config re-home, so a multiplexer
+# id can never be read back off a half-built sandbox): a headless pilot that
+# inherits the operator's live CMUX ids has renamed their real workspaces before.
+for _key in tuple(os.environ):
+    if _key.startswith("CMUX_"):
+        os.environ.pop(_key)
 os.environ["HOME"] = str(SANDBOX)
 os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(SANDBOX / "config")
 os.environ.pop("NO_COLOR", None)
