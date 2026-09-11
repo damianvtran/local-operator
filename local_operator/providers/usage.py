@@ -2256,6 +2256,17 @@ async def fetch_usage(
             client, "qwencloud-console-usage", "", account_id, creds=extra_creds
         )
         if report is not None:
+            # KNOWN LIMITATION, and the tradeoff is deliberate. Returning here
+            # rather than merging both routes' limits is what makes exactly one
+            # ``credits-7d`` row possible: both routes build that id, and
+            # concatenating them would render the same window twice. The cost is
+            # that a HYBRID account -- a personal Token Plan that also holds BSS
+            # Credit Packs -- loses its ``credits-packs`` row, because the BSS
+            # path that reports packs never runs. Unusual, since packs are the
+            # teams addon commodity (``sfm_tokenplanteamsaddon_dp_intl``), and
+            # not the live account this was verified against (BSS returns
+            # ``TotalCount: 0`` for it). If a packs row ever goes missing for an
+            # account whose 7-day window reports fine, this is why.
             return report
     oauth_kind, api_kind = routes
     if access_token and oauth_kind is not None:
