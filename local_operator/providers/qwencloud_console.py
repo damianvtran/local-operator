@@ -24,6 +24,8 @@ CHAT traffic on a read-only console cookie.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import stat
 import time
 from pathlib import Path
@@ -52,6 +54,18 @@ class TicketStoreError(RuntimeError):
     """The ticket cannot be stored safely. The message never carries a value."""
 
 
+class TicketStoreUnreadable(TicketStoreError):
+    """The store could not be read, so whether a ticket exists is UNKNOWN.
+
+    Distinct from "no ticket is stored" on purpose, and the distinction is the
+    whole point: collapsing the two made ``rm`` report "No QwenCloud console
+    ticket stored." with exit 0 while the plaintext full-account cookie was
+    still on disk. The user accepted the plaintext risk on the understanding
+    they could revoke it, so a revoke that cannot prove it worked must say so
+    rather than claim success.
+    """
+
+
 def _resolve_db_path(store: Any) -> Path:
     """Where ``store`` keeps its SQLite file, or raise.
 
@@ -67,12 +81,13 @@ def _resolve_db_path(store: Any) -> Path:
     world-readable store while reporting success. A security precondition
     that cannot be EVALUATED must never be treated as SATISFIED.
     """
-    value = getattr(store, "db_path", None)
-    if value is None:
+    try:
+        value = store.db_path
+    except AttributeError as exc:
         raise TicketStoreError(
             "cannot determine the credential store's path, so its permissions "
             "cannot be checked; refusing to store a full-account session cookie"
-        )
+        ) from exc
     return Path(value)
 
 
@@ -126,11 +141,27 @@ def store_ticket(store: Any, ticket: str, *, now_ms: int | None = None) -> None:
 
 
 def read_ticket_record(store: Any) -> dict[str, Any] | None:
-    """The stored row's metadata, or None. The VALUE is never included."""
+    """The stored row's metadata, or None when no row exists.
+
+    Raises :class:`TicketStoreUnreadable` when the store cannot be read, which
+    is NOT the same answer as "nothing is stored" — see that class.
+
+    The ``except`` is deliberately NARROW, following the rule
+    ``ProviderController.has_any_credential`` records at controller.py:268-278:
+    a locked, busy or corrupt store is an ENVIRONMENT fact to be reported,
+    while ``sqlite3.ProgrammingError`` (a connection used across threads, a
+    closed handle) is a BUG in the caller and must keep propagating. It is
+    re-raised first because it subclasses ``DatabaseError``, so any clause
+    broad enough to cover a corrupt store would otherwise swallow it.
+    """
     try:
         rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
-    except Exception:  # noqa: BLE001 — an unreadable store has no ticket
-        return None
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+        raise TicketStoreUnreadable(
+            f"the credential store could not be read ({type(exc).__name__})"
+        ) from exc
     for row in rows:
         data = getattr(row, "data", None)
         if isinstance(data, dict) and data.get("ticket"):
@@ -143,9 +174,32 @@ def read_ticket_record(store: Any) -> dict[str, Any] | None:
 
 
 def delete_ticket(store: Any) -> bool:
-    """Remove the stored cookie. True when a row was removed."""
+    """Remove the stored cookie. True when a row was removed, False when none was.
+
+    Raises :class:`TicketStoreUnreadable` when the store cannot be read, and
+    :class:`TicketStoreError` when a row was found but is still present
+    afterwards.
+
+    The deletion is CONFIRMED by re-reading rather than inferred from the call
+    returning: ``AuthStore.delete_credential`` returns ``None`` whether or not
+    it matched anything (auth_store.py:682-688), so "it did not raise" is not
+    evidence the cookie is gone. For a revocation command on a full-account
+    plaintext credential, the difference between those two is the entire value
+    of the command.
+    """
     record = read_ticket_record(store)
     if record is None:
         return False
-    store.delete_credential(record["credential_id"])
+    try:
+        store.delete_credential(record["credential_id"])
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        raise TicketStoreUnreadable(
+            f"the ticket could not be deleted ({type(exc).__name__}); " "it may still be stored"
+        ) from exc
+    if read_ticket_record(store) is not None:
+        raise TicketStoreError(
+            "the ticket is still present after deleting it; it may still be stored"
+        )
     return True

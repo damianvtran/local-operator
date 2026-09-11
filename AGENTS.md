@@ -2046,6 +2046,16 @@ and silently reverts a locally built console fetcher while leaving the row in
 place: nothing reads it, and the credential still looks healthy.
 `lop qwencloud-ticket status` reports that state explicitly.
 
+**Revocation must be provable, not assumed.** `rm` re-reads the store to
+confirm the row is gone, and exits **non-zero** saying the ticket may still be
+stored if it cannot prove otherwise — a locked or corrupt store is an ordinary
+outcome with `busy_timeout` at 5s on a busy machine. "Cannot read the store"
+and "nothing is stored" are deliberately different answers
+(`TicketStoreUnreadable`): collapsing them made `rm` report success with exit 0
+while the plaintext full-account cookie was still on disk, removing the user's
+only mitigation and telling them it had worked. `status` reports UNKNOWN for
+the same reason.
+
 **Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
 SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
 broader than every other row in it. `set` refuses to write when the store's
