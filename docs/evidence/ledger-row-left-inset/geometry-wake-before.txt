@@ -1,0 +1,10 @@
+# before-wake-collapsed.svg (100x30, cell width 8px)
+y=  47.934  c2='▌' | c4='did' | c8='the' | c12='wake' | c17='fire' | c22='while' | c28='I' | c30='was' | c34='away?'
+y=  81.934  c2='The' | c6='scheduler' | c16='delivered' | c26='one' | c30='a' | c32='moment' | c39='ago.' | c44='Checking' | c53='what' | c58='it' | c61='left.'
+y= 115.934  c3='\uf15c' | c5='read' | c14='src/build.py' | c88='✓' | c91='0.0s'
+y= 149.934  c2='\uf017' | c4='wake' | c13='w3' | c16='(3/8,' | c22='every' | c28='1h)'
+y= 183.934  c3='\uf120' | c5='bash' | c14='make' | c19='-C' | c22='build' | c28='test' | c88='✓' | c91='0.0s'
+y= 217.934  c2='\uf017' | c4='wake' | c13='catch-up' | c22='—' | c24='2' | c26='missed' | c33='wakes' | c39='(w1,' | c44='w2)'
+y= 251.934  c2='Both' | c7='deliveries' | c18='are' | c22='accounted' | c32='for.'
+y= 438.934  c2='❯' | c6='Message' | c14='Local' | c20='Operator…'
+y= 472.934  c2='◆' | c4='test/model' | c15='›' | c17='⌂' | c19='/Users/damian/local-operator-worktrees/ledger-inset'
