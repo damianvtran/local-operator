@@ -52,6 +52,7 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.sigils import SlashContext, is_boundary
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
     ArgumentChoice,
@@ -188,34 +189,11 @@ class _RowStyles(NamedTuple):
     cursor: Style
 
 
-class SlashContext(NamedTuple):
-    """Where the active command word sits, and the word typed so far.
-
-    ``start`` indexes the ``/`` itself and ``end`` the first cell past the word,
-    so a completion can rebuild JUST that span and leave the rest of the draft
-    untouched. Before inline detection the word always ran to the end of the
-    buffer, so a completion could splice from ``start`` to the end; now the word
-    can have a message typed after it (``fix this /team``, or ``/team\\nfix
-    this``), and only ``[start, end)`` is the command — everything outside it is
-    the user's prose and must survive the completion verbatim.
-    """
-
-    start: int
-    query: str
-    end: int
-
-
-#: A sigil opens a token only at a WORD BOUNDARY: the line start, or right
-#: after whitespace. This is what keeps ``src/foo`` and ``and/or`` from opening
-#: the picker — the ``/`` there is glued to a preceding non-space character, so
-#: it is punctuation inside a word, not the start of a command. The rule is the
-#: same one a shell or an editor command palette uses to tell a path apart from
-#: a command, and it is the ONE thing that makes inline detection safe to run on
-#: every keystroke of ordinary prose. ``$`` leans on it harder still: it is the
-#: whole reason ``costs$5`` and ``a$b`` cannot open a skill list.
-def _is_boundary(line: str, index: int) -> bool:
-    """Whether ``line[index]`` (a sigil) begins a fresh token."""
-    return index == 0 or line[index - 1].isspace()
+#: Re-exported under its historical private name so in-module call sites and
+#: any external import keep resolving after the move to `local_operator.sigils`
+#: (Slice 0). The grammar moved because `references.py` is a session-layer
+#: module that must not import a Textual widget — see that module's docstring.
+_is_boundary = is_boundary
 
 
 def _line_of_cursor(text: str, cursor: int | None) -> tuple[str, int, int]:
