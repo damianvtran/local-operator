@@ -178,14 +178,37 @@ THEME_SYSTEM_PROMPT = (
 #: answer reached after a real fresh judgement still folds to
 #: :data:`TITLE_UNCHANGED` at the call site: that outcome stays reachable and
 #: honest, it just stops being the answer the prompt asks for.
+#:
+#: The tie-break in the third sentence group is what stops the opposite defect.
+#: Removing the anchor instruction removed every reason to PREFER the standing
+#: name, and a real-model probe (12 rounds, each stored title fed back as the
+#: next anchor on work that was still the same work) repainted 8 times across 6
+#: distinct titles and never settled — "HTML rendering and caching" to "markdown
+#: rendering" to "caching and rendering", every one of them a fair name for the
+#: same session. A command that never settles reads as broken, and it is not
+#: free: each cycle repaints the band, the tab, the projection and the sidebar.
+#: So equally-accurate alternatives resolve to the standing name, and the
+#: casefold fold at the call site turns that into an honest
+#: :data:`TITLE_UNCHANGED`.
+#:
+#: The rule is narrow ON PURPOSE. The defect this whole prompt exists to fix was
+#: an anchor that kept the name ALWAYS; "no more accurate" is not that, and
+#: leaves the fresh judgement decisive wherever the standing name is stale — a
+#: stale name is not equally accurate, so the headline case (the session that
+#: genuinely moved on) still retitles. ``when present`` is there because this
+#: caller, unlike :func:`generate_retitle`, runs on unnamed sessions too: with
+#: no anchor the tag is simply absent from the data, and a rule written as
+#: though it were always there would be an instruction about nothing.
 REFRESH_SYSTEM_PROMPT = (
     "Write a 3 to 7 word title for what the conversation in <chat> is about "
     "NOW. The user has asked for the name to be worked out again.\n"
     "The most recent turns are the strongest signal; the earliest turns are "
     "background. <elided/> marks turns left out.\n"
-    "<current-title> is the name being reconsidered, not a name to keep. Judge "
-    "the conversation afresh and answer with the title it deserves today, even "
-    "when that comes out the same.\n"
+    "<current-title>, when present, is the name being reconsidered, not a name "
+    "to keep. Judge the conversation afresh and answer with the title it "
+    "deserves today. When your best alternative is no more accurate than "
+    "<current-title>, keep <current-title>: a different paraphrase of the same "
+    "name is not a better title.\n"
     "Never title one file, error, or tool call the conversation happened to "
     "touch.\n"
     "Reply with only <title>3 to 7 words</title>. No task at all, just small "
