@@ -1376,6 +1376,94 @@ class TestLiveStateReachesTheRecord:
 
 
 @pytest.mark.asyncio
+async def test_the_record_directory_is_fixed_when_the_runtime_starts(tmp_path, monkeypatch) -> None:
+    """The record belongs to the config dir the runtime was STARTED in.
+
+    ``start`` only hands the work to a thread, so a runner loaded enough to
+    delay that thread past the caller's own teardown had ``_serve`` resolve
+    ``config_dir()`` at the worst possible moment, publish its record into the
+    NEXT test's directory, and then delete it there on the way out — ``close``
+    re-resolved the same way. Records are keyed by pid alone and an xdist
+    worker keeps one pid, so that file belonged to a different session. Both
+    shapes need the thread to be late, which is why this pins the DIRECTORY
+    rather than trying to reproduce the scheduling delay: the answer must be
+    settled at ``start`` no matter when the thread eventually runs.
+    """
+
+    started_in = tmp_path / "started-in"
+    moved_to = tmp_path / "moved-to"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
+    original_serve = RuntimeServer._serve
+
+    async def serve_after_the_world_moved(server: RuntimeServer) -> None:
+        # Stand in for a worker thread the OS did not schedule promptly: by the
+        # time it reaches `_serve`, the process is on another config dir.
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+        await original_serve(server)
+
+    monkeypatch.setattr(RuntimeServer, "_serve", serve_after_the_world_moved)
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    server.start()
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5
+        found: list[registry.SessionRecord] = []
+        while loop.time() < deadline:
+            found = [rec for rec, state in registry.scan(started_in) if state == "live"]
+            if found:
+                break
+            await asyncio.sleep(0.02)
+        assert found, "the runtime must publish into the config dir it started in"
+        stray = registry.run_dir(moved_to) / f"{server._record.pid}.json"
+        assert not stray.exists(), (
+            "a thread that runs late must not publish where the config dir has "
+            "since moved — that filename belongs to another session"
+        )
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    """The same invariant on the in-process start path.
+
+    Here the window is REAL, not manufactured: ``_serve`` reaches its first
+    yield — ``await asyncio.start_server`` — before it builds the publisher, so
+    a config dir that moves while ``start_in_process`` is suspended in that
+    await is exactly what a dropped pin lets the publisher resolve inside
+    ``_serve``. The wrapper below moves it at that point, and the record must
+    still land where this runtime started; removing the pin fails this test
+    (``assert []``) while the thread-path test still passes, so the two halves
+    are separately caught.
+    """
+
+    started_in = tmp_path / "started-in"
+    moved_to = tmp_path / "moved-to"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
+    original_serve = RuntimeServer._serve
+
+    async def serve_after_the_world_moved(server: RuntimeServer) -> None:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
+        await original_serve(server)
+
+    monkeypatch.setattr(RuntimeServer, "_serve", serve_after_the_world_moved)
+    server = RuntimeServer(FakeHandle(), kind="tui")
+    await server.start_in_process()
+    try:
+        live = [rec for rec, state in registry.scan(started_in) if state == "live"]
+        assert live, "the runtime must publish into the config dir it started in"
+        stray = registry.run_dir(moved_to) / f"{server._record.pid}.json"
+        assert not stray.exists(), (
+            "an in-process runtime must not publish where the config dir has "
+            "since moved — that filename belongs to another session"
+        )
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
 async def test_desktop_watch_lease_separates_visibility_and_notification_delivery() -> None:
     from local_operator.mobile.attach_client import AttachClient
     from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
