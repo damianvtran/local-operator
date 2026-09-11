@@ -13,6 +13,7 @@ import base64
 import io
 import os
 import random
+import re
 import struct
 import subprocess
 import threading
@@ -2421,3 +2422,1106 @@ async def test_edit_tolerant_match_keeps_crlf_line_endings(tools, context, tmp_p
     )
     assert result.is_error is False
     assert path.read_bytes() == b"if ok:\r\n\tnew()\r\n\tadded()\r\nnext()\r\n"
+
+
+# ---------------------------------------------------------------------------
+# edit: the not-found refusal (closest-region diagnostics)
+# ---------------------------------------------------------------------------
+#
+# The failure these cover is a hunk written from a STALE copy of the file: the
+# paragraph still exists, reworded, and the file may even hold a later
+# revision of it. The refusal is therefore a diagnosis — it shows the file's
+# current text and never applies anything — and these tests pin both halves of
+# that contract: the facts it must carry, and the bounds that stop a failing
+# edit on a big file from flooding the context it is trying to help.
+#
+# They assert FACTS (a line number, an overlap figure, the presence of the
+# difference pair, whether the two rows actually differ) rather than whole
+# sentences of copy, so a legitimate rewording cannot turn into four red tests
+# (review round 1, R7). Where the wording IS the subject — the label, the
+# frame note — the marker asserted is the shortest one that means it.
+
+_DRIFT_DOC = (
+    "Intro paragraph: how a stage holds and releases its key material.\n"
+    "Second line of background that the hunk does not touch at all.\n"
+    "- **Key release, custody and the possession handshake (S-5, S2-12).** A stage's key is\n"
+    "  released only after its quote verifies.\n"
+    "Trailing paragraph about something else entirely, for padding.\n"
+    "Last line of the document.\n"
+)
+
+#: The same sentence as the caller still has it: pre-review wording, and the
+#: marker rolled back.
+_DRIFT_STALE = (
+    "- **Key release and hygiene (S-5).** Session keys are released to a stage only\n"
+    "  after its quote verifies."
+)
+
+#: ``123| the text`` rows, ready to be checked against the file on disk.
+_QUOTED_LINE_RE = re.compile(r"^\s+(\d+)\| (.*)$", re.M)
+_READ_RANGE_RE = re.compile(r'range="(\d+)-(\d+)"')
+
+
+def _assert_quotes_match_the_disk(message: str, path: Path) -> None:
+    """Every quoted line must be that line of the FILE, at the number shown.
+
+    This is review round 1's R1 in test form: the diagnostics are built from
+    the on-disk content, so a quoted row can be checked against the bytes the
+    caller is about to `read`. A report computed from the in-memory batch state
+    fails here as soon as an earlier hunk of the same call matched.
+    """
+    quoted = _QUOTED_LINE_RE.findall(message)
+    assert quoted, f"nothing quoted to check:\n{message}"
+    disk = path.read_text().splitlines()
+    for number, text in quoted:
+        index = int(number)
+        assert 1 <= index <= len(disk), f"quoted line {index} of a {len(disk)}-line file"
+        assert disk[index - 1].startswith(
+            text.rstrip("…")[:60]
+        ), f"line {index} quoted as {text!r} but the file says {disk[index - 1]!r}"
+    for low, high in _READ_RANGE_RE.findall(message):
+        assert 1 <= int(low) <= int(high) <= len(disk), f"read range {low}-{high} outside the file"
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_quotes_the_files_line_at_its_number(tools, context, tmp_path) -> None:
+    """The refusal names a line, quotes the FILE's text there, and names its metric."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "doc.md", "old_text": _DRIFT_STALE, "new_text": "REPLACED"},
+        context,
+    )
+    assert result.is_error is True
+    assert "hunk 1: old_text not found" in result.text
+    assert re.search(r"closest text — file lines? \d+(-\d+)? \(\d+% word overlap\)", result.text)
+    # The window is the drifted paragraph (lines 3-4), and every row quoted is
+    # that line of the file — the whole point of the change.
+    assert "file lines 3-4" in result.text
+    _assert_quotes_match_the_disk(result.text, path)
+    # The actionable call leads its own line with its range intact: the card
+    # clips rows from the right, and a range cut mid-argument cannot be pasted
+    # back (design round 1, D2).
+    assert re.search(r'^  read\(range="\d+-\d+", path="[^"]+"\)', result.text, re.M)
+
+
+@pytest.mark.asyncio
+async def test_edit_diagnostics_agree_with_the_file_on_disk(tools, context, tmp_path) -> None:
+    """An earlier hunk matching must not move the lines the report names.
+
+    Eight lines on disk; hunk 1 inserts a line (so the in-memory text is nine
+    lines and everything after line 3 shifts), hunk 2 is a stale copy of disk
+    line 7. Computing the report against the in-memory state named line 8 of
+    the file and suggested reading past its end (review R1 / QA Q1); the
+    caller's next move is a `read` of the disk, so the report must describe the
+    disk.
+    """
+    path = tmp_path / "mixed.txt"
+    path.write_text("".join(f"line {i} of the document\n" for i in range(1, 9)))
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "mixed.txt",
+            "edits": [
+                {
+                    "old_text": "line 3 of the document\n",
+                    "new_text": "line 3 of the document\nan inserted line\n",
+                },
+                {"old_text": "line 7 of the documnt (typo, stale)", "new_text": "x"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "1 of 2 hunks did not match" in result.text
+    # Every quoted row and the read range are checked against the file itself.
+    _assert_quotes_match_the_disk(result.text, path)
+    assert "line 7 of the document" in result.text
+    # And the frame is stated, because the two views genuinely differ here.
+    assert "Note:" in result.text and "nothing was written" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_frame_note_is_absent_when_nothing_matched_earlier(
+    tools, context, tmp_path
+) -> None:
+    """No earlier hunk matched, so there is nothing to disclaim."""
+    path = tmp_path / "plain.txt"
+    path.write_text("alpha\nbeta\ngamma\ndelta\n")
+    result = await _call(
+        tools, "edit", {"path": "plain.txt", "old_text": "zzz nope", "new_text": "x"}, context
+    )
+    assert result.is_error is True
+    assert "Note:" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_shows_the_first_difference(tools, context, tmp_path) -> None:
+    """The differing pair is the file's real line, and the two rows DO differ."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "doc.md", "old_text": _DRIFT_STALE, "new_text": "REPLACED"},
+        context,
+    )
+    assert "first difference — your line 1 vs file line 3:" in result.text
+    rows = [
+        line
+        for line in result.text.splitlines()
+        if line.startswith("    - ") or line.startswith("    + ")
+    ]
+    assert len(rows) == 2
+    yours, theirs = (row[6:] for row in rows)
+    assert yours != theirs
+    assert theirs.startswith("- **Key release, custody")
+    assert re.search(r"identical for the first \d+ characters, then they diverge", result.text)
+
+
+@pytest.mark.parametrize("cut", [77, 231])
+@pytest.mark.asyncio
+async def test_edit_difference_rows_differ_inside_the_visible_excerpt(
+    cut: int, tools, context, tmp_path
+) -> None:
+    """The card clips rows from the RIGHT, so the pair must diverge near the start.
+
+    Both rows used to be windowed at character 0, which rendered them
+    byte-identical whenever the divergence sat past the clip (design round 1,
+    D1; QA round 1, Q3 — reproduced at character 231). The excerpt now leads
+    with ~24 characters of run-up, so the divergence is inside the first ~30
+    characters of what is actually painted.
+    """
+    path = tmp_path / "wide.txt"
+    filler = "a" * 400
+    path.write_text(filler[:cut] + "FILE-SIDE" + filler[cut:] + "\n")
+    hunk = filler[:cut] + "HUNK-SIDE" + filler[cut:]
+    result = await _call(
+        tools, "edit", {"path": "wide.txt", "old_text": hunk, "new_text": "x"}, context
+    )
+    rows = [
+        line
+        for line in result.text.splitlines()
+        if line.startswith("    - ") or line.startswith("    + ")
+    ]
+    assert len(rows) == 2, result.text
+    yours, theirs = (row[6:] for row in rows)
+    assert yours != theirs, "the two rows rendered identically"
+    assert yours[:40] != theirs[:40], "the divergence is past the visible part of the row"
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_says_no_close_match_without_inventing_a_region(
+    tools, context, tmp_path
+) -> None:
+    """Nothing similar anywhere: say so, and do not fabricate a region."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "doc.md",
+            "old_text": "quokka nimbus walrus zephyr marmot pelican saxophone",
+            "new_text": "x",
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "no close match" in result.text
+    assert "closest text" not in result.text
+    assert not _QUOTED_LINE_RE.search(result.text)
+
+    # One shared word is enough to have a nearest line, and the label must stay
+    # honest: the overlap is still nowhere near a match.
+    shared = await _call(
+        tools,
+        "edit",
+        {
+            "path": "doc.md",
+            "old_text": "quokka nimbus walrus zephyr marmot pelican stage",
+            "new_text": "x",
+        },
+        context,
+    )
+    assert "no close match" in shared.text
+    assert re.search(r"nearest text is line \d+ \(\d+% word overlap\)", shared.text)
+    assert not _QUOTED_LINE_RE.search(shared.text)
+
+
+@pytest.mark.asyncio
+async def test_edit_no_overlap_is_not_reported_as_an_empty_file(tools, context, tmp_path) -> None:
+    """A file full of text that shares no words is not an empty file."""
+    path = tmp_path / "text.txt"
+    path.write_text("alpha beta gamma delta\nepsilon zeta eta theta\n")
+    result = await _call(
+        tools, "edit", {"path": "text.txt", "old_text": "quokka", "new_text": "x"}, context
+    )
+    assert result.is_error is True
+    assert "no close match" in result.text
+    # The claim the search actually established, not one it did not.
+    assert "there is no text" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_anchor_line_is_echoed_back(tools, context, tmp_path) -> None:
+    """The one hint the caller gave the tool is repeated in the refusal.
+
+    It is free advice: the caller said which line it meant, and the old message
+    offered "the range around line N" back (review round 1, R4).
+    """
+    path = tmp_path / "anchor.txt"
+    path.write_text("alpha\nbeta\ngamma\ndelta\n")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "anchor.txt", "old_text": "zzz nope", "new_text": "x", "anchor_line": 3},
+        context,
+    )
+    assert result.is_error is True
+    # The suggestion is a real call whose range CONTAINS the anchor line, not a
+    # fixed range at the head of the file (review round 2, R9) — asserted as a
+    # fact about the range so a wording change does not break it (R7).
+    hint = re.search(r'read\(range="(\d+)-(\d+)", path="[^"]+"\)', result.text)
+    assert hint, result.text
+    first, last = (int(value) for value in hint.groups())
+    assert first <= 3 <= last
+    assert "anchor" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_anchor_line_is_echoed_beside_a_close_region(tools, context, tmp_path) -> None:
+    """With a region to point at, the anchor is still repeated (R4/R7)."""
+    path = tmp_path / "anchor2.txt"
+    path.write_text("alpha\nbeta\nthe quick brown fox jumps over the lazy dog\ndelta\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "anchor2.txt",
+            "old_text": "the quick brown cat jumps over the lazy dog",
+            "new_text": "x",
+            "anchor_line": 3,
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert re.search(r"anchor[^\n]*\b3\b", result.text), result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_reports_every_refusal_and_writes_nothing(
+    tools, context, tmp_path
+) -> None:
+    """One round trip names all the bad hunks, and the good ones stay unwritten.
+
+    The old engine returned on the FIRST failing hunk, so a caller with two
+    broken hunks paid two round trips to learn what one message can say.
+    """
+    path = tmp_path / "batch.txt"
+    path.write_text("alpha line\nbeta line\ngamma line\n")
+    before = path.read_bytes()
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "batch.txt",
+            "edits": [
+                {"old_text": "alpha line", "new_text": "ALPHA"},
+                {"old_text": "missing one\n", "new_text": "x"},
+                {"old_text": "beta line", "new_text": "BETA"},
+                {"old_text": "missing two\n", "new_text": "y"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "2 of 4 hunks" in result.text
+    assert "hunk 2: old_text not found" in result.text
+    assert "hunk 4: old_text not found" in result.text
+    assert "hunk 1" not in result.text and "hunk 3" not in result.text
+    # Byte-identical: the atomicity claim is checked, not restated in prose.
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_edit_ambiguous_refusal_lists_the_match_lines(tools, context, tmp_path) -> None:
+    """The count was always there; the line numbers were the missing half."""
+    path = tmp_path / "amb.txt"
+    path.write_text("  foo\nbar\n  foo\n")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "amb.txt", "old_text": "foo", "new_text": "X"},
+        context,
+    )
+    assert result.is_error is True
+    assert "old_text matches 2 places (lines 1, 3)" in result.text
+    assert "give anchor_line" in result.text
+    # And the header is about the reason that actually happened: the hunk
+    # matched, twice, which "did not match" would contradict (QA round 1, Q2).
+    assert "matched more than one place" in result.text
+    assert "did not match" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_mixed_refusal_reasons_are_named_in_the_header(tools, context, tmp_path) -> None:
+    """A batch that fails for two reasons says both, and counts each."""
+    path = tmp_path / "mixed.txt"
+    path.write_text("foo\nbar\nfoo\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "mixed.txt",
+            "edits": [
+                {"old_text": "foo", "new_text": "X"},
+                {"old_text": "nothing like this at all", "new_text": "Y"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "2 of 2 hunks did not apply" in result.text
+    assert "1 did not match" in result.text
+    assert "1 matched more than one place" in result.text
+
+
+def _failing_batch(count: int) -> list[dict[str, str]]:
+    return [
+        {"old_text": f"absent hunk number {i} about quokkas and walruses", "new_text": "x"}
+        for i in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_edit_refusal_is_bounded_and_names_what_it_suppressed(
+    tools, context, tmp_path
+) -> None:
+    """Ten refusals stay under the cap, are counted, and are never half-shown."""
+    path = tmp_path / "many.txt"
+    path.write_text("alpha beta gamma delta epsilon\n" * 5)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "many.txt", "edits": _failing_batch(10)},
+        context,
+    )
+    assert result.is_error is True
+    assert "10 of 10 hunks" in result.text
+    assert len(result.text) <= builtin._EDIT_MAX_MESSAGE_CHARS
+    detailed = builtin._EDIT_MAX_DETAILED_HUNKS
+    compact = builtin._EDIT_MAX_COMPACT_HUNKS
+    assert result.text.count("old_text not found") == detailed + compact
+    # The suppression line names exactly the hunks that got no block at all, and
+    # every refusal is accounted for once. Asserted as the number plus the
+    # suppression claim, so the tail's wording stays free (review round 2, R7).
+    tail = result.text.splitlines()[-1]
+    assert str(10 - detailed - compact) in tail and "suppress" in tail
+
+
+@pytest.mark.asyncio
+async def test_edit_refusal_stays_bounded_for_a_long_pattern_in_a_large_file(
+    tools, context, tmp_path
+) -> None:
+    """A 200-line pattern against a ~5k-line file still returns a bounded message.
+
+    This is the shape that would be unbounded by default: the window is 200
+    lines long, only a handful of them are ever quoted, and the note says how
+    many there were.
+    """
+    rng = random.Random(11)
+    words = [f"w{i}" for i in range(400)]
+    lines = [" ".join(rng.choice(words) for _ in range(12)) for _ in range(5000)]
+    path = tmp_path / "big.txt"
+    path.write_text("\n".join(lines) + "\n")
+    pattern = lines[2400:2600]
+    drifted = "\n".join(
+        " ".join(line.split()[1:]) if i % 4 == 0 else line for i, line in enumerate(pattern)
+    )
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "big.txt", "old_text": drifted, "new_text": "x"},
+        context,
+    )
+    assert result.is_error is True
+    assert len(result.text) <= builtin._EDIT_MAX_MESSAGE_CHARS
+    quoted = _QUOTED_LINE_RE.findall(result.text)
+    assert 0 < len(quoted) <= builtin._EDIT_MAX_WINDOW_LINES
+    assert f"of {len(pattern)}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_summarises_refusals_past_the_detailed_cap_compactly(
+    tools, context, tmp_path
+) -> None:
+    """Past the detailed cap each refusal still gets one line naming a place."""
+    path = tmp_path / "mixed.txt"
+    path.write_text(_DRIFT_DOC)
+    edits = [{"old_text": _DRIFT_STALE, "new_text": "x"}] + [
+        {"old_text": f"absent hunk {i} about quokkas and walruses", "new_text": "y"}
+        for i in range(7)
+    ]
+    result = await _call(tools, "edit", {"path": "mixed.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert "8 of 8 hunks" in result.text
+    assert result.text.count("old_text not found (exact and whitespace-tolerant") == (
+        builtin._EDIT_MAX_DETAILED_HUNKS
+    )
+    # The first hunk the cap turned into a one-liner still names a line.
+    first_compact = builtin._EDIT_MAX_DETAILED_HUNKS + 1
+    assert re.search(
+        rf"hunk {first_compact}: old_text not found — (closest text at line \d+|"
+        rf"no close match \(nearest line \d+)",
+        result.text,
+    )
+    tail = result.text.splitlines()[-1]
+    suppressed = 8 - builtin._EDIT_MAX_DETAILED_HUNKS - builtin._EDIT_MAX_COMPACT_HUNKS
+    assert str(suppressed) in tail and "suppress" in tail
+
+
+@pytest.mark.asyncio
+async def test_edit_worst_case_refusal_fits_the_expanded_card(tools, context, tmp_path) -> None:
+    """The most blocks this message can carry must still FIT the expanded card.
+
+    This is the constraint that sets ``_EDIT_MAX_DETAILED_HUNKS`` (design round
+    1, D4): the card paints at most ``EXPAND_MAX_LINES`` rows of a message and
+    silently drops the rest, so a message whose tail falls past that is a
+    diagnosis the reader cannot reach by any key. Two full reports plus the
+    compact lines plus the tail is the worst shape the caps allow; a third
+    report is ~15 more rows and does not fit.
+    """
+    from local_operator.tui.widgets.tool_card import EXPAND_MAX_LINES
+
+    vocabulary = [f"token{i}" for i in range(60)]
+    body: list[str] = []
+    starts: list[int] = []
+    for seed in range(6):
+        paragraph_rng = random.Random(seed)
+        starts.append(len(body))
+        body.extend(" ".join(paragraph_rng.choice(vocabulary) for _ in range(40)) for _ in range(8))
+        body.append("")
+
+    def drift(paragraph: list[str]) -> str:
+        return "\n".join(
+            " ".join(line.split()[: max(1, len(line.split()) - 3)]) if i % 2 == 0 else line
+            for i, line in enumerate(paragraph)
+        )
+
+    path = tmp_path / "worst.txt"
+    path.write_text("\n".join(body) + "\n")
+    # THREE full-size candidates, so a third detailed block would cost 15 more
+    # rows rather than a two-line no-close-match stub.
+    edits = [
+        {"old_text": drift(body[starts[index] : starts[index] + 6]), "new_text": "x"}
+        for index in (1, 3, 5)
+    ] + [{"old_text": f"absent hunk {i} with a few words", "new_text": "y"} for i in range(3)]
+    result = await _call(tools, "edit", {"path": "worst.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert result.text.count("old_text not found (exact and whitespace-tolerant") == (
+        builtin._EDIT_MAX_DETAILED_HUNKS
+    )
+    assert len(result.text.splitlines()) <= EXPAND_MAX_LINES
+
+
+def test_edit_label_follows_the_printed_percent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The label is decided by the number the message prints (review R5).
+
+    0.296 rounds to ``30%``, which is the label threshold — so the region gets
+    the ``closest text`` label, not ``no close match`` next to ``30% word
+    overlap``. This drives the real report builders with a forced score, so it
+    fails if either of them goes back to comparing the raw float.
+    """
+    monkeypatch.setattr(builtin, "_closest_regions", lambda scan, pattern, limit=3: [(0, 1, 0.296)])
+    scan = builtin._FileScan("one line of text\nanother line of text\n")
+    detailed = "\n".join(builtin._edit_not_found_report(scan, 1, "some hunk text", "/tmp/x"))
+    compact = "\n".join(builtin._edit_not_found_compact(scan, 1, "some hunk text"))
+    for message in (detailed, compact):
+        assert "30% word overlap" in message
+        assert "no close match" not in message
+
+
+@pytest.mark.asyncio
+async def test_edit_single_line_file_uses_singular_copy(tools, context, tmp_path) -> None:
+    """``1 line``, not ``1 lines`` — and a one-line region is ``file line 7``."""
+    path = tmp_path / "one.txt"
+    path.write_text("only line\n")
+    singular = await _call(
+        tools, "edit", {"path": "one.txt", "old_text": "zzz nope", "new_text": "x"}, context
+    )
+    assert "— 1 line," in singular.text
+    assert "1 lines" not in singular.text
+
+    path.write_text(_DRIFT_DOC)
+    one_line = await _call(
+        tools,
+        "edit",
+        {
+            "path": "one.txt",
+            "old_text": "Trailing paragraph about something else entirly",
+            "new_text": "x",
+        },
+        context,
+    )
+    assert "closest text — file line 5" in one_line.text
+    assert "file lines 5-5" not in one_line.text
+
+
+def test_edit_overlap_label_agrees_with_the_printed_percent() -> None:
+    """One rounded number decides the label AND what gets printed (review R5).
+
+    The raw float decided the label while the rounded integer got printed, so a
+    region at 0.296 printed ``30% word overlap`` under a ``no close match``
+    label. Both now read ``_overlap_percent``.
+    """
+    for value, expected in (
+        (0.296, "closest"),
+        (0.294, "no close"),
+        (0.30, "closest"),
+        (0.0, "no close"),
+    ):
+        printed = builtin._overlap_percent(value)
+        label = "closest" if printed >= builtin._EDIT_OVERLAP_LABEL_PERCENT else "no close"
+        assert label == expected, (value, printed)
+        assert builtin._percent(value) == f"{printed}%"
+    # A percent printed under the "no close match" label is always below it.
+    assert builtin._overlap_percent(0.294) < builtin._EDIT_OVERLAP_LABEL_PERCENT
+
+
+# The tolerant pass as it was before the index: the reference the prefilter
+# must agree with, kept here on purpose. It is the ONLY definition of the
+# semantics — the fast one is an optimisation of this, so a disagreement is a
+# bug in the fast one.
+def _naive_tolerant_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    windows: list[tuple[int, int, str]] = []
+    start = content.find(old_text)
+    while start != -1:
+        windows.append((start, start + len(old_text), old_text))
+        start = content.find(old_text, start + 1)
+    if windows:
+        return windows
+
+    file_lines = content.splitlines(keepends=True)
+    offsets: list[int] = []
+    at = 0
+    for line in file_lines:
+        offsets.append(at)
+        at += len(line)
+    old_lines = old_text.splitlines()
+    if not old_lines or len(old_lines) > len(file_lines):
+        return []
+
+    for i in range(len(file_lines) - len(old_lines) + 1):
+        window = file_lines[i : i + len(old_lines)]
+        if all(f.rstrip("\r\n").strip() == o.strip() for f, o in zip(window, old_lines)):
+            last_line = window[-1]
+            end = offsets[i + len(old_lines) - 1] + len(last_line)
+            windows.append((offsets[i], end, "".join(window)))
+    return windows
+
+
+def _tolerant_corpus() -> list[tuple[str, str]]:
+    """Patterns that exercise the seeded prefilter's edges, with a file each."""
+    lf = "alpha\n    beta\n\ngamma\nalpha\nbeta\n"
+    crlf = "alpha\r\n    beta\r\n\r\ngamma\r\nalpha\r\nbeta\r\n"
+    repeats = "x\nblock\nsame\nsame\nx\nblock\nsame\nsame\nend\n"
+    cases = [
+        # Indent drift in both directions, and a blank interior line.
+        (lf, "    alpha\nbeta"),
+        (lf, "alpha\n\tbeta\n\ngamma"),
+        # CRLF file against an LF hunk (and the reverse spelling).
+        (crlf, "    alpha\nbeta"),
+        (crlf, "alpha\n  beta\n\ngamma"),
+        # Repeated blocks: every candidate start must still be found.
+        (repeats, "block\nsame\nsame"),
+        # Pattern longer than the file.
+        (repeats, "block\nsame\nsame\nend\nmore"),
+        # Blank first line, and a pattern that is only a blank line.
+        (lf, "\ngamma"),
+        (lf, "\n"),
+        # Nothing that matches at all, plus a file with no newline at the end.
+        (lf, "nothing\nhere"),
+        ("tail-without-newline", "tail-without-newline"),
+        # Seed line present elsewhere with the WRONG neighbours: the indexed
+        # pass must reject the start the seed alone cannot rule out. Both
+        # pattern lines occur the same number of times, so the seed is the
+        # first of them, and only one of its occurrences has the right tail.
+        # The indent on the second line is what keeps pass 1 (exact) out of
+        # the way so pass 2 actually runs.
+        ("a\n  b\na\nc\n  b\nd\n", "a\nb"),
+        ("p\n  q\nx\np\ny\n  q\n", "p\nq"),
+    ]
+    return cases
+
+
+def test_tolerant_prefilter_matches_the_naive_reference() -> None:
+    """The seeded index is an optimisation, so it must be indistinguishable."""
+    for content, old_text in _tolerant_corpus():
+        expected = _naive_tolerant_windows(content, old_text)
+        actual = builtin._match_windows(content, old_text)
+        assert actual == expected, (content, old_text, expected, actual)
+
+
+def test_tolerant_prefilter_agrees_over_a_generated_corpus() -> None:
+    """Property-style version of the check above, over generated shapes."""
+    rng = random.Random(4242)
+    vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    for _ in range(120):
+        line_count = rng.randint(0, 30)
+        lines = []
+        for _ in range(line_count):
+            indent = " " * rng.choice([0, 0, 1, 2, 4, 8]) + ("\t" if rng.random() < 0.2 else "")
+            body = " ".join(rng.choice(vocabulary) for _ in range(rng.randint(0, 4)))
+            lines.append(indent + body)
+        ending = rng.choice(["\n", "\r\n"])
+        content = ending.join(lines) + (ending if lines and rng.random() < 0.8 else "")
+        start = rng.randrange(0, max(line_count, 1))
+        width = rng.randint(1, 4)
+        old_text = ending.join(lines[start : start + width])
+        if rng.random() < 0.35:
+            # Drift the pattern's indentation, the way a model writing from
+            # memory does.
+            old_text = "\n".join(
+                (" " * rng.choice([0, 2, 4, 8])) + line.strip() for line in old_text.splitlines()
+            )
+        assert builtin._match_windows(content, old_text) == _naive_tolerant_windows(
+            content, old_text
+        ), (content, old_text)
+
+
+class _ScoringCounter:
+    """Counts how many candidate windows the full metric is run over."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.count = 0
+        real = builtin._dice
+
+        def counting(pattern, window):  # type: ignore[no-untyped-def]
+            self.count += 1
+            return real(pattern, window)
+
+        monkeypatch.setattr(builtin, "_dice", counting)
+
+
+def test_closest_region_search_scores_a_bounded_number_of_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structural bound, not a stopwatch: the work cannot grow with file size.
+
+    A timing assertion here would encode this laptop's core speed into the
+    test (see AGENTS.md, "Timing, flakes, and how to assert that something is
+    fast"). What actually matters is that the exhaustive O(file_lines x
+    pattern_lines) scan is gone, and that is a fact about how many windows are
+    scored.
+    """
+    pattern = [f"absent prose line {i} with several words" for i in range(40)]
+    counts = []
+    for line_count in (60, 6000):
+        content = "\n".join(f"filler line {i} of the document" for i in range(line_count))
+        counter = _ScoringCounter(monkeypatch)
+        builtin._closest_regions(builtin._FileScan(content), pattern)
+        counts.append(counter.count)
+    ceiling = builtin._EDIT_MAX_ANCHORS * builtin._EDIT_MAX_CANDIDATE_STARTS
+    assert all(count <= ceiling for count in counts), counts
+    # 100x the file, the same search: the prefilter is what makes that true.
+    assert counts[0] == counts[1]
+
+
+def _counting_file_scan(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every ``_FileScan`` construction, in order (review round 2, R11)."""
+    built: list[str] = []
+    real = builtin._FileScan
+
+    class Counting(real):  # type: ignore[misc, valid-type]
+        def __init__(self, content: str) -> None:
+            built.append(content)
+            super().__init__(content)
+
+    monkeypatch.setattr(builtin, "_FileScan", Counting)
+    return built
+
+
+@pytest.mark.asyncio
+async def test_edit_builds_one_scan_per_frame_not_one_per_hunk(
+    tools, context, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frames are built per content version, not per hunk.
+
+    The diagnostics describe the file on disk while matching runs against the
+    in-memory state, so a failing batch legitimately needs two views. What it
+    must not do is rebuild them per hunk: a 10-hunk failure costs the same as a
+    2-hunk one.
+    """
+    built = _counting_file_scan(monkeypatch)
+    path = tmp_path / "many.txt"
+    path.write_text("".join(f"line {i} of the document\n" for i in range(1, 21)))
+    edits = [
+        {"old_text": "line 2 of the document\n", "new_text": "line 2 of the document\nmore\n"}
+    ] + [{"old_text": f"absent hunk {i} about quokkas", "new_text": "y"} for i in range(10)]
+    result = await _call(tools, "edit", {"path": "many.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert len(built) == 2, built
+
+
+@pytest.mark.asyncio
+async def test_edit_pins_the_disk_frame_across_an_alternating_batch(
+    tools, context, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The on-disk frame survives a batch that applies and fails alternately.
+
+    Review round 2 (R11): with the two frames sharing one cache, an
+    apply-then-fail batch evicted the disk frame each time a hunk wrote, so
+    every later failure rebuilt it as well. Pinned in its own slot, the disk
+    frame is built EXACTLY once however the batch alternates, and the matching
+    frame is rebuilt only when a hunk actually writes — which is the honest
+    bound the comments state, and the bound asserted below.
+    """
+    original_text = "".join(f"line {i} of the document\n" for i in range(1, 31))
+    built = _counting_file_scan(monkeypatch)
+    path = tmp_path / "alternating.txt"
+    path.write_text(original_text)
+    applies = [
+        {"old_text": f"line {n} of the document\n", "new_text": f"line {n} revised\n"}
+        for n in (3, 7, 11)
+    ]
+    # An apply FIRST, so the matching frame can never be mistaken for the disk
+    # frame by content: from hunk 2 on, the two frames differ by construction.
+    edits = [
+        applies[0],
+        {"old_text": "absent hunk about quokkas", "new_text": "y"},
+        applies[1],
+        {"old_text": "another absent hunk about quokkas", "new_text": "y"},
+        applies[2],
+        {"old_text": "a third absent hunk about quokkas", "new_text": "y"},
+    ]
+    result = await _call(tools, "edit", {"path": "alternating.txt", "edits": edits}, context)
+    assert result.is_error is True
+    disk_builds = [content for content in built if content == original_text]
+    assert len(disk_builds) == builtin._EDIT_MAX_DISK_SCANS, built
+    # At most the pinned disk frame plus one matching frame per content version.
+    assert len(built) <= 1 + len(applies) + builtin._EDIT_MAX_DISK_SCANS, built
+
+
+_AMBIGUOUS_LINES_RE = re.compile(r"old_text matches \d+ places \(lines ([\d, …]+)\)")
+
+
+def _listed_match_lines(message: str) -> list[int]:
+    """The line numbers an ambiguity refusal lists, as integers."""
+    found = _AMBIGUOUS_LINES_RE.search(message)
+    assert found, message
+    return [int(value) for value in re.findall(r"\d+", found.group(1))]
+
+
+@pytest.mark.asyncio
+async def test_edit_ambiguous_list_names_the_files_lines_not_the_batchs(
+    tools, context, tmp_path
+) -> None:
+    """Review round 2, R8: the match list is the FILE's, like every other fact.
+
+    An earlier hunk of the same call had already inserted a line in memory, so
+    the batch's own numbering is shifted; the caller's next move is a `read` of
+    the file (or an `anchor_line` against it), so the listed numbers have to be
+    the file's.
+    """
+    path = tmp_path / "amb.txt"
+    path.write_text("x\nfoo\ny\nfoo\nz\n")
+    edits = [
+        {"old_text": "x\n", "new_text": "x\ninserted\n"},
+        {"old_text": "foo", "new_text": "bar"},
+    ]
+    result = await _call(tools, "edit", {"path": "amb.txt", "edits": edits}, context)
+    assert result.is_error is True
+    disk = path.read_text().splitlines()
+    listed = _listed_match_lines(result.text)
+    assert listed == [2, 4], result.text
+    # Each listed number is a line that really holds this text.
+    assert all(disk[number - 1] == "foo" for number in listed), listed
+    # And the frame note is present, because the frames really do differ here.
+    assert "Note: earlier hunks" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_ambiguous_row_says_when_the_batch_created_the_duplicate(
+    tools, context, tmp_path
+) -> None:
+    """A duplicate this call created is named as such, never as a file line."""
+    path = tmp_path / "amb2.txt"
+    path.write_text("x\nfoo\ny\nz\n")
+    edits = [
+        {"old_text": "x\n", "new_text": "x\nfoo\n"},
+        {"old_text": "foo", "new_text": "bar"},
+    ]
+    result = await _call(tools, "edit", {"path": "amb2.txt", "edits": edits}, context)
+    assert result.is_error is True
+    disk = path.read_text().splitlines()
+    # The file holds one occurrence (line 2); the batch's second copy is what
+    # made the hunk ambiguous, and the message says so instead of listing a
+    # line the file does not have.
+    assert "in-memory" in result.text, result.text
+    assert "1 place in the file on disk (line 2)" in result.text, result.text
+    assert disk[1] == "foo"
+
+
+@pytest.mark.asyncio
+async def test_edit_hint_prints_the_callers_path_spelling(tools, context, tmp_path) -> None:
+    """Design round 2, D2 residual: the hint's path is the caller's own.
+
+    The message is for the caller and quotes a `read` they will re-use, so it
+    prints the spelling they passed. The resolved absolute path of this fixture
+    is much longer and pushed the range argument off the card's row at every
+    width, which is the defect this fixes.
+    """
+    nested = tmp_path / "local_operator" / "tools"
+    nested.mkdir(parents=True)
+    (nested / "builtin.py").write_text("".join(f"line {i} of the document\n" for i in range(1, 30)))
+    caller_path = "local_operator/tools/builtin.py"
+    result = await _call(
+        tools,
+        "edit",
+        # A drifted hunk, so the report carries a closest region AND a hint.
+        {"path": caller_path, "old_text": "line 7 of the documnt (typo)", "new_text": "y"},
+        context,
+    )
+    assert result.is_error is True
+    hint = next(line for line in result.text.splitlines() if line.strip().startswith("read("))
+    assert f'path="{caller_path}"' in hint, hint
+    assert str(tmp_path) not in hint, "the hint must not carry the resolved absolute path"
+    # range first: at the narrowest supported width it is the argument that
+    # survives the card's right-truncation. The header line keeps the resolved
+    # path, which is the one place an absolute path is the right answer.
+    assert re.match(r'^  read\(range="\d+-\d+", path="[^"]+"\)', hint), hint
+    assert str(tmp_path) in result.text.splitlines()[1]
+
+
+@pytest.mark.asyncio
+async def test_edit_no_region_hint_never_invents_a_range(tools, context, tmp_path) -> None:
+    """Review round 2, R9: with nothing to point at, no range is invented.
+
+    The old hint emitted the head of the file (and, on an empty file, the
+    inverted `1-0`) — a place the failure gave no reason to look at.
+    """
+    path = tmp_path / "big.txt"
+    path.write_text("".join(f"line {i} of the document\n" for i in range(1, 5001)))
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "big.txt", "old_text": "quokka marsupial taxonomy", "new_text": "y"},
+        context,
+    )
+    assert result.is_error is True
+    assert "no close match" in result.text
+    assert not re.search(r'range="\d+-\d+"', result.text), result.text
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "empty.txt", "old_text": "anything at all", "new_text": "y"},
+        context,
+    )
+    assert result.is_error is True
+    assert 'range="1-0"' not in result.text
+    assert not re.search(r'range="\d+-\d+"', result.text), result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_no_region_hint_uses_the_anchor_line_when_given(
+    tools, context, tmp_path
+) -> None:
+    """With an anchor, the suggested range brackets it and stays in the file."""
+    path = tmp_path / "big2.txt"
+    path.write_text("".join(f"line {i} of the document\n" for i in range(1, 5001)))
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "big2.txt",
+            "old_text": "quokka marsupial taxonomy",
+            "new_text": "y",
+            "anchor_line": 4000,
+        },
+        context,
+    )
+    assert result.is_error is True
+    found = re.search(r'read\(range="(\d+)-(\d+)", path="[^"]+"\)', result.text)
+    assert found, result.text
+    first, last = (int(value) for value in found.groups())
+    assert first <= 4000 <= last <= 5000
+    # No quoted rows and no closest region: the file resembles nothing, so the
+    # only number in the message is the range around the caller's own anchor.
+    assert "closest text" not in result.text
+
+
+def test_own_text_on_disk_is_an_identity_test_not_a_metric() -> None:
+    """The gate itself (review round 3, R13): text, never a similarity figure.
+
+    ``_overlap_percent`` is bag-of-words, so a punctuation-only rewrite of the
+    same words scores exactly 100% and the clause ("this is this hunk's own
+    text") would be false. This pins the gate directly, because the two
+    repro shapes are also covered by the no-difference-pair guard and would
+    therefore survive a metric-based gate on their own.
+    """
+    disk = "alpha, beta gamma\nmoved line\n"
+    current = "alpha, beta gamma\nmoved line\nrewritten\n"
+    # Same word bag, different text: NOT the hunk's own text.
+    assert builtin._own_text_on_disk(disk, current, "alpha beta gamma\n") is False
+    # A one-word drop from a 120-token line: raw overlap 0.9958, which ROUNDS to
+    # 100% and so fired the old percentage gate. The window is still not the
+    # hunk's text, which is what the gate has to answer.
+    long_line = " ".join(f"token{i}" for i in range(1, 121))
+    without_one = " ".join(word for word in long_line.split() if word != "token60")
+    assert (
+        builtin._own_text_on_disk(
+            long_line + "\nrewritten\n", long_line + "\nrewritten\n", without_one + "\n"
+        )
+        is False
+    )
+    # The genuine case: byte-identical on disk, moved on in the batch.
+    assert builtin._own_text_on_disk("target text\nother\n", "other\n", "target text\n") is True
+    # Frames identical: nothing was consumed, so there is no clause to make.
+    assert builtin._own_text_on_disk("target text\n", "target text\n", "target text\n") is False
+
+
+@pytest.mark.asyncio
+async def test_edit_self_match_clause_needs_text_identity_not_a_similarity(
+    tools, context, tmp_path
+) -> None:
+    """Review round 3, R13 / design round 2, D8: identity, not 100% overlap.
+
+    A bag-of-words figure reaches 100% for a punctuation-only rewrite or a
+    reordered list, which is exactly when the clause ("this is this hunk's own
+    text") was false — and false in the same block as the difference pair that
+    disproved it.
+    """
+    # (a) punctuation only: the same word bag, different text. Hunk 1 APPLIES,
+    # so the frames differ and only the identity test can withhold the clause —
+    # the shape both streams reproduced.
+    punctuation = tmp_path / "punctuation.txt"
+    punctuation.write_text("alpha, beta gamma\nother line\n")
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "punctuation.txt",
+            "edits": [
+                {"old_text": "other line\n", "new_text": "OTHER LINE\n"},
+                {"old_text": "alpha beta gamma\n", "new_text": "y\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "100% word overlap" in result.text, result.text
+    assert "unchanged on disk" not in result.text, result.text
+    # ... and the block stays self-consistent: the pair that disproves the
+    # identity is right there, which is what made the clause self-contradictory.
+    assert "first difference" in result.text, result.text
+    assert punctuation.read_text() == "alpha, beta gamma\nother line\n"
+
+    # (b) one word dropped from a 120-token line: the designer's shape, where
+    # raw overlap is 0.9958 and therefore ROUNDS to 100% — the case that made a
+    # percentage gate fire on text that is not the hunk's.
+    long_line = " ".join(f"token{i}" for i in range(1, 121))
+    without_one = " ".join(word for word in long_line.split() if word != "token60")
+    body = f"{long_line}\na second line, so the batch has something to apply\n"
+    drifted = tmp_path / "drifted.txt"
+    drifted.write_text(body)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "drifted.txt",
+            "edits": [
+                {
+                    "old_text": "a second line, so the batch has something to apply\n",
+                    "new_text": "a second line, rewritten\n",
+                },
+                {"old_text": without_one + "\n", "new_text": "y\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "100% word overlap" in result.text, result.text
+    assert "unchanged on disk" not in result.text, result.text
+    assert drifted.read_text() == body
+
+
+@pytest.mark.asyncio
+async def test_edit_self_match_clause_is_short_and_leads_with_the_cause(
+    tools, context, tmp_path
+) -> None:
+    """Design round 2, D9: the clause must fit a narrow card, cause first.
+
+    At 60 columns the message body has ~50 visible cells and the card clips
+    every row from the right, so a 149-character clause lost the reason
+    entirely.
+    """
+    line = "the whole quote chain must verify before any plaintext leaves the stage\n"
+    path = tmp_path / "short.txt"
+    path.write_text(line)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "short.txt",
+            "edits": [
+                {"old_text": line, "new_text": "the replacement chain must verify\n"},
+                {"old_text": line, "new_text": "another chain must verify\n"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    clause = next(row.strip() for row in result.text.splitlines() if "unchanged on disk" in row)
+    assert len(clause) <= 70, clause
+    assert clause.startswith("(") and "earlier hunks" in clause[:30], clause
+
+
+@pytest.mark.asyncio
+async def test_edit_consumed_hunk_says_its_text_is_still_on_disk(tools, context, tmp_path) -> None:
+    """Review round 2, R10: "not found" must not sit beside 100% of your own text.
+
+    Hunk 1 rewrites the paragraph in memory; hunk 2 sends the original wording.
+    The disk still holds hunk 2's text exactly, so the report has to name the
+    real situation — an earlier hunk of this call consumed it.
+    """
+    paragraph = "AAA BBB CCC the target paragraph\n"
+    path = tmp_path / "consumed.txt"
+    path.write_text(paragraph)
+    edits = [
+        {"old_text": paragraph, "new_text": "AAA BBB CCC the replacement paragraph\n"},
+        {"old_text": paragraph, "new_text": "AAA BBB CCC another paragraph\n"},
+    ]
+    result = await _call(tools, "edit", {"path": "consumed.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert "100% word overlap" in result.text
+    assert re.search(r"earlier hunk[^\n]*this call", result.text), result.text
+    assert path.read_text() == paragraph
+
+
+@pytest.mark.asyncio
+async def test_edit_suppression_tail_uses_the_headers_word_for_a_mixed_batch(
+    tools, context, tmp_path
+) -> None:
+    """Review round 2, R12: the tail does not name a reason the header avoided."""
+    path = tmp_path / "mixed.txt"
+    # "alpha" twice, so hunk 1 is ambiguous; then hunks that match nothing.
+    path.write_text(
+        "alpha\nalpha\nbeta\n" + "".join(f"line {i} of the document\n" for i in range(1, 20))
+    )
+    edits = [{"old_text": "alpha", "new_text": "ALPHA"}] + [
+        {"old_text": f"absent hunk {i} about quokkas", "new_text": "y"} for i in range(8)
+    ]
+    result = await _call(tools, "edit", {"path": "mixed.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert "did not apply" in result.text and "matched more than one place" in result.text
+    tail = result.text.splitlines()[-1]
+    suppressed = 9 - builtin._EDIT_MAX_DETAILED_HUNKS - builtin._EDIT_MAX_COMPACT_HUNKS
+    assert str(suppressed) in tail, tail
+    assert "refused" in tail, tail
