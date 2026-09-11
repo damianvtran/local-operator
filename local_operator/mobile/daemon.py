@@ -272,8 +272,16 @@ class SessionTable:
 
         def load() -> tuple[dict[str, Any], dict[str, float]]:
             directory = config_dir()
-            # /resume intentionally pays no creation-metadata reads. Only the
-            # two stable-order surfaces enrich its cheap rows with birth dates.
+            # ``recent_session_rows`` itself pays no creation-metadata reads —
+            # it is on the CLI startup path. Each surface that needs birth
+            # dates pays for them itself, and the two surfaces differ in HOW
+            # because their row counts differ. These stable-order listings are
+            # bounded and need a date for EVERY row, so they enrich eagerly
+            # here. The /resume picker needs one only for the row under the
+            # cursor, over an unbounded list, so it resolves them lazily and
+            # caches per session id instead (``session/preview.py``,
+            # ``SessionPreviews.created_at``) — measured, an eager loop there
+            # cost 24.6% of the picker's open on a 151-session store.
             rows = {
                 row.id: row._replace(created_at=session_created_at(directory / "sessions" / row.id))
                 for row in recent_session_rows(directory, 100)
