@@ -16,7 +16,7 @@ import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.transcript import (
@@ -95,6 +95,28 @@ class DisplayHistoryWindow(BaseModel):
     #: Lets the viewer say "earlier history above" at the moment the context
     #: phase drains, rather than claiming the conversation starts there.
     audit_available: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _collapse_epoch_alias(cls, data: Any) -> Any:
+        """Accept the epoch under either key, including both at once.
+
+        ``AliasChoices`` consumes only the FIRST match and the model forbids
+        extras, so a payload carrying ``owner_epoch`` AND ``runtime_epoch``
+        raised ``extra_forbidden`` on the second key instead of validating.
+        That is the one shape a producer mid-rename can emit — the old key for
+        viewers that have not flipped, the new one for those that have — and a
+        hard failure there breaks the attach outright. Collapse the pair to
+        the single key the field reads.
+
+        ``runtime_epoch`` wins when both are present: a payload that carries it
+        comes from the newer producer, so its value is the authoritative one,
+        and the alternative is honouring a key the rename is retiring. Delete
+        with ``AliasChoices`` on the flip release.
+        """
+        if isinstance(data, dict) and "runtime_epoch" in data:
+            data["owner_epoch"] = data.pop("runtime_epoch")
+        return data
 
     @property
     def runtime_epoch(self) -> str:

@@ -183,6 +183,45 @@ async def test_the_wire_keeps_the_old_epoch_key_and_reads_both(
 
 
 @pytest.mark.asyncio
+async def test_a_page_carrying_both_epoch_aliases_still_validates(tmp_path: Path) -> None:
+    """Tolerate the transitional payload that carries BOTH epoch keys.
+
+    ``AliasChoices`` consumes only the FIRST match and this DTO forbids extras,
+    so a payload with ``owner_epoch`` AND ``runtime_epoch`` used to raise
+    ``extra_forbidden`` on the second key. That is the one shape a producer
+    mid-rename can emit — the old key for viewers that have not flipped, the
+    new key for those that have — so it has to validate rather than kill the
+    attach. ``runtime_epoch`` wins when both are present: the payload carrying
+    it came from the newer producer. The emit stays ``owner_epoch`` alone, or
+    a pre-rename viewer's ``extra="forbid"`` DTO rejects our pages.
+    """
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(Message.user("row"))
+    base = {
+        "conversation_id": "c",
+        "history_generation": 1,
+        "through_id": None,
+    }
+
+    old_only = DisplayHistoryWindow.model_validate({**base, "owner_epoch": "e"})
+    assert old_only.owner_epoch == "e"
+
+    new_only = DisplayHistoryWindow.model_validate({**base, "runtime_epoch": "e"})
+    assert new_only.owner_epoch == "e"
+    assert new_only.runtime_epoch == "e"
+
+    both = DisplayHistoryWindow.model_validate(
+        {**base, "owner_epoch": "stale", "runtime_epoch": "e"}
+    )
+    assert both.owner_epoch == "e"
+    assert both.runtime_epoch == "e"
+
+    emitted = window(transcript).model_dump(mode="json")
+    assert "runtime_epoch" not in emitted
+    assert emitted["owner_epoch"] == "synthetic-epoch"
+
+
+@pytest.mark.asyncio
 async def test_a_pre_rename_viewer_still_accepts_the_wire_page(tmp_path: Path) -> None:
     """The exact attach break round 1 flagged, held shut by a fixture viewer.
 

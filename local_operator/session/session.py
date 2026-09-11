@@ -3527,7 +3527,7 @@ class Session:
     def pending_display_tool_ids(self) -> set[str]:
         """Unanswered calls in the pending gate's current serialized user turn.
 
-        The local half of the display question ``RemoteSession`` already
+        The local half of the display question ``AttachedSession`` already
         answers for a viewer: a replay of the in-flight turn's tail must not
         settle the row the gate is parked on. A gate can precede
         tool_execution_start, so no invented start event is needed.
@@ -3545,7 +3545,7 @@ class Session:
         ``pending_display_tool_ids`` returns nothing for it while the call is
         very much alive.
 
-        Until this accessor existed the question was RemoteSession-only, so a
+        Until this accessor existed the question was AttachedSession-only, so a
         resume onto a LIVE LOCAL session replayed the in-flight call as a
         settled row — a duplicate beside the card the running turn's own
         events paint, one extra head in the "running N tools" count, and a

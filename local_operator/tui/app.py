@@ -4755,7 +4755,7 @@ class OperatorApp(App[None]):
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
-                raise RuntimeError("The prepared owner is no longer active")
+                raise RuntimeError("The prepared runtime is no longer active")
             remote = await AttachedSession.connect(
                 record,
                 session_id,
@@ -4764,7 +4764,7 @@ class OperatorApp(App[None]):
                 display_window=True,
             )
         if not _is_viewer(remote):
-            raise RuntimeError("Sidebar navigation requires an owner-backed session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed session")
         try:
             if remote.session_id != session_id:
                 raise RuntimeError("The launcher returned a different conversation")
@@ -4840,7 +4840,7 @@ class OperatorApp(App[None]):
         try:
             session = source.session
             if not _is_viewer(session):
-                raise RuntimeError("Sidebar navigation requires an owner-backed session")
+                raise RuntimeError("Sidebar navigation requires a runtime-backed session")
             # Canonical synchronization belongs to the source connection task,
             # never to a click waiting for its first useful viewport.
             #
@@ -4858,7 +4858,7 @@ class OperatorApp(App[None]):
             # logs at debug and whose `finally` releases the preparation, so no
             # user-visible surface observes it.
             if speculative and session.is_cold:
-                raise RuntimeError("The prepared owner is no longer ready")
+                raise RuntimeError("The prepared runtime is no longer ready")
             if speculative or refresh:
                 await session.ensure_display_current()
             if not refresh:
@@ -5725,8 +5725,9 @@ class OperatorApp(App[None]):
         preparation loop expensive.
 
         Both terms move only on durable content. `display_history_revision` is
-        bumped by compaction, prune and recovery (`remote.py:1385,1506`) — the
-        rewrites that can make an over-budget window SMALLER.
+        bumped by compaction, prune and recovery (`attached.py`'s
+        `_invalidate_display_history`) — the rewrites that can make an
+        over-budget window SMALLER.
         `history_message_count` is the durable row count.
         """
         session = source.session
@@ -5945,7 +5946,7 @@ class OperatorApp(App[None]):
         if source is self._interaction and incoming.replay.view is self._transcript_view():
             return
         if not _is_viewer(session):
-            raise RuntimeError("The conversation is not owner-backed")
+            raise RuntimeError("The conversation is not runtime-backed")
         if not source.display_only and (
             not session.display_history_current
             or incoming.replay_revision != session.display_history_revision
@@ -5958,7 +5959,7 @@ class OperatorApp(App[None]):
         focused_before_refresh = self.focused if refreshing else None
         previous = outgoing.session
         if previous is not None and not _is_viewer(previous):
-            raise RuntimeError("Sidebar navigation requires an owner-backed current session")
+            raise RuntimeError("Sidebar navigation requires a runtime-backed current session")
         if not refreshing:
             self._close_subagent_view()
             self._close_org_chart_view()
@@ -6443,7 +6444,7 @@ class OperatorApp(App[None]):
                 # A BIND THAT DID NOT BIND IS A FAILURE. The bind has two
                 # silent returns that look identical here — "already bound,
                 # nothing to do" and "cannot bind right now" (the facade is
-                # `_recovering`, remote.py) — and only the second leaves the
+                # `_recovering`, attached.py) — and only the second leaves the
                 # session cold. Committing on that second one publishes a COLD
                 # session as connected: `display_only` goes False, the saved
                 # transcript is swapped in live, and then
@@ -16450,7 +16451,7 @@ class OperatorApp(App[None]):
                         # recoverable (press again), so it renders as a
                         # warning that says exactly what is unknown.
                         self._replace_stop_notice(
-                            f"could not confirm the stop with the session owner — "
+                            f"could not confirm the stop with the runtime — "
                             f"{offered} subagent{'s' if offered != 1 else ''} may still "
                             "be running; press Esc twice again to retry",
                             "warning",
@@ -20148,7 +20149,7 @@ class OperatorApp(App[None]):
             record = getattr(session, "record_shell", None) if session is not None else None
             if not callable(record):
                 self._notice_for(
-                    source, "Shell finished, but this owner cannot save its receipt", "error"
+                    source, "Shell finished, but this runtime cannot save its receipt", "error"
                 )
                 return
             try:
@@ -23922,7 +23923,7 @@ class OperatorApp(App[None]):
             # second line about the same fact pointing the other way is the
             # defect, not the diagnosis.
             logger.debug(
-                "build skew (owner) at %s: %s is current, this window (%s) is behind",
+                "build skew (runtime) at %s: %s is current, this window (%s) is behind",
                 reason,
                 owner.label(),
                 loaded.label(),
@@ -23992,7 +23993,7 @@ class OperatorApp(App[None]):
                 # in this build, so anything without it is older than this
                 # window.
                 announce(
-                    "owner-unknown",
+                    "runtime-unknown",
                     "",
                     loaded.label(),
                     f"{subject} is running an older version than this window \u2014 it "
@@ -24027,7 +24028,7 @@ class OperatorApp(App[None]):
                 # reaper compares itself against disk and acts on the answer
                 # (QA round 1, Q-1 all-refs sub-case).
                 announce(
-                    "owner",
+                    "runtime",
                     owner.label(),
                     loaded.label(),
                     # Collapsed by hand when the versions are EQUAL (the
@@ -24057,7 +24058,7 @@ class OperatorApp(App[None]):
                 )
                 return
             announce(
-                "owner",
+                "runtime",
                 owner.label(),
                 loaded.label(),
                 f"{subject} is running {_build_change(owner, loaded)} \u2014 it will "
@@ -24068,7 +24069,7 @@ class OperatorApp(App[None]):
 
         if runtime_idle and callable(ask):
             logger.debug(
-                "build skew (owner) at %s: %s -> %s; owner idle, requesting refresh",
+                "build skew (runtime) at %s: %s -> %s; runtime idle, requesting refresh",
                 reason,
                 owner.label() if owner is not None else "<unstamped>",
                 loaded.label(),
@@ -24625,8 +24626,8 @@ class OperatorApp(App[None]):
             # list (a reduced test double) still falls through, matching the
             # pre-guard behaviour the round-4 walk established.
             self._system_notice(
-                f"/{entry.name} is not available from this session's owner; "
-                "run it in the owner's terminal",
+                f"/{entry.name} is not available from this session's runtime; "
+                "run it in the runtime's terminal",
                 "warning",
             )
             return
@@ -25073,7 +25074,7 @@ class OperatorApp(App[None]):
             # `AttachedSession.request_stop` does.
             self._issued_own_stop = False
             self._system_notice(
-                "cannot stop this session's owner — the owner is an older process; "
+                "cannot stop this session's runtime — the runtime is an older process; "
                 "close it there or upgrade",
                 "warning",
             )
@@ -35297,7 +35298,7 @@ class OperatorApp(App[None]):
         if session is not self._session:
             logger.debug("dropped a recall refusal for a session that is no longer current")
             return
-        logger.debug("session owner refused the recall of steer %s", command_id)
+        logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
     def _settle_queued_steer_notices_unsent(self) -> None:
