@@ -452,6 +452,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # QwenCloud console session cookie: the credential the personal Token Plan
+    # usage window needs and no login flow can mint (a browser session cookie
+    # cannot be refreshed headlessly). stdlib-only registration, same rule.
+    qwencloud_parser = subparsers.add_parser(
+        "qwencloud-ticket",
+        help="Store the QwenCloud console session cookie that /usage reads",
+    )
+    qwencloud_actions = qwencloud_parser.add_subparsers(dest="qwencloud_command")
+    qwencloud_actions.add_parser(
+        "set", help="Store the cookie; the value is read from STDIN, never argv"
+    )
+    qwencloud_actions.add_parser(
+        "status", help="Whether a cookie is stored and how old it is; never the value"
+    )
+    qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
+
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
@@ -3706,6 +3722,104 @@ def login_status_command() -> int:
         auth_store.close()
 
 
+def qwencloud_ticket_command(args: argparse.Namespace) -> int:
+    """Store / inspect / remove the QwenCloud console session cookie.
+
+    The value is read from STDIN and never from argv: a command line is
+    readable by any process running as you (`ps`) and lands in shell history.
+    This mirrors `lop secret set NAME`.
+    """
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_TICKET_STALE_MS,
+        TicketStoreError,
+        delete_ticket,
+        read_ticket_record,
+        store_ticket,
+    )
+
+    command = getattr(args, "qwencloud_command", None)
+    store = AuthStore()
+
+    if command == "set":
+        if sys.stdin is None or sys.stdin.isatty():
+            print(
+                "lop qwencloud-ticket set: the value is read from stdin, never from "
+                "the command line (argv is readable by any process running as you).\n"
+                "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+                file=sys.stderr,
+            )
+            return 2
+        value = sys.stdin.read()
+        if value.endswith("\n"):
+            value = value[:-1]
+        try:
+            store_ticket(store, value)
+        except TicketStoreError as exc:
+            print(f"lop qwencloud-ticket set: {exc}", file=sys.stderr)
+            return 1
+        record = read_ticket_record(store)
+        length = record["length"] if record else 0
+        print(f"Stored QwenCloud console ticket ({length} characters).")
+        return 0
+
+    if command == "status":
+        record = read_ticket_record(store)
+        if record is None:
+            print("No QwenCloud console ticket stored.")
+            print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
+            return 0
+        captured = record.get("captured_at")
+        age_ms = 0
+        if captured:
+            age_ms = int(time.time() * 1000) - int(captured)
+            days = age_ms / 86_400_000
+            age = f"{days:.1f} days old"
+        else:
+            age = "age unknown"
+        print(f"QwenCloud console ticket stored ({record['length']} characters, {age}).")
+        if captured and age_ms > QWENCLOUD_TICKET_STALE_MS:
+            print(
+                "  This is older than a console session usually lasts. If /usage has "
+                "stopped showing the 7 Day Credits window, capture a fresh cookie."
+            )
+        # A `lop /update` or `uv tool upgrade` reinstalls from PyPI and reverts
+        # a locally built console fetcher while leaving this row in place --
+        # a silent "nothing reads it" state. Say so instead of looking healthy.
+        # Probed with getattr rather than a direct import: the symbol is absent
+        # by design in a build without the console fetcher, and an import of a
+        # name that may not exist is a static-analysis error rather than the
+        # runtime question actually being asked ("does this build read it?").
+        try:
+            from local_operator.providers import usage as _usage_module
+
+            has_fetcher = hasattr(_usage_module, "fetch_qwencloud_console_usage")
+        except ImportError:
+            has_fetcher = False
+        if not has_fetcher:
+            print(
+                "  WARNING: this build has no QwenCloud console fetcher, so the stored "
+                "ticket is not read by anything. Reinstall local-operator from a build "
+                "that includes it."
+            )
+        return 0
+
+    if command == "rm":
+        print(
+            "Removed the stored QwenCloud console ticket."
+            if delete_ticket(store)
+            else "No QwenCloud console ticket stored."
+        )
+        return 0
+
+    print(
+        "usage: lop qwencloud-ticket {set,status,rm}\n"
+        "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+        file=sys.stderr,
+    )
+    return 2
+
+
 _MCP_INTERACTIVE_LOGIN_TIMEOUT_MS = 10 * 60_000
 
 
@@ -4857,6 +4971,8 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "qwencloud-ticket":
+            return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":
