@@ -550,3 +550,49 @@ def test_the_wake_headline_strips_every_model_facing_prefix() -> None:
     assert wake_receipt_headline("(alarm) " * 5 + "build finished") == "build finished"
     # A message that merely MENTIONS the marker keeps its own words.
     assert wake_receipt_headline("see (alarm) in the logs") == "see (alarm) in the logs"
+
+
+def test_both_surfaces_strip_the_reference_block() -> None:
+    """A `@path` expansion is model-facing payload, not the user's words.
+
+    An `@` reference is expanded ONCE at submit and the file rides the message
+    as an `<operator-references>` block. The model needs it; a transcript row
+    must not show it, or a one-line question about a file paints as the whole
+    file — and, because a session is titled from its first user turn, titles the
+    thread after the file's first line too.
+
+    Asserted through `user_row_text` because that is the ONE function both
+    surfaces paint through (`tui/session_presentation.py:922` and
+    `mobile/projection.py:767`). Stripping in a host is how the phone once got
+    a rule the TUI had and the other did not, which is the divergence this whole
+    file exists to prevent — so the test lives here rather than in a new
+    `test_rows.py` beside it.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    typed = "what does @auth.py do?"
+    sent = (
+        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n"
+        '<file path="auth.py">\ndef login():\n    return SECRET\n</file>\n'
+        f"{REFERENCE_BLOCK_CLOSE}"
+    )
+
+    row = user_row_text(sent)
+
+    assert row == typed
+    assert "SECRET" not in row
+    assert REFERENCE_BLOCK_OPEN not in row
+    # The token itself SURVIVES: it is what the operator typed, and the row is
+    # a record of that rather than of what the model was handed.
+    assert "@auth.py" in row
+
+
+def test_an_unexpanded_message_is_untouched_by_the_reference_strip() -> None:
+    """The overwhelmingly common case must not be rewritten.
+
+    Every message that cites no file goes through this same function, so a
+    strip that trimmed or normalised ordinary prose would change every row on
+    both surfaces to fix a case that is not present.
+    """
+    assert user_row_text("just a question about @ signs") == "just a question about @ signs"
+    assert user_row_text("plain prose") == "plain prose"

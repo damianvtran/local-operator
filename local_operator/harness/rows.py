@@ -108,14 +108,58 @@ def typed_line_of(text: str) -> str | None:
         return None
 
 
+def reference_block_stripped(text: str) -> str:
+    """``text`` without its appended ``<operator-references>`` block.
+
+    An ``@path`` reference is expanded ONCE, at submit, and the expansion is
+    appended to the message as a block. The model needs that block; the
+    transcript must not show it, or a one-line question about a file paints as
+    the whole file — and, because a session is titled from its first user turn,
+    titles the thread after the file's first line too. Exactly the failure
+    :func:`typed_line_of` exists to prevent for a skill payload.
+
+    Stripping HERE rather than in a host is the point (design R5). Both surfaces
+    paint through :func:`user_row_text`, so a strip written in the TUI would
+    leave the phone showing the block — which is precisely how one surface got
+    the skill rule and the other did not.
+
+    Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
+    above and for the same reason: this module stays host-free, and a broken or
+    absent resolver must never stop a transcript replaying. Every failure
+    degrades to "no block here", so the caller paints the text verbatim.
+    """
+    try:
+        from local_operator.references import (
+            REFERENCE_BLOCK_CLOSE,
+            REFERENCE_BLOCK_OPEN,
+        )
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return text
+    opened = text.find(REFERENCE_BLOCK_OPEN)
+    if opened == -1:
+        return text
+    closed = text.find(REFERENCE_BLOCK_CLOSE, opened)
+    if closed == -1:
+        # An UNCLOSED block: truncated history, or a message cut mid-write. Drop
+        # from the opener anyway — showing a dangling `<operator-references>`
+        # and the half file under it is worse than showing the typed line alone.
+        return text[:opened].rstrip()
+    return (text[:opened] + text[closed + len(REFERENCE_BLOCK_CLOSE) :]).rstrip()
+
+
 def user_row_text(text: str) -> str:
     """What a surface paints for a ``role="user"`` message.
 
-    Collapses a skill payload to the line the user actually typed and leaves
-    every other message alone. Kept beside :func:`is_harness_chrome` because
-    the two are the whole of the "what did the user really say" decision, and
-    splitting them across hosts is how one surface got the skill rule and the
-    other did not.
+    Collapses a skill payload to the line the user actually typed, strips an
+    expanded reference block, and leaves every other message alone. Kept beside
+    :func:`is_harness_chrome` because the two are the whole of the "what did the
+    user really say" decision, and splitting them across hosts is how one
+    surface got the skill rule and the other did not.
+
+    The reference block is removed FIRST, before the skill fallback: a
+    `$skill` invocation whose request cited a file carries both, and
+    :func:`typed_line_of` parses the payload envelope, which a trailing block
+    would sit outside of and survive.
 
     Strips for the same reason :func:`is_harness_chrome` does: the two hosts
     normalise differently, so an envelope with surrounding whitespace would
@@ -123,7 +167,7 @@ def user_row_text(text: str) -> str:
     phone. The fallback returns the stripped text so both surfaces paint one
     row, not one padded and one not.
     """
-    stripped = text.strip()
+    stripped = reference_block_stripped(text).strip()
     return typed_line_of(stripped) or stripped
 
 

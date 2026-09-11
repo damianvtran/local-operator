@@ -144,6 +144,7 @@ from local_operator.tui.widgets.command_picker import (
     CommandPicker,
     CompletionMode,
     PickerMode,
+    at_token,
     completion_for,
     ghost_for,
     skill_token,
@@ -152,6 +153,7 @@ from local_operator.tui.widgets.command_picker import (
     slash_context,
     slash_token_span,
     slash_word,
+    split_token,
 )
 from local_operator.tui.widgets.model_picker import ModelPicker, ModelRow
 
@@ -1598,6 +1600,33 @@ class SkillQueryOpened(Message):
     """
 
 
+class FileQueryOpened(Message):
+    """Posted when the buffer enters an ``@path`` token, so the app fills rows.
+
+    CARRIES THE DIRECTORY PART, unlike :class:`SkillQueryOpened`, which carries
+    nothing. That difference is the whole design of this message. A skill
+    vocabulary is fixed for the session, so one message per token is enough. A
+    file vocabulary is not: ``@src/`` and ``@src/ap`` list the SAME directory,
+    but ``@src/`` and ``@src/sub/`` list DIFFERENT ones. Keying the re-arm on
+    the token — the rule ``SkillQueryOpened`` uses — would list the parent
+    forever as the user typed deeper.
+
+    So the editor re-posts this whenever the directory part changes, not merely
+    when the token opens. That is the same problem
+    :class:`RefreshArgumentChoices` solves for a two-level argument whose choice
+    set changes under a standing command word, and the economy it documents is
+    preserved the same way: one scan per DIRECTORY, not one per keystroke.
+    """
+
+    def __init__(self, directory: str) -> None:
+        super().__init__()
+        #: The directory part of the token, as :func:`split_token` reads it —
+        #: ``""`` for a bare ``@``, ``"src/"`` for ``@src/ap``. The app resolves
+        #: it against the session cwd; it is never an absolute path of the
+        #: app's choosing.
+        self.directory = directory
+
+
 class RefreshArgumentChoices(Message):
     """Posted when the rows an open argument list should offer have changed
     UNDER the same command word — which :class:`ArgumentQueryOpened` can never
@@ -2018,6 +2047,15 @@ class Editor(TextArea):
         #: the token so the next ``$`` asks again. Assigned here because
         #: ``_sync_picker`` reads it during ``super().__init__()``.
         self._skill_choices_requested: bool = False
+        #: The DIRECTORY a :class:`FileQueryOpened` has been posted for, or
+        #: ``None`` outside an ``@`` token. The file list's re-arm latch, and it
+        #: holds a directory rather than a bool because the file vocabulary
+        #: changes UNDER a standing token: ``@src/`` and ``@src/ap`` are the same
+        #: scan, ``@src/sub/`` is a different one. A bool latch — the rule the
+        #: skill list can afford — would list the parent directory forever as
+        #: the user typed deeper. Assigned here because ``_sync_picker`` reads
+        #: it during ``super().__init__()``.
+        self._file_choices_requested: str | None = None
         # Command words (primaries AND aliases) whose argument opens the value
         # list, and the subset of those the bare command cannot stand without.
         # DERIVED from the registry in :meth:`set_commands` rather than listed
@@ -3224,7 +3262,17 @@ class Editor(TextArea):
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
                     unambiguous = self._picker_choice_is_unambiguous(name)
-                    if self._picker.mode is PickerMode.SKILL:
+                    if self._picker.mode is PickerMode.FILE:
+                        # NEITHER key ever submits on a file row, ambiguous or
+                        # not — the same rule SKILL gets below, for a stronger
+                        # reason. A completed `@src/` is very often MID-PATH:
+                        # the user is one segment into naming a file and the
+                        # next keystroke continues it. Submitting on the
+                        # one-match case would send a reference to a directory
+                        # nobody meant to send, and there is no undo for a
+                        # turn already dispatched.
+                        self._complete_file(name)
+                    elif self._picker.mode is PickerMode.SKILL:
                         # NEITHER key ever submits here, ambiguous or not. A
                         # completed `$skill ` is not a runnable thing the way
                         # `/logout anthropic` is — it is the opening of a
@@ -7205,10 +7253,17 @@ class Editor(TextArea):
     def _picker_phase(self) -> str | None:
         """Which list the caret is currently inside, or ``None``.
 
-        ``"argument"`` while :func:`slash_argument` matches, ``"command"``
-        while :func:`slash_context` matches, ``None`` otherwise. Used by
+        ``"file"`` while :func:`at_token` matches, ``"argument"`` while
+        :func:`slash_argument` matches, ``"command"`` while
+        :func:`slash_context` matches, ``None`` otherwise. Used by
         :meth:`_sync_picker_if_phase_changed` so a caret move that stays
         inside one phase does not re-open an Esc-dismissed list.
+
+        ``"file"`` is the FOURTH answer and it is mutually exclusive with the
+        other three for the cheapest possible reason: a boundary ``@`` is not a
+        boundary ``$`` and not a boundary ``/``. The sigils are distinct
+        characters, so no buffer position can open two of these tokens at once
+        and the order below decides only who is ASKED first, never who wins.
 
         The three answers are still mutually exclusive, but the claim alone no
         longer delivers that. A prompt command's claim is now PARTIAL: a ``$``
@@ -7221,6 +7276,11 @@ class Editor(TextArea):
         never who wins.
         """
         cursor = self._caret_offset()
+        # Asked first because it is the cheapest parse of the four and cannot
+        # collide with them: `at_token` matches only a boundary `@`, a character
+        # none of the other three parsers reads as a sigil.
+        if at_token(self.text, cursor) is not None:
+            return "file"
         # Checked FIRST and short-circuiting, but the reason is no longer "a `$`
         # is anchored at offset 0": it is inline now, so `/team ops $research`
         # puts both sigils on one line. `skill_token` takes the recognised
@@ -7270,10 +7330,13 @@ class Editor(TextArea):
         with its own vocabulary.
 
         ``self._picker`` is asked with ANY non-``None`` phase, not just
-        ``"command"`` (round 2, R14). That widget serves FOUR lists — the
+        ``"command"`` (round 2, R14). That widget serves FIVE lists — the
         command word, an argument list (`/theme `, `/effort `, `/login `,
-        `/mcp `, `/team `…), the `$skill` list and the loading reserve — and
-        every one of them can hold an Esc. Narrowing the question to the
+        `/mcp `, `/team `…), the `$skill` list, the `@path` list and the
+        loading reserve — and every one of them can hold an Esc. The `@path`
+        list cost this site NO edit, which is the point of asking a total
+        question: it became live the moment :meth:`_picker_phase` learned to
+        answer ``"file"``. Narrowing the question to the
         command word answered it for one list and returned the other three to
         the literal-whitespace corruption U13 exists to prevent: `/theme d`
         became `/theme d    `. ``_picker_phase()`` returning non-``None`` is
@@ -7343,6 +7406,33 @@ class Editor(TextArea):
         the caret sits, not just what the buffer contains.
         """
         cursor = self._caret_offset()
+        # The `@path` list is derived first, for the reason `_picker_phase`
+        # gives: `@` is a character no other parser here reads as a sigil, so
+        # this branch cannot take a token another list wanted.
+        file_token = at_token(self.text, cursor)
+        if file_token is not None:
+            # Re-posted on a DIRECTORY change, not once per token. This is the
+            # `RefreshArgumentChoices` problem in a new place: that message
+            # exists because a two-level argument's choice set changes while the
+            # command word stands still, and a file token does the same thing —
+            # `@src/` then `sub/` is the same token and a different directory.
+            # Keying the latch on the token alone (what the `$` branch below can
+            # safely do, because a session has one skill vocabulary) would list
+            # the parent forever.
+            directory = split_token(file_token.query)[0]
+            if self._file_choices_requested != directory:
+                self._file_choices_requested = directory
+                self.post_message(FileQueryOpened(directory))
+            self._picker.sync_files(self.text, cursor)
+            self._picker_phase_at_last_sync = self._picker_phase()
+            self._sync_ghost()
+            return
+        # Left the token: the next `@` asks for rows again, so a file created
+        # between two references is not invisible for the rest of the session.
+        # `None` rather than `""` because `""` is a REAL directory here — the
+        # cwd, what a bare `@` scans — and using it as the "nothing requested"
+        # value would suppress the post for the most common token of all.
+        self._file_choices_requested = None
         # The `$skill` list is derived before either slash list, and the
         # arbitration that makes that safe is inside the parse rather than in
         # this ordering — see `_picker_phase`: an inline `$` sitting in an
@@ -7850,6 +7940,14 @@ class Editor(TextArea):
         """
         if not self._picker.is_open():
             return None
+        # ABOVE the two tests below, and that position is load-bearing rather
+        # than stylistic. The ARGUMENT test two lines down is a FALLTHROUGH —
+        # `is not ARGUMENT` returns COMMAND — so a FILE mode reaching it would
+        # be described as a command completion, and since `_ghost_completion`
+        # reads this function the user would see ghost text for a `/command`
+        # dimmed over a path token. Do not move this below it.
+        if self._picker.mode is PickerMode.FILE:
+            return CompletionMode.FILE
         if self._picker.mode is PickerMode.SKILL:
             return CompletionMode.SKILL
         if self._picker.mode is not PickerMode.ARGUMENT:
@@ -8059,6 +8157,18 @@ class Editor(TextArea):
         closes the picker — the word is now whitespace-terminated, so the list
         drops away on the same keystroke that chose from it.
         """
+        if self._picker.mode is PickerMode.FILE:
+            # A clicked file row FILLS AND WAITS, never submits — the same rule
+            # the keyboard gets, because the path may be mid-segment.
+            #
+            # This arm is required, not symmetry: without it FILE falls through
+            # to the COMMAND completion at the end of this method, which looks
+            # `src/app.py` up in the command vocabulary, gets `None` back from
+            # `completion_for`, and returns at the `completed is None` guard.
+            # The click would then do NOTHING — no row inserted, no error, no
+            # clue — which is the worst failure shape available here.
+            self._complete_file(name)
+            return
         if self._picker.mode is PickerMode.ARGUMENT:
             # A clicked team/agent row fills the name and a space and waits for
             # the message, exactly like Tab/Enter on the same row — a click on a
@@ -8132,6 +8242,30 @@ class Editor(TextArea):
         (review round 1, B1).
         """
         completed = self._completion_for(CompletionMode.SKILL, name)
+        if completed is None:
+            return
+        self._set_text_and_caret(*completed)
+
+    def _complete_file(self, name: str) -> None:
+        """Put ``@name`` in the buffer, leaving the caret at the token's end.
+
+        NO TRAILING SPACE, unlike :meth:`_complete_skill`. A path segment may
+        continue — ``@src/`` is very often one keystroke from ``@src/app.py`` —
+        and a space would terminate the token, closing the very list the user is
+        still navigating down. This is the rule an enum-tail ARGUMENT gets, and
+        for the identical reason.
+
+        NO REASSEMBLY either, unlike :meth:`_complete_skill`. That method moves
+        the whole construct to the buffer front because the skill parser is
+        ANCHORED at offset 0 and cannot read an inline token. A reference has no
+        anchored parser: it is resolved wherever it sits, so the span
+        replacement is the entire edit and the user's draft is never reordered
+        around it.
+
+        Nothing submits here, on either key or a click — see the key routing and
+        :meth:`_apply_command`.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
         if completed is None:
             return
         self._set_text_and_caret(*completed)
