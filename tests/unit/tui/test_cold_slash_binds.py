@@ -106,19 +106,41 @@ class _RoutingHandle(FakeHandle):
         return {"ok": True}
 
 
-def _stub_engage(monkeypatch: pytest.MonkeyPatch, server: RuntimeServer) -> list[int]:
-    """Stand in for the runtime spawn: publish a live record for the session."""
+def _stub_engage(
+    monkeypatch: pytest.MonkeyPatch,
+    server: RuntimeServer,
+    *,
+    land: asyncio.Event | None = None,
+) -> list[int]:
+    """Stand in for the runtime spawn: publish a live record for the session.
+
+    ``land`` holds the runtime back until the test releases it, for a test that
+    needs the viewer to still be COLD while it works. The 1.0 s sleep below is
+    a wall-clock bet on the runner being fast enough for the caller's work to
+    finish first, and the listing test lost that bet on a loaded shard runner:
+    it dispatches its listings a few hundred ms after the mount engage starts,
+    so any stall that pushed them past the engage's own 1.0 s ran a LISTING
+    against a viewer that had already bound — where a bare listing is an
+    authoritative command by design — failing its "no listing routes"
+    assertion. A test that needs the engage not to have landed yet must say
+    when it may land rather than hope the clock agrees.
+    """
     engagements: list[int] = []
 
     async def fake_engage(
         session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
     ):  # noqa: ANN001
         engagements.append(1)
-        # The measured engage takes 1.1–2.8 s. The race IS the test: at 0.2 s
-        # the mount engage (#622) usually won against the paste+Enter, and
-        # two of the three cold cells stayed green with the fix removed
-        # (review round 2, R6). One second makes all three red deterministically.
-        await asyncio.sleep(1.0)
+        if land is not None:
+            # The caller's own signal, so the cold window lasts exactly as long
+            # as the work that needs it and no longer.
+            await land.wait()
+        else:
+            # The measured engage takes 1.1–2.8 s. The race IS the test: at 0.2 s
+            # the mount engage (#622) usually won against the paste+Enter, and
+            # two of the three cold cells stayed green with the fix removed
+            # (review round 2, R6). One second makes all three red deterministically.
+            await asyncio.sleep(1.0)
         server.start()
         marker = config_dir / "sessions" / session_id / ".session.pid"
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -147,12 +169,15 @@ def _cold_app(config_dir: Path, session_id: str) -> OperatorApp:
 
 
 def _rig(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    land: asyncio.Event | None = None,
 ) -> tuple[OperatorApp, _RoutingHandle, RuntimeServer, list[int]]:
     session_id = uuid.uuid4().hex[:12]
     handle = _RoutingHandle(session_id)
     server = RuntimeServer(handle, kind="tui")
-    engagements = _stub_engage(monkeypatch, server)
+    engagements = _stub_engage(monkeypatch, server, land=land)
     return _cold_app(config_dir, session_id), handle, server, engagements
 
 
@@ -339,7 +364,16 @@ async def test_listings_and_chart_stay_local_and_engage_nothing_extra(
     TeamRegistry(isolated).create_team(
         TeamEditFields(name="lopdev", description="d", manager="manager")
     )
-    app, handle, server, engagements = _rig(isolated, monkeypatch)
+    # Held back so the listings below are dispatched against a viewer that is
+    # PROVABLY cold. That is the whole property: "a listing never routes through
+    # the bind seam" is a statement about a cold viewer, and a bare listing on a
+    # bound one is an authoritative command by design (the capability registry
+    # says so, and the owner-routed receipt is the intended warm behaviour) — so
+    # a runner slow enough to let the mount engage land first made this test
+    # assert the opposite of what it means. The viewer's coldness is
+    # unambiguous now: nothing can land until this event is set.
+    land = asyncio.Event()
+    app, handle, server, engagements = _rig(isolated, monkeypatch, land=land)
     try:
         async with app.run_test(size=(110, 30)) as pilot:
             session = await _boot(app, pilot)
@@ -352,7 +386,12 @@ async def test_listings_and_chart_stay_local_and_engage_nothing_extra(
                 await pilot.pause()
             # Rendered from local config immediately, while still cold.
             assert "lopdev" in _transcript_text(app)
+            land.set()
             await _until(pilot, lambda: not session.is_cold)
+            # Slack for the NEGATIVE assertion below rather than a settle for
+            # work this test needs: any authoritative call these listings could
+            # make would arrive on the owner's socket, and giving it time to
+            # land can only make "none did" harder to satisfy.
             await asyncio.sleep(0.3)
             await pilot.pause()
             assert engagements == [1], "only the mount engage; the listings added none"
