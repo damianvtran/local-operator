@@ -201,6 +201,32 @@ def font_provenance(profile: CaptureProfile) -> dict[str, Any]:
     return result
 
 
+async def settle_status_line(pilot: Any, app: Any, *, tries: int = 200) -> None:
+    """Pump until the bottom band carries a real model label, then return.
+
+    WHY THIS EXISTS. The status band is pushed the resolved model label a few
+    frames after boot, and until it lands the band paints the ``MODEL_PENDING``
+    sentinel (``connecting…``). A capture taken on a fixed number of ``pause()``
+    calls therefore races that push: the same script on the same tree painted
+    ``connecting…`` in one run and ``test/model`` in the next, which put an
+    unrelated pixel band in a before/after pair whose whole point is to differ
+    in one thing. QA round 1 on PR #972 caught exactly that (Q2) in the
+    committed peer frames.
+
+    Waits on the band's own state rather than on a frame count, because the
+    number of frames is what is not knowable — the label arrives from the
+    session, not from the layout. Reading ``_status``/``_model_label`` is a
+    reach into the band's private state, and that is deliberate: the public
+    surface paints the sentinel, so any public read would have to parse the
+    very text being waited on.
+    """
+    for _ in range(tries):
+        await pilot.pause()
+        if getattr(getattr(app, "_status", None), "_model_label", ""):
+            return
+    raise AssertionError("status band never left the pending model label")
+
+
 def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | None = None) -> str:
     """Save a native-size SVG and the cell/box measurements needed to audit it."""
     if not app.CSS_PATH:
