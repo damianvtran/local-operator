@@ -599,10 +599,14 @@ class TranscriptBlock(Static):
         state (a tool card knows; a streaming message knows from its source
         text) never pays for a full render just to be spaced correctly.
         The default measures whatever renderable is applied, memoized per
-        content revision.
+        content revision. The width comes from the fold LADDER like every other
+        authoring site: a block a builder has already told where it is going
+        (`set_fold_hint`, e.g. a page settled before its mount) must not be
+        judged at the 80-column fallback, or `_settle_gaps` decides spacing for
+        a fold the block is never painted at.
         """
         if self._multirow_cache is None:
-            self._multirow_cache = _count_rows(self._content, self.size.width or 80) > 1
+            self._multirow_cache = _count_rows(self._content, self.fold_width(80)) > 1
         return self._multirow_cache
 
     # -- text selection (TUI-021) -------------------------------------------
@@ -1089,7 +1093,18 @@ class UserBlock(TranscriptBlock):
     #: is most crowded and the reader needs it most.
     MIN_BODY = 8
 
-    def __init__(self, text: str, attachments: int = 0) -> None:
+    def __init__(self, text: str, attachments: int = 0, *, fold_width: int = 0) -> None:
+        """``fold_width`` is the width this prompt is about to be given.
+
+        This block wraps in ``__init__``, so unlike a streaming row there is no
+        later authoring pass a caller could hint after: either the width is
+        known HERE or the rows are authored at the 80-column fallback and pin
+        that fold as their height until the first layout's resize lands — the
+        narrow-then-wide flash on a page mounted above the viewport, which is
+        the one place the reader is looking when a page arrives. Supplied by a
+        builder that knows the destination (`session_presentation`'s replay
+        fold, `entry_block` on the subagent page); zero keeps the fallback.
+        """
         super().__init__()
         self.add_class("user-block")
         self._text = text
@@ -1101,6 +1116,9 @@ class UserBlock(TranscriptBlock):
         #: by `_build` at the width it actually wrapped at, so `copy_row_is_chrome`
         #: never has to re-derive it and cannot disagree with the frame.
         self._receipt_row: int | None = None
+        # BEFORE `_build`: a hint supplied after the rows exist is a width
+        # nothing will read (the ladder is only consulted while authoring).
+        self.set_fold_hint(fold_width)
         self.set_content(self._build())
         self.finalize()
 
@@ -1241,7 +1259,11 @@ class UserBlock(TranscriptBlock):
         """
         rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
         text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        # The LADDER, not `size.width or 80`: before this block has a size the
+        # ladder can still answer with the width it is about to be given (its
+        # parent's content region, or the hint a builder supplied). Reading the
+        # size alone is what made a detached prompt unable to receive one.
+        body = max(self.fold_width(80) - self.RULE_COLS, self.MIN_BODY)
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
         self._set_authored_height(len(rows))
@@ -1314,12 +1336,22 @@ class NoticeBlock(TranscriptBlock):
         "error": "danger",
     }
 
-    def __init__(self, text: str, kind: NoticeKind = "info") -> None:
+    def __init__(self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0) -> None:
+        """``fold_width``: the width this notice is about to be given.
+
+        Same reason ``UserBlock.__init__`` documents at length — a notice wraps
+        itself in ``_build``, so the hint has to be set before the rows exist or
+        the wrap is authored at the fallback and the height pin measures it.
+        The boot-column notice is the one place a wrong fold is not merely a
+        flash: the app hands it the card's width, and a build folded for the
+        terminal wraps again inside it.
+        """
         super().__init__()
         self.add_class("notice-block")
         self._text = text
         self._token = self._KIND_TOKENS.get(kind, "dim")
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
+        self.set_fold_hint(fold_width)
         self.set_content(self._build())
         self.finalize()
 
@@ -1533,7 +1565,9 @@ class NoticeBlock(TranscriptBlock):
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
-        body = self.body_budget(self.size.width or 80)
+        # The ladder, for the reason `UserBlock._build` records: a detached
+        # notice must be able to fold for the destination its builder named.
+        body = self.body_budget(self.fold_width(80))
         rows = self._rows(body)
         # PINNED to the authored row count, for the reason ``UserBlock._build``
         # gives: under ``auto`` the engine measures this block, and the first
@@ -1600,7 +1634,7 @@ class WakeBlock(ExpandableActionBlock):
     #: of row. Catch-up vs live is the SUMMARY, not the name.
     tool_name = "wake"
 
-    def __init__(self, text: str, *, catchup: bool = False) -> None:
+    def __init__(self, text: str, *, catchup: bool = False, fold_width: int = 0) -> None:
         super().__init__()
         self._text = text
         self._catchup = catchup
@@ -1613,6 +1647,9 @@ class WakeBlock(ExpandableActionBlock):
         self._row_count = 1
         self._applied_rows = -1
         self._built_width = -1
+        # Before the first row build: a hint set afterwards is never read
+        # (see `UserBlock.__init__`).
+        self.set_fold_hint(fold_width)
         self._refresh_row()
         self.finalize()
 
@@ -1961,11 +1998,15 @@ class PeerMessageBlock(ExpandableActionBlock):
     #: alone is a floor on half the arithmetic.
     MIN_BODY = 8
 
-    def __init__(self, body: str, sender: dict[str, object] | None = None) -> None:
+    def __init__(
+        self, body: str, sender: dict[str, object] | None = None, *, fold_width: int = 0
+    ) -> None:
         super().__init__()
         self.add_class("peer-message-block")
         self._text = body
         self._sender = sender or {}
+        # Before the first row build (see `UserBlock.__init__`).
+        self.set_fold_hint(fold_width)
         self._expanded = False
         self._hovered = False
         self._focused = False
@@ -2610,6 +2651,7 @@ class WorkingBlock(TranscriptBlock):
         *,
         clock: bool = True,
         clock_from: float | None = None,
+        fold_width: int = 0,
     ) -> None:
         super().__init__()
         self.add_class("working-block")
@@ -2636,6 +2678,9 @@ class WorkingBlock(TranscriptBlock):
         # :meth:`set_activity`; ``None`` means the phase's zero is correct.
         self._clock_from = clock_from
         self._clock = ""
+        # Before the first `_paint`: the row's truncation point is a function of
+        # the width, so a hint supplied after construction is never read.
+        self.set_fold_hint(fold_width)
         self._paint()
 
     @property
@@ -2856,7 +2901,7 @@ class WorkingBlock(TranscriptBlock):
         # model-supplied and of no bounded length. The clock's cells are
         # reserved rather than measured, so the clip point holds still.
         width = max(
-            (self.size.width or 80) - SPINE_INDENT - cell_len(head) - self._CLOCK_COL,
+            self.fold_width(80) - SPINE_INDENT - cell_len(head) - self._CLOCK_COL,
             8,
         )
         label = truncate_cells(self._activity, width)
