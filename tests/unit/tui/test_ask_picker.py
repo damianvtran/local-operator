@@ -237,6 +237,29 @@ def _long_description_question(recommended: int | None = 0) -> AskQuestion:
     )
 
 
+def _is_badge_line(text: str) -> bool:
+    """Is this drawn line the recommendation BADGE's own line?
+
+    The badge owns a line between a row's label and its prose
+    (`ask_picker._build_line_list`), so "every line past a row's first is
+    description" — the rule the four structural helpers below share — would
+    count it as a phantom prose line. That is not a cosmetic miscount: the
+    BLOCKER-1 reveal guards assert on those helpers to prove prose is still on
+    screen, and `_repro_question` defaults to `recommended=0`, so a phantom line
+    lets them pass while the prose is actually gone.
+
+    The test is the tag AND nothing else on the line, not `RECOMMENDED_TAG in
+    text`: a bare containment check would also swallow a genuine PROSE line that
+    happens to quote the words. At the budget-1 band the tag rides the LABEL
+    instead, which these helpers already skip as a row's first line, so this
+    never has to consider that frame.
+
+    Scrollbar glyphs are stripped first — a windowed frame appends one to every
+    body line, and the badge's line is no exception.
+    """
+    return _strip_scrollbar_cell(text).strip() == RECOMMENDED_TAG
+
+
 def _description_lines_of(card: AskPickerScreen, lines: list[str]) -> list[str]:
     """The DESCRIPTION lines among ``lines``, read from the card's own map.
 
@@ -245,14 +268,15 @@ def _description_lines_of(card: AskPickerScreen, lines: list[str]) -> list[str]:
     already multi-line tolerant — so this keeps working when one row's
     description occupies several lines, which is the whole point of the change.
     A row's FIRST line is its label; every further line belonging to the same
-    row is description.
+    row is description — EXCEPT the recommendation badge's own line, which is
+    neither (:func:`_is_badge_line`).
     """
     seen: set[int] = set()
     out: list[str] = []
     for index, line in zip(card._line_rows, lines):
         if index is None:
             continue
-        if index in seen:
+        if index in seen and not _is_badge_line(line):
             out.append(line)
         seen.add(index)
     return out
@@ -2021,17 +2045,20 @@ def _desc_lines_by_row(card: AskPickerScreen) -> dict[int, int]:
     """How many DESCRIPTION lines each visible row drew: its drawn lines minus 1.
 
     A row's first drawn line is its label; every further line mapped to the same
-    row is a description line. Read from `_line_rows` so it stays correct when a
-    row occupies several lines — which is the whole point of the change. A row
-    clipped to only its label (the top/bottom partial-row case) reports 0.
+    row is a description line — EXCEPT the recommendation badge's own line,
+    which is neither and is not counted (:func:`_is_badge_line`). Read from
+    `_line_rows` so it stays correct when a row occupies several lines — which
+    is the whole point of the change. A row clipped to only its label (the
+    top/bottom partial-row case) reports 0.
     """
     counts: dict[int, int] = {}
     first_seen: set[int] = set()
-    for index in _body_line_rows(card):
+    for index, line in zip(_body_line_rows(card), card.render_lines_for_test()):
         if index is None:
             continue
         if index in first_seen:
-            counts[index] = counts.get(index, 0) + 1
+            if not _is_badge_line(line):
+                counts[index] = counts.get(index, 0) + 1
         else:
             first_seen.add(index)
             counts.setdefault(index, 0)
@@ -2261,9 +2288,14 @@ def _prose_by_row(card: AskPickerScreen) -> dict[int, list[str]]:
     Built from `_line_rows` for the same reason :func:`_description_lines_of`
     is: it is the map the hit-test uses, it is rebuilt on every paint, and it is
     already multi-line tolerant. A row's FIRST mapped line is its label; every
-    further line belonging to that row is description. Rows with no description
-    drawn are ABSENT from the result rather than present-and-empty, so
-    `set(before) - set(after)` names the rows that lost their prose outright.
+    further line belonging to that row is description — EXCEPT the
+    recommendation badge's own line, which is neither
+    (:func:`_is_badge_line`). Counting the badge as prose is precisely the
+    failure this helper exists to catch, one level down: the guards below would
+    report a row as still carrying its prose when all it carries is the tag.
+    Rows with no description drawn are ABSENT from the result rather than
+    present-and-empty, so `set(before) - set(after)` names the rows that lost
+    their prose outright.
     """
     lines = [line.rstrip() for line in card.render_lines_for_test()]
     seen: set[int] = set()
@@ -2271,7 +2303,7 @@ def _prose_by_row(card: AskPickerScreen) -> dict[int, list[str]]:
     for index, line in zip(card._line_rows, lines):
         if index is None:
             continue
-        if index in seen:
+        if index in seen and not _is_badge_line(line):
             out.setdefault(index, []).append(line.strip())
         seen.add(index)
     return out
@@ -2681,7 +2713,13 @@ async def test_the_badge_no_longer_shortens_the_option_it_promotes() -> None:
         assert cell_len(promoted) == cell_len(sibling), (promoted, sibling)
         assert RECOMMENDED_TAG not in promoted
         # It moved to the row's own second line, where the prose had room.
-        assert lines[lines.index(promoted) + 1].strip().startswith(RECOMMENDED_TAG)
+        badge_line = lines[lines.index(promoted) + 1]
+        assert badge_line.strip().startswith(RECOMMENDED_TAG)
+        # And that line is the badge's ALONE. It used to head the first prose
+        # line behind a ` · ` separator, which is what made it the row's second
+        # claim on one line and let a tight budget drop it.
+        assert badge_line.strip() == RECOMMENDED_TAG, badge_line
+        assert "·" not in badge_line, badge_line
 
 
 @pytest.mark.asyncio
@@ -3796,6 +3834,57 @@ def _fingerprint(card: AskPickerScreen) -> list[str]:
     return [line.rstrip() for line in card.render_lines_for_test()]
 
 
+def _anchored_fingerprint(card: AskPickerScreen) -> dict[tuple[str, int], str]:
+    """The card's drawn text keyed by WHAT each line is, not WHERE it landed.
+
+    `_fingerprint` compares frames position by position, which cannot tell a
+    one-line viewport SCROLL from a redistribution: a scroll rewrites every
+    position while saying nothing new, and the D3 guard below is about the card
+    rewriting itself under the cursor, not about it scrolling.
+
+    So body lines are keyed by their ABSOLUTE line in the card's line list
+    (`_offset` plus their position within the drawn viewport), which a scroll
+    leaves unchanged and a redistribution rewrites. Chrome lines (`None` in
+    `_line_rows`) do NOT scroll — the header, question, spacer, position row and
+    footer hold their frame positions while only the body moves — so they stay
+    keyed by frame position. Keying the whole frame by a single shift measures
+    WORSE than not shifting at all (11 of 13 against 6 of 13 at 130x30), because
+    it misaligns every chrome line.
+
+    Keys present on only one side are lines that scrolled INTO or out of the
+    viewport — arrivals, not rewrites — and :func:`_churn` does not count them.
+
+    The scrollbar glyph is deliberately NOT stripped: the thumb moving is
+    visible change and belongs in the count. Stripping it was measured to erase
+    the red half's signal (2 of 14 instead of 6 of 14).
+
+    Order matters. `render_lines_for_test()` is called FIRST because it
+    repaints, and `_line_rows` / `_offset` are its output; read before the
+    repaint they describe the previous frame.
+    """
+    lines = [line.rstrip() for line in card.render_lines_for_test()]
+    rows = list(card._line_rows)
+    offset = card._offset
+    keyed: dict[tuple[str, int], str] = {}
+    body_position = 0
+    for position, text in enumerate(lines):
+        row = rows[position] if position < len(rows) else None
+        if row is None:
+            keyed[("chrome", position)] = text
+        else:
+            keyed[("body", offset + body_position)] = text
+            body_position += 1
+    return keyed
+
+
+def _churn(
+    before: dict[tuple[str, int], str], after: dict[tuple[str, int], str]
+) -> tuple[int, int]:
+    """``(lines that changed, lines compared)`` over the keys both frames share."""
+    shared = before.keys() & after.keys()
+    return sum(1 for key in shared if before[key] != after[key]), len(shared)
+
+
 def _thumb_column(card: AskPickerScreen) -> list[str]:
     """The rightmost cell of every DRAWN BODY (viewport) line, top to bottom.
 
@@ -3851,10 +3940,17 @@ def _selected_row_lines(card: AskPickerScreen) -> list[str]:
     description lines ARE its own lines in the one line list (§6) — there is no
     separate block — so this is how a test reads "the revealed text" now that
     :func:`_reveal_block_lines` (the old block locator) always returns empty.
+
+    The recommendation badge's own line is excluded (:func:`_is_badge_line`):
+    callers read this as the row's label plus its PROSE, and the tag is neither
+    — a `…`-mark test over these lines would otherwise be answered by a line
+    that never carries one.
     """
     selected = card.state.selected
     return [
-        line for row, line in zip(card._line_rows, card.render_lines_for_test()) if row == selected
+        line
+        for row, line in zip(card._line_rows, card.render_lines_for_test())
+        if row == selected and not _is_badge_line(line)
     ]
 
 
@@ -4325,11 +4421,24 @@ async def test_a_revealed_row_taller_than_the_viewport_marks_its_cut() -> None:
     cap but not the body), the regime the D7 fix exposed.
 
     Proven able to go red by :func:`test_a_silent_viewport_clip_is_caught`.
+
+    The 120-column leg was RE-DERIVED to 110 when the recommendation badge took
+    a line of its own. The badge used to reserve its cells in the recommended
+    row's first description line, so that row's prose wrapped in a column
+    fourteen cells narrower than every other row's; with the reservation gone it
+    wraps at the full width like its siblings, and at 120 columns the selected
+    row's wrap drops from 5 lines to 4 — enough to fit the viewport, so the leg
+    stopped reaching the clip regime it was chosen to exercise. Measured
+    in-regime after the change: 100x30/32/34 and 110x30/32/34.
+
+    Nothing about the CLAIM moved, and the sweep is still asserted non-vacuous
+    below for exactly that reason: a size list that quietly stops entering the
+    regime turns this guard into a test that passes by doing nothing.
     """
     full = " ".join(_LONG_DESCRIPTIONS[0].split())
     exercised = 0
 
-    for size in ((100, 30), (100, 32), (100, 34), (120, 30), (120, 32), (120, 34)):
+    for size in ((100, 30), (100, 32), (100, 34), (110, 30), (110, 32), (110, 34)):
         app, card = await _real_app_card(size, [_long_description_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
@@ -4812,20 +4921,59 @@ async def test_one_arrow_press_barely_changes_the_card() -> None:
     The old height claim is NOT dropped: it is asserted here too, because a
     card could hold its content still by changing height instead, and the two
     together are what "the card does not move" means.
+
+    Churn is now measured VIEWPORT-ANCHORED (:func:`_anchored_fingerprint`) and
+    the numbers above still read true. A position-by-position comparison cannot
+    tell a one-line SCROLL from a redistribution — a scroll rewrites every
+    position while the card says nothing new — and the recommendation badge's
+    own line made that reachable here: at 130x30 the recommended row spans four
+    lines of a six-line body, so moving the cursor to the next row scrolls by
+    one to keep its whole span visible, which is `_scroll_offset_for_cursor`
+    doing its documented job. Body lines are therefore keyed by their absolute
+    line in the line list and chrome by frame position.
+
+    And the D3 property is now asserted DIRECTLY as well, on
+    `description_rows`. That is not belt-and-braces for its own sake: against a
+    synthetic redistribution (the rejected design — the selected row's cap
+    lifted to 6 unconditionally) the anchored churn measurement catches 190x50
+    (12 of 18) and 150x40 (9 of 20) but MISSES 130x30, scoring 3 of 9 against
+    this bound of 4. At a six-line viewport a rewrite large enough to change the
+    whole card pushes most of the rewritten content out of the shared key set,
+    so only the survivors are compared. The grants assertion closes that hole,
+    and it is the more honest statement of what D3 is: the allocation moved.
+
+    The bound stays at 4 for the reason it always was — worst legitimate churn
+    under the anchored measurement is 3, at 130x30.
     """
     for size in ((190, 50), (150, 40), (130, 30)):
         app, card = await _real_app_card(size, [_repro_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
 
-            before = _fingerprint(card)
+            grants_before = card._layout().description_rows
+            height_before = len(_fingerprint(card))
+            before = _anchored_fingerprint(card)
             await pilot.press("down")
             await _until(pilot, lambda: card.selected_index == 1)
-            after = _fingerprint(card)
+            grants_after = card._layout().description_rows
+            height_after = len(_fingerprint(card))
+            after = _anchored_fingerprint(card)
 
-            assert len(after) == len(before), (size, len(before), len(after))
-            changed = sum(1 for old, new in zip(before, after) if old != new)
-            assert changed <= 4, (size, changed, len(before))
+            # The height proxy, kept.
+            assert height_after == height_before, (size, height_before, height_after)
+            # D3 stated DIRECTLY: the allocation does not move under the cursor.
+            # This is the assertion that actually pins the defect — churn-on-ink
+            # alone lets a real redistribution through at a 6-line viewport,
+            # where most of the rewritten content is pushed out of the shared
+            # key set and only the survivors are compared (measured: a synthetic
+            # cap-lift redistribution scores 3 of 9 at 130x30, under the bound,
+            # while its grants visibly move).
+            assert grants_after == grants_before, (size, grants_before, grants_after)
+            # And the ink the user sees stays put, viewport-anchored. The belt to
+            # the grants check's braces: it catches a rewrite that holds the
+            # grants constant, which the grants check alone would miss.
+            changed, compared = _churn(before, after)
+            assert changed <= 4, (size, changed, compared)
 
 
 @pytest.mark.asyncio
@@ -4848,16 +4996,23 @@ async def test_an_uncapped_card_churns_under_the_cursor(
     async with app.run_test(size=(150, 40)) as pilot:
         await _show(app, pilot, card)
 
-        before = _fingerprint(card)
+        height_before = len(_fingerprint(card))
+        before = _anchored_fingerprint(card)
         await pilot.press("down")
         await _until(pilot, lambda: card.selected_index == 1)
-        after = _fingerprint(card)
+        height_after = len(_fingerprint(card))
+        after = _anchored_fingerprint(card)
 
         # The proxy holds...
-        assert len(after) == len(before), (len(before), len(after))
-        # ...and the real property does not.
-        changed = sum(1 for old, new in zip(before, after) if old != new)
-        assert changed > 4, (changed, len(before))
+        assert height_after == height_before, (height_before, height_after)
+        # ...and the real property does not. Measured viewport-anchored, so this
+        # fires on genuine rewriting rather than on a scroll having moved every
+        # line down by one.
+        #
+        # No grants assertion here, deliberately: this half's job is to FAIL, and
+        # a second failing assertion beside it would obscure which property fired.
+        changed, compared = _churn(before, after)
+        assert changed > 4, (changed, compared)
 
 
 @pytest.mark.asyncio
@@ -4893,20 +5048,22 @@ async def test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it() -> No
         card = await app.open_picker()
         await pilot.pause()
 
-        line = next(
-            candidate
-            for candidate in card._card_text().split("\n")
-            if RECOMMENDED_TAG in candidate.plain
+        drawn = card._card_text().split("\n")
+        at = next(
+            index for index, candidate in enumerate(drawn) if RECOMMENDED_TAG in candidate.plain
         )
+        line = drawn[at]
         start = line.plain.index(RECOMMENDED_TAG)
-        end = start + len(RECOMMENDED_TAG)
 
         badge = _style_at(line, start)
-        # The prose after the tag: the text the badge has to win against. Taken
-        # from the far side of the ` · ` separator so it is genuinely the
-        # description and not the separator's own ink.
-        prose_at = line.plain.index("·", end) + 2
-        prose = _style_at(line, prose_at)
+        # The prose the badge has to win against: the row's first description
+        # line, which is the badge's SUCCESSOR now that the tag owns a line of
+        # its own. It used to be taken from the far side of this line's own
+        # ` · ` separator, and an own-line badge has no separator and no prose
+        # to point at — the locator moved for that reason and for no other.
+        # Every assertion below is unchanged.
+        prose_line = drawn[at + 1]
+        prose = _style_at(prose_line, len(prose_line.plain) - len(prose_line.plain.lstrip()))
 
         badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
         prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
@@ -4929,6 +5086,9 @@ async def test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it() -> No
         # buy its emphasis by dimming the consequence text, which on the
         # approval gate authorises a tool call (design §2.3).
         assert prose_colour == theme_mod.semantic_color("muted"), prose_colour
+        # The badge really is alone on its line — the premise the locator above
+        # now rests on, asserted rather than assumed.
+        assert line.plain.strip() == RECOMMENDED_TAG, line.plain
 
 
 @pytest.mark.asyncio
@@ -4996,21 +5156,290 @@ async def test_a_badge_drawn_like_the_prose_is_caught(
     async with app.run_test(size=(100, 30)) as pilot:
         card = await app.open_picker()
         await pilot.pause()
-        line = next(
-            candidate
-            for candidate in card._card_text().split("\n")
-            if RECOMMENDED_TAG in candidate.plain
+        drawn = card._card_text().split("\n")
+        at = next(
+            index for index, candidate in enumerate(drawn) if RECOMMENDED_TAG in candidate.plain
         )
+        line = drawn[at]
         start = line.plain.index(RECOMMENDED_TAG)
 
         badge = _style_at(line, start)
-        prose = _style_at(line, line.plain.index("·", start + len(RECOMMENDED_TAG)) + 2)
+        # The badge's successor line — the row's prose. See the locator note in
+        # the green half above: only where the prose is read moved, and only
+        # because the badge no longer shares a line with it.
+        prose_line = drawn[at + 1]
+        prose = _style_at(prose_line, len(prose_line.plain) - len(prose_line.plain.lstrip()))
         badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
         prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
 
         # Indistinguishable, which is what the guard above must reject.
         assert badge_colour == prose_colour, (badge_colour, prose_colour)
         assert bool(badge.bold) == bool(prose.bold), (badge.bold, prose.bold)
+
+
+def _edge_question() -> AskQuestion:
+    """A recommended row whose description wraps to TWO lines at width 100.
+
+    Sized so the row's span is ``label + badge + 2 prose`` and the viewport can
+    cut it between the badge and the prose — the frame
+    :func:`test_a_badge_line_at_the_viewport_edge_is_not_marked_as_a_clipped_description`
+    needs, and the reason the description is this long.
+    """
+    return AskQuestion(
+        id="rollout",
+        question="Which rollout should the stale-row migration take?",
+        options=[
+            AskOption(label="Drop the rows", description="nothing reads the column any more"),
+            AskOption(
+                label="Backfill from the audit log",
+                description=(
+                    "nothing reads that column any more, and the follow-up merge request has"
+                    " not been assigned to anyone yet, so the cleanup would wait"
+                ),
+            ),
+            AskOption(label="Dual-write for a week", description="two writers for a week"),
+        ],
+        recommended=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_badge_line_at_the_viewport_edge_is_not_marked_as_a_clipped_description() -> None:
+    """The badge's own line must never reach `_mark_clipped`.
+
+    `_mark_clipped` documents "assumes ``row`` is a DESCRIPTION line": it slices
+    off `_description_indent()` cells and repaints the remainder at `muted` with
+    a `…` appended. Run on the badge line it strips the `▸` glyph and turns
+    `RECOMMENDED` into muted prose ending in an ellipsis — a badge rendered as a
+    sentence fragment, on the one row the model is pointing at.
+
+    It is reachable because the guard that gates it used to be POSITIONAL —
+    "the last visible line sits past the row's label" — which was a sound proxy
+    for "is prose" only while a row's lines were `label, desc*`. The own-line
+    badge makes `label, badge, desc*` reachable and the proxy false, so the
+    guard now reads the line's KIND. Nothing else about the frame changed, which
+    is why a green suite would not notice: the corruption is one line of one
+    frame at one viewport edge.
+
+    The size is DERIVED here rather than pinned from a measurement taken before
+    the badge had a line, and the preconditions are asserted so the test cannot
+    quietly stop testing anything.
+    """
+    question = _edge_question()
+    size = (100, 22)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        row = card.question.recommended
+        assert row is not None
+
+        # Precondition 1: the plan gives the row exactly its label and its
+        # badge, with prose below the edge.
+        assert layout.body_line_budget == 2, layout.body_line_budget
+        assert layout.row_draws_badge_line(row), "the row was not granted a badge line"
+
+        lines = [line.rstrip() for line in card.render_lines_for_test()]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        assert len(drawn) == 2, (drawn, lines)
+        badge_line = lines[drawn[-1]]
+
+        # Precondition 2: the last visible line of the viewport IS the badge
+        # line, and the clip guard is live behind it (the row continues below).
+        assert _is_badge_line(badge_line), badge_line
+        assert len(card._description_lines(row, layout.content_width)) >= 2, "prose must continue"
+
+        # The badge, verbatim and unmangled.
+        assert RECOMMENDED_TAG in badge_line, badge_line
+        assert badge_line.startswith(" ") and "▸" in badge_line, badge_line
+        assert not _strip_scrollbar_cell(badge_line).rstrip().endswith("…"), badge_line
+
+        styled = next(
+            line for line in card._card_text().split("\n") if RECOMMENDED_TAG in line.plain
+        )
+        ink = _style_at(styled, styled.plain.index(RECOMMENDED_TAG))
+        assert ink.bold, styled.plain
+        colour = ink.color.triplet.hex if ink.color and ink.color.triplet else None
+        assert colour != theme_mod.semantic_color("muted"), colour
+
+
+@pytest.mark.asyncio
+async def test_a_badge_line_marked_as_a_clipped_description_is_caught() -> None:
+    """The red half of the guard above: under the POSITIONAL test the badge line
+    is routed into `_mark_clipped`, and it comes back destroyed.
+
+    Two claims, because the guard is worth only as much as both:
+
+    1. the OLD predicate — "the last visible line sits past the row's label
+       line" — is TRUE for this frame's badge line, so the pre-fix code would
+       have marked it. Recomputed here from the same `_line_rows` map the widget
+       builds, rather than asserted from memory;
+    2. and `_mark_clipped` run on that line destroys the badge.
+
+    What "destroyed" means is measured, not assumed. The `▸` glyph SURVIVES —
+    `_description_indent()` is 5 and the tag starts at column 5, so the slice
+    that strips the indent stops exactly short of it. The damage is the other
+    three: the weight is dropped (bold → none), the ink is repainted from `fg`
+    to `muted`, and a `…` is appended. That is the badge rendered as an
+    abandoned sentence of description prose — the same indistinguishable-from-
+    prose state `test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it`
+    exists to reject, arrived at from the paint side instead of the style side.
+    """
+    question = _edge_question()
+    size = (100, 22)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        row = card.question.recommended
+        assert row is not None
+        assert layout.body_line_budget == 2, layout.body_line_budget
+
+        lines = [line.rstrip() for line in card.render_lines_for_test()]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        badge_at = drawn[-1]
+        assert _is_badge_line(lines[badge_at]), lines[badge_at]
+
+        # Claim 1: the positional predicate fires on the badge line. `label_pos`
+        # is the row's first drawn line; the badge sits past it, which is all
+        # the old guard ever asked.
+        label_pos = drawn[0]
+        assert badge_at > label_pos, (badge_at, label_pos)
+
+        # Claim 2: what that routing does to the line.
+        original = next(
+            line for line in card._card_text().split("\n") if RECOMMENDED_TAG in line.plain
+        )
+        before = _style_at(original, original.plain.index(RECOMMENDED_TAG))
+        assert before.bold, "precondition: the badge is bold before marking"
+
+        mangled = card._mark_clipped(original, layout.content_width, row)
+        assert mangled.plain.rstrip().endswith("…"), mangled.plain
+        after = _style_at(mangled, len(mangled.plain) - len(mangled.plain.lstrip()))
+        assert not after.bold, mangled.plain
+        colour = after.color.triplet.hex if after.color and after.color.triplet else None
+        assert colour == theme_mod.semantic_color("muted"), colour
+        assert colour != theme_mod.semantic_color("fg"), colour
+
+
+@pytest.mark.asyncio
+async def test_the_badge_line_is_not_counted_as_a_rows_prose() -> None:
+    """The badge's line is not description, and the structural helpers know it.
+
+    `_prose_by_row` and its three siblings map "every line past a row's first"
+    to description. Under the own-line badge that rule hands the recommended row
+    a phantom prose line — and `_repro_question` defaults to `recommended=0`, so
+    the phantom lands squarely in the BLOCKER-1 reveal guards, which would then
+    report a row as still carrying prose when all it carries is the tag.
+    """
+    question = _edge_question()
+    size = (100, 30)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        row = card.question.recommended
+        assert row is not None
+        layout = card._layout()
+        assert layout.row_draws_badge_line(row), "the fixture must draw a badge line"
+
+        prose = _prose_by_row(card)[row]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        # label + badge + prose: the badge is drawn, and it is not in the prose.
+        assert len(drawn) > len(prose) + 1, (drawn, prose)
+        assert all(RECOMMENDED_TAG not in line for line in prose), prose
+        assert prose, "the row's prose must still be reported"
+        assert prose[0].startswith("nothing reads that column"), prose
+
+
+@pytest.mark.asyncio
+async def test_the_recommended_badge_survives_the_band_where_it_used_to_vanish() -> None:
+    """100x22 and below is where the badge was measured GONE.
+
+    It was drawn at the head of the row's first DESCRIPTION line, so it was the
+    row's second claim on a line and the first thing a tight budget dropped —
+    on exactly the frames where the badge is the only thing marking the promoted
+    row, since a short card also sheds the prose that would otherwise explain
+    it. Charged its own line ahead of the prose it survives every budget that
+    grants the row two lines; at a budget of one it rides the LABEL
+    (`_row_text`), which is the honest degradation and not an absence.
+
+    The measured budget is asserted at each size, not noted in a comment, so
+    the test fails loudly rather than silently measuring a different frame.
+    """
+    question = _edge_question()
+    expected_budget = {(100, 30): 6, (100, 24): 3, (100, 22): 2, (100, 20): 1}
+    for size, budget in expected_budget.items():
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            row = card.question.recommended
+            assert row is not None
+            assert layout.body_line_budget == budget, (size, layout.body_line_budget)
+
+            frame = "\n".join(_fingerprint(card))
+            assert RECOMMENDED_TAG in frame, (size, frame)
+
+            lines = [line.rstrip() for line in card.render_lines_for_test()]
+            drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+            assert drawn, (size, "the recommended row drew nothing")
+            if len(drawn) >= 2:
+                # Two lines or more: the tag is ALONE on the second one.
+                assert layout.row_draws_badge_line(row), size
+                assert _is_badge_line(lines[drawn[1]]), (size, lines[drawn[1]])
+            else:
+                # One line: the tag rides the label, and the row is selected.
+                assert not layout.row_draws_badge_line(row), size
+                assert RECOMMENDED_TAG in lines[drawn[0]], (size, lines[drawn[0]])
+                assert card.state.selected == row, size
+
+
+@pytest.mark.asyncio
+async def test_the_badge_is_never_drawn_without_the_label_it_points_at() -> None:
+    """D1: a badge whose row's LABEL has scrolled off the top is not drawn.
+
+    The badge names a row by sitting under that row's label. Scrolled to just
+    below the label, the frame drew `▸ RECOMMENDED` with no name, no number and
+    no cursor beneath it — and directly above a DIFFERENT option's label, so the
+    natural reading is that the option BELOW is the recommended one. A badge
+    pointing at the wrong row is worse than the missing badge this whole change
+    exists to fix.
+
+    Reachable only under the own-line badge, and that is why it ships with it:
+    before, the tag shared line 0 with the row's description, and a scrolled-off
+    row showing prose reads as an obvious continuation of something above — which
+    is exactly what it is. A badge does not.
+
+    The band is body 6 / recommended row 4 — common laptop-split and tmux-pane
+    sizes — measured at 130x30, 120x30, 110x30, 100x30 and 80x30, on every
+    recommended index. The invariant asserted here is TOTAL rather than pinned to
+    that band: wherever a badge line is drawn, its row's label is drawn above it.
+    """
+    sizes = ((130, 30), (120, 30), (110, 30), (100, 30), (80, 30), (190, 50), (150, 40))
+    for size in sizes:
+        for recommended in (0, 1, 2):
+            app, card = await _real_app_card(size, [_repro_question(recommended=recommended)])
+            async with app.run_test(size=size) as pilot:
+                await _show(app, pilot, card)
+                for press in range(3):
+                    lines = [line.rstrip() for line in card.render_lines_for_test()]
+                    rows = list(card._line_rows)
+                    for position, (row, line) in enumerate(zip(rows, lines)):
+                        if row is None or not _is_badge_line(line):
+                            continue
+                        drawn = [at for at, mapped in enumerate(rows) if mapped == row]
+                        # The row's label is its FIRST drawn line. A badge line
+                        # that is itself the row's first drawn line means the
+                        # label is above the window: the orphan.
+                        assert min(drawn) < position, (
+                            size,
+                            recommended,
+                            press,
+                            "a badge was drawn without the label it points at",
+                            lines,
+                        )
+                    await pilot.press("down")
+                    await pilot.pause()
 
 
 @pytest.mark.asyncio
@@ -5186,6 +5615,23 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
     at which the real dock still affords the full 2-line rhythm, and the
     label-only 100x30 frame is pinned SEPARATELY and honestly below, because it
     is a real frame the user can reach and nothing else in this file covered it.
+
+    RE-DERIVED for the badge's OWN LINE, and the frame grew by exactly one line.
+    The badge used to head the row's first description line behind a ` · `
+    separator; it is now charged its own line ahead of the prose, so
+
+        ``❯ 1. Backfill from the audit log``
+        ``     ▸ RECOMMENDED · slower, keeps history``
+
+    became three lines with the tag alone on the middle one. INTENDED, and the
+    point of the change: sharing line 0 made the badge the row's second claim on
+    a line the viewport may not grant, so it vanished at 100x22 and below —
+    exactly the frames where it is the only mark on the promoted row.
+
+    One line, and no other row moved: the line list went 10 → 11 at both pinned
+    sizes and `show_position` stayed False at both, so the badge's line did not
+    push this surface into windowing. The two assertions below say so, and if
+    either flips that is a stop-and-escalate rather than a golden to update.
     """
     question = AskQuestion(
         id="rollout",
@@ -5206,7 +5652,8 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
         "Which rollout should the stale-row migration take?",
         "",
         "❯ 1. Backfill from the audit log",
-        f"     {RECOMMENDED_TAG} · slower, keeps history",
+        f"     {RECOMMENDED_TAG}",
+        "     slower, keeps history",
         "  2. Drop the rows",
         "     nothing reads the column any more",
         "  3. Dual-write for a week",
