@@ -82,6 +82,7 @@ EventKind = Literal[
     "action_batch",
     "environment_step",
     "user_simulator_exchange",
+    "agent_stop",
     "finalization_start",
     "scoring_start",
     "scoring_result",
@@ -429,6 +430,31 @@ class UserSimulatorExchangePayload(ProtocolModel):
     receipt_id: Digest
 
 
+class AgentStopPayload(ProtocolModel):
+    """The episode stopped between steps with the environment still alive.
+
+    Truncation is scored ON a step and a deliberate finish is scored ON a
+    batch, but two stop causes happen BETWEEN steps -- after the previous
+    step's output observation was recorded and before any new batch exists:
+    the model spent its corrective re-prompts without a usable decision
+    (``model_failure``), or it asked a question no responder answered
+    (``ask_unanswered``). Both leave paid environment work that a
+    mid-episode failure path would seal unscored and thereby void, so the
+    runner records the stop here and finalizes scored on the state reached,
+    exactly like a truncation. The stop carries NO action batch: the
+    one-batch-per-observation rule means the stopped observation never gets
+    one, and the verifier binds the stop to that exact (latest, batchless)
+    observation. ``attempts`` counts the billed decision calls that produced
+    no usable batch, or the one ask that went unanswered.
+    """
+
+    stop_id: StrictIdentifier
+    reason: Literal["model_failure", "ask_unanswered"]
+    observation_id: StrictIdentifier
+    attempts: SafeCount
+    detail_artifact: EvidenceArtifactRef | None = None
+
+
 class FinalizationIntent(ProtocolModel):
     kind: Literal["score", "unscored"]
     scorer_id: StrictIdentifier | None = None
@@ -557,6 +583,7 @@ EventPayload: TypeAlias = (
     | ActionBatchPayload
     | EnvironmentStepPayload
     | UserSimulatorExchangePayload
+    | AgentStopPayload
     | FinalizationStartPayload
     | ScoringStartPayload
     | ScoringResultPayload
@@ -577,6 +604,7 @@ _EVENT_PAYLOAD_TYPES: dict[str, type[ProtocolModel]] = {
     "action_batch": ActionBatchPayload,
     "environment_step": EnvironmentStepPayload,
     "user_simulator_exchange": UserSimulatorExchangePayload,
+    "agent_stop": AgentStopPayload,
     "finalization_start": FinalizationStartPayload,
     "scoring_start": ScoringStartPayload,
     "scoring_result": ScoringResultPayload,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1093,9 +1094,11 @@ def test_scoring_start_without_result_still_refuses_interruption(tmp_path: Path)
     root = _interrupted_bundle(tmp_path, failure_kind="crash", scored=True)
     _drop_events_rechain(root, {"scoring_result"})
     assert "finalization_invalid" in codes(root)
-    # Exactly one: the exemption. Under the M4 mutation (drop ``not starts``)
-    # this count falls to zero.
-    assert _finalization_invalid_count(root) == 1
+    # Exactly two: the deliberate-ending refusal plus the scored-terminal
+    # failure-kind guard (a score may carry only None/"model"). Under the M4
+    # mutation (drop ``not starts``) the exemption fires and this count falls
+    # to one -- only the kind guard remains.
+    assert _finalization_invalid_count(root) == 2
 
 
 def test_scoring_result_without_start_still_refuses_interruption(tmp_path: Path) -> None:
@@ -1111,6 +1114,211 @@ def test_scoring_result_without_start_still_refuses_interruption(tmp_path: Path)
     root = _interrupted_bundle(tmp_path, failure_kind="crash", scored=True)
     _drop_events_rechain(root, {"scoring_start"})
     assert "finalization_invalid" in codes(root)
-    # Two: the structural scoring violation plus the exemption. Under the M5
-    # mutation (drop ``not results``) this count falls to one.
+    # Three: the structural scoring violation, the deliberate-ending refusal,
+    # and the scored-terminal failure-kind guard. Dropping only ``not
+    # results`` (M5) exempts the bundle from the last two and the count falls
+    # to one.
+    assert _finalization_invalid_count(root) == 3
+
+
+def _rewrite_events(root: Path, transform: Any) -> None:
+    """Apply an arbitrary edit to the journal, then renumber and rechain.
+
+    Generalises ``_drop_events_rechain``: the transform may insert or edit
+    records (not only drop them), which is how the agent-stop matrix builds
+    shapes the writer's phase machine refuses to emit -- a stop bound to the
+    wrong observation, a second stop, execution after a stop. Timestamps are
+    renumbered to the sequence so an inserted record can never move time
+    backward.
+    """
+
+    events = [json.loads(line) for line in (root / "events.jsonl").read_bytes().splitlines()]
+    kept = transform(events)
+    previous = manifest().manifest_digest
+    records = []
+    for sequence, event in enumerate(kept):
+        event = dict(event)
+        event["sequence"] = sequence
+        event["previous_event_sha256"] = previous
+        event["monotonic_ns"] = sequence + 1
+        event["wall_time_ms"] = sequence + 1
+        event["event_id"] = "0" * 64
+        record = EventRecord.model_validate(event, strict=True)
+        records.append(record.to_canonical_json())
+        previous = record.event_id
+    (root / "events.jsonl").write_bytes(b"\n".join(records) + b"\n")
+
+
+def _stop_event(
+    reason: str, *, observation_id: str = "obs-1", stop_id: str = "stop-0"
+) -> dict[str, Any]:
+    return {
+        "kind": "agent_stop",
+        "payload": {
+            "stop_id": stop_id,
+            "reason": reason,
+            "observation_id": observation_id,
+            "attempts": 3,
+            "detail_artifact": None,
+        },
+    }
+
+
+def _insert_before(
+    events: list[dict[str, Any]], kind: str, new: dict[str, Any]
+) -> list[dict[str, Any]]:
+    index = next(i for i, event in enumerate(events) if event["kind"] == kind)
+    return [*events[:index], new, *events[index:]]
+
+
+def _stopped_bundle(
+    tmp_path: Path,
+    *,
+    reason: str,
+    failure_kind: str | None,
+    stop: dict[str, Any] | None,
+) -> Path:
+    """A scored bundle whose rollout ended on a between-steps agent stop.
+
+    ``_interrupted_bundle`` provides the stepped rollout (obs-0 -> step ->
+    obs-1, obs-1 batchless); the rewrite inserts the stop event (or leaves it
+    out when ``stop`` is None) immediately before finalization, which is where
+    the runner writes it.
+    """
+
+    root = _interrupted_bundle(tmp_path, failure_kind=failure_kind, scored=True)
+    if stop is not None:
+        _rewrite_events(root, lambda events: _insert_before(events, "finalization_start", stop))
+    return root
+
+
+_ERROR_CODES = {"finalization_invalid", "receipt_binding_invalid", "event_order_invalid"}
+
+
+@pytest.mark.parametrize(
+    ("reason", "failure_kind"),
+    [("model_failure", "model"), ("ask_unanswered", None)],
+)
+def test_agent_stop_is_a_deliberate_ending_that_may_score(
+    tmp_path: Path, reason: str, failure_kind: str | None
+) -> None:
+    """The two runner shapes verify clean.
+
+    Decision exhaustion keeps kind "model" for audit and an unanswered ask
+    keeps kind None; both score the state the episode reached, exactly like a
+    truncation. Each of the reject cases below pins one arm whose removal
+    would let exactly one of these laundered shapes through.
+    """
+
+    root = _stopped_bundle(
+        tmp_path, reason=reason, failure_kind=failure_kind, stop=_stop_event(reason)
+    )
+    assert not codes(root) & _ERROR_CODES
+
+
+def test_scored_model_failure_without_a_stop_is_rejected(tmp_path: Path) -> None:
+    """Pins the scored-kind guard's "stop required" direction.
+
+    A scored terminal may claim kind "model" ONLY beside the agent_stop that
+    records the exhaustion. Exactly two refusals fire: the deliberate-ending
+    check (no stop, no finish, no terminal step) and this guard -- so
+    removing EITHER arm is detectable as the count falling to one.
+    """
+
+    root = _stopped_bundle(tmp_path, reason="model_failure", failure_kind="model", stop=None)
     assert _finalization_invalid_count(root) == 2
+
+
+@pytest.mark.parametrize(
+    ("reason", "failure_kind"),
+    [("model_failure", None), ("ask_unanswered", "model")],
+)
+def test_stop_reason_must_agree_with_the_failure_kind(
+    tmp_path: Path, reason: str, failure_kind: str | None
+) -> None:
+    """Pins the reason-agreement guard's pairing direction.
+
+    The runner writes exactly the pairs (model_failure, "model") and
+    (ask_unanswered, None); either crossed pairing is a terminal record that
+    contradicts the stop event, so neither may verify. The (model_failure,
+    None) cross isolates the agreement arm -- the deliberate-ending check is
+    satisfied by the stop and the kind is None, so exactly one refusal fires.
+    """
+
+    root = _stopped_bundle(
+        tmp_path, reason=reason, failure_kind=failure_kind, stop=_stop_event(reason)
+    )
+    expected = 1 if failure_kind is None else 2
+    assert _finalization_invalid_count(root) == expected
+
+
+@pytest.mark.parametrize("failure_kind", ["crash", "infrastructure", "cancelled"])
+def test_an_agent_stop_cannot_launder_an_interrupted_score(
+    tmp_path: Path, failure_kind: str
+) -> None:
+    """Crash/provider/cancel kinds stay unscored-only even beside a stop.
+
+    The stop is a third deliberate ending, but the scored-terminal kind guard
+    is independent of it: a run whose terminal says the harness or the
+    environment broke can never report a score, however its journal ends.
+    Both the kind guard and the reason-agreement guard fire (the stop claims
+    model_failure against a crash-shaped kind), so removing either arm is
+    detectable as the count falling to one.
+    """
+
+    root = _stopped_bundle(
+        tmp_path,
+        reason="model_failure",
+        failure_kind=failure_kind,
+        stop=_stop_event("model_failure"),
+    )
+    assert _finalization_invalid_count(root) == 2
+
+
+def test_stop_must_bind_to_the_latest_batchless_observation(tmp_path: Path) -> None:
+    """Pins the binding arm: obs-0 is both stale and already batched.
+
+    A stop naming obs-0 would attribute the ending to a state the episode
+    had already acted past, and obs-0 carries batch-0 -- the runner's rule is
+    that a stopped observation never receives a batch.
+    """
+
+    root = _stopped_bundle(
+        tmp_path,
+        reason="model_failure",
+        failure_kind="model",
+        stop=_stop_event("model_failure", observation_id="obs-0"),
+    )
+    assert "receipt_binding_invalid" in codes(root)
+
+
+def test_nothing_may_execute_after_an_agent_stop(tmp_path: Path) -> None:
+    """Pins the post-stop ordering arm with an observation appended after it."""
+
+    root = _stopped_bundle(
+        tmp_path, reason="model_failure", failure_kind="model", stop=_stop_event("model_failure")
+    )
+    _rewrite_events(
+        root,
+        lambda events: _insert_before(
+            events,
+            "finalization_start",
+            {"kind": "observation", "payload": {"observation_id": "obs-2", "sequence": 2}},
+        ),
+    )
+    assert "event_order_invalid" in codes(root)
+
+
+def test_a_second_agent_stop_is_rejected(tmp_path: Path) -> None:
+    """Pins the single-stop arm: two endings cannot both be the ending."""
+
+    root = _stopped_bundle(
+        tmp_path, reason="model_failure", failure_kind="model", stop=_stop_event("model_failure")
+    )
+    _rewrite_events(
+        root,
+        lambda events: _insert_before(
+            events, "finalization_start", _stop_event("model_failure", stop_id="stop-1")
+        ),
+    )
+    assert "event_order_invalid" in codes(root)

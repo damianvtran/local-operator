@@ -22,6 +22,7 @@ from local_operator.evaluation.evidence.media import (
 from local_operator.evaluation.evidence.models import (
     AbandonmentRecord,
     ActionBatchPayload,
+    AgentStopPayload,
     ArtifactRef,
     BudgetCommitmentPayload,
     CleanupPayload,
@@ -415,6 +416,8 @@ def _verify_semantics(
     next_observation_sequence = 0
     exchanges: set[str] = set()
     last_exchange: str | None = None
+    agent_stops: dict[str, AgentStopPayload] = {}
+    latest_observation_id: str | None = None
     compactions: set[str] = set()
     lifecycle: dict[str, LifecycleTransitionPayload] = {}
     last_state_id: str | None = None
@@ -442,6 +445,7 @@ def _verify_semantics(
         ActionBatchPayload,
         EnvironmentStepPayload,
         UserSimulatorExchangePayload,
+        AgentStopPayload,
     )
     allowed_after_finalizing = {
         "scoring_start",
@@ -539,6 +543,13 @@ def _verify_semantics(
             cleaned = True
         elif terminal_lifecycle:
             terminal_lifecycle_seen = True
+        if agent_stops and execution_evidence and not isinstance(payload, AgentStopPayload):
+            # ``agent_stop`` IS the between-steps ending: the agent stopped
+            # acting on the named observation, so no request, batch, step,
+            # exchange or observation may follow it. Without this, a stop
+            # event followed by more execution would claim the episode both
+            # stopped and continued -- two endings for one bundle.
+            issues.error("event_order_invalid", location)
         if isinstance(payload, ModelRequestPayload):
             if payload.request_id in requests:
                 issues.error("receipt_binding_invalid", location)
@@ -588,6 +599,7 @@ def _verify_semantics(
             ):
                 issues.error("receipt_binding_invalid", location)
             observations[payload.observation_id] = payload
+            latest_observation_id = payload.observation_id
             if payload.observation_id == terminal_output_observation:
                 terminal_output_resolved = True
             expected_output_observation = None
@@ -636,6 +648,26 @@ def _verify_semantics(
                 issues.error("receipt_binding_invalid", location)
             exchanges.add(payload.exchange_id)
             last_exchange = payload.exchange_id
+        elif isinstance(payload, AgentStopPayload):
+            if terminal_output_observation is not None:
+                # A terminal step already recorded a deliberate ending ON the
+                # step; a stop event after it would be a second one.
+                issues.error("finalization_invalid", location)
+            if agent_stops:
+                issues.error("event_order_invalid", location)
+            elif (
+                payload.observation_id not in observations
+                or payload.observation_id != latest_observation_id
+                or payload.observation_id in observation_batches
+            ):
+                # The stop must name the observation the episode actually
+                # stopped on: the newest one, still batchless. A stop bound
+                # to an older observation would attribute the ending to a
+                # state the episode had already acted past, and one bound to
+                # a batched observation contradicts the runner's rule that a
+                # stopped observation never receives a batch.
+                issues.error("receipt_binding_invalid", location)
+            agent_stops[payload.stop_id] = payload
         elif isinstance(payload, LifecycleTransitionPayload):
             if payload.state_id in lifecycle or payload.previous_state_id != last_state_id:
                 issues.error("receipt_binding_invalid", location)
@@ -832,13 +864,45 @@ def _verify_semantics(
         interrupted = (
             len(terminal_states) == 1 and terminal_states[0].failure_kind is not None and unscored
         )
+        # Third deliberate ending: an ``agent_stop`` records that the agent
+        # itself stopped between steps (decision exhaustion, unanswered ask)
+        # while the environment stayed alive -- the two cases that cannot be
+        # recorded on a step or a batch because no new step or batch exists.
+        stop = next(iter(agent_stops.values())) if agent_stops else None
         if (
             environment_step_seen
             and not last_step_terminal
             and not finish_action_seen
+            and stop is None
             and not interrupted
         ):
             issues.error("finalization_invalid", terminal_location)
+        if terminal_states:
+            # A SCORED terminal may claim only the failure kinds that can
+            # honestly precede one: a clean run (None) or the agent under
+            # test stopping itself ("model", recorded by the agent_stop the
+            # next check requires). Crash/provider/cancel kinds mean the
+            # harness or the environment broke mid-rollout, and a score over
+            # that state -- however it got into the journal -- is a truncated
+            # run laundered into a reportable result, so it stays rejected.
+            kind = terminal_states[0].failure_kind
+            if not unscored and kind not in (None, "model"):
+                issues.error("finalization_invalid", terminal_location)
+            elif (
+                not unscored
+                and kind == "model"
+                and (stop is None or stop.reason != "model_failure")
+            ):
+                # A scored "model" kind must show the stop event that says so:
+                # it is the only writer path that seals a score with a failure
+                # kind, so its absence means the kind was asserted without the
+                # recorded exhaustion.
+                issues.error("finalization_invalid", terminal_location)
+            if stop is not None and (stop.reason == "model_failure") != (kind == "model"):
+                # Reason agreement, scored or not: the runner writes exactly
+                # the pairs (model_failure, "model") and (ask_unanswered,
+                # None), so any other pairing contradicts the terminal record.
+                issues.error("finalization_invalid", terminal_location)
         if terminal_output_observation is not None and not terminal_output_resolved:
             issues.error("receipt_binding_invalid", terminal_location)
     if outcome is not None:

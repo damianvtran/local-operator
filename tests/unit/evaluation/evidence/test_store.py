@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.evidence.models import (
+    AgentStopPayload,
     BudgetCommitmentPayload,
     CancelPayload,
     FinalizationIntent,
@@ -400,6 +401,65 @@ def test_finalizing_marker_precedes_scoring_start_and_closes_execution(tmp_path:
                     finalization_id="final", scoring_operation_id="score-op", score=score
                 )
             )
+
+
+def test_agent_stop_is_between_steps_execution_evidence(tmp_path: Path) -> None:
+    """The stop event follows the execution phase rules exactly like a batch.
+
+    It is evidence about the rollout (it binds an observation), so it needs a
+    prior commitment, it closes with the journal when finalization begins,
+    and it roundtrips through the hash chain as its registered kind.
+    """
+
+    root = tmp_path / "bundle"
+    with EvidenceWriter.create(root, manifest(), redactions()) as writer:
+        stop = AgentStopPayload(
+            stop_id="stop-0",
+            reason="model_failure",
+            observation_id="obs-0",
+            attempts=3,
+        )
+        # Before the commitment: out of phase, exactly like a batch would be.
+        # (The attempt is never persisted, so the authority below is still
+        # event #0/#1.)
+        with pytest.raises(EvidenceBundleInvalid, match="prior commitment"):
+            writer.append("agent_stop", stop, monotonic_ns=1, wall_time_ms=1)
+        _append_authority(writer, timestamp=2)
+        writer.append(
+            "observation",
+            ObservationPayload(observation_id="obs-0", sequence=0),
+            monotonic_ns=3,
+            wall_time_ms=3,
+        )
+        record = writer.append("agent_stop", stop, monotonic_ns=4, wall_time_ms=4)
+        assert record.kind == "agent_stop"
+        assert record.payload == stop
+        writer.begin_finalization(
+            "final",
+            "score-op",
+            FinalizationIntent(kind="score", scorer_id="scorer", scorer_version="1"),
+            monotonic_ns=5,
+            wall_time_ms=5,
+        )
+        with pytest.raises(EvidenceTerminal):
+            writer.append(
+                "agent_stop",
+                stop.model_copy(update={"stop_id": "stop-1"}),
+                monotonic_ns=6,
+                wall_time_ms=6,
+            )
+    # The durable journal reparses as the registered kind, not generic JSON.
+    lines = (root / "events.jsonl").read_bytes().splitlines()
+    parsed = [json.loads(line) for line in lines]
+    assert [entry["kind"] for entry in parsed] == [
+        "preflight",
+        "budget_commitment",
+        "observation",
+        "agent_stop",
+        "finalization_start",
+        "scoring_start",
+    ]
+    assert parsed[3]["payload"] == stop.model_dump(mode="json")
 
 
 def test_redaction_rejects_all_encoded_canaries_without_echo(tmp_path: Path) -> None:

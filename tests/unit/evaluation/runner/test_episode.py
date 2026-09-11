@@ -18,6 +18,8 @@ import pytest
 from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
+    ActionBatchPayload,
+    AgentStopPayload,
     CleanupPayload,
     EnvironmentStepPayload,
     ErrorPayload,
@@ -239,6 +241,49 @@ async def test_unanswered_ask_cancels_rather_than_leaving_it_open(
     assert verify_bundle(root).valid
     assert "cancel" in _kinds(root)
     assert outcome.score is not None and outcome.score.reason == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_unanswered_ask_after_a_step_scores_the_reached_state(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A human who does not exist must not void paid environment work.
+
+    The step-0 ask above stays a cancellation (nothing to grade); once a
+    step has landed, the same unanswered ask becomes a scored agent stop on
+    the state reached -- the ask is never written as a batch, so the stopped
+    observation stays batchless and the verifier accepts the stop binding.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["type", "ask", "finish"]),
+        responder=RecordingResponder(None),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.reportability_label == "reportable"
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    kinds = _kinds(root)
+    assert "cancel" not in kinds
+    assert kinds.index("agent_stop") < kinds.index("finalization_start")
+    stops = payloads(root, AgentStopPayload)
+    assert len(stops) == 1
+    assert stops[0].reason == "ask_unanswered"
+    assert stops[0].attempts == 1
+    assert stops[0].observation_id == payloads(root, ObservationPayload)[-1].observation_id
+    assert stops[0].detail_artifact is not None
+    # The environment graded the state the one step reached.
+    assert "score" in adapter.calls
 
 
 @pytest.mark.asyncio
@@ -1001,6 +1046,66 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
     assert errors[-1].diagnostic_code == "modelfailure"
     # Cleanup ran on the live session: the environment was never at fault.
     assert "cleanup" in adapter.calls
+
+
+@pytest.mark.asyncio
+async def test_decision_exhaustion_after_a_step_scores_the_reached_state(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Exhaustion between steps grades the work already bought.
+
+    The step-0 exhaustion above stays unscored (no environment work to
+    grade); after a step has landed, the same exhaustion records an
+    ``agent_stop`` and scores the state reached. The terminal keeps
+    ``failure_kind="model"`` for audit -- so the episode reports failed --
+    and the verifier's laundering guard requires that kind to agree with the
+    stop reason. No action batch is written for the stopped observation.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["type", "reject", "reject", "reject"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_decision_retries=2),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.reportability_label == "reportable"
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    kinds = _kinds(root)
+    assert kinds.index("agent_stop") < kinds.index("finalization_start")
+    stops = payloads(root, AgentStopPayload)
+    assert len(stops) == 1
+    assert stops[0].reason == "model_failure"
+    assert stops[0].attempts == 3
+    assert stops[0].observation_id == payloads(root, ObservationPayload)[-1].observation_id
+    assert stops[0].detail_artifact is not None
+    # The scored path writes no terminal model error: every rejection keeps
+    # its own retryable record and the stop carries the diagnostic.
+    errors = payloads(root, ErrorPayload)
+    assert [(error.category, error.retryable) for error in errors] == [
+        ("model", True),
+        ("model", True),
+        ("model", True),
+    ]
+    # The last observation never received a batch: one batch per observation,
+    # and the stopped one is the verifier's allowed batchless tail.
+    observations = payloads(root, ObservationPayload)
+    batches = payloads(root, ActionBatchPayload)
+    assert {batch.observation_id for batch in batches} == {
+        observation.observation_id for observation in observations[:-1]
+    }
+    assert "score" in adapter.calls
 
 
 @pytest.mark.asyncio
