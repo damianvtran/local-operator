@@ -373,6 +373,14 @@ _BOUNDED_COLLECTION_FIELDS = {
     # budget. Every retained row keeps the identity and outcome a card needs.
     "live_events": "clipped at the wire: end rows capped newest-first, result text budgeted",
     "todos": "the user's own list, written by hand",
+    # One entry per call executing AT ONCE, and a call's entry is popped by its
+    # own `tool_execution_end` while the whole map is cleared at both ends of
+    # the turn. The live population is therefore bounded by the parallel slot
+    # count (`max_parallel_tools`, 8 by default) and cannot grow with
+    # conversation length, turn count or child count — which is the property
+    # this side of the line is for. Its values are `float`s and its keys are
+    # call ids, so even a whole turn's worth is a few hundred bytes.
+    "live_tool_started_at": "one float per call executing now; popped on end, cleared per turn",
     "wakes": "the user's own schedules",
     "mcp_servers": "one row per configured server",
     "slash_capabilities": "one row per SLASH_COMMANDS entry",
@@ -719,6 +727,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             for index in range(200)
         ],
         "wakes": [],
+        # AT the bound rather than past it, unlike the fields above, because
+        # this one's bound is a real ceiling rather than a clip: the map holds
+        # one entry per call executing AT ONCE, and calls beyond that wait for a
+        # slot (`max_parallel_tools`, 8 by default — `harness/types.py`). So the
+        # largest value a producer can publish is this, and the one knob that
+        # could raise it is a config value this fixture cannot guess at. Ids are
+        # the width a provider actually issues rather than `call-0`.
+        "live_tool_started_at": {f"call_{index:024d}": 1_756_000_000.123456 for index in range(8)},
         "mcp_servers": [
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)
         ],

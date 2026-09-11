@@ -22,6 +22,7 @@ hexes so a ramp change moves one file, not this suite.
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2415,3 +2416,114 @@ def test_a_resize_to_a_new_width_does_rebuild() -> None:
     card.on_resize(SimpleNamespace(size=SimpleNamespace(width=card._built_width - 20)))
 
     assert builds["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The seeded clock: a row adopted for a call that is ALREADY running.
+#
+# Reported from the field: switch away from a session whose tool is executing
+# and switch back, and the row's elapsed reading restarts at zero and counts up
+# from the switch — a `bash` row reading `27s` (and the band above it saying the
+# same) while the call is half an hour old. The row was not wrong to refuse a
+# number: it had NO start instant, so any number it printed was a claim about
+# when the VIEWER arrived. What changed is that the start is now knowable, so
+# the refusal is precise rather than total.
+#
+# These drive the card directly with an INJECTED clock, so "the number is the
+# call's true age" is arithmetic rather than a sleep: a test that slept 27
+# seconds to prove a count-up would be a test nobody runs. The wall-clock part
+# only converts the epoch once, at the seed; see `monotonic_from_epoch`.
+# ---------------------------------------------------------------------------
+
+
+def test_a_restored_running_row_arms_from_the_call_start_epoch() -> None:
+    """The epoch is the call's own start, so the number IS its age.
+
+    And it keeps ticking from that anchor — the second read is three seconds
+    later on the injected monotonic clock, not a re-conversion of the epoch, so
+    a wall-clock adjustment after the seed cannot move a running counter.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    card.restore(state="running", started_at=time.time() - 27.0)
+
+    assert card.started_at is not None, "a call whose start is known dates itself"
+    assert card.started_at == pytest.approx(now[0] - 27.0, abs=0.05)
+    assert card._build_row(80).plain.rstrip().endswith("27s")
+
+    now[0] += 3.0
+    assert card._build_row(80).plain.rstrip().endswith("30s")
+
+
+def test_a_restored_running_row_without_a_start_epoch_still_withholds() -> None:
+    """The other half of the same arm, and not a legacy curiosity.
+
+    A `subagent_view` child row and a call whose producer predates the field
+    both reach this with nothing to seed from, and the honest rendering for
+    them is still the blank column: their ``_started`` is when this surface
+    painted the row, so any number here would be about the viewer.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    card.restore(state="running")
+
+    assert card.started_at is None
+    assert card._elapsed() is None
+    assert not card._build_row(80).plain.rstrip().endswith("s")
+
+
+def test_a_settled_row_ignores_a_start_epoch() -> None:
+    """Settled states are rendered from the executor's measured interval.
+
+    Passing an epoch must not change that: the receipt for a finished call is
+    ``duration_s``, and a start instant has no part in it.
+    """
+    now = [1_000.0]
+    card = ToolCard("t", "bash", {"command": "sleep 1"}, clock=lambda: now[0])
+    card.restore(state="success", result_text="done", duration_s=6.0, started_at=time.time() - 27.0)
+
+    assert card.started_at is None, "a settled row holds no running start"
+    assert card._duration == 6.0, "the executor's measured interval is the receipt"
+    row = card._build_row(80).plain
+    assert "6.0s" in row
+    assert "27s" not in row, "the epoch has no part in a settled receipt"
+
+
+def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
+    """The re-entry arm, which the switch actually takes.
+
+    A re-delivered ``ToolStarted`` — `/resume` onto the running turn, or a
+    switch away and back replaying the owner's live seed — reaches the SAME
+    card the projection restored, through ``begin_running``. Seeding only
+    ``restore`` would leave this call resetting the row to zero, which is
+    exactly the reported frame.
+    """
+    now = [2_000.0]
+    card = ToolCard("t", "bash", clock=lambda: now[0])
+    card.set_composing(12, "bash")
+    card.begin_running("bash", {"command": "sleep 30"}, None, started_at=time.time() - 41.0)
+
+    assert card.started_at == pytest.approx(now[0] - 41.0, abs=0.05)
+    assert card._build_row(80).plain.rstrip().endswith("41s")
+
+    # Without an epoch the re-entry keeps the withheld clock, which is what a
+    # caller with nothing to pass must not be able to lose by accident.
+    other = ToolCard("t2", "bash", clock=lambda: now[0])
+    other.restore(state="running")
+    other.begin_running("bash", {"command": "sleep 30"}, None)
+    assert other.started_at is None
+
+
+def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
+    """The seeded arm must not displace the ordinary one.
+
+    A call this process watched begin dates itself from the event that started
+    it. Pushing a session epoch through this path could only be a re-statement
+    of the same instant, so the assertion is that a fresh card's own clock is
+    untouched by the arrival of the feature.
+    """
+    now = [3_000.0]
+    card = ToolCard("t", "bash", {"command": "ls"}, clock=lambda: now[0])
+    assert card.started_at == 3_000.0
+    now[0] += 2.0
+    assert card._build_row(80).plain.rstrip().endswith("2s")

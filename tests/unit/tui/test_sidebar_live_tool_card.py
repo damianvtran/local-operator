@@ -54,12 +54,16 @@ from local_operator.harness.types import (
     Message,
     TextContent,
     ToolCall,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
     ToolResult,
 )
 from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, ToolCard
+from local_operator.tui.events import TurnStarted
+from local_operator.tui.widgets.tool_card import format_duration
 from tests.e2e.harness import (
     ScriptedStream,
     assistant_message,
@@ -71,6 +75,11 @@ from tests.e2e.harness import (
     wait_for_adoption,
 )
 from tests.unit.harness.test_comms import DEADLOCK_GUARD_S, MAX_PUMP_TURNS
+
+# Module-level rather than per-test as the rest of this file does it: the
+# epoch-carrying fake below is a CLASS, so its base has to exist at import
+# time. Nothing in `test_app_pilot` imports this module, so there is no cycle.
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: Not ``wait``. ``Session._merge_capability_tools`` merges the real ``wait``
 #: builtin into every session it builds, and a same-named double is SHADOWED by
@@ -636,31 +645,199 @@ async def test_a_cold_resume_of_the_same_history_still_marks_interrupted() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_replayed_running_row_never_starts_its_clock() -> None:
-    """A painted live row withholds its clock exactly as restore does.
+class _Epochs(FakeSession):
+    """A session whose owner has stamped start instants for its live calls.
 
-    The transcript carries no true start time for an in-flight call, so the
-    one row the owner paints must refuse to count from when it was painted —
-    the same guarantee `restore(state="running")` makes, pinned here on the
-    painter the projection path uses. Driven through the app's own view so
-    the mount is real.
+    The seam the fix rests on and the only thing that changed about this
+    surface: the painter still refuses to invent a start, and now has one to
+    use when the session carried it. The three attributes are CLASS-level so a
+    test can set the ones it cares about and a fixed instant never depends on
+    construction time.
     """
-    from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    app = OperatorApp(lambda: _factory(FakeSession()))
+    epochs: dict[str, float] = {}
+    #: The calls the owner reports as still executing, and which of them is
+    #: parked at a gate — the pair the projection asks before it skips a replay
+    #: row, forwarded so this fake drives the real decision instead of a
+    #: hand-rolled one.
+    executing: set[str] = set()
+    pending: set[str] = set()
+
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        return dict(self.epochs)
+
+    def executing_display_tool_ids(self) -> set[str]:
+        return set(self.executing)
+
+    def pending_display_tool_ids(self) -> set[str]:
+        return set(self.pending)
+
+
+def _paint_one(app: OperatorApp, call_id: str, session: Any = None) -> ToolCard:
+    """Paint a skipped live call through the app's OWN painter and return its row."""
+    view = app._transcript_view()
+    OperatorApp._paint_skipped_live_tool_rows(
+        view, app._tool_cards, [_call(call_id)], session=session
+    )
+    return app._tool_cards[call_id]
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_running_row_without_a_start_epoch_never_starts_its_clock() -> None:
+    """No known start ⇒ no number, rather than a number about the VIEWER.
+
+    A call whose start nobody recorded — a legacy producer, a child row inside
+    `subagent_view` — reaches the painter with nothing to seed from, and its
+    ``_started`` would otherwise be the instant this view painted the row. A
+    clock started from the wrong zero is worse than no clock, so the column
+    stays blank. Driven through the app's own view so the mount is real.
+    """
+    app = OperatorApp(lambda: _factory(_Epochs()))
     async with app.run_test(size=(100, 30)) as pilot:
         await wait_for_adoption(app, pilot)
         await pilot.pause()
 
-        view = app._transcript_view()
-        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
-        card = app._tool_cards["call-clock"]
+        card = _paint_one(app, "call-clock", _Epochs())
         assert card._state == "running"
         assert card._started is None
+        assert card._elapsed() is None
         # One row per call: painting the same skipped call again is a no-op.
-        OperatorApp._paint_skipped_live_tool_rows(view, app._tool_cards, [_call("call-clock")])
+        view = app._transcript_view()
+        OperatorApp._paint_skipped_live_tool_rows(
+            view, app._tool_cards, [_call("call-clock")], session=_Epochs()
+        )
         assert len(app._tool_cards) == 1
         assert len([b for b in view.blocks() if isinstance(b, ToolCard)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_running_row_arms_from_the_sessions_start_epoch() -> None:
+    """The other half of the same arm: a KNOWN start is the call's age.
+
+    Same painter, same row, same blank-when-unknown rule — with the session's
+    folded epoch threaded in, the elapsed reading becomes the call's true age
+    instead of being withheld. That is the whole change: the refusal was
+    precise, not total.
+    """
+    aged = 27.0
+    session = _Epochs()
+    session.epochs = {"call-clock": time.time() - aged}
+
+    app = OperatorApp(lambda: _factory(_Epochs()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        card = _paint_one(app, "call-clock", session)
+        assert card._state == "running"
+        assert card._started is not None
+        assert card._elapsed() == pytest.approx(aged, abs=1.0)
+        assert format_duration(round(card._elapsed() or 0.0)) == format_duration(int(aged))
+
+
+@pytest.mark.asyncio
+async def test_a_switch_away_and_back_resumes_a_live_tools_true_age() -> None:
+    """The operator's report, driven through both paths a switch-back takes.
+
+    The report: a live `bash` row reading `27s`, the operator switches to
+    another conversation in the sidebar and back, and the row restarts at zero
+    and counts up from the switch — so the one number on it, the answer to "is
+    this thing stuck", is about the viewer instead of the call. The band beside
+    it said the same thing, because a running batch's clock is the oldest live
+    card's own start.
+
+    Both halves of the re-entry are driven here, because passing only one of
+    them leaves the other resetting the row to zero — which is exactly the
+    bug's shape:
+
+    1. the replay the switch performs, which paints the row through
+       ``restore`` (``_mark_pending_tool_rows`` / the skipped-call painter),
+    2. the owner's live seed re-delivered through the event controller, which
+       reaches the SAME row through ``begin_running``.
+
+    A fresh reading is NOT the assertion: ``27s`` is, and the difference
+    between the two is the whole fix. The receipt at the end is asserted too,
+    so a fix that bought the live number by feeding the settle path would fail
+    here.
+    """
+    aged = 27.0
+    epoch = time.time() - aged
+    session = _Epochs()
+    session.epochs = {"call-live": epoch}
+    session.executing = {"call-live"}
+    session.streaming = True
+
+    app = OperatorApp(lambda: _factory(_Epochs()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+        app._session = session
+        # The turn the operator is away from is still running, so the band is
+        # mounted over this transcript — the second clock in the report.
+        app.post_message(TurnStarted())
+        await pilot.pause()
+
+        # (1) The switch back: the projection replays the conversation, skips
+        # the call the owner is still executing, and paints its ONE row.
+        app._project_settled_rows(_history_with_one_call("call-live"))
+        card = app._tool_cards["call-live"]
+        assert card._state == "running"
+        assert card._started is not None, "the session knows when this call began"
+        assert card._elapsed() == pytest.approx(aged, abs=1.0), (
+            f"the row reads {card._elapsed()} for a call {aged}s old: it counted "
+            "from the switch instead of from the call's own start"
+        )
+
+        # (2) The owner's seed arrives and re-delivers the still-in-flight start
+        # through the controller, which lands on the same row.
+        controller = app._controller
+        assert controller is not None
+        controller._on_event(
+            ToolExecutionStartEvent(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                args={"job_id": "j1"},
+                started_at_epoch=epoch,
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+        assert card._elapsed() == pytest.approx(
+            aged, abs=1.0
+        ), "re-entry reset the row: begin_running must seed from the same epoch"
+        assert len(app._tool_cards) == 1
+
+        # The band reads the same anchor, which is the second clock in the
+        # report — a batch's number is the oldest live card's own start (D9).
+        app._refresh_working_activity()
+        line = app._working_block
+        assert line is not None
+        assert line._clock_text() == format_duration(int(aged)), line._clock_text()
+
+        # And the receipt stays the CALL's, not the viewer's. A card that can
+        # date itself keeps its own reading (`mark_done`), and the executor's
+        # measured interval is the fallback for one that cannot — so a seeded
+        # row settles to the age its own seed implies, which for a real producer
+        # is the same interval it measured. What must never happen is the switch
+        # showing up in the receipt, and the two readings this asserts against
+        # are what separate the cases: `aged`, and the zero a reset would print.
+        controller._on_event(
+            ToolExecutionEndEvent(
+                tool_call_id="call-live",
+                tool_name=PARKING_TOOL,
+                result=ToolResult(
+                    tool_call_id="call-live", tool_name=PARKING_TOOL, duration_s=aged
+                ),
+                duration_s=aged,
+            )
+        )
+        await pilot.pause()
+        await pilot.pause()
+        assert card._state == "success"
+        assert card._duration == pytest.approx(aged, abs=1.0), (
+            f"the receipt reads {card._duration} for a call {aged}s old — the "
+            "settle fell back to the switch instant"
+        )
 
 
 def _history_with_one_call(call_id: str, tool_name: str = PARKING_TOOL) -> list[Message]:

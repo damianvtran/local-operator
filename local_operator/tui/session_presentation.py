@@ -111,6 +111,48 @@ def live_projection_call_ids(session: Any) -> set[str]:
     return live
 
 
+def live_tool_start_epochs(session: Any) -> dict[str, float]:
+    """The session's own start epoch per live tool call, or ``{}`` when absent.
+
+    Probed rather than called directly for the reason the sibling above is: a
+    reduced facade — a test double, an embedding host — need not implement the
+    accessor, and "no epochs" is the correct answer for one. It reduces to
+    "withhold the clock", which is what every consumer does with a missing id,
+    so a facade without the accessor keeps today's behaviour instead of
+    raising.
+
+    The same shape is answered by BOTH session kinds, and it is the SAME fact
+    either way: the epochs a producer stamped on its ``tool_execution_start``
+    events, folded per call. That is what lets a live row and the switched-to
+    row for one call share an anchor instead of differing by when each was
+    painted.
+    """
+    accessor = getattr(session, "live_tool_start_epochs", None)
+    if not callable(accessor):
+        return {}
+    return dict(cast("dict[str, float]", accessor()))
+
+
+def activity_phase_clock(session: Any) -> tuple[str, float | None]:
+    """The session's folded phase and its zero, or ``("", None)`` for none.
+
+    The companion to the accessor above, for the arm of the working line that
+    has no tool call behind it: ``thinking``, ``responding`` and ``composing``
+    are dated by a phase edge rather than by a call, so a viewer that arrived
+    mid-turn has no other way to know how long the model call has been going.
+
+    ``("", None)`` is the answer for a facade with no fold and for a session
+    that has not been published yet. The consumer compares the phase against
+    the one it derived itself and withholds the clock on any mismatch, so the
+    empty value matches nothing and no age is invented from it.
+    """
+    accessor = getattr(session, "activity_phase_clock", None)
+    if not callable(accessor):
+        return ("", None)
+    phase, started_at = cast("tuple[str, float | None]", accessor())
+    return str(phase or ""), started_at
+
+
 class CompactionMarkerBlock(NoticeBlock):
     """The compaction seam, spaced apart from whatever it lands beside.
 

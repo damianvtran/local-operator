@@ -3561,6 +3561,49 @@ class Session:
             return set()
         return unanswered_tail_call_ids(self._context.messages)
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """The instant each in-flight call began, keyed by call id.
+
+        The local owner answers from its own folded state, which is the same
+        fold an attached viewer applies to the events it receives — one rule,
+        two transports — and this process is the PRODUCER of those stamps, so
+        the instants are the executor's own rather than a reconstruction.
+
+        Empty rather than raising when the store has not been built: the
+        accessor is read through ``getattr`` by hosts that may hold a reduced
+        facade, and "no live calls" is the honest answer for a session that
+        has never published state. Callers must treat a missing call id the
+        same way: withholding the clock, never defaulting the epoch.
+
+        Through the STORE, not ``frontend_state``: this runs once per tool
+        start on the event loop, and the property deep-copies the whole state
+        for a question about one small dict.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is None:
+            return {}
+        return store.live_tool_start_epochs()
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase, and the instant that phase began.
+
+        The local owner is the PRODUCER of the events this is folded from, so
+        the instants are its own rather than a reconstruction — which is why
+        the same phase a viewer reads off the wire is available here without one.
+
+        Read through the store rather than ``frontend_state``: the app asks this
+        on every event that moves the turn, and the property deep-copies every
+        job, usage row and trajectory for two scalars.
+
+        ``("", None)`` when the store has not been built — a facade with no
+        fold matches no phase, and the consumer withholds the clock rather than
+        counting from its own arrival.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is None:
+            return ("", None)
+        return store.activity_phase_clock()
+
     def context_breakdown(self) -> dict[str, int]:
         """On-demand token breakdown for the context the next request sends.
 

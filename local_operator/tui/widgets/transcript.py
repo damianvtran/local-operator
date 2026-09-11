@@ -2756,6 +2756,7 @@ class WorkingBlock(TranscriptBlock):
         *,
         clock: bool = True,
         clock_from: float | None = None,
+        clock_from_epoch: float | None = None,
         fold_width: int = 0,
     ) -> None:
         super().__init__()
@@ -2782,6 +2783,16 @@ class WorkingBlock(TranscriptBlock):
         # A zero supplied by the CALLER, overriding the phase's own. See
         # :meth:`set_activity`; ``None`` means the phase's zero is correct.
         self._clock_from = clock_from
+        # The same override expressed as the WALL-CLOCK instant the session
+        # recorded for this phase, for the phases whose zero lives outside this
+        # widget (a viewer that attached mid-turn). Kept beside the monotonic
+        # value rather than replacing it because only the epoch can be compared
+        # for "has the phase's own zero changed" — the monotonic conversion
+        # moves on every call — and because it is what a later re-seed has to
+        # match against. Converted ONCE, on a phase change; see
+        # :meth:`set_activity`.
+        self._clock_from_epoch = clock_from_epoch
+        self._seed_clock_from_epoch()
         self._clock = ""
         #: The width the row was last authored at; `on_resize` compares against
         #: it so a height-only resize does not re-truncate a one-row line.
@@ -2803,6 +2814,7 @@ class WorkingBlock(TranscriptBlock):
         *,
         clock: bool = True,
         clock_from: float | None = None,
+        clock_from_epoch: float | None = None,
     ) -> None:
         """Name what the turn is doing now.
 
@@ -2817,6 +2829,23 @@ class WorkingBlock(TranscriptBlock):
         phase containing it. ``None`` keeps the phase's own zero, which is right
         for every state whose label and phase begin together.
 
+        ``clock_from_epoch`` is the same override for the phases whose zero the
+        WIDGET cannot have observed — ``thinking``, ``responding`` and
+        ``composing`` — where the session folded the instant the phase began
+        from the producer's own events. It is what makes a viewer that attaches
+        mid-turn resume the true age: this row is constructed at the switch, so
+        its phase zero is the switch, and without the seed the operator's own
+        report applies — the thinking indicator counting from the moment they
+        came back rather than from when the model call started.
+
+        It is converted to a monotonic instant ONCE, here, on the phase change
+        (:func:`tool_card.monotonic_from_epoch`), and every tick afterwards
+        counts on ``time.monotonic``: an elapsed-time reading must not move
+        because something adjusted the system clock, and a DST jump on a
+        seeded row would be a number nobody could explain. ``clock_from_epoch``
+        wins over ``clock_from`` when both arrive; the two describe different
+        phases and the caller only ever passes the one that matches.
+
         ``clock=False`` says the caller knows the LABEL but not when the work it
         names began, and the number is then withheld rather than counted from
         this moment. The case that forced it: a sidebar switch adopts a tool the
@@ -2828,9 +2857,16 @@ class WorkingBlock(TranscriptBlock):
         the adjacent number read as a claim ABOUT that tool, so the label is
         kept and the clock is dropped: this row's whole contract is that every
         number on it was derived from an event the app received, and a clock
-        started from the wrong zero is worse than no clock. There is no honest
-        alternative reading available — the start event carries no timestamp, so
-        the true age is not recoverable on this surface at any price.
+        started from the wrong zero is worse than no clock.
+
+        Withholding is still the answer whenever the true age is genuinely
+        unavailable, and that is a real population rather than a hypothetical:
+        a call whose producer sent no ``started_at_epoch`` (an older runtime), a
+        folded phase that does not match the one the app derived (a facade with
+        no fold, a compaction or retry fallback), and every child row inside
+        ``subagent_view``. For those the timestamp does not exist on this
+        surface at any price, so the clock stays blank rather than inventing
+        one; the matching rules live in ``OperatorApp._current_activity``.
 
         The clock restarts only when the PHASE changes, not whenever the label
         does. Keying it to the rendered string made the row refute itself: one
@@ -2849,13 +2885,48 @@ class WorkingBlock(TranscriptBlock):
         elif (
             activity == self._activity
             and clock == self._clock_known
-            and clock_from == self._clock_from
+            and clock_from_epoch == self._clock_from_epoch
+            # WHICH value is the anchor decides which one has to be compared,
+            # and getting that wrong is silent in both directions. With an
+            # epoch the epoch IS the anchor and the monotonic instant is only
+            # its image, so equality of the epoch is the whole test — comparing
+            # the image instead can never match the `None` this arm passes as
+            # `clock_from` for a non-epoch phase, and re-deriving the image on
+            # every repaint would put the counter back on the WALL clock (a
+            # system-clock adjustment or a DST change after the seed would move
+            # a reading that is supposed to be immune to both). With no epoch
+            # the monotonic value is the anchor and must itself be compared, or
+            # a running batch that sheds its oldest call keeps the stale zero
+            # and the band reports the shed sibling's age (D9).
+            and (clock_from_epoch is not None or clock_from == self._clock_from)
         ):
             return
         self._activity = activity
         self._clock_known = clock
+        self._clock_from_epoch = clock_from_epoch
         self._clock_from = clock_from
+        self._seed_clock_from_epoch()
         self._paint()
+
+    def _seed_clock_from_epoch(self) -> None:
+        """Convert a session-supplied epoch into this widget's monotonic zero.
+
+        Called wherever ``_clock_from_epoch`` is set — the constructor and
+        :meth:`set_activity` — so the conversion exists once. Kept OFF the paint
+        path deliberately: the epoch is converted when the phase's anchor
+        CHANGES, not on every repaint, because recomputing ``clock() - (now -
+        epoch)`` per frame would make the counter follow the wall clock again
+        and undoing that is the entire point of seeding a monotonic instant.
+
+        Lazy import for the same reason the sibling duration formatter is
+        imported this way: ``tool_card`` imports this module, so a module-level
+        import of the converter here would be a cycle.
+        """
+        if self._clock_from_epoch is None:
+            return
+        from local_operator.tui.widgets.tool_card import monotonic_from_epoch
+
+        self._clock_from = monotonic_from_epoch(self._clock_from_epoch)
 
     def on_mount(self) -> None:
         self._sync_rate()

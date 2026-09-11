@@ -113,6 +113,12 @@ from local_operator.mcp.verbs import _home_relative
 # boot path nothing the lazy-import discipline above is protecting.
 from local_operator.model.effort import next_effort
 from local_operator.session import naming
+from local_operator.session.frontend_state import (
+    ACTIVITY_PHASE_COMPOSING,
+    ACTIVITY_PHASE_RESPONDING,
+    ACTIVITY_PHASE_RUNNING,
+    ACTIVITY_PHASE_THINKING,
+)
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 
 # Shared loop semantics stay import-light for detached owners.
@@ -189,7 +195,9 @@ from local_operator.tui.session_presentation import (
     OlderHistoryNotice,
     PreparedReplay,
     SessionPresentation,
+    activity_phase_clock,
     live_projection_call_ids,
+    live_tool_start_epochs,
 )
 from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
@@ -5066,6 +5074,7 @@ class OperatorApp(App[None]):
                 prepared_live_cards,
                 replay._projection_skipped_live,
                 collect=replay.blocks,
+                session=session,
             )
             replay.view.styles.layer = "session-cache"
             # visibility:hidden removes the compositor map and makes size=0.
@@ -9230,6 +9239,10 @@ class OperatorApp(App[None]):
             # approval row as though the call the user has not authorised were
             # already executing.
             live_ids = cast(set[str], executing()) - call_ids
+            # The session's own start instants for those calls, read ONCE
+            # rather than per row: it is a copy of a small map, and the loop
+            # below may touch several rows of one batch.
+            epochs = live_tool_start_epochs(session)
             for block in blocks:
                 if isinstance(block, ToolCard) and block.tool_call_id in live_ids:
                     # `restore`, not `mark_running`: the row was mounted by
@@ -9239,7 +9252,15 @@ class OperatorApp(App[None]):
                     # while refusing to invent an elapsed time it cannot know
                     # — the same reason `subagent_view` restores a child's
                     # in-flight row this way.
-                    block.restore(state="running")
+                    #
+                    # `started_at` is what makes that refusal precise rather
+                    # than total. The producer stamped when the call began and
+                    # the session folded it, so for a call owned by a live
+                    # runtime the age IS knowable and the row resumes it
+                    # instead of counting from this switch. A call the map does
+                    # not have — an older runtime, a genuinely unknown start —
+                    # passes `None` and keeps the clockless rendering.
+                    block.restore(state="running", started_at=epochs.get(block.tool_call_id))
                     if live_cards is not None:
                         # See the docstring: this is the row's ONLY settle path
                         # when the turn dies instead of returning a result.
@@ -9333,7 +9354,10 @@ class OperatorApp(App[None]):
                 self._transcript_view().blocks(), self._session, self._tool_cards
             )
             painted = self._paint_skipped_live_tool_rows(
-                self._transcript_view(), self._tool_cards, self._projection_skipped_live
+                self._transcript_view(),
+                self._tool_cards,
+                self._projection_skipped_live,
+                session=self._session,
             )
             if painted and self._controller is not None:
                 # The adopt path's settle seam. The skipped call's
@@ -9360,6 +9384,7 @@ class OperatorApp(App[None]):
         calls: list[Any],
         *,
         collect: list[Any] | None = None,
+        session: Any = None,
     ) -> list[str]:
         """Paint the ONE row for a still-executing call the replay skipped.
 
@@ -9387,8 +9412,15 @@ class OperatorApp(App[None]):
         yet, so the row is appended to the presentation's block list for the
         caller's bulk mount rather than to the (unmountable) view. The visible
         path leaves it ``None`` and appends to the live view directly.
+
+        ``session`` is the session this row is being painted FOR, and it is a
+        parameter rather than ``self._session`` for the same reason the registry
+        is: the prepare caller is painting another conversation, and reading the
+        visible session's epochs there would date this row from the wrong
+        conversation's calls. Both callers already hold the right session.
         """
         painted: list[str] = []
+        epochs = live_tool_start_epochs(session)
         for call in calls:
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
@@ -9402,12 +9434,18 @@ class OperatorApp(App[None]):
             # start is when the tool began, not when this view painted the row,
             # so the card must not invent an elapsed time it cannot know — the
             # same reason `restore(state="running")` clears `_started`.
+            #
+            # `started_at` supplies that true start when the session has one:
+            # the producer's own stamp, folded per call, so the row painted here
+            # and the row the live path would have painted for the same call
+            # agree on one age. `None` for a call the map does not hold, and the
+            # clock stays withheld.
             card = ToolCard(
                 call_id,
                 getattr(call, "name", "") or "",
                 getattr(call, "arguments", None) or {},
             )
-            card.restore(state="running")
+            card.restore(state="running", started_at=epochs.get(call_id))
             if collect is not None:
                 collect.append(card)
             else:
@@ -19742,7 +19780,7 @@ class OperatorApp(App[None]):
         Asks the SAME deriver the working line and the title use, so the three
         cannot disagree about whether a turn is parked.
         """
-        _, phase, _, _ = self._current_activity()
+        _, phase, _, _, _ = self._current_activity()
         if phase != ACTIVITY_APPROVAL:
             return
         asking = self._ask_pending is not None and not self._ask_pending.done()
@@ -34760,8 +34798,14 @@ class OperatorApp(App[None]):
         """
         if self._working_block is not None:
             return
-        label, phase, clock, clock_from = self._current_activity()
-        self._working_block = WorkingBlock(label, phase, clock=clock, clock_from=clock_from)
+        label, phase, clock, clock_from, clock_from_epoch = self._current_activity()
+        self._working_block = WorkingBlock(
+            label,
+            phase,
+            clock=clock,
+            clock_from=clock_from,
+            clock_from_epoch=clock_from_epoch,
+        )
         self._append_block(self._working_block, ends_empty_state=ends_empty_state, pin_tail=True)
 
     def _dismiss_working_block(self) -> None:
@@ -34790,9 +34834,15 @@ class OperatorApp(App[None]):
         a stop reaches this hook without either of those paths knowing a title
         exists.
         """
-        label, phase, clock, clock_from = self._current_activity()
+        label, phase, clock, clock_from, clock_from_epoch = self._current_activity()
         if self._working_block is not None:
-            self._working_block.set_activity(label, phase, clock=clock, clock_from=clock_from)
+            self._working_block.set_activity(
+                label,
+                phase,
+                clock=clock,
+                clock_from=clock_from,
+                clock_from_epoch=clock_from_epoch,
+            )
         waiting = phase == ACTIVITY_APPROVAL
         if self._status is not None:
             self._status.set_attention(waiting)
@@ -34827,13 +34877,26 @@ class OperatorApp(App[None]):
         elif not waiting:
             self._waiting_kind = None
 
-    def _current_activity(self) -> tuple[str, str, bool, float | None]:
-        """What the turn is doing: ``(label, phase, clock, clock_from)``.
+    def _current_activity(self) -> tuple[str, str, bool, float | None, float | None]:
+        """What the turn is doing: ``(label, phase, clock, clock_from, clock_from_epoch)``.
 
         ``clock`` is whether the elapsed number the band draws would be TRUE at
         all. ``clock_from`` is the instant it should count from when it is:
         ``None`` means the phase's own zero is correct, which it is for every
         state but a running tool batch.
+
+        ``clock_from_epoch`` is the same override for the phases whose zero the
+        WIDGET cannot have observed — ``thinking``, ``responding`` and
+        ``composing``, which is precisely the arm the operator's report names
+        (the thinking indicator restarting on a switch) — and it is the instant
+        the SESSION folded for that phase from the producer's own events. It is
+        passed only when the folded phase EQUALS the phase derived here. On any
+        mismatch it is withheld, which is the safety property this row has held
+        since design rounds 2 and 3: a compaction or retry fallback phase, a
+        legacy owner, a facade with no fold, or a fold that has simply not seen
+        this turn's events all leave the widget counting from its own phase zero
+        — the pre-existing behaviour — rather than receiving a plausible-looking
+        age that belongs to something else.
 
         Two fields because the two design findings against this row are
         different questions, and one bit cannot answer both:
@@ -34890,12 +34953,16 @@ class OperatorApp(App[None]):
             # FIRST, above the approval prompt: the picker is a modal drawn over
             # everything, so it is what the user is looking at even if a card
             # underneath is also waiting.
-            return ("waiting for your answer", ACTIVITY_APPROVAL, True, None)
+            #
+            # No epoch arm for the two waiting states: the phase's zero IS the
+            # moment the question was asked on every surface that draws it, so
+            # there is nothing a switch could move.
+            return ("waiting for your answer", ACTIVITY_APPROVAL, True, None, None)
         if self._approval is not None and not self._approval.answered:
             # Nothing is running: the turn is parked on the question on screen,
             # and "thinking" under an unanswered prompt blames the model for a
             # wait that belongs to the user.
-            return ("waiting for approval", ACTIVITY_APPROVAL, True, None)
+            return ("waiting for approval", ACTIVITY_APPROVAL, True, None, None)
         if self._tool_cards:
             cards = list(self._tool_cards.values())
             starts = [card.started_at for card in cards]
@@ -34905,11 +34972,17 @@ class OperatorApp(App[None]):
             # measure is exactly the oldest one. See the docstring.
             known = [s for s in starts if s is not None]
             dateable = len(known) == len(starts)
+            # No epoch arm: a running batch is dated by its CARDS, which is a
+            # finer anchor than the folded phase edge (the phase restarts on
+            # every call that joins, the batch clock must not). `starts` is
+            # already the producer's own stamp, converted when each card was
+            # seeded from `live_tool_start_epochs`.
             return (
                 self._batch_phrase(cards),
-                "running",
+                ACTIVITY_PHASE_RUNNING,
                 dateable,
                 min(known) if dateable else None,
+                None,
             )
         if self._composing_cards:
             # The tool's NAME is deliberately absent. It arrives in fragments —
@@ -34918,10 +34991,54 @@ class OperatorApp(App[None]):
             # and `composing wr` reads as a typo rather than as a state.
             count = len(self._composing_cards)
             noun = "a call" if count == 1 else f"{count} calls"
-            return (f"composing {noun}", "composing", True, None)
+            return (
+                f"composing {noun}",
+                ACTIVITY_PHASE_COMPOSING,
+                True,
+                None,
+                self._folded_phase_epoch(ACTIVITY_PHASE_COMPOSING),
+            )
         if self._streaming_block is not None:
-            return (ACTIVITY_RESPONDING, ACTIVITY_RESPONDING, True, None)
-        return (self._working_fallback, self._working_fallback, True, None)
+            return (
+                ACTIVITY_RESPONDING,
+                ACTIVITY_RESPONDING,
+                True,
+                None,
+                self._folded_phase_epoch(ACTIVITY_PHASE_RESPONDING),
+            )
+        return (
+            self._working_fallback,
+            self._working_fallback,
+            True,
+            None,
+            self._folded_phase_epoch(ACTIVITY_PHASE_THINKING),
+        )
+
+    def _folded_phase_epoch(self, phase: str) -> float | None:
+        """The session's own start instant for ``phase``, when it IS that phase.
+
+        This is the whole of the new anchor's safety. The number is used only
+        when the phase folded from the producer's events is the SAME phase this
+        app just derived from its own widgets — equal by string, because the two
+        are different reductions of one stream and any disagreement means one of
+        them has missed events. When they agree, the instant is the producer's
+        own and a viewer that attached mid-turn resumes the true age instead of
+        counting from its arrival; when they disagree, or when there is no fold
+        at all, ``None`` is returned and the widget falls back to its phase zero.
+
+        The disagreement cases are real, not defensive dressing: a compaction or
+        retry fallback phase the fold does not model, a legacy runtime whose
+        events carry no phase, and every reduced facade in tests. In all of them
+        withholding the clock is the honest reading, and it is what the widget
+        already did — so a mismatch can only preserve behaviour, never invent an
+        age.
+
+        Read through the cheap session probe, not ``session.frontend_state``:
+        this runs on every event that moves the turn, and the property deep-copies
+        the whole state for two scalars.
+        """
+        folded, started_at = activity_phase_clock(self._session)
+        return started_at if folded and folded == phase else None
 
     @staticmethod
     def _batch_phrase(cards: list[ToolCard]) -> str:
@@ -35461,6 +35578,16 @@ class OperatorApp(App[None]):
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
+        # The call's own start instant, stamped by the producer and folded by
+        # the session. Preferred over the map because it is the SAME value for
+        # the row the live path paints and the row a switch back repaints: a
+        # reader that took the map alone would date the switched-to row from
+        # the last fold while the live row counted from the event, so the two
+        # surfaces for one call would disagree by their own handler latency.
+        # The map is the fallback for a producer that sent no stamp.
+        started_at = getattr(event, "started_at_epoch", None)
+        if started_at is None:
+            started_at = live_tool_start_epochs(self._session).get(event.tool_call_id)
         # Adopt the row that announced this call rather than mounting a second
         # one: the composing card already sits in the right place in the ledger,
         # and swapping it out would flicker a row away and an identical row back
@@ -35472,9 +35599,20 @@ class OperatorApp(App[None]):
             # leaves an interrupted ghost behind after the real one completes.
             card = self._painted_tool_card(event.tool_call_id)
         if card is not None:
-            card.begin_running(event.tool_name, event.args, event.intent)
+            card.begin_running(event.tool_name, event.args, event.intent, started_at=started_at)
         else:
-            card = ToolCard(event.tool_call_id, event.tool_name, event.args, event.intent)
+            # Seeded from the same instant as the adopt path. A start event that
+            # reaches a view with no row for its call — the owner's live seed
+            # re-delivered to a rebuilt transcript — would otherwise mount a
+            # fresh card whose clock begins here, which is the reported reset
+            # wearing the other hat: the row is new, the CALL is not.
+            card = ToolCard(
+                event.tool_call_id,
+                event.tool_name,
+                event.args,
+                event.intent,
+                started_at=started_at,
+            )
             self._append_block(card)
         self._tool_cards[event.tool_call_id] = card
         self._refresh_working_activity()
