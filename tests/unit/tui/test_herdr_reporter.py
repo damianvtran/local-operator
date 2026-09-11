@@ -29,7 +29,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.approval import ApprovalPrompt
 from local_operator.tui.widgets.status_line import StatusLine
-from tests.unit.test_herdr_reporter import Recorder
+from tests.unit.test_herdr_reporter import FakeHerdrRow, Recorder
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _isolate_tui_settings
 from tests.unit.tui.test_status_line import FakeDock
 
@@ -398,26 +398,59 @@ def test_the_heartbeat_re_asserts_the_bands_state_through_the_band() -> None:
 
     A short interval is injected so the test does not wait out the 30 s
     production one; the wiring under test is the same.
+
+    WHY THE FAKE ROW AND NOT A CALL COUNT. Attaching the reporter starts the
+    heartbeat, so between `set_herdr_reporter` and `update(streaming=True)`
+    the loop is already ticking: a >=50 ms stall there (measured on a box at
+    load 45) lets one or more pre-update `idle` re-assertions land, and an
+    assertion that indexes the call list by position — "the first two are
+    idle, working" — then reads a heartbeat tick as the transition and goes
+    red for load, not for a defect. The number of `idle` ticks before the
+    band moves is a property of the scheduler, so it must not appear in the
+    assertion at all.
+
+    `swallow="working"` is what removes the count: the row accepts the single
+    `working` TRANSITION and drops it, exactly as a Herdr restart would, so
+    the only thing that can ever put `working` on the row is a heartbeat
+    re-assertion. `wait_for_state` then waits on that publication rather than
+    on a call total (AGENTS.md "Wait on the event, never on the clock"), and
+    the seq it returns being higher than the swallowed transition's is the
+    re-assertion property itself.
     """
-    recorder = Recorder()
+    row = FakeHerdrRow(swallow="working")
     status = StatusLine(cast(Static, FakeDock(120)))
     counter = itertools.count(1)
     reporter = HerdrReporter(
         pane_id="w1:p1",
         binary="/opt/herdr",
         session_id="sess",
-        invoker=recorder,
+        invoker=row,
         clock=lambda: next(counter),
         resync_interval_s=0.02,
     )
     status.set_herdr_reporter(reporter)
     status.update(streaming=True)
-    recorder.wait_for_calls(2)  # idle, working
-    # No further band activity from here: only the heartbeat can add calls.
-    recorder.wait_for_calls(4)
+    # No further band activity from here: only the heartbeat can add calls, and
+    # only a heartbeat can put `working` on the row — the transition was
+    # swallowed. Waiting on the publication is also what makes the seq below
+    # safe to read: the transition's call is recorded by the time this returns.
+    resync_seq = row.wait_for_state("working")
     reporter.release()
     reporter.join()
-    assert set(recorder.states()[2:]) == {"working"}
-    seqs = recorder.seqs()
-    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
-    assert [sub for sub, _ in recorder.calls][-1] == "release-agent"
+
+    reports = [argv for sub, argv in row.calls if sub == "report-agent"]
+    states = [argv[argv.index("--state") + 1] for argv in reports]
+    seqs = [int(argv[argv.index("--seq") + 1]) for argv in reports]
+    # Index, never a literal position: how many `idle` ticks precede the band's
+    # move is the scheduler's business and must not be asserted.
+    first_working = states.index("working")
+    assert set(states[:first_working]) <= {"idle"}, states
+    # Every report from the transition on re-asserts it: no new transition, and
+    # the heartbeat re-asserts rather than inventing a state.
+    assert set(states[first_working:]) == {"working"}, states
+    # The heartbeat's re-assertion outranks the report the row dropped, which
+    # is what makes the high-water mark accept it.
+    assert resync_seq > seqs[first_working], (resync_seq, seqs[first_working])
+    all_seqs = row.seqs()
+    assert all_seqs == sorted(all_seqs) and len(set(all_seqs)) == len(all_seqs), all_seqs
+    assert [sub for sub, _ in row.calls][-1] == "release-agent"
