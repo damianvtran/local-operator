@@ -78,7 +78,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
-from local_operator.session.attachments import AttachmentStore
+from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -3228,7 +3228,25 @@ class AttachedSession:
                 # the file START without meeting the cursor, so this is the
                 # same "id is not in the journal" the whole-file parse saw.
                 cut = None
-            return replay_entries(suffix.entries, AttachmentStore(directory), through_id=cut)
+            # Resolve externalized media against the SAME shared store the
+            # write path puts it in: ``Transcript`` externalizes to
+            # ``config_dir()/attachments`` (attachments.AttachmentStore's
+            # default root), so that is the only root that can resolve a
+            # reference. The obvious-looking alternative — a per-session store
+            # at ``self._config_dir / "sessions" / self._session_id`` — was
+            # the bug: NOTHING ever writes there, so every digest resolved to
+            # None and a live, on-disk screenshot replayed as "image
+            # unavailable — no longer in the transcript". :meth:`_read_transcript`
+            # moved off ``Transcript.build_llm_history()`` (which used the
+            # shared store) and silently carried the wrong root with it.
+            # Mirrors ``server/utils/desktop_sessions.py`` and
+            # ``mobile/durable.py``, both of which deliberately read ONE
+            # cross-session store rather than a per-session copy.
+            return replay_entries(
+                suffix.entries,
+                AttachmentStore(self._config_dir / ATTACHMENTS_DIRNAME),
+                through_id=cut,
+            )
 
         return await asyncio.to_thread(_replay)
 

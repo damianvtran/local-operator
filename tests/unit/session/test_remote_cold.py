@@ -112,6 +112,73 @@ async def test_a_cold_viewer_renders_durable_history_without_an_owner(
 
 
 @pytest.mark.asyncio
+async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An externalized image must replay with its BYTES, not an empty block.
+
+    The cold replay used to resolve attachment digests against a per-session
+    store (``<config>/sessions/<id>``) that nothing ever writes to, so a user
+    screenshot that is on disk and intact replayed as the "image unavailable —
+    no longer in the transcript" receipt. The write path externalizes to the
+    SHARED ``<config>/attachments`` store (``AttachmentStore``'s default root),
+    and that is the only root a replay can resolve against.
+
+    Asserted through ``AttachedSession.cold`` — the real cold seam that boots a
+    viewer over a seeded journal — rather than ``replay_entries`` directly, so
+    the test fails if the viewer is ever wired to a third root.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    import base64
+    import json
+
+    from local_operator.harness.types import ImageContent, Message
+    from local_operator.session.transcript import Transcript
+
+    # Above the 1 KB externalization floor, so the row references the store
+    # rather than carrying the bytes inline — an inline row resolves with no
+    # store at all and would pass on the buggy tree.
+    image = ImageContent(
+        data=base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096).decode("ascii"),
+        mime_type="image/png",
+    )
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("look at this [Image #1]", images=[image]))
+
+    rows = [
+        json.loads(line)
+        for line in (directory / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert any(
+        block.get("attachment")
+        for row in rows
+        for block in (row.get("payload", {}).get("content") or [])
+        if isinstance(block, dict)
+    ), "precondition: the image row must be externalized to the store"
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        blocks = [
+            block
+            for message in viewer.history()
+            for block in (getattr(message, "content", None) or [])
+            if isinstance(block, ImageContent)
+        ]
+        assert len(blocks) == 1
+        # NON-EMPTY and byte-identical to the paste: a block that merely
+        # EXISTS is exactly what the bug produced.
+        assert blocks[0].data == image.data
+        assert len(blocks[0].data) > 0
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_cold_viewer_shows_scheduled_wakes_from_the_index(
     tmp_path: Path, monkeypatch
 ) -> None:
