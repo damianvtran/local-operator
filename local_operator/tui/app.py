@@ -1025,10 +1025,11 @@ RESUME_START_NOTICE = "start of conversation"
 #:
 #: Deliberately NOT "start of conversation" (which would be false) and not the
 #: "scroll up to load" instruction (which the reader cannot carry out here). It
-#: states what is true and offers the row itself as the way out: the notice is
-#: a control (:class:`OlderHistoryNotice`), so it does not have to recite a
-#: keyboard chord the product documents nowhere else.
-RESUME_UNREACHABLE_NOTICE = "older messages above — select to load"
+#: names the gesture the row actually honours: the notice is a control
+#: (:class:`OlderHistoryNotice`) with a full-width hover band, so "click"
+#: matches what the reader sees rather than a picker verb. Keyboard recovery
+#: is the documented ``ctrl+home`` chord, not this clause.
+RESUME_UNREACHABLE_NOTICE = "older messages above — click to load"
 
 #: The audit-phase twins of the two notices above, shown once the reader has
 #: drained everything the model can still see and the rows above are
@@ -1048,7 +1049,7 @@ RESUME_AUDIT_NOTICE = "earlier history above — scroll up to load"
 
 #: The unreachable twin: more pre-compaction history exists but this frame
 #: cannot be scrolled to it, so the row offers itself as the control instead.
-RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — select to load"
+RESUME_AUDIT_UNREACHABLE_NOTICE = "earlier history above — click to load"
 
 #: How many times one fetch transaction re-issues against a moved display
 #: window before declaring the head genuinely unstable. The window moves on a
@@ -1069,12 +1070,24 @@ _OLDER_PAGE_TRANSPORT_NOTICE = "session is reconnecting; earlier messages will l
 
 #: The genuine-fault message. Still an error — a contiguity violation or an
 #: unexpected failure must surface — but phrased for a human: what happened,
-#: and that scrolling up is the way to ask again. Never carries the internal
-#: `not attached` / `history changed while paging` wording.
+#: and how to ask again. The verb is geometry-aware because the same toast on
+#: an unscrollable frame used to instruct a gesture the head notice correctly
+#: said was impossible (UX U4). Never carries the internal `not attached` /
+#: `history changed while paging` wording.
 _OLDER_PAGE_FAULT_NOTICE = "Could not load earlier messages right now — scroll up to try again"
+_OLDER_PAGE_FAULT_NOTICE_CLICK = "Could not load earlier messages right now — click to try again"
+
+#: Restated onto the head notice while an unmounted paging lease is held.
+#: Wedged and in-flight are indistinguishable from this side of the gate, so
+#: the copy must not look idle ("scroll up" / "click to load") while a fetch
+#: is already the thing that will make the frame scrollable. A second click
+#: may still retire an unmounted lease — that is the wedge escape — but the
+#: row has to say a load is underway rather than asking the reader to start one.
+RESUME_LOADING_NOTICE = "loading older messages…"
+RESUME_AUDIT_LOADING_NOTICE = "loading earlier history…"
 
 
-@dataclass(frozen=True)
+@dataclass
 class _PagingLease:
     """Ownership of ONE backward-paging transaction, request through settle.
 
@@ -1091,9 +1104,29 @@ class _PagingLease:
     and are checked separately. Ownership answers a different question — may
     this completion open the gate — and the honest answer is "only if the gate
     is still the one it took", which is object identity and nothing else.
+
+    ``mounted`` is mutated in place on THIS object rather than by swapping a
+    replacement into the dict: ``owns()`` and ``_release_paging_lease``
+    compare identity, so replacing the stored lease would make the in-flight
+    fetch's object no longer the holder and its settle would refuse to
+    release. Frozen was the original F1 shape; the flags that let a click
+    retire a wedged holder have to live on the same object.
+
+    ``mounted`` records whether THIS transaction ever painted a page. A lease
+    that has held through an explicit request (click or the documented
+    ``ctrl+home`` chord) without mounting anything belongs to a fetch that
+    will never complete — a wedged owner socket that no disconnect event
+    reaches — so the next such request retires it rather than standing down
+    against a gate that nothing will ever release. A holder that HAS mounted
+    is merely settling, and keeps its gate (F1): a dropped ``insert_blocks``
+    settle is a TranscriptView defect outside this path, and breaking that
+    lease would re-consume a cursor whose rows are already painted. A fetch
+    that has not yet returned is indistinguishable from a wedge, so the
+    request is also the reader's way out of a hung wait.
     """
 
     source_token: str
+    mounted: bool = False
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -3337,9 +3370,9 @@ class OperatorApp(App[None]):
         #: across the gaps between attempts where the gate is open.
         #:
         #: Read only by `_reconcile_head_notice`, to withhold the pessimistic
-        #: "select to load" copy while the fill is still working. Stating it
+        #: "click to load" copy while the fill is still working. Stating it
         #: from intermediate geometry made the row round-trip its own copy on
-        #: painted frames — `scroll up` -> `select` -> `scroll up` — which
+        #: painted frames — `scroll up` -> `click` -> `scroll up` — which
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
         self._resume_fill_serial = 0
@@ -8799,6 +8832,10 @@ class OperatorApp(App[None]):
                 self._fetch_older_display_page(source, lease, on_settled=settled),
                 group=source.worker_group("history-page"),
             )
+            # The fetch is now the thing that will make the frame scrollable.
+            # Until it lands, an unmounted lease must not advertise a gesture
+            # the gate will swallow — restate as loading copy.
+            self._reconcile_head_notice()
         else:
             self._resume_fill_active = False
             self._reconcile_head_notice()
@@ -8871,18 +8908,39 @@ class OperatorApp(App[None]):
             # rendered at `info`/`dim`, 3.77:1 on the light theme against the
             # 4.5:1 AA floor (design review round 1, D4).
             self._restate_head_notice(notice, RESUME_START_NOTICE, "note")
-        elif not scrollable and self._resume_fill_active:
+            return
+        lease = self._paging_leases.get(self._interaction.token)
+        if lease is not None and not lease.mounted:
+            # An unmounted lease is a fetch in flight or a wedge. Either way
+            # the wheel stands down against `_resume_paging`, so advertising
+            # "scroll up to load" is the stuck frame's lie on a scrollable
+            # geometry (UX U1) and "click to load" looks idle while a load is
+            # already underway (UX U3 / D2). Loading copy until a page mounts
+            # is the honest state; a second click or ctrl+home may still
+            # retire the lease. A holder that HAS mounted is merely settling
+            # and falls through so R6's skip still applies.
+            self._restate_head_notice(
+                notice,
+                RESUME_AUDIT_LOADING_NOTICE if audit else RESUME_LOADING_NOTICE,
+                "note",
+            )
+            return
+        if not scrollable and self._resume_fill_active:
             # A fill attempt is still in flight, and the frame it is about to
             # produce is the one worth describing. Stating "unreachable" from
             # intermediate geometry the fill is on its way to invalidating made
             # the row ROUND-TRIP its copy on painted frames — `scroll up` ->
-            # `select` -> `scroll up` at 120x300, which a reader sees as the
+            # `click` -> `scroll up` at 120x300, which a reader sees as the
             # notice changing its mind and changing it back (review round 2,
             # R6). The pessimistic state is worth stating once the fill has
             # actually given up, and the fill's own exits do exactly that:
             # every one of them clears this flag before reconciling.
+            #
+            # Unmounted in-flight leases already returned above with loading
+            # copy. A fill that still has this flag with no such lease (or
+            # with a mounted one) is the R6 skip: keep the current row.
             return
-        elif not scrollable:
+        if not scrollable:
             # `note`, not `info`: this is the answer to "where did my history
             # go", which is the role `NoticeBlock` reserves `note` for, and it
             # carries an instruction the reader must be able to READ to act
@@ -9144,7 +9202,18 @@ class OperatorApp(App[None]):
             self._mount_newer_resume_page()
 
     def on_older_history_notice_requested(self, message: OlderHistoryNotice.Requested) -> None:
-        """The explicit affordance uses the same demand lease as upward input."""
+        """The explicit affordance uses the same demand lease as upward input.
+
+        One extra duty the wheel does not carry: the click is the reader
+        ASKING for the page the row advertises, so a gate that swallowed the
+        previous ask without mounting anything is abandoned, not busy. Retire
+        it and let this click fetch — otherwise a wedged holder (an owner
+        socket that never answers and is never torn down) leaves the frame
+        with a notice no input can answer: the stuck "older messages above"
+        state. ``ctrl+home`` carries the same retirement through
+        :meth:`_check_resume_page` so a keyboard reader is not stuck waiting
+        for a mouse.
+        """
         message.stop()
         if message.notice is self._resume_head_notice:
             self._resume_fill_active = False
@@ -9307,7 +9376,7 @@ class OperatorApp(App[None]):
                     # can scroll. Fall through to the honest fault rather than
                     # live-lock; the next scroll-up asks again.
                     self._resume_fill_active = False
-                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
+                    self._notice(self._older_page_fault_notice(), "error")
                 elif failure == "transport":
                     # The connection is down; reattach is the transport
                     # layer's floor and is driven underneath this one. Do NOT
@@ -9326,7 +9395,7 @@ class OperatorApp(App[None]):
                     # as five identical red rows.
                     self._older_page_retries.pop(lease.source_token, None)
                     self._resume_fill_active = False
-                    self._notice(_OLDER_PAGE_FAULT_NOTICE, "error")
+                    self._notice(self._older_page_fault_notice(), "error")
         finally:
             # `transferred` means the mount now carries the lease to its settle.
             # Otherwise this transaction ends here, and only it may end itself.
@@ -9368,7 +9437,7 @@ class OperatorApp(App[None]):
         without going through either. So the copy was correct on every path a
         test drove and wrong on the one a reader takes most often: the notice
         told a reader to scroll up in a frame with no scrollbar after the
-        window grew, and went on offering `select to load` after it shrank back
+        window grew, and went on offering `click to load` after it shrank back
         into a scrollable frame (design review round 2, D1; QA Q5).
 
         Keyed on the EXTENT rather than on a resize event, which is the same
@@ -9387,6 +9456,21 @@ class OperatorApp(App[None]):
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
+
+    def _older_page_fault_notice(self) -> str:
+        """Genuine-fault toast, with a verb this frame can actually honour.
+
+        The scrollable clause is the original instruction. On an unscrollable
+        frame it would contradict the head notice (UX U4): "scroll up to try
+        again" next to "click to load". Dropping the gesture entirely would
+        leave a toast with no next step; naming the click matches the control
+        the head row already is.
+        """
+        view = self._transcript_view()
+        viewport = view.container_size.height or view.size.height
+        if viewport and view.virtual_size.height > viewport:
+            return _OLDER_PAGE_FAULT_NOTICE
+        return _OLDER_PAGE_FAULT_NOTICE_CLICK
 
     @property
     def _resume_paging(self) -> bool:
@@ -9462,6 +9546,9 @@ class OperatorApp(App[None]):
             self._fetch_older_display_page(source, lease, on_settled=on_settled),
             group=source.worker_group("history-page"),
         )
+        # Until this fetch lands, an unmounted lease must not advertise a
+        # gesture the gate will swallow. Restate as loading copy.
+        self._reconcile_head_notice()
 
     def _acquire_paging_lease(self, source: SessionInteraction) -> _PagingLease | None:
         """Take the backward-paging gate for ``source``, or refuse.
@@ -9490,6 +9577,49 @@ class OperatorApp(App[None]):
         if self._paging_leases.get(lease.source_token) is not lease:
             return False
         del self._paging_leases[lease.source_token]
+        return True
+
+    def _break_abandoned_paging_lease(self, source: SessionInteraction) -> bool:
+        """Retire a paging gate whose holder will never release it.
+
+        Only an explicit ASK may do this — the notice click, or the documented
+        ``ctrl+home`` chord — and only against a lease that has produced
+        NOTHING: it held the gate through one explicit request and still
+        mounted no rows. That combination means the holder is wedged — a fetch
+        parked on an owner socket that never answers and whose teardown never
+        arrives — and every input gates on it, so the frame is stuck until the
+        lease is retired. The wheel is not this gesture: every notch of a
+        healthy in-flight fetch would otherwise cancel and restart it.
+
+        A fetch that has not yet returned is indistinguishable from a wedge
+        from this side of the gate, so the ask is also the way out of a hung
+        wait. A holder that HAS mounted is merely settling, and keeping that
+        gate is F1: retiring it would let a second fetch re-consume the same
+        cursor. A dropped ``insert_blocks`` settle is a TranscriptView defect
+        outside this path and is deliberately not retired here.
+
+        The replacement inherits ``_older_page_retries`` for this source: the
+        budget is against a moving window, not a particular transaction, so a
+        wedged fetch that already spent retries should not get a fresh count.
+
+        Retiring is safe because the wedged holder's own completion is fenced
+        on identity: when it finally lands (or is cancelled) it no longer owns
+        the gate, so it releases nothing it does not hold and publishes nothing
+        to a screen it no longer owns. The replacement fetch re-reads the same
+        ``history_before_token`` cursor the wedged one never consumed, so no
+        page is skipped or duplicated.
+
+        Returns whether a lease was retired, so the caller can decide whether
+        the gesture should now proceed to a fresh fetch.
+        """
+        lease = self._paging_leases.get(source.token)
+        if lease is None or lease.mounted:
+            return False
+        # Cancel the wedged fetch's worker so its coroutine unwinds through
+        # its own `finally` (which now releases nothing, having lost the gate)
+        # rather than lingering against the retired lease.
+        self.workers.cancel_group(self, source.worker_group("history-page"))
+        del self._paging_leases[source.token]
         return True
 
     def _transcript_scrolled(self, *args: Any, continuous: bool = False) -> None:
@@ -9541,7 +9671,17 @@ class OperatorApp(App[None]):
             view.call_after_refresh(run_check)
 
     def _check_resume_page(self, *, force: bool = False) -> None:
-        """Spend one demand only after motion settles in the prefetch zone."""
+        """Spend one demand only after motion settles in the prefetch zone.
+
+        ``force=True`` is an explicit ASK (the notice click, or the documented
+        ``ctrl+home`` chord), not a wheel notch. A wedged unmounted lease
+        stands every other input down against `_resume_paging`; retiring it
+        here is what lets the documented keyboard route recover in place
+        (UX U2). The wheel still calls without force, so a healthy in-flight
+        fetch is not cancelled by every notch.
+        """
+        if force:
+            self._break_abandoned_paging_lease(self._interaction)
         if not self._resume_in_zone or self._resume_paging:
             return
         view = self._transcript_view()
@@ -9688,6 +9828,10 @@ class OperatorApp(App[None]):
             # stays the top row and the conversation keeps its order.
             mounted = transcript.blocks()
             index = 1 if mounted and notice is not None and mounted[0] is notice else 0
+            # Flag BEFORE the insert's settle: a click arriving while gaps
+            # are still answering must see a working transaction, not a
+            # wedge. Mutated on this object so identity (F1) is unchanged.
+            lease.mounted = True
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
             # Hidden-only pages still yield; otherwise initial fill projects
@@ -26994,7 +27138,18 @@ class OperatorApp(App[None]):
         untouched — the whole point of the chord is that the composer keeps
         the caret, so a reader checking the start of a long session can type
         the moment they return with ``ctrl+end``.
+
+        On a wedged unscrollable frame the scroll itself is a no-op — there is
+        no offset to travel, and every later check stands down against the
+        held gate. The help screen documents this chord as the keyboard
+        recovery for that state, so it has to carry the same unmounted-lease
+        retirement the notice click got (UX U2). Retire first, then take the
+        existing scroll path: ``note_user_scroll`` still fires at y=0 (clamped
+        input rearms), and with the gate open the deferred check can fetch.
+        A wheel notch never comes through this action, so a healthy in-flight
+        fetch is not cancelled by scrolling.
         """
+        self._break_abandoned_paging_lease(self._interaction)
         self._transcript_view().action_scroll_home()
 
     def action_transcript_end(self) -> None:
@@ -31592,7 +31747,7 @@ class OperatorApp(App[None]):
         # is itself a chord (`fn+ctrl+←`) on most Mac keyboards.
         #
         # It says "loads" because that is the part a reader cannot guess. On a
-        # frame too tall to scroll, `select to load` is followable with a mouse
+        # frame too tall to scroll, `click to load` is followable with a mouse
         # in one click, while `pageup` and `home` are no-ops (there is no
         # offset to travel) and reaching the notice by arrow traversal costs
         # ~129 presses — so the only practical keyboard route was a key whose
