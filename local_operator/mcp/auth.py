@@ -153,11 +153,12 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: (:data:`UNCONFIRMED_SEND_TTL_S`) and why a connect-phase failure clears it.
 GRANT_UNCONFIRMED_SEND_KEY = "grant_refresh_unconfirmed"
 
-#: Outcome of one refresh attempt. Six-valued rather than ``bool`` because each
+#: Outcome of one refresh attempt. Seven-valued rather than ``bool`` because each
 #: refusal has its OWN truthful user-visible message (lock contention, a budget
-#: overrun, a server refusal, a possibly-spent token needing a fresh sign-in)
-#: and because the coordinator must tell a DEAD grant (never present this token
-#: again) from a merely FAILED one (transient; today's behaviour is correct).
+#: overrun, a server that answered without a token, a token endpoint that could
+#: not be reached, a possibly-spent token needing a fresh sign-in) and because
+#: the coordinator must tell a DEAD grant (never present this token again) from a
+#: merely FAILED one (transient; today's behaviour is correct).
 #: CAUTION: every member is a truthy string — every call site must compare
 #: against a member explicitly, never test truthiness.
 RefreshOutcome = Literal[
@@ -167,6 +168,7 @@ RefreshOutcome = Literal[
     "contended",
     "overran",
     "unacknowledged",
+    "unreachable",
 ]
 
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
@@ -212,22 +214,45 @@ REFRESH_LATE_RESPONSE_GRACE_S = 30.0
 #: expiry can only degrade to the status quo ante, never to something worse.
 UNCONFIRMED_SEND_TTL_S = 3600.0
 
-#: Why a refresh was refused — one value per truthful user-visible message (see
-#: :class:`McpRefreshContendedError` and :class:`McpRefreshUnconfirmedError`).
-#: The manager re-voices a transport-mangled cancellation from these and the
-#: tests assert the rendered copy verbatim, so the set is closed and short.
+#: Why a refresh was refused — ONE STABLE CODE per truthfully different
+#: situation. This block is the SEAM the user-visible wording hangs off: the auth
+#: layer carries the code on the exception (:attr:`McpRefreshContendedError`'s
+#: ``reason_code`` / :attr:`McpAuthRequiredError.reason_code`) and the manager —
+#: the only layer that knows the server's NAME — composes the short rendered
+#: text from it (:meth:`McpManager._auth_failure_text`). Nothing here is copy.
 #:
-#: * ``REFRESH_REFUSAL_LOCK`` — no exclusivity, so nothing was presented.
+#: The split exists because one sentence covered all of these and was therefore
+#: untrue on most of them. A first attempt at splitting reworded the verbose
+#: sentence instead, which does not work at any terminal width: that sentence
+#: opens with ``MCP OAuth token refresh for <full server URL>``, which is ~55 of
+#: a 58-cell toast card, so the distinguishing clause was always the part
+#: tail-truncated away and all three refusals rendered byte-identically at 100
+#: columns and below (design review D1/D2). A CODE travels independently of the
+#: sentence, so the rendered text can be short while the sentence stays verbose
+#: where verbose is right — ``str(exc)`` and the logs.
+#:
+#: The set is closed and short: the manager re-voices a transport-mangled
+#: cancellation from these and the tests assert the mapped copy verbatim.
+#:
+#: * ``REFRESH_REFUSAL_LOCK`` — no exclusivity, so nothing was presented; another
+#:   session is refreshing this grant right now.
 #: * ``REFRESH_REFUSAL_INFLIGHT`` — the exchange outran the connect's budget and
 #:   is still running; a late rotation will still be persisted.
 #: * ``REFRESH_REFUSAL_ENDPOINT`` — the exchange ran and the authorization
-#:   server's answer was not a usable token.
+#:   server's answer carried no usable token.
+#: * ``REFRESH_REFUSAL_UNREACHABLE`` — the request never reached the wire (httpx's
+#:   own pre-send taxonomy, see :func:`_refresh_request_never_sent`), so nothing
+#:   was presented and there is no rotation to keep. Split out of
+#:   ``REFRESH_REFUSAL_ENDPOINT`` deliberately: an unreachable endpoint is not a
+#:   server that rejected us, and saying it was (review round 2, minor 1) tells
+#:   the user the grant was refused when the request never left the machine.
 #: * ``REFRESH_REFUSAL_UNCONFIRMED`` — a token may already be spent (it was
 #:   presented, or an earlier presentation was never acknowledged), so nothing
 #:   may be presented until an interactive grant replaces it.
 REFRESH_REFUSAL_LOCK = "lock"
 REFRESH_REFUSAL_INFLIGHT = "inflight"
 REFRESH_REFUSAL_ENDPOINT = "endpoint"
+REFRESH_REFUSAL_UNREACHABLE = "unreachable"
 REFRESH_REFUSAL_UNCONFIRMED = "unconfirmed"
 
 #: Bound on ACQUIRING the cross-process refresh lock. The critical section it
@@ -291,15 +316,34 @@ class McpAuthRequiredError(RuntimeError):
     line, so the command still comes first. ``None`` (the default) keeps the
     generic "authorization expired" wording, which is the truthful summary for
     every other route into this error: the stored grant could not be refreshed.
+
+    ``reason_code`` is the STABLE CODE for why (:data:`REFRESH_REFUSAL_LOCK` and
+    friends), and it is the seam user-visible copy is composed from: the manager
+    maps the code to short rendered text, while ``str(self)`` keeps the verbose
+    technical sentence for the logs. ``None`` means "no more specific reason than
+    an unusable grant". See the ``REFRESH_REFUSAL_*`` block for why the copy is
+    not carried here as prose.
     """
 
-    def __init__(self, server_url: str, *, detail: str | None = None) -> None:
+    #: See :attr:`reason_code` in the class docstring; class-level so the
+    #: subclasses that know their reason set it without touching ``__init__``.
+    reason_code: str | None = None
+
+    def __init__(
+        self,
+        server_url: str,
+        *,
+        detail: str | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         message = f"MCP OAuth authorization required for {server_url}"
         if detail is not None:
             message = f"{message}: {detail}"
         super().__init__(message)
         self.server_url = server_url
         self.detail = detail
+        if reason_code is not None:
+            self.reason_code = reason_code
 
 
 class McpRefreshContendedError(RuntimeError):
@@ -316,13 +360,15 @@ class McpRefreshContendedError(RuntimeError):
     ``_RefreshCoordinatingOAuthProvider._refuse_unlocked_refresh``) so the
     suppressed SDK refresh cannot run either way.
 
-    One message per ``refusal``, because the three paths that reach it say
-    different things and a single string was untrue on two of them: the lock
-    being held elsewhere is not a server refusal, and a server that ANSWERED
-    500 did not fail "under the refresh lock". It also deliberately does NOT
-    promise a retry: the mid-session reconnect path does retry with backoff,
-    but the startup gate renders this same string as the reason a server is
-    unavailable and schedules no retry there.
+    One verbose SENTENCE per reason, and one stable CODE: the code is what the
+    manager turns into user-visible text (this string opens with the server's
+    full URL and is ~55 cells before it says anything distinguishing, so it can
+    never be the rendered copy — see the ``REFRESH_REFUSAL_*`` block), while the
+    sentence below stays for ``str(exc)`` and the logs, where the URL and the
+    wording are exactly what a maintainer wants. The sentences also deliberately
+    do NOT promise a retry: the mid-session reconnect path does retry with
+    backoff, but the startup gate schedules none, so the log sentence may not
+    claim one either.
 
     This type reaches the manager INDIRECTLY. The MCP streamable-HTTP transport
     runs the request inside anyio cancel scopes, so an exception raised out of
@@ -334,16 +380,20 @@ class McpRefreshContendedError(RuntimeError):
     caller) see the raise itself.
     """
 
-    def __init__(self, server_url: str, *, refusal: str = REFRESH_REFUSAL_LOCK) -> None:
-        if refusal == REFRESH_REFUSAL_INFLIGHT:
+    def __init__(self, server_url: str, *, reason_code: str = REFRESH_REFUSAL_LOCK) -> None:
+        if reason_code == REFRESH_REFUSAL_INFLIGHT:
             message = (
                 f"MCP OAuth token refresh for {server_url} did not finish in time; "
                 "a rotation is kept if the response lands"
             )
-        elif refusal == REFRESH_REFUSAL_ENDPOINT:
+        elif reason_code == REFRESH_REFUSAL_ENDPOINT:
             message = (
-                f"MCP OAuth token refresh for {server_url} was rejected by the "
-                "authorization server"
+                f"MCP OAuth token refresh for {server_url} was answered without a " "usable token"
+            )
+        elif reason_code == REFRESH_REFUSAL_UNREACHABLE:
+            message = (
+                f"MCP OAuth token refresh for {server_url} could not be sent: the "
+                "token endpoint was unreachable, so no token was presented"
             )
         else:
             message = (
@@ -352,7 +402,7 @@ class McpRefreshContendedError(RuntimeError):
             )
         super().__init__(message)
         self.server_url = server_url
-        self.refusal = refusal
+        self.reason_code = reason_code
 
 
 class McpRefreshUnconfirmedError(McpAuthRequiredError):
@@ -371,13 +421,16 @@ class McpRefreshUnconfirmedError(McpAuthRequiredError):
     grant", so it takes the auth block, the actionable toast and the abandoned
     auto-reconnect that every other auth requirement takes. ``detail`` is what
     keeps the toast truthful — a refresh that was SENT but never confirmed is not
-    an expired authorization.
+    an expired authorization — and it is kept SHORT because it is the tail of a
+    line the startup toast then clamps (`refresh unconfirmed`, where the previous
+    sentence-length wording was itself truncated off the card).
     """
 
     def __init__(self, server_url: str) -> None:
         super().__init__(
             server_url,
-            detail="a token refresh was sent but never confirmed",
+            detail="refresh unconfirmed",
+            reason_code=REFRESH_REFUSAL_UNCONFIRMED,
         )
         # We necessarily HOLD a grant for this server (the refusal exists because
         # its stored refresh token may have been spent), so the user-visible
@@ -853,9 +906,30 @@ class McpTokenStorage:
 
         So the write re-reads the row immediately before writing and persists
         only while the payload still holds the refresh token THIS exchange
-        presented. A row that is gone entirely is re-created: absence is not
-        evidence that somebody replaced the grant, and the rotation is still
-        ours to keep.
+        presented.
+
+        A row that is gone ENTIRELY is treated as the same fact, not as licence
+        to re-create: an explicitly removed row stays removed, so a `/mcp logout`
+        or a `/mcp reauth` that lands while our exchange is in flight is never
+        silently undone by a refresh that was already on the wire (QA round 2,
+        Q6). This used to re-create the row on the stated reasoning that
+        "absence is not evidence that somebody replaced the grant" — and that
+        half is still true, which is why the three-valued
+        :meth:`has_stored_row` decides it: a DEFINITE absence is an act by
+        another writer and this write is dropped with an INFO line naming the
+        writer and the reason, while an UNREADABLE store
+        (:meth:`has_stored_row` returns ``None``) is not evidence of removal
+        either and keeps the old behaviour, the rotation is still written. That
+        direction is deliberate and is the one the family's safety rests on: a
+        rotation we drop while the spent token stays in the row is re-presented
+        by the next refresh, which is the reuse-detecting POST that revokes
+        every session. Dropping a rotation costs at most one interactive
+        sign-in; keeping a spent token costs the whole family.
+
+        This is now symmetric with :meth:`mark_grant_dead`, which declines to
+        write on a payload that no longer holds the token it rejected. Two
+        writers racing a removal must give the same answer, and before this fix
+        they gave opposite ones.
 
         Two disciplines separate this from :meth:`set_tokens`:
 
@@ -865,18 +939,32 @@ class McpTokenStorage:
           resurrect a family it has already killed. The write still happens —
           the rotation is real and worth keeping for support — and the marker
           keeps it from ever being presented.
-        * a dropped write is logged at INFO, naming this writer. A lost rotation
-          is what support has to be able to read out of the log after an
-          incident; it is never a debug detail.
+        * a dropped write is logged at INFO, naming this writer and the reason.
+          A lost rotation is what support has to be able to read out of the log
+          after an incident; it is never a debug detail.
+
+        The first-grant path is unaffected: ``set_tokens`` still creates the row
+        for a completed interactive grant. A refresh can only ever run against a
+        row that already held the token it presented, so absence here always
+        means a REMOVAL that raced us, never a first grant.
 
         Caller: :func:`_perform_refresh_exchange`, which holds the refresh lock
         across this call, so the only writers it races are the ones that
         deliberately do not take the lock (a completed interactive login, the
-        SDK's client-info writes).
+        SDK's client-info writes, a `/mcp logout`).
 
         Returns ``True`` when the response was written.
         """
         creds = self._read()
+        if creds is None and self.has_stored_row() is False:
+            logger.info(
+                "MCP token refresh for %s was NOT persisted: the credential row was "
+                "removed while this exchange was in flight (a logout or reauth), so "
+                "the removal is honoured rather than re-created "
+                "[writer: McpTokenStorage.store_refresh_result]",
+                self.server_url,
+            )
+            return False
         if creds is not None and not _payload_holds_refresh_token(creds, presented_refresh_token):
             logger.info(
                 "MCP token refresh for %s was NOT persisted: the stored grant moved on "
@@ -922,13 +1010,24 @@ class McpTokenStorage:
         self._write(creds)
 
     def clear_send_unconfirmed(self) -> None:
-        """Resolve the send marker: the exchange reached an ANSWER for its token.
+        """Resolve the send marker: the exchange reached a DEFINITIVE answer.
 
-        Called for any HTTP response (the server answered, so it either
-        rotated-and-told-us or refused without rotating) and for a connect-phase
-        failure (the token never reached the wire). Deliberately NOT called when
-        the request was written and no answer arrived, which is exactly the state
-        the marker describes.
+        Called only for an answer that proves our presented token was not left
+        spent (see :func:`_answer_resolves_send_marker`), and for a connect-phase
+        failure (the token never reached the wire, so nothing was spent).
+        Deliberately NOT called for the two other shapes, which is the whole
+        point of the marker:
+
+        * the request was written and no answer arrived — the state the marker
+          describes;
+        * an answer that does not prove anything about our token, such as a
+          ``5xx`` or a ``429``. A provider that commits a rotation and THEN
+          fails the response leaves the row holding a spent token, so clearing
+          the marker there would let the next connect re-present it: the
+          reuse-detection POST that revokes the whole family (review round 2,
+          minor 2). Keeping it costs at most one interactive sign-in — and since
+          a marked token is never presented again, it can also never be
+          double-spent, which is the property that matters more.
         """
         creds = self._read()
         if creds is None or GRANT_UNCONFIRMED_SEND_KEY not in creds:
@@ -1366,6 +1465,16 @@ def _refresh_request_never_sent(exc: BaseException) -> bool:
     ``RemoteProtocolError`` — can have been written, so it is treated as suspect.
     That asymmetry is deliberate: a wrongly-suspect failure costs one interactive
     sign-in, a wrongly-trusted one costs the whole token family.
+
+    The annotation is ``BaseException`` because the predicate is TOTAL over
+    exceptions by construction: it answers "was this demonstrably pre-send?"
+    and anything it does not recognise — including ``asyncio.CancelledError`` —
+    answers ``False``, i.e. suspect. That is the conservative answer, and it is
+    why the caller needs no special case for cancellation: the caller's ``except
+    (httpx.HTTPError, TimeoutError)`` cannot catch a ``CancelledError``, so a
+    cancelled send keeps the marker by PROPAGATION, while this predicate — were
+    it ever asked — would keep it too. This docstring must not claim a
+    classification the caller never requests (review round 2, nit).
     """
     import httpx
 
@@ -1379,6 +1488,38 @@ def _refresh_request_never_sent(exc: BaseException) -> bool:
             httpx.LocalProtocolError,
         ),
     )
+
+
+def _answer_resolves_send_marker(status_code: int, *, invalid_grant: bool) -> bool:
+    """Whether a token-endpoint ANSWER proves our presented token is not spent.
+
+    The ONE place the marker's clearing rule lives, so no future status-code
+    tweak can quietly re-open the family-revoking POST (review round 2, minor
+    2). Clearing the marker says "the next connect may present this token
+    again", so it is allowed only for an answer that settles the question:
+
+    * ``200`` with a body already parsed into a usable token — the exchange ran,
+      so the presented token is consumed and the row holds its replacement.
+      :func:`_perform_refresh_exchange` asks only after the body parsed; the
+      unreadable-200 shape is ``unacknowledged`` by definition and never reaches
+      here;
+    * ``400`` whose body names ``invalid_grant`` — the authorization server
+      answered that this token is not acceptable (spent, revoked, or already
+      rotated away), and the caller records the tombstone that is the outcome.
+      There is nothing left for the marker to protect.
+
+    Everything else is an UNKNOWN answer and keeps the marker: ``5xx`` and
+    ``429`` (a provider that commits the rotation and THEN fails the response
+    would otherwise leave a spent token re-presentable), and any other 4xx that
+    is not an ``invalid_grant`` (a refusal that is not readable as a statement
+    about our token). The cost is bounded and stated: the marker expires
+    (:data:`UNCONFIRMED_SEND_TTL_S`), so an authorization-server outage can cost
+    the affected grant ONE interactive sign-in rather than risking a fleet-wide
+    revocation. That is the trade this module takes on purpose.
+    """
+    if status_code == 200:
+        return True
+    return status_code == 400 and invalid_grant
 
 
 def _stored_token_is_fresh(storage: "McpTokenStorage", tokens: Any) -> bool:
@@ -2953,10 +3094,13 @@ async def _refresh_oauth_token_locked(
     is written and the token must never be presented again), ``"contended"``
     (no exclusivity, so NOTHING was presented), ``"overran"`` (the budget was
     spent with the exchange still running; a rotation that still lands is
-    persisted), ``"unacknowledged"`` (a token may already be spent, so nothing
-    was or may be presented until an interactive grant), and ``"failed"`` for
-    every other outcome, including "nothing to refresh". Callers MUST compare
-    against a member: every member is a truthy string.
+    persisted), ``"unreachable"`` (the request never reached the wire, so
+    nothing was presented and there is nothing to keep — a pre-send transport
+    failure, which is NOT a server rejection), ``"unacknowledged"`` (a token may
+    already be spent, so nothing was or may be presented until an interactive
+    grant), and ``"failed"`` for every other outcome, including "nothing to
+    refresh". Callers MUST compare against a member: every member is a truthy
+    string.
 
     The caller holds the cross-process refresh lock and passes its HANDLE, which
     this function hands to the exchange task before its first cancellable await.
@@ -3229,7 +3373,12 @@ async def _perform_refresh_exchange(
                     server_url,
                     type(exc).__name__,
                 )
-                return "failed"
+                # Its OWN outcome, not "failed": nothing was presented, so
+                # nothing was refused. The user-visible text says "could not
+                # be reached" instead of claiming an authorization server
+                # rejected a request it never received (review round 2, minor
+                # 1), and the manager composes that text from the code.
+                return "unreachable"
             # SENT and never answered: the token may already be spent, so a
             # retry is exactly the reuse-detection POST. The request already
             # armed the marker, and this outcome is what makes the caller take
@@ -3247,10 +3396,27 @@ async def _perform_refresh_exchange(
             return "unacknowledged"
 
         if response.status_code != 200:
-            # The authorization server ANSWERED, so the request is resolved
-            # either way: it rotated-and-told-us (a 200) or it refused without
-            # rotating. An answer also means the marker's question is answered.
-            storage.clear_send_unconfirmed()
+            # Whether this answer resolves the send marker is a decision, not a
+            # reflex: it is cleared only when the response is DEFINITIVE about
+            # our token (a 200 we could parse, or a parsed ``invalid_grant``),
+            # and kept for every answer that leaves the outcome unknown —
+            # ``5xx``/``429`` among them. Clearing it on a 5xx would let the
+            # next connect re-present a token a provider may have spent before
+            # failing the response: the reuse-detection POST that revokes the
+            # family this whole mechanism exists to protect. See
+            # :func:`_answer_resolves_send_marker` for the rule and its cost.
+            invalid_grant = response.status_code == 400 and _is_invalid_grant(response.content)
+            if _answer_resolves_send_marker(response.status_code, invalid_grant=invalid_grant):
+                storage.clear_send_unconfirmed()
+            else:
+                logger.info(
+                    "MCP token refresh for %s got HTTP %s, which does not prove the "
+                    "presented refresh token was not consumed; the token will not be "
+                    "presented again, so this server may need one fresh sign-in "
+                    "[writer: locked refresh exchange]",
+                    server_url,
+                    response.status_code,
+                )
             # A revoked-grant rejection is qualitatively different from a
             # transient one and must be logged as such: for a rotating provider
             # that runs refresh-token REUSE DETECTION (Notion), presenting an
@@ -3263,7 +3429,7 @@ async def _perform_refresh_exchange(
             # McpAuthRequiredError, which the manager turns into a suspended
             # reconnect (see manager._reconnect's McpAuthRequiredError arm)
             # rather than hammering a dead grant.
-            if response.status_code == 400 and _is_invalid_grant(response.content):
+            if invalid_grant:
                 logger.info(
                     "MCP OAuth grant revoked for %s (invalid_grant); run /mcp login to "
                     "restore it",
@@ -3419,7 +3585,7 @@ async def ensure_mcp_oauth_fresh(
         outcome = await _refresh_oauth_token_locked(
             server_url, storage, endpoints, lock=lock, peer_refresh_is_success=True
         )
-        if outcome in ("contended", "overran", "failed", "unacknowledged"):
+        if outcome in ("contended", "overran", "failed", "unreachable", "unacknowledged"):
             # Best-effort by contract: the connect proceeds and re-reads under
             # the lock on its next attempt. Each refusal already logged its own
             # reason at INFO, naming that writer — no second line here, because
@@ -3748,7 +3914,7 @@ def _make_refresh_coordinating_provider(
                 # reuse-detection POST. The honest disposition is an interactive
                 # sign-in, not a retry — see McpRefreshUnconfirmedError.
                 self._refuse_unconfirmed_exchange(ctx)
-            elif outcome in ("contended", "overran", "failed"):
+            elif outcome in ("contended", "overran", "failed", "unreachable"):
                 self._refuse_unlocked_refresh(ctx, outcome)
             # POST-CONDITION, in ONE place so no exit path can miss it: we are
             # about to return into ``async_auth_flow``, whose very next act is to
@@ -3792,19 +3958,26 @@ def _make_refresh_coordinating_provider(
               strand a healthy server on a login prompt the user has no reason
               to run.
 
-            ``outcome`` becomes the refusal REASON, which is what makes the
-            user-visible string truthful per path: unable to take the lock, a
-            budget overrun, and a rejected refresh are three different things
-            and were one sentence before (design review input). The reason is
-            carried onto the ledger so the manager's re-voiced error says the
-            same thing.
+            ``outcome`` becomes the refusal REASON CODE, which is what lets the
+            manager render a truthful short message per path: unable to take the
+            lock, a budget overrun, an unreachable token endpoint and an answer
+            without a usable token are four different things and were one
+            sentence before (design review input; review round 2 minor 1 split
+            the last of those off). The code is carried onto the ledger so the
+            manager's re-voiced error says the same thing.
             """
             if not ctx.can_refresh_token() or ctx.is_token_valid():
                 return
             self._strip_in_memory_refresh_token(ctx)
-            refusal = {
+            # ``.get``'s default is the ANSWERED-but-unusable case, which is what
+            # every remaining outcome ("failed", and the post-condition's
+            # fall-through) actually is. ``unreachable`` must be listed: without
+            # its own arm a request that never left the machine would be reported
+            # to the user as a server refusal.
+            reason_code = {
                 "contended": REFRESH_REFUSAL_LOCK,
                 "overran": REFRESH_REFUSAL_INFLIGHT,
+                "unreachable": REFRESH_REFUSAL_UNREACHABLE,
             }.get(outcome, REFRESH_REFUSAL_ENDPOINT)
             # ARM THE SIDE CHANNEL BEFORE RAISING, and do it here rather than in
             # the raise's caller: the MCP transport will NOT deliver this error.
@@ -3814,8 +3987,8 @@ def _make_refresh_coordinating_provider(
             # re-voices that cancellation using this record — reason and all —
             # and only when the cancellation was NOT a genuine external one, so
             # a dispose still wins. See :class:`RefreshContentionLedger`.
-            REFRESH_CONTENTION.record(self._refresh_coord_server_url, refusal)
-            raise McpRefreshContendedError(self._refresh_coord_server_url, refusal=refusal)
+            REFRESH_CONTENTION.record(self._refresh_coord_server_url, reason_code)
+            raise McpRefreshContendedError(self._refresh_coord_server_url, reason_code=reason_code)
 
         def _refuse_unconfirmed_exchange(self, ctx: Any) -> None:
             """Refuse to re-present a refresh token that may already be spent.

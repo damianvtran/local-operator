@@ -55,7 +55,11 @@ from local_operator.harness.types import (
 )
 from local_operator.mcp.auth import (
     REFRESH_CONTENTION,
+    REFRESH_REFUSAL_ENDPOINT,
+    REFRESH_REFUSAL_INFLIGHT,
+    REFRESH_REFUSAL_LOCK,
     REFRESH_REFUSAL_UNCONFIRMED,
+    REFRESH_REFUSAL_UNREACHABLE,
     McpAuthChallengeError,
     McpAuthRequiredError,
     McpRefreshContendedError,
@@ -115,6 +119,48 @@ def _sdk_available() -> bool:
 #: rather than sniffing the text — the alternative is a substring match that goes
 #: quietly wrong the day the wording changes.
 MCP_SDK_MISSING_ERROR = missing_extra_error("mcp", "Connecting to MCP servers")
+
+#: Short, user-visible text per TRANSIENT refresh refusal, keyed by the stable
+#: reason code the auth layer carries on the exception
+#: (:data:`~local_operator.mcp.auth.REFRESH_REFUSAL_LOCK` and friends). Composed
+#: HERE rather than in ``auth.py`` because the code, not the sentence, is what
+#: travels: the auth layer's own ``str(exc)`` opens with
+#: ``MCP OAuth token refresh for https://<host>/<path>`` and is ~55 cells before
+#: it says anything distinguishing, so it cannot be the rendered copy.
+#:
+#: Every entry is measured against the two surfaces that clamp it — the startup
+#: toast, whose detail line is ``failed: <name> — <this>`` truncated to 58 cells
+#: at 100 columns and 36 at 44 (so <this> gets 41 and 19 respectively) — and the
+#: durable notice, which is the full terminal width. The rules the wording obeys:
+#:
+#: * NO full URL and no subsystem internals (no "refresh lock", no "rotation"):
+#:   the host line already names the server, and a user cannot act on our nouns;
+#: * the DISTINGUISHING word comes first, because the toast tail-truncates: all
+#:   four must differ within their first ~19 cells or the 44-column card renders
+#:   the same fragment for every one of them (design review D1);
+#: * the condition, not a promise: the two in-flight refusals read as states that
+#:   may clear on their own (another session is on it; the exchange is still
+#:   running), the other two name the server side as the problem, which is the
+#:   only "does this heal by itself?" signal a user can get;
+#: * NO command and NO "retrying": for a transient refusal the remedy
+#:   mid-session is the manager's own backoff reconnect, while the startup gate
+#:   schedules nothing at all — so offering a command would send the user at a
+#:   destructive ``reauth`` for a self-healing condition, and promising a retry
+#:   would be untrue at boot. Only the auth requirement
+#:   (``McpRefreshUnconfirmedError``) leads with a command, and it is rendered by
+#:   ``_auth_required_text``, not from this table.
+_REFRESH_REFUSAL_TEXT: dict[str, str] = {
+    REFRESH_REFUSAL_LOCK: "another session is refreshing",
+    REFRESH_REFUSAL_INFLIGHT: "refresh still in progress",
+    REFRESH_REFUSAL_ENDPOINT: "the server returned no token",
+    REFRESH_REFUSAL_UNREACHABLE: "cannot reach the server",
+}
+
+#: Fallback for a refusal code this build does not know (a newer peer writes a
+#: code we cannot name). Deliberately says only what is true of every refusal in
+#: the set — never ``str(exc)``, whose URL prefix would render as the fragment
+#: this whole mapping exists to remove.
+REFRESH_REFUSAL_UNKNOWN_TEXT = "the refresh did not complete"
 
 # Fast-startup gate: how long discovery blocks before deferring slow servers.
 STARTUP_GATE_MS = 250
@@ -1499,8 +1545,16 @@ class McpManager:
                 _settle_future_error(waiter, exc)
                 continue
             except Exception as exc:
-                result.errors[name] = str(exc)
-                self._startup_failures[name] = str(exc)
+                # Through the dispatcher, not ``str(exc)``: a transient refresh
+                # refusal (a peer holding the refresh lock, an exchange that
+                # overran the budget) lands HERE, and its own ``str`` is the
+                # URL-prefixed log sentence that renders as an identical
+                # truncated fragment for every refusal. The dispatcher maps the
+                # exception's reason code to the short rendered text; for any
+                # exception it does not know it returns ``str(exc)`` unchanged.
+                message = self._auth_failure_text(name, exc)
+                result.errors[name] = message
+                self._startup_failures[name] = message
                 logger.warning("MCP server %r failed to connect: %s", name, exc)
                 # A parked waiter (reload) must fail, not hang (MCP-08).
                 waiter = self._connect_futures.pop(name, None)
@@ -1769,7 +1823,7 @@ class McpManager:
             # be misattributed to a later, unrelated cancellation of the same
             # server. The ledger holds one record per refusal, so a second
             # concurrent connect's refusal is still there for its own arm.
-            refusal = (
+            reason_code = (
                 REFRESH_CONTENTION.pop(url)
                 if isinstance(exc, asyncio.CancelledError) and isinstance(url, str) and url
                 else None
@@ -1813,11 +1867,11 @@ class McpManager:
                 # actionable reauth command instead of "authorization expired".
                 # The externally_cancelled guard above has already run, so a
                 # genuine teardown never reaches here.
-                if refusal is not None:
+                if reason_code is not None:
                     assert isinstance(url, str)
-                    if refusal == REFRESH_REFUSAL_UNCONFIRMED:
+                    if reason_code == REFRESH_REFUSAL_UNCONFIRMED:
                         raise McpRefreshUnconfirmedError(url) from exc
-                    raise McpRefreshContendedError(url, refusal=refusal) from exc
+                    raise McpRefreshContendedError(url, reason_code=reason_code) from exc
                 from local_operator.mcp.auth import (
                     ABANDONED_GRANTS,
                     McpLoginCancelledError,
@@ -2159,7 +2213,13 @@ class McpManager:
         # leads. Only a refresh that was SENT but never confirmed carries one
         # today (see McpRefreshUnconfirmedError): calling that an expired
         # authorization would send the user looking for a grant that is
-        # perfectly valid on disk.
+        # perfectly valid on disk. It is kept SHORT (``refresh unconfirmed``)
+        # because this whole line is the tail of the toast's
+        # ``failed: <name> — <line>`` and is therefore clamped twice: at ~58
+        # cells the previous sentence-length detail was itself truncated off the
+        # card (design review D4), which left the added reason invisible on the
+        # first surface the user reads. The command still leads and there is
+        # still exactly one dash, which is the rule D4's fix had to preserve.
         detail = getattr(exc, "detail", None)
         if has_stored_grant:
             return f"run /mcp reauth {name} — {detail or 'authorization expired'}"
@@ -2209,11 +2269,22 @@ class McpManager:
         incident sink and ``/mcp`` never drift apart on what a user is told to
         run — the two shapes reach the same surfaces by different routes
         (a configured grant that needs a browser vs a server that refused us).
+
+        The TRANSIENT refresh refusals are rendered here too, and they are the
+        reason this is the composition point: they used to fall through to
+        ``str(exc)``, whose ``MCP OAuth token refresh for <url> …`` prefix filled
+        the toast card on its own, so all four rendered as one identical
+        truncated fragment at 100 columns and below (design review D1/D2). The
+        short text is keyed by the exception's stable reason code, so the auth
+        layer keeps only the code and the log sentence.
         """
         if isinstance(exc, McpAuthChallengeError):
             return cls._auth_challenge_text(name, exc)
         if isinstance(exc, McpAuthRequiredError):
             return cls._auth_required_text(name, exc)
+        reason_code = getattr(exc, "reason_code", None)
+        if reason_code is not None:
+            return _REFRESH_REFUSAL_TEXT.get(reason_code, REFRESH_REFUSAL_UNKNOWN_TEXT)
         return str(exc)
 
     def auth_recovery_hint(self, rendered_error: str) -> str | None:
@@ -2431,14 +2502,20 @@ class McpManager:
             # owns it.
             current_round = not self._disposed and epoch == self._epoch
             if current_round:
-                # Record the failure into the round accumulator (an auth
-                # requirement as its actionable text, else the raw reason) and
-                # settle this deferred server BEFORE firing tools-changed, so the
-                # front end that re-reports on settle sees the complete map.
-                if isinstance(auth_exc, (McpAuthRequiredError, McpAuthChallengeError)):
-                    self._startup_failures[name] = self._auth_failure_text(name, auth_exc)
-                else:
-                    self._startup_failures[name] = str(exc)
+                # Record the failure into the round accumulator and settle this
+                # deferred server BEFORE firing tools-changed, so the front end
+                # that re-reports on settle sees the complete map. ONE dispatcher
+                # for both shapes: the auth requirement renders as its actionable
+                # command, and a transient refresh refusal renders as the short
+                # reason its code maps to. Reaching for ``str(exc)`` on the
+                # non-auth side is what made every refusal identical on the card
+                # (design review D1), and the dispatcher returns ``str(exc)``
+                # unchanged for anything it does not recognise.
+                # ``auth_exc`` is the auth requirement found anywhere in a
+                # transport ``ExceptionGroup``, else the original exception — and
+                # a re-voiced refusal is raised directly by ``_connect_server``,
+                # so the same value carries both shapes unchanged.
+                self._startup_failures[name] = self._auth_failure_text(name, auth_exc)
             # Re-fetch the waiter: a reload during the await may have swapped
             # it, and settling the stale one would strand the current waiters.
             _settle_future_error(self._connect_futures.get(name), exc)

@@ -3735,12 +3735,19 @@ class TestDeadGrantTombstone:
     async def test_transient_failures_never_tombstone(
         self, monkeypatch: pytest.MonkeyPatch, factory_name: str
     ) -> None:
-        """F2: a 500, a transport error and an unparseable 200 are all "failed"
-        with NO marker.
+        """F2: a 500 and a transport error are both non-tombstoning.
 
         This is the regression guard for the design's stated risk 1: gating on a
         bare HTTP 400 (or on any failure) would let one flaky provider minute
         permanently suppress refresh on a live grant until the user noticed.
+
+        The two are NOT the same shape, which is the point of the two outcomes
+        asserted here: a 500 is an ANSWER that proves nothing about our token,
+        so it keeps the write-ahead marker (review round 2, minor 2 — the
+        marker's rule, not the tombstone's), while a ConnectError never reached
+        the wire, so it is "unreachable" rather than "failed" and leaves no
+        marker at all (review round 2, minor 1). Neither writes a tombstone:
+        nothing told us the GRANT is dead.
         """
         import httpx
 
@@ -3759,14 +3766,21 @@ class TestDeadGrantTombstone:
 
         outcome = await auth_mod._refresh_oauth_token_locked(self.URL, storage, self._endpoints())
 
-        assert outcome == "failed"
+        if factory_name == "server_error":
+            assert outcome == "failed"
+            # An answer that does not prove the presented token was not consumed
+            # keeps the marker: a provider that commits a rotation and then fails
+            # the response would otherwise leave a spent token re-presentable.
+            assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY in store.rows[0].data
+            assert storage.send_unconfirmed() is True
+        else:
+            assert outcome == "unreachable"
+            # Nothing was written, so nothing may be suspect: an ordinary
+            # transient retry, and the user is not sent at a reauth.
+            assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in store.rows[0].data
+            assert storage.send_unconfirmed() is False
         assert storage.grant_is_dead() is False
         assert auth_mod.GRANT_DEAD_AT_KEY not in store.rows[0].data
-        # Neither failure leaves a "presented but unacknowledged" marker: a 5xx
-        # is an ANSWER (the server refused without rotating) and a ConnectError
-        # happens BEFORE the request is written, so in both cases the stored
-        # token is untouched and the next attempt is an ordinary retry.
-        assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in store.rows[0].data
 
     @pytest.mark.asyncio
     async def test_a_200_with_an_unreadable_body_marks_the_token_as_spent(

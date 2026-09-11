@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -53,6 +54,7 @@ class FakeTokenEndpoint:
         refresh_token: str = "refresh-0",
         response_delay_s: float = 0.0,
         on_reject: Callable[[], Awaitable[None]] | None = None,
+        commit_then_fail_status: int | None = None,
     ) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
@@ -61,6 +63,14 @@ class FakeTokenEndpoint:
         #: test model the SIBLING process that persists its own rotation while
         #: our request is in flight — the window D3 is about.
         self.on_reject = on_reject
+        #: When set, a refresh that the server ACCEPTS is still answered with
+        #: this status (an error body) AFTER the rotation is committed — the
+        #: provider shape review round 2 (minor 2) was about: a 5xx that leaves
+        #: the presented token spent while telling the client nothing. Real
+        #: enough to be the failure mode of a proxy in front of a rotating
+        #: issuer, and the only way to test the marker's clearing rule without
+        #: guessing at one.
+        self.commit_then_fail_status = commit_then_fail_status
         self.requests: list[dict[str, str]] = []
         self.reuse_attempts = 0
         self.rotation_count = 0
@@ -133,6 +143,12 @@ class FakeTokenEndpoint:
         self.refresh_token = f"refresh-{self.rotation_count}"
         self.access_token = f"access-{self.rotation_count}"
         self.rotation_applied.set()
+        if self.commit_then_fail_status is not None:
+            # The rotation above HAPPENED and the client is told nothing usable:
+            # the committed state is the one a next exchange would have to
+            # present, which is exactly what makes clearing the send marker on a
+            # non-200 a family-revoking mistake.
+            return self.commit_then_fail_status, {"error": "server_error"}
         return 200, {
             "access_token": self.access_token,
             "token_type": "Bearer",
@@ -144,7 +160,10 @@ class FakeTokenEndpoint:
     @staticmethod
     def _write(writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
-        reason = "OK" if status == 200 else "Bad Request"
+        # The real phrase, not a hardcoded "Bad Request": a 500 written as
+        # "500 Bad Request" is a fixture artifact that makes a status-code test
+        # look like it is reading a 400.
+        reason = http.HTTPStatus(status).phrase
         writer.write(
             (
                 f"HTTP/1.1 {status} {reason}\r\n"

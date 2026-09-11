@@ -17,6 +17,12 @@ import pytest
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
+from local_operator.mcp.auth import (
+    REFRESH_REFUSAL_ENDPOINT,
+    REFRESH_REFUSAL_INFLIGHT,
+    REFRESH_REFUSAL_LOCK,
+    REFRESH_REFUSAL_UNREACHABLE,
+)
 from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mcp.manager import (
     McpManager,
@@ -3959,55 +3965,126 @@ class TestAnUnreadableGrantMarkerIsNotAChangedGrant:
 
 
 class TestRefreshRefusalCopy:
-    """The exact user-visible strings for the three split refusals.
+    """The exact RENDERED strings for the four refusals and the auth line.
 
-    The reviewer's minor and QA's Q5 both landed here: one message covered three
-    different situations, so it was untrue on two of them — a token endpoint
-    that ANSWERED 500 had not failed "under the refresh lock", and a lock held by
-    another session is not a server refusal. It also promised a retry that the
-    startup gate never performs. These assertions pin the rendered text because
-    a design review round follows, and copy that is not pinned drifts.
+    Round 1 split one message into three truthful sentences and design review
+    round 1 (D1/D2) showed why that was not enough: every one of those sentences
+    opens with ``MCP OAuth token refresh for <full server URL>``, which is ~55
+    of the toast card's 58 content cells, so the distinguishing clause was
+    always the part tail-truncated away and all of them rendered byte-identically
+    at 100 columns and below. The split now lives on the exception as a stable
+    reason CODE and the manager composes the short text from it, so these
+    assertions are made against the RENDERED line at both real card widths —
+    not against the code's idea of the sentence, which is exactly the mistake
+    that let four different refusals look the same.
+
+    The 44-column case is the tight one and the reason the wording is this
+    short: ``failed: notion — `` spends 17 of the 36 available cells, leaving 19
+    for the reason, so each reason must be DISTINGUISHABLE inside its first 19
+    cells.
     """
 
     URL = "https://mcp.example.com/v1/mcp"
 
-    def test_the_three_refusals_say_different_true_things(self) -> None:
-        from local_operator.mcp.auth import (
-            REFRESH_REFUSAL_ENDPOINT,
-            REFRESH_REFUSAL_INFLIGHT,
-            REFRESH_REFUSAL_LOCK,
-            McpRefreshContendedError,
-        )
+    #: Rendered at 100 columns (58 content cells) and at 44 (36).
+    EXPECTED = {
+        REFRESH_REFUSAL_LOCK: (
+            "failed: notion — another session is refreshing",
+            "failed: notion — another session is…",
+        ),
+        REFRESH_REFUSAL_INFLIGHT: (
+            "failed: notion — refresh still in progress",
+            "failed: notion — refresh still in p…",
+        ),
+        REFRESH_REFUSAL_ENDPOINT: (
+            "failed: notion — the server returned no token",
+            "failed: notion — the server returne…",
+        ),
+        REFRESH_REFUSAL_UNREACHABLE: (
+            "failed: notion — cannot reach the server",
+            "failed: notion — cannot reach the s…",
+        ),
+    }
 
-        lock = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_LOCK))
-        inflight = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_INFLIGHT))
-        endpoint = str(McpRefreshContendedError(self.URL, refusal=REFRESH_REFUSAL_ENDPOINT))
+    @staticmethod
+    def _toast_failure_line(reason: str, cells: int) -> str:
+        """The failure row the REAL toast composer paints, for ``reason``."""
+        from local_operator.session.mcp_status import McpStartupOutcome
+        from local_operator.tui.widgets.toast import format_mcp_startup
 
-        # No "retrying": the same string is the startup gate's reason a server
-        # is unavailable, and nothing schedules a retry there.
-        assert lock == (
-            f"MCP OAuth token refresh for {self.URL} was skipped: another session "
-            "holds the refresh lock"
-        )
-        assert inflight == (
-            f"MCP OAuth token refresh for {self.URL} did not finish in time; a rotation "
-            "is kept if the response lands"
-        )
-        assert endpoint == (
-            f"MCP OAuth token refresh for {self.URL} was rejected by the authorization server"
-        )
-        assert len({lock, inflight, endpoint}) == 3
-        assert str(McpRefreshContendedError(self.URL)) == lock
+        outcome = McpStartupOutcome(configured=("notion",), failures={"notion": reason})
+        payload = format_mcp_startup(outcome, max_cells=cells)
+        assert payload is not None
+        return payload[0].plain.split("\n")[1]
+
+    def test_the_reason_codes_compose_short_copy_with_no_url_or_internals(self) -> None:
+        """Each code maps to its own sentence, and the sentence is safe to render."""
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        rendered = McpManager._auth_failure_text  # readability
+        texts: dict[str, str] = {}
+        for reason in self.EXPECTED:
+            exc = McpRefreshContendedError(self.URL, reason_code=reason)
+            texts[reason] = rendered("notion", exc)
+
+        assert len(set(texts.values())) == 4, texts
+        for reason, text in texts.items():
+            assert "http" not in text, (reason, text)
+            # The internals the design review named: a user cannot act on either.
+            for jargon in ("lock", "rotation", "token refresh for"):
+                assert jargon not in text, (reason, text)
+            # No promise of a retry: the startup gate schedules none, so a card
+            # that said "retrying" would be untrue at the surface most users see.
+            assert "retry" not in text.lower() and "retrying" not in text.lower(), text
+
+    def test_the_toast_card_renders_every_reason_distinguishably_at_both_widths(self) -> None:
+        """The whole point of the fix, asserted on the painted line.
+
+        A green unit test on ``str(exc)`` is what let this defect through round
+        1: the strings differed, and the CARD did not. So this pins the exact
+        rendered row at 58 cells (a 100-column terminal) and 36 (44 columns).
+        """
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        for cells_index, cells in enumerate((58, 36)):
+            lines = []
+            for reason, expected in self.EXPECTED.items():
+                reason_text = McpManager._auth_failure_text(
+                    "notion", McpRefreshContendedError(self.URL, reason_code=reason)
+                )
+                line = self._toast_failure_line(reason_text, cells)
+                assert line == expected[cells_index], (reason, cells, line)
+                lines.append(line)
+            assert len(set(lines)) == 4, (cells, lines)
+
+    def test_an_unknown_reason_code_never_falls_back_to_the_verbose_sentence(self) -> None:
+        """A code this build does not know must still render short and URL-free.
+
+        A newer peer process can write a reason we cannot name. Falling back to
+        ``str(exc)`` there would put the ~55-cell URL preamble back on the card
+        — the defect this mapping exists to remove — so the fallback states only
+        what is true of every refusal in the set.
+        """
+        from local_operator.mcp.auth import McpRefreshContendedError
+
+        exc = McpRefreshContendedError(self.URL, reason_code="a-code-from-the-future")
+        text = McpManager._auth_failure_text("notion", exc)
+        assert text == "the refresh did not complete"
+        assert "http" not in text
+        line = self._toast_failure_line(text, 36)
+        assert line == "failed: notion — the refresh did no…"
 
     def test_an_unacknowledged_send_renders_the_actionable_reauth_command(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The third message, at the surface a user actually reads.
+        """The auth line, at the surface a user reads, on ONE card row.
 
         ``_auth_required_text`` composes the startup-toast line (and the
-        transcript notice, and ``/mcp``), leading with the command. A refresh
-        that was SENT and never confirmed is not an expired authorization, so the
-        error carries the reason and the tail says it instead.
+        transcript notice, and ``/mcp``), leading with the command and carrying
+        exactly one em-dash. A refresh that was SENT and never confirmed is not
+        an expired authorization, so the error carries the reason as a SHORT
+        tail — the previous sentence-length tail was itself clipped off the card
+        (design review D4).
         """
         from local_operator.mcp.auth import (
             McpAuthRequiredError,
@@ -4022,13 +4099,57 @@ class TestRefreshRefusalCopy:
         )
 
         rendered = McpManager._auth_required_text("notion", McpRefreshUnconfirmedError(self.URL))
-        assert rendered == "run /mcp reauth notion — a token refresh was sent but never confirmed"
+        assert rendered == "run /mcp reauth notion — refresh unconfirmed"
+        assert rendered.count("—") == 1
+        assert rendered.startswith("run /mcp reauth notion"), "the command must lead"
 
         # And the unchanged generic wording, so the new detail cannot silently
         # become the text every other auth requirement renders.
         assert (
             McpManager._auth_required_text("notion", McpAuthRequiredError(self.URL))
             == "run /mcp reauth notion — authorization expired"
+        )
+
+        # Rendered by the real card composer, the reason survives at 100 columns.
+        line = self._toast_failure_line(rendered, 58)
+        assert line == "failed: notion — run /mcp reauth notion — refresh unconfi…"
+
+    def test_the_log_sentence_still_carries_the_url_and_the_technical_reason(self) -> None:
+        """``str(exc)`` stays verbose for the logs, which is the other half of D1.
+
+        The reason code exists so the COPY can be short; the sentence is not
+        deleted, just moved off the user's surfaces — support needs the URL and
+        the mechanism when reading a log after an incident.
+        """
+        from local_operator.mcp.auth import (
+            REFRESH_REFUSAL_ENDPOINT,
+            REFRESH_REFUSAL_INFLIGHT,
+            REFRESH_REFUSAL_LOCK,
+            REFRESH_REFUSAL_UNREACHABLE,
+            McpRefreshContendedError,
+        )
+
+        assert str(McpRefreshContendedError(self.URL)) == (
+            f"MCP OAuth token refresh for {self.URL} was skipped: another session "
+            "holds the refresh lock"
+        )
+        assert str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_INFLIGHT)) == (
+            f"MCP OAuth token refresh for {self.URL} did not finish in time; a rotation "
+            "is kept if the response lands"
+        )
+        # A pre-send transport failure is NOT a rejection by the authorization
+        # server: it never reached one (review round 2, minor 1).
+        unreachable = str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_UNREACHABLE)
+        )
+        assert "unreachable" in unreachable
+        assert "no token was presented" in unreachable
+        assert "rejected" not in unreachable
+        endpoint = str(McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_ENDPOINT))
+        assert "rejected" not in endpoint
+        # The lock sentence still says the lock: it is the accurate log line.
+        assert "holds the refresh lock" in str(
+            McpRefreshContendedError(self.URL, reason_code=REFRESH_REFUSAL_LOCK)
         )
 
     @pytest.mark.asyncio
@@ -4065,7 +4186,7 @@ class TestRefreshRefusalCopy:
         REFRESH_CONTENTION.record(url, REFRESH_REFUSAL_UNCONFIRMED)
         with pytest.raises(McpRefreshUnconfirmedError) as excinfo:
             await manager._connect_server("dd", cfg)
-        assert excinfo.value.detail == "a token refresh was sent but never confirmed"
+        assert excinfo.value.detail == "refresh unconfirmed"
 
         # The manager arm for an auth requirement: blocked, not retried.
         scheduled = {"called": False}
@@ -4084,8 +4205,7 @@ class TestRefreshRefusalCopy:
         assert manager.auth_blocked("dd") is True
         assert manager.get_connection_status("dd") == "auth-required"
         assert incidents[-1][1] == (
-            "MCP authorization failed; run /mcp reauth dd — a token refresh was sent "
-            "but never confirmed"
+            "MCP authorization failed; run /mcp reauth dd — refresh unconfirmed"
         ), incidents
 
     def test_each_refusal_reason_is_carried_on_the_ledger(
