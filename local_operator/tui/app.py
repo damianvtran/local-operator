@@ -21747,7 +21747,7 @@ class OperatorApp(App[None]):
         if not title:
             current = session.conversation_name
             if current:
-                notice(f"conversation: {current} — /title <words>, or /title refresh")
+                notice(f"conversation: {current} — /title <words>, or /title --refresh")
             elif self._provisional_name:
                 # The band is wearing a stand-in, not a name (see
                 # `_show_provisional_name`). Answering a bare "unnamed" with an
@@ -30200,10 +30200,17 @@ class OperatorApp(App[None]):
             # ONE row, and it is the whole reason this command takes a list. The
             # other argument is free text — a title cannot be offered from a
             # list, because the app does not know what the conversation should
-            # be called — so the list exists to teach the one word a user could
-            # not guess. Free typing is unaffected: the editor RANKS what is
-            # typed and never filters what may be submitted, so an arbitrary
+            # be called — so the list exists to teach the flag spelling a user
+            # could not guess. Free typing is unaffected: the editor RANKS what
+            # is typed and never filters what may be submitted, so an arbitrary
             # title still reaches `_cmd_rename`.
+            #
+            # `--refresh` is the shape every other command teaches, so it is
+            # what the row offers and what lands in the buffer. The alias is not
+            # decoration: `match_choices` scores against `choice.names` but
+            # always displays `choice.name`, so a user who already learned the
+            # bare word still gets an exact-score hit instead of falling to a
+            # fuzzy subsequence score of 1 against `--refresh`.
             #
             # The description states the release, not just the call. That the
             # refresh hands the name back to automatic naming is the surprising
@@ -30212,9 +30219,10 @@ class OperatorApp(App[None]):
             picker.set_choices(
                 [
                     ArgumentChoice(
-                        name="refresh",
+                        name="--refresh",
                         description="Re-read the conversation and name it again",
                         detail="resumes auto-naming",
+                        aliases=("refresh",),
                     )
                 ]
             )
@@ -32559,7 +32567,7 @@ class OperatorApp(App[None]):
         if not title:
             current = session.conversation_name
             text = (
-                f"conversation: {current} — /title <words>, or /title refresh"
+                f"conversation: {current} — /title <words>, or /title --refresh"
                 if current
                 else "unnamed — /title <words> names this conversation"
             )
