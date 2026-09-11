@@ -1120,13 +1120,41 @@ lifeline — it is consulted per retrieval. So:
 >   its sink had no store to scrub through, every notice went unacked, and the
 >   fail-closed rule below denied EVERY descendant retrieval in EVERY attached
 >   session. The runtime now registers from its own handle
->   (`ServingSessionHandle`, `session/runtime/serving.py`), the single seam
->   behind both `spawn_owned_session` (phone and TUI runtime spawn) and `lop
+>   (`ServingSessionHandle`, `session/runtime/serving.py`), the seam behind
+>   both `spawn_owned_session` (phone and TUI runtime spawn) and `lop
 >   exec --control`, and deregisters on the handle's disposal and on the exec
 >   control surface's own teardown. `run_tui` keeps its registration for the
 >   case it is actually right for — a TUI that OWNS the session, where the
->   store really is in that process. A registration is also skipped when no
->   store exists yet, since there is nothing a descendant could be served.
+>   store really is in that process — and, for an ATTACHED TUI, its sink now
+>   FORWARDS the notice to the runtime over the control channel
+>   (`register_secret_redaction`) instead of failing, so the viewer's entry is
+>   the broker's working fallback when the runtime registered nothing. A
+>   registration is also skipped when no store exists yet, since there is
+>   nothing a descendant could be served.
+>
+>   **Amended (the hardened-tier lineage limit on that seam, review round 1
+>   MAJOR-2).** The handle is the seam for a runtime that HAS lineage — one
+>   that descends from the terminal that unlocked the store, or from an
+>   already-registered session. It is NOT the seam for a daemon-spawned
+>   runtime: in the **hardened tier** a runtime started by launchd (ppid 1,
+>   which is how a wake or a phone-triggered runtime with no viewer in its
+>   ancestry runs) has no granted terminal and no registered ancestor, so
+>   `_handle_register` refuses it (`broker.py`, "registering a session also
+>   requires descending from an unlocked terminal or a registered session").
+>   Nothing registers, the runtime's descendants are denied
+>   (`no lop session is registered with the broker`), and — because
+>   `access.retrieve_secret` degrades to the local decrypt on that refusal in
+>   the keyfile tier — the failure is only visible there as a denied
+>   `lop secret get`, not as a served value. This is NOT a regression (a phone
+>   session registered nothing before either) and it is **not a hole in the
+>   keyfile tier**, where the ticket alone admits a registrant; it is a limit
+>   of the hardened tier that needs a lineage story for the daemon, not a
+>   weaker register gate. The shape that would work is an `unlock` grant for
+>   the daemon's SUPERVISOR (the process launchd owns), so a runtime it spawns
+>   descends from a granted terminal like any other — recorded as DEFERRED on
+>   the PR rather than half-built here. The refusal is at least no longer
+>   silent: `client.register_session` logs a WARNING naming the tier and the
+>   broker's reason.
 > - **Unlocking grants the operator's terminal standing for this boot.** `lop
 >   secret get` typed at a prompt has no lop session among its ancestors and is
 >   denied by construction — in `keyfile` mode the key-file fallback hides

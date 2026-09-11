@@ -58,6 +58,15 @@ from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
 #: surfaces as an error rather than a hang.
 ACK_TIMEOUT_S = 15.0
 
+#: The whole viewer-side budget for one §6 redaction forward (viewer → owner,
+#: ``register_secret_redaction``). Sized well under the broker's
+#: ``NOTIFY_ACK_TIMEOUT_S`` (2 s) on purpose: the broker denies the child when
+#: the session does not acknowledge in time, so a hop that stalls must give up
+#: and fail closed BEFORE that deadline rather than eating it and turning the
+#: denial into an ambiguous timeout. The TUI's notice thread bounds its wait on
+#: this same constant, so both sides of the hop share one budget.
+REDACTION_FORWARD_TIMEOUT_S = 1.0
+
 #: How long to wait for ``complete_aside`` — a full provider round trip, not a
 #: control-plane op. Matched to ``providers/clients.py`` ``STREAM_READ_TIMEOUT_S
 #: = 180.0``, the layer below's own budget for silence from a stream in flight:
@@ -1364,6 +1373,29 @@ class AttachClient:
         carefully — nothing echoes, logs, or transcribes this field.
         """
         return await self._request_payload("credential", action=action, key=key, value=value)
+
+    async def register_secret_redaction(self, value: str) -> None:
+        """Ask the owner to register ONE §6 value with its own redactor.
+
+        This is the attached viewer's half of §6: the broker's notice reaches
+        the nearest REGISTERED session above the retrieving child, which is
+        normally the runtime itself (``ServingSessionHandle``) — but not when
+        the runtime registered nothing (it booted before a store existed at its
+        config root, §13). There the viewer's own registration is the one that
+        answers, and the ``VariableStore`` the value must reach is the owner's,
+        not this process's — so the value is forwarded over the same
+        viewer→runtime control route ``credential`` already rides, in its own
+        named field with a single consumer. It is deliberately NOT a
+        ``/credential`` verb: the owner registers a redaction, it does not
+        store a credential, and the op must stay out of that verb table.
+
+        ``value`` never appears in any log, journal, announcement, audit row
+        or event stream on either side of the wire; the owner's handler writes
+        it only into its ``VariableStore`` redaction set.
+        """
+        await self._request_payload(
+            "register_secret_redaction", value=value, deadline_s=REDACTION_FORWARD_TIMEOUT_S
+        )
 
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork an aside exchange into the conversation on the authoritative owner."""

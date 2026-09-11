@@ -131,6 +131,12 @@ def register_session(
     started, the registration ticket is unreadable, the broker refused — and is
     never an error the caller has to handle: a session boots and runs normally
     without a secret store.
+
+    **A REFUSAL is logged before returning ``None`` (review round 1, MAJOR-2).**
+    "Nothing to register" and "the broker said no" both end here, but only the
+    second is a limit the operator should be able to see: in the hardened tier
+    a registrant with no lineage — a daemon-spawned runtime, §13 — is refused,
+    and that refusal used to be silent at every level because nothing raised.
     """
     try:
         from local_operator.secrets import client
@@ -176,6 +182,24 @@ def register_variable_store_session(
     the registration there keeps a session that never touches the store from
     starting a broker daemon of its own. A store created later is picked up on
     the next session boot.
+
+    **The base is the caller's, on purpose (MINOR-3, NIT-2).** ``base`` is the
+    root this session was built from, passed by the caller
+    (``ServingSessionHandle``), never re-read from ``config_dir()`` here: the
+    store-existence check below and the registration itself must agree about
+    WHICH store this session owns, or a handle rooted at a different store
+    could check one and register against another.
+
+    **A session with no ``variables`` still registers, and that is not an
+    oversight (NIT-2).** Skipping it would leave a descendant with no
+    registered ancestor at all, and the broker's ancestry refusal is not the end
+    of that path: ``access.retrieve_secret`` catches ``BrokerDenied`` and, in
+    the keyfile tier, falls through to an UNNOTIFIED local decrypt, so the
+    child is SERVED the value with nothing registered to scrub it — the exact
+    §6 leak. Registering anyway keeps the broker's fail-closed denial, and the
+    sink raises per notice so the child is denied rather than served raw. That
+    deny path is pinned by
+    ``tests/unit/secrets/test_runtime_session_registration.py``.
     """
     from local_operator.secrets.keys import store_path
 
