@@ -439,17 +439,17 @@ jobs:
         # leaves intact -- but it also covers a device-level failure nothing
         # printed, and a fired worker stack dump in the case where the shard
         # step failed rather than timed out.
+        #
+        # The printing is done by the module (`report_dumps`), not by `cat`, and
+        # that is load-bearing rather than cosmetic: a worker writes its header
+        # at ARM time, one per test, so a raw dump of this PR's own cancelled
+        # shard held 3088 lines all reading "<nodeid> exceeded 240s" with the
+        # one real timeout buried among them. The module's FIRED_MARKER filter
+        # is the single source of truth for "this is evidence", so the step asks
+        # for the filtered report instead of re-implementing the rule in YAML.
         if: always()
         run: |
-          dir="${TMPDIR:-/tmp}/lo-shard-stall"
-          if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
-            echo "no shard stall report: nothing stalled long enough to trip the watchdog"
-            exit 0
-          fi
-          for f in "$dir"/*.log; do
-            echo "===== $f ====="
-            cat "$f"
-          done
+          python -m tests.shard_stall_watchdog "${TMPDIR:-/tmp}/lo-shard-stall"
 
       - name: Upload shard coverage data
         uses: actions/upload-artifact@v4

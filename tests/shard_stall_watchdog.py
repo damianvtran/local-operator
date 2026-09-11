@@ -51,12 +51,60 @@ thing that survives -- the same "the file's existence is the signal" discipline
 ``tests.e2e.watchdog`` uses, and for the same reason: a diagnostic that can turn
 a green run red gets disabled the first time it is wrong.
 
+"Never fails a run" has to include failing to do its own work, because these
+hooks run in every pytest process: no filesystem or timer operation here is
+allowed to raise either. An unusable dump directory, or a variable unset
+between install and the first test, disables the instrument and the run
+continues -- measured before that was true, an occupied ``TMPDIR`` was an
+``INTERNALERROR`` that failed a shard with ``no tests ran``. The reading is the
+same one :func:`enabled_seconds` takes of a malformed bound: disable, never fail.
+
 The workspace is deliberately NOT under ``tmp_path``: the master and its workers
 are separate processes and the controller has to be able to read what a wedged
 worker wrote, which means a path both can compute from the environment. It is
 also fixed rather than unique per session so that the workflow's ``always()``
 step can find the files after a job is cancelled, when no process is left to
 tell it where they are.
+
+WHAT A CANCELLED JOB LEAVES BEHIND
+----------------------------------
+The controller prints straight into the job log, but a job can also die with no
+report at all, so the workflow keeps an ``always()`` step that prints the dump
+directory. That step asks :func:`report_dumps` to do the printing rather than
+``cat``-ing the files itself, because a worker writes its header at ARM time,
+one per test, and the raw file is therefore mostly claims about tests that ran
+in milliseconds. The first real CI occurrence (job 103135419093, shard 2) is the
+measurement: the raw step printed 3088 ``exceeded 240s`` lines across four
+files, exactly four of them backed by a real :data:`FIRED_MARKER`, and the one
+genuine timeout was indistinguishable among the rest. :data:`FIRED_MARKER` is
+the single source of truth for "this is evidence", so it is applied in exactly
+one place and the step reuses it.
+
+WHAT IT DOES NOT INSTRUMENT, AND WHY THAT IS ACCEPTABLE
+-------------------------------------------------------
+Only a worker arms a C timer; the controller's sole witness is its Python poll
+thread. That is weaker than it sounds -- the poll thread does the printing too,
+so a worker wedged inside a syscall is fully covered without the controller's
+main thread making progress -- but it leaves the mirror case open: a park
+*inside the controller process*. It is left open deliberately, because the
+obvious repair does not close it. Arming a controller-side
+``dump_traceback_later`` "when a report fires" still needs a Python frame to arm
+it, and the only thread that could do so is the reporter thread itself --
+precisely the thread a kernel-level park of the controller would take out. A
+wall-clock controller timer armed at startup would instead fire on every healthy
+long run and keep a file, which breaks the rule that a file's existence means
+something fired. The shard job also runs no test body on the controller, so the
+uninstrumented surface is pytest/xdist orchestration, not the suite.
+
+THE OTHER C TIMER IN THIS REPO
+------------------------------
+``faulthandler``'s timer is process-global, so ``tests.e2e.watchdog.bounded``
+-- a second C timer, for tests whose failure mode is a hang -- displaces the
+worker timer for the rest of whichever test opens it, leaving that test with no
+stacks. Nothing interlocks them because nothing runs them together: the shard
+job sets :data:`ENV_SECONDS` and deselects ``e2e``, while the ``tui-e2e`` job
+runs ``-n0`` (one process, no worker branch) without the variable. Both halves
+of that invariant are pinned by the unit guards rather than left to prose.
 
 WHERE IT IS ENABLED
 -------------------
@@ -70,6 +118,7 @@ AGENTS.md allows to be calibrated from CI.
 
 from __future__ import annotations
 
+import contextlib
 import faulthandler
 import os
 import sys
@@ -89,6 +138,13 @@ DUMP_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "lo-shard-stall"
 #: (``Timeout (0:04:00)!``). Distinguishing a real dump from a header written at
 #: arm time is what lets cleanup delete the harmless ones and keep the evidence.
 FIRED_MARKER = "Timeout ("
+
+#: The header a worker writes when it ARMS the timer, i.e. when the test starts.
+#: It reads like a timeout claim but is not one; :func:`report_dumps` recognises
+#: it so a reader is never handed "<nodeid> exceeded 240s" for a test that ran in
+#: milliseconds. Kept here rather than spelled out at the write site and again in
+#: the report so the two cannot drift apart.
+ARM_MARKER = "[shard stall] "
 
 #: How often the controller repeats an ongoing report. A stall is reported more
 #: than once on purpose: the cap can arrive mid-stall, and the last report
@@ -145,7 +201,20 @@ def enabled_seconds() -> float | None:
 
 
 def _dump_path(tag: str) -> Path:
-    DUMP_DIR.mkdir(parents=True, exist_ok=True)
+    """The dump path for ``tag``; best-effort ensures the directory.
+
+    The ``mkdir`` is guarded even though its result is ignored, because this is
+    reached from ``pytest_configure`` (via :class:`_WorkerTimer`), where an
+    exception is an ``INTERNALERROR`` that fails the whole shard before a single
+    test runs. An unwritable ``TMPDIR``, or a file occupying the path, was
+    measured to do exactly that -- ``NotADirectoryError`` and ``FileExistsError``
+    respectively -- which is the one way a diagnostic could turn a green run red.
+    Failing to create it instead disables the writes that follow, which is the
+    same "disable, never fail" reading :func:`enabled_seconds` takes of a
+    malformed bound.
+    """
+    with contextlib.suppress(OSError):
+        DUMP_DIR.mkdir(parents=True, exist_ok=True)
     return DUMP_DIR / f"{tag}.log"
 
 
@@ -155,30 +224,56 @@ class _WorkerTimer:
     ``repeat=True`` because the bound is a floor, not a schedule: a test that
     runs for three times the bound should leave three snapshots, and the last
     one before the cap is the one with the most useful stacks.
+
+    The bound is captured once, here, rather than re-read from the environment
+    for every test: the value is known to be usable at install time, whereas
+    ``note_start`` runs inside ``pytest_runtest_logstart``, where an unset
+    variable reaching ``dump_traceback_later(None)`` raised ``TypeError`` and
+    became an ``INTERNALERROR``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
         self._handle = None
         self._path = _dump_path(f"worker-{os.getpid()}")
         self._armed = False
+        # Set when the dump target itself is unusable, so nothing retries a
+        # failed open once per test for the rest of the run.
+        self._disabled = False
 
-    def arm(self, nodeid: str, seconds: float) -> None:
-        if self._armed:
+    def arm(self, nodeid: str) -> None:
+        """Start the C timer for ``nodeid``; disable quietly if it cannot.
+
+        Every failure here is swallowed rather than raised. This runs inside a
+        pytest hook, so an exception is an ``INTERNALERROR`` that fails the
+        shard -- the diagnostic is not allowed to be the reason a run goes red,
+        and a run whose dump directory is unusable is still a run worth having.
+        """
+        if self._armed or self._disabled:
             return
-        # The handle must exist and stay open for the life of the process: the
-        # dump is written from a C thread with a raw descriptor, so the file
-        # cannot be opened at the moment it fires.
-        if self._handle is None or self._handle.closed:
-            self._handle = self._path.open("w", encoding="utf-8")
-        self._handle.write(f"[shard stall] {nodeid} exceeded {seconds:g}s; every thread follows.\n")
-        self._handle.flush()
-        faulthandler.dump_traceback_later(seconds, file=self._handle, repeat=True, exit=False)
+        try:
+            # The handle must exist and stay open for the life of the process:
+            # the dump is written from a C thread with a raw descriptor, so the
+            # file cannot be opened at the moment it fires.
+            if self._handle is None or self._handle.closed:
+                self._handle = self._path.open("w", encoding="utf-8")
+            self._handle.write(
+                f"{ARM_MARKER}{nodeid} exceeded {self.seconds:g}s; every thread follows.\n"
+            )
+            self._handle.flush()
+            faulthandler.dump_traceback_later(
+                self.seconds, file=self._handle, repeat=True, exit=False
+            )
+        except (OSError, ValueError, TypeError):
+            self._disabled = True
+            return
         self._armed = True
 
     def disarm(self) -> None:
         if not self._armed:
             return
-        faulthandler.cancel_dump_traceback_later()
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            faulthandler.cancel_dump_traceback_later()
         self._armed = False
 
 
@@ -345,7 +440,7 @@ def install(config) -> None:
         return
     if hasattr(config, "workerinput"):
         if _WORKER is None:
-            _WORKER = _WorkerTimer()
+            _WORKER = _WorkerTimer(seconds)
     elif _CONTROLLER is None:
         _CONTROLLER = _Controller(seconds)
         _CONTROLLER.start()
@@ -355,7 +450,10 @@ def note_start(nodeid: str) -> None:
     if _CONTROLLER is not None:
         _CONTROLLER.started(nodeid)
     elif _WORKER is not None:
-        _WORKER.arm(nodeid, enabled_seconds())  # type: ignore[arg-type]
+        # Inertness is decided once, at install: re-reading the variable here
+        # and passing it on was how an unset value could reach
+        # ``dump_traceback_later(None)`` from inside a hook.
+        _WORKER.arm(nodeid)
 
 
 def note_report(report) -> None:
@@ -378,3 +476,81 @@ def _install_controller_for_test(seconds: float, sink) -> _Controller:
     global _CONTROLLER
     _CONTROLLER = _Controller(seconds, sink=sink)
     return _CONTROLLER
+
+
+def _armed_nodeids(text: str) -> list[str]:
+    """Node ids from arm-time headers, in the order the worker armed them.
+
+    The last entry is the test that worker had started most recently, which is
+    the most useful thing an unfired file can say once the job is gone.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(ARM_MARKER):
+            out.append(line[len(ARM_MARKER) :].split(" exceeded ", 1)[0].strip())
+    return out
+
+
+def _report_file(path: Path) -> list[str]:
+    """One dump file for :func:`report_dumps`, labelled for what it is."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [f"===== {path} : unreadable ({exc.__class__.__name__}) ====="]
+    if FIRED_MARKER in text:
+        lines = _first_snapshot(text)
+        return [f"===== {path} (fired, first snapshot, {len(lines)} lines) =====", *lines]
+    armed = _armed_nodeids(text)
+    if not armed:
+        return [f"===== {path} : empty (armed, no test recorded) ====="]
+    return [
+        f"===== {path} : timer armed but never fired "
+        f"({len(armed)} tests started in this worker) =====",
+        f"in flight at cancel, not fired: {armed[-1]}",
+    ]
+
+
+def report_dumps(directory: Path | None = None) -> str:
+    """A filtered, human-readable report over the dump files in ``directory``.
+
+    This is what the workflow's ``always()`` step prints, and it lives here
+    rather than in the YAML on purpose. The step used to ``cat`` every ``*.log``,
+    which contradicted this module's own discipline: a worker writes its header
+    at ARM time, one per test, so a cancelled shard's files held thousands of
+    lines all reading "<nodeid> exceeded 240s" with the one real timeout
+    indistinguishable among them (measured: 3088 lines, 4 of them fired, on this
+    module's first real CI occurrence). :data:`FIRED_MARKER` is the single source
+    of truth for "this snapshot is evidence", so it is applied once -- in
+    :meth:`_Controller._stack_excerpts` for the live report, and in
+    :func:`_report_file` for this one.
+
+    An empty or missing directory is not an error: the step runs on every shard,
+    including the ones with nothing to report.
+    """
+    root = DUMP_DIR if directory is None else directory
+    try:
+        paths = sorted(root.glob("*.log"))
+    except OSError:
+        paths = []
+    if not paths:
+        return "no shard stall report: nothing stalled long enough to trip the watchdog\n"
+    blocks: list[str] = []
+    for path in paths:
+        blocks.extend(_report_file(path))
+    return "\n".join(blocks) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m tests.shard_stall_watchdog [dir]`` -- print the dumps.
+
+    The optional directory lets the workflow point at its own
+    ``${TMPDIR:-/tmp}/lo-shard-stall``; the default is :data:`DUMP_DIR`, computed
+    from the same variable, so the two agree without the caller knowing the name.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    sys.stdout.write(report_dumps(Path(args[0]) if args else None))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - operator/CI aid
+    raise SystemExit(main())
