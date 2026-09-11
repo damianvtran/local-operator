@@ -158,9 +158,95 @@ async def test_manual_input_only_pastes_code_without_server() -> None:
     assert flow.bound_port is None  # no server in manual mode
 
 
+class _PortSquatter:
+    """A server that occupies a port and answers nothing — without hanging.
+
+    Used as the ``client_connected_cb`` for the port-blocking doubles below.
+
+    WHY A HANDLER IS NOT OPTIONAL. ``Server.wait_closed()`` returns only when
+    the server is closed AND every connection it ACCEPTED has been released.
+    A handler that never closes its writer pins that count for the life of the
+    event loop, so ``await server.wait_closed()`` in a test's ``finally`` never
+    returns. That was this file's ``lambda r, w: None``: the flow's
+    best-effort ``GET /cancel`` probe is what connects here, the probe always
+    closes its own side, and on CPython 3.12 a closed peer is not enough —
+    ``StreamReaderProtocol.eof_received()`` returns True (a half-close is
+    legal HTTP), so the transport stays open and the server never detaches it.
+
+    Measured, because the two interpreters disagree and that is why this went
+    unnoticed: with ``lambda r, w: None``,
+    ``test_pinned_port_fails_before_browser_when_busy`` hangs and is killed by
+    ``timeout 45`` on **3.12.13, 3 of 3 runs** (its coroutine parked on an idle
+    event loop, its stack a bare ``await blocker.wait_closed()``), while on
+    3.14 the identical code passes, because asyncio replaced the
+    ``_active_count`` gate with a ``_clients`` set for 3.14. On CI that
+    difference is a 20-minute ``timeout-minutes`` cancel with no failing
+    assertion and a ~6-minute silent tail -- the stall the shard watchdog
+    (``tests/shard_stall_watchdog.py``) named in run 34558244102, job
+    103135419093 -- so the double, not the product, is the defect here.
+
+    Reading to EOF before closing keeps the double FAITHFUL as well as safe:
+    it still answers nothing, so the probe still has to wait out its own read
+    timeout, which is the behaviour under test. The read is bounded by the peer
+    closing, never by a clock.
+    """
+
+    def __init__(self) -> None:
+        self.accepted: list[asyncio.StreamWriter] = []
+        self.released = False
+
+    async def __call__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.accepted.append(writer)
+        try:
+            await reader.read(-1)
+        except Exception:  # a reset counts as the peer going away
+            pass
+        finally:
+            writer.close()
+            self.released = True
+
+
+async def test_the_port_squatter_double_releases_what_it_accepts() -> None:
+    """Pin the double's contract, so the hang cannot come back unnoticed.
+
+    The regression this guards is real and costly: the previous
+    ``lambda r, w: None`` left the accepted connection attached forever, and
+    the only symptom was a shard cancelled at the workflow's 20-minute cap with
+    the suite at 99% and no failure anywhere.
+
+    What it catches, precisely -- mutation-tested, both interpreters: removing
+    the handler's ``writer.close()`` (so the connection is accepted, tracked and
+    never released) fails this guard in 5.32s on 3.12 AND on 3.14, because the
+    bounded ``wait_closed()`` below cannot return while a connection is still
+    attached. What it does NOT catch is a call site that stops using
+    ``_PortSquatter`` at all -- the literal ``lambda r, w: None`` binds at the
+    ``start_server`` call, not here. That case is covered by the test that owns
+    the behaviour instead: it hangs on 3.12, so the shard watchdog reports it in
+    four minutes rather than the workflow cap reporting it in twenty.
+    """
+    squatter = _PortSquatter()
+    blocker = await asyncio.start_server(squatter, "127.0.0.1", 0)
+    busy_port = int(blocker.sockets[0].getsockname()[1])
+    _reader, writer = await asyncio.open_connection("127.0.0.1", busy_port)
+    writer.write(b"GET /cancel HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    writer.close()
+    await writer.wait_closed()
+
+    assert squatter.accepted, "nothing connected, so this guard would prove nothing"
+    for _ in range(200):
+        if squatter.released:
+            break
+        await asyncio.sleep(0.01)
+    assert squatter.released, "the squatter kept an accepted connection attached"
+
+    blocker.close()
+    await asyncio.wait_for(blocker.wait_closed(), timeout=5.0)
+
+
 async def test_pinned_port_fails_before_browser_when_busy() -> None:
     """A provider-pinned port that is busy must fail fast — no browser."""
-    blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    blocker = await asyncio.start_server(_PortSquatter(), "127.0.0.1", 0)
     busy_port = int(blocker.sockets[0].getsockname()[1])
     opened: list[str] = []
     try:
@@ -178,7 +264,7 @@ async def test_pinned_port_fails_before_browser_when_busy() -> None:
 
 
 async def test_port_fallback_when_allowed() -> None:
-    blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    blocker = await asyncio.start_server(_PortSquatter(), "127.0.0.1", 0)
     busy_port = int(blocker.sockets[0].getsockname()[1])
     try:
         flow = _EchoFlow(
