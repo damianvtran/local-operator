@@ -13,11 +13,17 @@ because its ``if/elif`` chain ended with no ``else``.
 
 The decisions below are the ones both surfaces must make identically:
 whether a message is harness chrome that no surface may attribute to the
-user, what a timed-out gate says, what ink a refused compaction gets, and
-which assistant turns produce a notice instead of prose. Each is a pure
-function of a message, with **no host dependency** — no Textual, no wire
-type, no session import at module scope — so both hosts can call it and
-neither can own it.
+user, whether a row was minted by the harness from a ``CustomMessage`` at
+all (:func:`is_harness_injection`), what a timed-out gate says, what ink a
+refused compaction gets, and which assistant turns produce a notice instead
+of prose. Each is a pure function of a message, with **no host dependency**
+— no Textual, no wire type, no session import at module scope — so both
+hosts can call it and neither can own it.
+
+The injection predicate reads a raw payload MAPPING as readily as a message,
+because the subagents panel (``tui/widgets/subagent_view.py``) folds raw
+transcript entry payloads rather than ``AgentMessage``s. It is the same
+decision on a third surface, so it belongs here rather than in that fold.
 
 CONSTRAINT — this module must stay host-free. It sits below both renderers
 the same way ``compaction/marker.py`` sits below the hosts that must not
@@ -35,6 +41,7 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
@@ -85,6 +92,49 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
     """
     return text.strip() in harness_chrome_prompts()
+
+
+def is_harness_injection(row: Any) -> bool:
+    """Whether this row was minted BY the harness from a ``CustomMessage``.
+
+    :func:`~local_operator.session.session._default_convert_to_llm` renders a
+    harness aside — a model-switch notice, a session incident, a wake
+    delivery, a gate timeout — into a plain ``Message(role="user")`` and
+    stamps ``provider_payload["harness_injected"]`` on it, so the row is
+    structurally indistinguishable from an operator prompt once it exists.
+    The stamp is compaction's provenance signal, and it is also the only
+    signal a fold has: a row carrying it was never typed by a person, so no
+    human-facing surface may paint it as their words. The live path never
+    paints one either (the failover moment has its own receipt), which makes
+    dropping it live/replay parity rather than a second opinion — the same
+    doctrine :func:`is_harness_chrome` follows for the three continuation
+    prompts.
+
+    Accepts EITHER a message-like object or a raw payload mapping, because
+    the surfaces do not all read the same shape: the TUI and phone folds hold
+    ``AgentMessage``s, while the subagents panel folds raw transcript entry
+    payloads (``{"role": ..., "provider_payload": {...}}``). Making the
+    caller adapt is how the second copy of a decision gets written.
+
+    The marker constant is imported LAZILY, like :func:`harness_chrome_prompts`
+    imports its prompts: ``compaction.cutpoint`` pulls ``compaction.tokens``,
+    and this module sits on both folds' import path. Measured here, importing
+    this module costs 2.3 ms while importing it together with
+    ``compaction.cutpoint`` costs 308 ms — a module-scope import would pay
+    that on every TUI and mobile start for one string constant.
+    """
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    payload: Any
+    if isinstance(row, Mapping):
+        payload = row.get("provider_payload")
+    else:
+        payload = getattr(row, "provider_payload", None)
+    if not isinstance(payload, Mapping):
+        # A replayed row can carry a malformed payload (an older writer, a
+        # hand-edited journal). Absent proof of injection is not proof of it.
+        return False
+    return bool(payload.get(RENDERED_INJECTION_KEY))
 
 
 def typed_line_of(text: str) -> str | None:

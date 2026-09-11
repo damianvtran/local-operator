@@ -51,8 +51,10 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     ToolResult,
 )
+from local_operator.incidents import format_model_switch_message
 from local_operator.session.session import Session
 from local_operator.session.transcript import (
+    ENTRY_MESSAGE,
     TRANSCRIPT_FILENAME,
     Transcript,
     TranscriptEntry,
@@ -84,6 +86,7 @@ from local_operator.tui.widgets.subagent_view import (
     _mark_consecutive_notices,
     entry_block,
     fold_trajectory,
+    fold_transcript_entries,
 )
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
@@ -942,6 +945,45 @@ def test_relay_reports_responding_once_per_message_and_never_over_a_running_tool
         assert emitted[-1] == "probing"
 
     asyncio.run(_drive())
+
+
+def test_a_harness_injected_row_is_not_painted_as_the_parents_words() -> None:
+    """A subagent fails over too, and the leak lands in the CHILD's transcript.
+
+    ``journal_model_switch`` names the failover-at-subagent case in its own
+    docstring, so the same compaction leak that bakes a transient notice into
+    the parent's transcript does it to a child's — where this fold paints a
+    plain ``role="user"`` row as the PARENT speaking. The row is dropped by
+    the shared ``is_harness_injection`` decision, read here off the raw payload
+    dict because that is the shape this fold holds.
+    """
+    notice = format_model_switch_message(
+        "zai/glm-5.3",
+        "anthropic/claude-opus-5",
+        reason="anthropic quota exhausted (0% remaining)",
+        transient=True,
+    )
+
+    def row(entry_id: str, text: str, *, injected: bool) -> TranscriptEntry:
+        payload: dict[str, Any] = {
+            "kind": "message",
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+        if injected:
+            payload["provider_payload"] = {"harness_injected": True}
+        return TranscriptEntry(id=entry_id, ts=1.0, type=ENTRY_MESSAGE, payload=payload)
+
+    folded = fold_transcript_entries(
+        [row("leaked", notice, injected=True), row("typed", "the real ask", injected=False)]
+    )
+    assert [(entry.kind, entry.text) for entry in folded] == [("user", "the real ask")]
+
+    # Negative control: the same TEXT without the stamp is the parent's own
+    # words (a pasted notice is a realistic thing to send) and must paint.
+    # The test keys on the stamp, not on the wording.
+    quoted = fold_transcript_entries([row("quoted", notice, injected=False)])
+    assert [entry.text for entry in quoted] == [notice]
 
 
 def test_fold_survives_junk_without_raising() -> None:
