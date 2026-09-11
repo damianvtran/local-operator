@@ -13,6 +13,7 @@ import base64
 import io
 import os
 import random
+import re
 import struct
 import subprocess
 import threading
@@ -2421,3 +2422,399 @@ async def test_edit_tolerant_match_keeps_crlf_line_endings(tools, context, tmp_p
     )
     assert result.is_error is False
     assert path.read_bytes() == b"if ok:\r\n\tnew()\r\n\tadded()\r\nnext()\r\n"
+
+
+# ---------------------------------------------------------------------------
+# edit: the not-found refusal (closest-region diagnostics)
+# ---------------------------------------------------------------------------
+#
+# The failure these cover is a hunk written from a STALE copy of the file: the
+# paragraph still exists, reworded, and the file may even hold a later
+# revision of it. The refusal is therefore a diagnosis — it shows the file's
+# current text and never applies anything — and these tests pin both halves of
+# that contract: the facts it must carry, and the bounds that stop a failing
+# edit on a big file from flooding the context it is trying to help.
+
+_DRIFT_DOC = (
+    "Intro paragraph: how a stage holds and releases its key material.\n"
+    "Second line of background that the hunk does not touch at all.\n"
+    "- **Key release, custody and the possession handshake (S-5, S2-12).** A stage's key is\n"
+    "  released only after its quote verifies.\n"
+    "Trailing paragraph about something else entirely, for padding.\n"
+    "Last line of the document.\n"
+)
+
+#: The same sentence as the caller still has it: pre-review wording, and the
+#: marker rolled back.
+_DRIFT_STALE = (
+    "- **Key release and hygiene (S-5).** Session keys are released to a stage only\n"
+    "  after its quote verifies."
+)
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_names_the_closest_line_and_overlap(tools, context, tmp_path) -> None:
+    """The refusal quotes the FILE's text at a named line, and names its metric."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "doc.md", "old_text": _DRIFT_STALE, "new_text": "REPLACED"},
+        context,
+    )
+    assert result.is_error is True
+    assert "hunk 1: old_text not found" in result.text
+    assert "closest text — file lines 3-4" in result.text
+    # The file's own line, with its real line number — the whole point of the
+    # change: the caller can see what the text says NOW.
+    assert (
+        "    3| - **Key release, custody and the possession handshake (S-5, S2-12).**"
+        in result.text
+    )
+    # The metric is always named; a bare percentage would read as "similarity"
+    # of something the caller cannot reproduce.
+    assert re.search(r"\d+% word overlap", result.text)
+    # And the confirmation step, including the skip case that a fuzzy
+    # auto-apply would have taken away from the caller.
+    assert f'read(path="{path}", range="1-6")' in result.text
+    assert "skip this hunk instead of re-applying it" in result.text
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_shows_the_first_difference(tools, context, tmp_path) -> None:
+    """The differing line pair is the file's real line, not a reconstruction."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "doc.md", "old_text": _DRIFT_STALE, "new_text": "REPLACED"},
+        context,
+    )
+    assert "first difference — your line 1 vs file line 3:" in result.text
+    assert "- - **Key release and hygiene (S-5).**" in result.text
+    assert "+ - **Key release, custody and the possession handshake (S-5, S2-12).**" in result.text
+    assert re.search(r"identical for the first \d+ characters, then they diverge", result.text)
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_says_no_close_match_for_novel_text(tools, context, tmp_path) -> None:
+    """Nothing similar anywhere: say so, and do not fabricate a region."""
+    path = tmp_path / "doc.md"
+    path.write_text(_DRIFT_DOC)
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "doc.md",
+            "old_text": "quokka nimbus walrus zephyr marmot pelican saxophone",
+            "new_text": "x",
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "no close match" in result.text
+    # No quoted region and no labelled candidate: the honest answer here is
+    # that the caller is editing the wrong file or inventing the text.
+    assert "closest text" not in result.text
+    assert not re.search(r"^\s+\d+\| ", result.text, re.M)
+
+    # One shared word is enough to have a nearest line, and the label must
+    # stay honest: the overlap is still nowhere near a match.
+    shared = await _call(
+        tools,
+        "edit",
+        {
+            "path": "doc.md",
+            "old_text": "quokka nimbus walrus zephyr marmot pelican stage",
+            "new_text": "x",
+        },
+        context,
+    )
+    assert "no close match" in shared.text
+    assert re.search(r"nearest text is line \d+ \(\d+% word overlap\)", shared.text)
+    assert not re.search(r"^\s+\d+\| ", shared.text, re.M)
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_reports_every_failure_and_writes_nothing(
+    tools, context, tmp_path
+) -> None:
+    """One round trip names all the bad hunks, and the good ones stay unwritten.
+
+    The old engine returned on the FIRST failing hunk, so a caller with two
+    broken hunks paid two round trips to learn what one message can say.
+    """
+    path = tmp_path / "batch.txt"
+    path.write_text("alpha line\nbeta line\ngamma line\n")
+    before = path.read_bytes()
+    result = await _call(
+        tools,
+        "edit",
+        {
+            "path": "batch.txt",
+            "edits": [
+                {"old_text": "alpha line", "new_text": "ALPHA"},
+                {"old_text": "missing one\n", "new_text": "x"},
+                {"old_text": "beta line", "new_text": "BETA"},
+                {"old_text": "missing two\n", "new_text": "y"},
+            ],
+        },
+        context,
+    )
+    assert result.is_error is True
+    assert "edit aborted: 2 of 4 hunks did not match" in result.text
+    assert "nothing was written (a call applies all its hunks or none)" in result.text
+    assert "hunk 2: old_text not found" in result.text
+    assert "hunk 4: old_text not found" in result.text
+    assert "hunk 1" not in result.text and "hunk 3" not in result.text
+    # Byte-identical: the atomicity claim is checked, not asserted in prose.
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_edit_ambiguous_refusal_lists_the_match_lines(tools, context, tmp_path) -> None:
+    """The count was always there; the line numbers were the missing half."""
+    path = tmp_path / "amb.txt"
+    path.write_text("  foo\nbar\n  foo\n")
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "amb.txt", "old_text": "foo", "new_text": "X"},
+        context,
+    )
+    assert result.is_error is True
+    assert "old_text matches 2 places (lines 1, 3)" in result.text
+    assert "give anchor_line" in result.text
+
+
+def _failing_batch(count: int) -> list[dict[str, str]]:
+    return [
+        {"old_text": f"absent hunk number {i} about quokkas and walruses", "new_text": "x"}
+        for i in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_edit_refusal_is_bounded_and_counts_what_it_hides(tools, context, tmp_path) -> None:
+    """Ten failures stay under the cap, and the tail counts the rest exactly."""
+    path = tmp_path / "many.txt"
+    path.write_text("alpha beta gamma delta epsilon\n" * 5)
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "many.txt", "edits": _failing_batch(10)},
+        context,
+    )
+    assert result.is_error is True
+    assert "edit aborted: 10 of 10 hunks did not match" in result.text
+    assert len(result.text) <= builtin._EDIT_MAX_MESSAGE_CHARS
+    detailed = builtin._EDIT_MAX_DETAILED_HUNKS
+    compact = builtin._EDIT_MAX_COMPACT_HUNKS
+    assert result.text.rstrip().endswith(
+        f"… ({10 - detailed - compact} more failing hunks not shown)"
+    )
+    # Every hunk that is not described is counted, and none is described twice.
+    assert result.text.count("old_text not found") == detailed + compact
+
+
+@pytest.mark.asyncio
+async def test_edit_refusal_stays_bounded_for_a_long_pattern_in_a_large_file(
+    tools, context, tmp_path
+) -> None:
+    """A 200-line pattern against a ~5k-line file still returns a bounded message.
+
+    This is the shape that would be unbounded by default: the window is 200
+    lines long, only 6 of them are ever quoted, and the note says so.
+    """
+    rng = random.Random(11)
+    words = [f"w{i}" for i in range(400)]
+    lines = [" ".join(rng.choice(words) for _ in range(12)) for _ in range(5000)]
+    path = tmp_path / "big.txt"
+    path.write_text("\n".join(lines) + "\n")
+    pattern = lines[2400:2600]
+    drifted = "\n".join(
+        " ".join(line.split()[1:]) if i % 4 == 0 else line for i, line in enumerate(pattern)
+    )
+    result = await _call(
+        tools,
+        "edit",
+        {"path": "big.txt", "old_text": drifted, "new_text": "x"},
+        context,
+    )
+    assert result.is_error is True
+    assert len(result.text) <= builtin._EDIT_MAX_MESSAGE_CHARS
+    assert "showing first 6 of 200" in result.text
+
+
+# The tolerant pass as it was before the index: the reference the prefilter
+# must agree with, kept here on purpose. It is the ONLY definition of the
+# semantics — the fast one is an optimisation of this, so a disagreement is a
+# bug in the fast one.
+def _naive_tolerant_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    windows: list[tuple[int, int, str]] = []
+    start = content.find(old_text)
+    while start != -1:
+        windows.append((start, start + len(old_text), old_text))
+        start = content.find(old_text, start + 1)
+    if windows:
+        return windows
+
+    file_lines = content.splitlines(keepends=True)
+    offsets: list[int] = []
+    at = 0
+    for line in file_lines:
+        offsets.append(at)
+        at += len(line)
+    old_lines = old_text.splitlines()
+    if not old_lines or len(old_lines) > len(file_lines):
+        return []
+
+    for i in range(len(file_lines) - len(old_lines) + 1):
+        window = file_lines[i : i + len(old_lines)]
+        if all(f.rstrip("\r\n").strip() == o.strip() for f, o in zip(window, old_lines)):
+            last_line = window[-1]
+            end = offsets[i + len(old_lines) - 1] + len(last_line)
+            windows.append((offsets[i], end, "".join(window)))
+    return windows
+
+
+def _tolerant_corpus() -> list[tuple[str, str]]:
+    """Patterns that exercise the seeded prefilter's edges, with a file each."""
+    lf = "alpha\n    beta\n\ngamma\nalpha\nbeta\n"
+    crlf = "alpha\r\n    beta\r\n\r\ngamma\r\nalpha\r\nbeta\r\n"
+    repeats = "x\nblock\nsame\nsame\nx\nblock\nsame\nsame\nend\n"
+    cases = [
+        # Indent drift in both directions, and a blank interior line.
+        (lf, "    alpha\nbeta"),
+        (lf, "alpha\n\tbeta\n\ngamma"),
+        # CRLF file against an LF hunk (and the reverse spelling).
+        (crlf, "    alpha\nbeta"),
+        (crlf, "alpha\n  beta\n\ngamma"),
+        # Repeated blocks: every candidate start must still be found.
+        (repeats, "block\nsame\nsame"),
+        # Pattern longer than the file.
+        (repeats, "block\nsame\nsame\nend\nmore"),
+        # Blank first line, and a pattern that is only a blank line.
+        (lf, "\ngamma"),
+        (lf, "\n"),
+        # Nothing that matches at all, plus a file with no newline at the end.
+        (lf, "nothing\nhere"),
+        ("tail-without-newline", "tail-without-newline"),
+        # Seed line present elsewhere with the WRONG neighbours: the indexed
+        # pass must reject the start the seed alone cannot rule out. Both
+        # pattern lines occur the same number of times, so the seed is the
+        # first of them, and only one of its occurrences has the right tail.
+        # The indent on the second line is what keeps pass 1 (exact) out of
+        # the way so pass 2 actually runs.
+        ("a\n  b\na\nc\n  b\nd\n", "a\nb"),
+        ("p\n  q\nx\np\ny\n  q\n", "p\nq"),
+    ]
+    return cases
+
+
+def test_tolerant_prefilter_matches_the_naive_reference() -> None:
+    """The seeded index is an optimisation, so it must be indistinguishable."""
+    for content, old_text in _tolerant_corpus():
+        expected = _naive_tolerant_windows(content, old_text)
+        actual = builtin._match_windows(content, old_text)
+        assert actual == expected, (content, old_text, expected, actual)
+
+
+def test_tolerant_prefilter_agrees_over_a_generated_corpus() -> None:
+    """Property-style version of the check above, over generated shapes."""
+    rng = random.Random(4242)
+    vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    for _ in range(120):
+        line_count = rng.randint(0, 30)
+        lines = []
+        for _ in range(line_count):
+            indent = " " * rng.choice([0, 0, 1, 2, 4, 8]) + ("\t" if rng.random() < 0.2 else "")
+            body = " ".join(rng.choice(vocabulary) for _ in range(rng.randint(0, 4)))
+            lines.append(indent + body)
+        ending = rng.choice(["\n", "\r\n"])
+        content = ending.join(lines) + (ending if lines and rng.random() < 0.8 else "")
+        start = rng.randrange(0, max(line_count, 1))
+        width = rng.randint(1, 4)
+        old_text = ending.join(lines[start : start + width])
+        if rng.random() < 0.35:
+            # Drift the pattern's indentation, the way a model writing from
+            # memory does.
+            old_text = "\n".join(
+                (" " * rng.choice([0, 2, 4, 8])) + line.strip() for line in old_text.splitlines()
+            )
+        assert builtin._match_windows(content, old_text) == _naive_tolerant_windows(
+            content, old_text
+        ), (content, old_text)
+
+
+class _ScoringCounter:
+    """Counts how many candidate windows the full metric is run over."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.count = 0
+        real = builtin._dice
+
+        def counting(pattern, window):  # type: ignore[no-untyped-def]
+            self.count += 1
+            return real(pattern, window)
+
+        monkeypatch.setattr(builtin, "_dice", counting)
+
+
+def test_closest_region_search_scores_a_bounded_number_of_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structural bound, not a stopwatch: the work cannot grow with file size.
+
+    A timing assertion here would encode this laptop's core speed into the
+    test (see AGENTS.md, "Timing, flakes, and how to assert that something is
+    fast"). What actually matters is that the exhaustive O(file_lines x
+    pattern_lines) scan is gone, and that is a fact about how many windows are
+    scored.
+    """
+    pattern = [f"absent prose line {i} with several words" for i in range(40)]
+    counts = []
+    for line_count in (60, 6000):
+        content = "\n".join(f"filler line {i} of the document" for i in range(line_count))
+        counter = _ScoringCounter(monkeypatch)
+        builtin._closest_regions(builtin._FileScan(content), pattern)
+        counts.append(counter.count)
+    ceiling = builtin._EDIT_MAX_ANCHORS * builtin._EDIT_MAX_CANDIDATE_STARTS
+    assert all(count <= ceiling for count in counts), counts
+    # 100x the file, the same search: the prefilter is what makes that true.
+    assert counts[0] == counts[1]
+
+
+@pytest.mark.asyncio
+async def test_edit_not_found_reports_each_hunk_past_the_detailed_cap_compactly(
+    tools, context, tmp_path
+) -> None:
+    """Hunks past the detailed cap get one line each that still names a location.
+
+    Eight failures: three get the full report, the next three a one-line
+    summary, and the last two are counted in the tail. The caller can still
+    tell every failing hunk apart, which is what makes a single round trip
+    enough to fix the batch.
+    """
+    path = tmp_path / "mixed.txt"
+    path.write_text(_DRIFT_DOC)
+    edits = [{"old_text": _DRIFT_STALE, "new_text": "x"}] + [
+        {"old_text": f"absent hunk {i} about quokkas and walruses", "new_text": "y"}
+        for i in range(7)
+    ]
+    result = await _call(tools, "edit", {"path": "mixed.txt", "edits": edits}, context)
+    assert result.is_error is True
+    assert "edit aborted: 8 of 8 hunks did not match" in result.text
+    # Three full reports (the first one a closest-region report, the rest the
+    # honest no-close-match form), then one-line summaries, then the tail.
+    assert result.text.count("old_text not found (exact and whitespace-tolerant") == 3
+    assert result.text.count("closest text — file lines") == 1
+    assert result.text.count("hunk 4: old_text not found — ") == 1
+    assert re.search(
+        r"hunk 4: old_text not found — (closest text at line \d+|"
+        r"no close match \(nearest line \d+)",
+        result.text,
+    )
+    assert "… (2 more failing hunks not shown)" in result.text
