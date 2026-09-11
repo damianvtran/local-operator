@@ -1168,6 +1168,68 @@ async def test_the_automatic_retitle_keeps_the_anchored_prompt_and_its_sampling(
     assert "turn 9" not in prompt
 
 
+def test_the_refresh_prompt_carries_a_tie_break_toward_the_standing_name() -> None:
+    """Without this rule the command never settles.
+
+    Removing the anti-drift anchor removed every reason to PREFER the standing
+    name, and a 12-round real-model probe (each stored title fed back as the
+    next anchor, on work that was still the same work) repainted 8 times across
+    6 distinct titles and never converged, every title a fair name for the same
+    session. With the tie-break the same probe repaints twice and then holds.
+
+    Pinned on the CLAUSE rather than on the constant, because every other
+    assertion on this prompt compares it to itself: deleting the tie-break
+    leaves the whole suite green and silently reintroduces the churn. Asserted
+    by substring, following the `"Repeat it verbatim" not in system` precedent
+    above, so a reword of the surrounding sentences does not fail it.
+    """
+    prompt = naming.REFRESH_SYSTEM_PROMPT
+    assert "no more accurate" in prompt
+    assert "keep <current-title>" in prompt
+    # ...and it is a TIE-break, not the anchor instruction that caused the
+    # original defect. The fresh judgement has to stay decisive wherever the
+    # standing name is stale, so the prompt still says the anchor is not a name
+    # to keep.
+    assert "not a name to keep" in prompt
+    assert "Repeat it verbatim" not in prompt
+
+
+def test_the_refresh_prompt_does_not_assume_a_session_is_named() -> None:
+    """This caller runs on unnamed sessions; ``generate_retitle`` does not.
+
+    ``refresh_title`` drops the "a current title is required" gate, so a session
+    whose opening naming call failed reaches this prompt with no
+    ``<current-title>`` in the data at all. A tie-break written as though the
+    tag were always there would be an instruction about nothing on exactly the
+    sessions a user reaches for this command on.
+    """
+    assert "<current-title>, when present," in naming.REFRESH_SYSTEM_PROMPT
+
+    # The claim the qualifier rests on: with no anchor the tag really is absent
+    # from the envelope, rather than present and empty.
+    context = naming.build_theme_context(
+        _turns("add a web_fetch tool"),
+        "",
+        current_title="",
+        head_turns=naming.REFRESH_HEAD_TURNS,
+        tail_turns=naming.REFRESH_TAIL_TURNS,
+    )
+    assert context
+    assert "<current-title>" not in context
+
+
+def test_the_automatic_prompt_did_not_inherit_the_tie_break() -> None:
+    """The two prompts stayed different, which is the point of the change.
+
+    ``generate_retitle`` keeps its own anchor instruction; a tie-break leaking
+    into it would be a second, weaker way of saying what "Repeat it verbatim"
+    already says there.
+    """
+    assert "no more accurate" not in naming.THEME_SYSTEM_PROMPT
+    assert "Repeat it verbatim" in naming.THEME_SYSTEM_PROMPT
+    assert naming.REFRESH_SYSTEM_PROMPT != naming.THEME_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_a_topic_shift_after_a_fresh_judgement_reports_a_refresh() -> None:
     """What the command is for: the subject moved, and the receipt says so."""
@@ -1299,16 +1361,20 @@ def test_every_advertised_surface_teaches_the_same_spelling() -> None:
     entry = next(c for c in SLASH_COMMANDS if c.name == "rename")
     assert "--refresh" in entry.description
 
-    # The three notices, formatted the way each handler formats them. Built
-    # from the same f-string bodies rather than snapshotted, so this fails on a
-    # changed SPELLING and not on a reworded sentence around it.
+    # The shape a user reads, spelled out once so a failure here shows the
+    # sentence rather than only a count.
     named = "Fix the login flow"
     assert "/title --refresh" in f"conversation: {named} — /title <words>, or /title --refresh"
     assert "/title --refresh" in f"name: {named} — /title <words>, or /title --refresh"
 
-    # And the source lines those came from still exist, so a handler that stops
-    # advertising the flag cannot pass this test by the fixture agreeing with
-    # itself.
+    # The teeth are below, and they are a strict SNAPSHOT of the whole clause,
+    # not a spelling check: the two assertions above are test-local literals
+    # that no production change can falsify, so the honesty comes from counting
+    # the real source lines. That means rewording a notice while KEEPING
+    # `--refresh` fails this test too. Deliberate, and the cost of the check —
+    # the sentence is what a user reads, so a copy edit to it is a change to
+    # what the product teaches and should be made on purpose. Update the count
+    # or the literal here in the same commit as the reword.
     app_source = Path(app_module.__file__).read_text(encoding="utf-8")
     serving_source = Path(serving_module.__file__).read_text(encoding="utf-8")
     assert app_source.count("/title <words>, or /title --refresh") == 2
