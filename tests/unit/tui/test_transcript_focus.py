@@ -571,6 +571,72 @@ async def test_expanding_a_row_above_the_viewport_reveals_its_top() -> None:
         assert view.scroll_y <= card.virtual_region.y + 0.5
 
 
+_LONG_REFUSAL = "\n".join(
+    [
+        "edit aborted: 2 of 2 hunks did not match; nothing was written "
+        "(a call applies all its hunks or none)."
+    ]
+    + ["File: /tmp/doc.md — 677 lines, 118203 bytes."]
+    + [
+        f"  hunk {n}: old_text not found (exact and whitespace-tolerant matchers both failed)."
+        for n in (1, 2)
+    ]
+    + [
+        f"    {line}| the file's own text, row {line} of the diagnosis body"
+        for line in range(1, 26)
+    ]
+)
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_long_card_at_the_tail_reveals_its_top() -> None:
+    """A card TALLER than the viewport, expanded while following the tail.
+
+    The immediate reveal cannot fire here: at the instant of the toggle the card
+    is still in view (its top is at the viewport's top), and only the refresh
+    that follows the toggle moves the extent — the tail anchor then holds the
+    BOTTOM, so the headline and the `File:` line land above the fold and no key
+    reaches them (design round 2, D3). The reveal is re-asked once the layout
+    has settled.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+
+        card = ToolCard("t", "edit", {"path": "local_operator/tools/builtin.py"})
+        app._append_block(card)
+        card.mark_failed(_LONG_REFUSAL)
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y >= view.max_scroll_y - 1, "premise: following the tail"
+
+        card.toggle_expanded()
+        for _ in range(6):
+            await pilot.pause()
+
+        assert card.expanded is True
+        top = card.virtual_region.y
+        assert (
+            card.virtual_region.height > view.size.height - 4
+        ), "premise: taller than the viewport"
+        assert view.scroll_y <= top + 0.5, "the reader must land on the card's top, not mid-body"
+
+        # ... and a new message must not move a view the reader is holding.
+        held = view.scroll_y
+        extra = ToolCard("x", "bash", {"command": "true"})
+        app._append_block(extra)
+        extra.mark_done("done")
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y == held, "a new message moved a held view"
+        assert view.max_scroll_y > held
+
+
 @pytest.mark.asyncio
 async def test_expanding_a_row_at_the_tail_still_follows_the_tail() -> None:
     """The reveal is for rows ABOVE the fold only; the tail keeps the bottom.

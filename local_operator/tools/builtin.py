@@ -980,7 +980,13 @@ def _display_url(raw: str) -> str | None:
     return f"{lead}{host}{tail}"
 
 
-def _ambiguous_report(content: str, number: int, chosen: list[tuple[int, int, str]]) -> str:
+def _ambiguous_report(
+    original: str,
+    current: str,
+    number: int,
+    chosen: list[tuple[int, int, str]],
+    old_text: str,
+) -> str:
     """The refusal for an ``old_text`` that matches more than one place.
 
     Names the lines, not just the count: ``matches 248 places`` leaves the
@@ -989,20 +995,46 @@ def _ambiguous_report(content: str, number: int, chosen: list[tuple[int, int, st
     computed, so the line numbers are nearly free — but only the reported
     few are located, since counting newlines is linear in the file.
 
-    ``content`` is the state the matches were FOUND in (the in-memory batch
-    state), not the on-disk text: those occurrences may not exist on disk, and
-    naming disk lines for in-memory matches would be a fabrication. When the
-    two frames differ, the refusal's header note says so.
+    The lines are located on ``original``, the file on disk, not on the state
+    the matches were FOUND in. An earlier hunk of the same call can move or
+    duplicate the text, so found-state line numbers can be shifted or can
+    describe lines the file does not have — and the caller's next act is a
+    ``read``, an ``anchor_line`` or a ``replace_all`` against the file, all of
+    which the header note promises are numbered the file's way (review round
+    2, R8). ``old_text`` is re-matched on the disk, which is a plain substring
+    scan in this case because the duplicate that got us here occurs on disk
+    too.
+
+    When the file does NOT hold a duplicate — the only duplicate is one an
+    earlier hunk of this call created — the row says that, and labels its
+    count as the batch's own state, rather than attaching file line numbers to
+    occurrences the file does not have.
     """
-    listed = [
-        str(_line_of_offset(content, window[0])) for window in chosen[:_EDIT_MAX_AMBIGUOUS_LINES]
-    ]
-    shown = ", ".join(listed)
-    if len(chosen) > _EDIT_MAX_AMBIGUOUS_LINES:
-        shown += ", …"
+    disk_windows = _match_windows(original, old_text)
+    if len(disk_windows) > 1:
+        listed = [
+            str(_line_of_offset(original, window[0]))
+            for window in disk_windows[:_EDIT_MAX_AMBIGUOUS_LINES]
+        ]
+        shown = ", ".join(listed)
+        if len(disk_windows) > _EDIT_MAX_AMBIGUOUS_LINES:
+            shown += ", …"
+        return (
+            f"hunk {number}: old_text matches {len(disk_windows)} places (lines {shown}); "
+            "include more surrounding context, give anchor_line, or set replace_all=true."
+        )
+    if disk_windows:
+        only_line = _line_of_offset(original, disk_windows[0][0])
+        return (
+            f"hunk {number}: old_text matches {len(chosen)} places in this call's in-memory "
+            f"state, but only 1 place in the file on disk (line {only_line}) — an earlier "
+            "hunk in this call created the duplicate. Re-send this hunk on its own against "
+            "the file, or set replace_all=true if every occurrence is meant."
+        )
     return (
-        f"hunk {number}: old_text matches {len(chosen)} places (lines {shown}); include "
-        "more surrounding context, give anchor_line, or set replace_all=true."
+        f"hunk {number}: old_text matches {len(chosen)} places in this call's in-memory "
+        "state, but does not occur in the file on disk at all — earlier hunks in this call "
+        "rewrote the text it matched. Re-read the file and re-send this hunk."
     )
 
 
@@ -3737,26 +3769,57 @@ def _dice(pattern: Counter[str], window: Counter[str]) -> float:
 #: thread's context copy, so concurrent edits of different files cannot see
 #: each other's snapshot.
 #:
-#: A small cache, not a single slot, because one call has TWO frames that are
-#: both live at once: the in-memory state hunks are matched against, and the
-#: on-disk content the diagnostics describe. ``_EDIT_MAX_SCANS`` bounds it, so
-#: a call builds at most that many snapshots however many hunks it has.
-_EDIT_SCANS: ContextVar[tuple[_FileScan, ...]] = ContextVar("edit_scans", default=())
+#: This holds the state hunks are MATCHED against, which changes as earlier
+#: hunks of the call are applied in memory; one slot is enough, because two
+#: hunks in a row share it until one of them writes.
+_EDIT_SCAN: ContextVar[_FileScan | None] = ContextVar("edit_scan", default=None)
+
+#: The line views of the call's ON-DISK content, pinned once at the call site.
+#:
+#: Diagnostics are built from this frame, never from ``_EDIT_SCAN``: the
+#: caller's next move is a ``read`` of the file, so the quoted text, line
+#: numbers and read ranges have to be the disk's (review round 1, R1 / QA
+#: round 1, Q1; the ambiguity list joined them in review round 2, R8).
+#:
+#: It needs its own slot rather than a slot in a shared cache: an
+#: apply-then-fail batch churns the matching frame once per applying hunk, and
+#: in a shared cache that churn evicted the disk frame, so every later failure
+#: rebuilt it too (review round 2, R11 — the review measured the rebuilds on a
+#: 10-hunk alternating batch). Pinned, the disk frame is built exactly once
+#: however the batch alternates; what remains is one matching frame per distinct
+#: content version, which is the matcher's own cost and not a cache defect.
+_EDIT_DISK_SCAN: ContextVar[_FileScan | None] = ContextVar("edit_disk_scan", default=None)
 
 
 def _scan_for(content: str) -> _FileScan:
-    """The current call's line views for ``content``, built once per snapshot.
+    """The current call's line views for the state hunks are matched against.
 
-    A snapshot is reused only when it describes exactly this content, so a
-    multi-hunk batch builds each frame's tolerant index and word bags once, no
-    matter how many hunks are matched or fail against it.
+    Reused only while it describes exactly this content, so a run of hunks
+    against an unchanged state pays for the tolerant index and the word bags
+    once. A hunk that writes retires it, and the next hunk builds its
+    successor — one frame per content version, not one per hunk.
     """
-    scans = _EDIT_SCANS.get()
-    for scan in scans:
-        if scan.matches(content):
-            return scan
+    scan = _EDIT_SCAN.get()
+    if scan is not None and scan.matches(content):
+        return scan
     scan = _FileScan(content)
-    _EDIT_SCANS.set((scan, *scans)[:_EDIT_MAX_SCANS])
+    _EDIT_SCAN.set(scan)
+    return scan
+
+
+def _scan_for_disk(content: str) -> _FileScan:
+    """The call's ON-DISK line views, built at most once per call.
+
+    ``content`` is always the call's ``original``; the identity check is there
+    so a stale pin can never be served (the ContextVar is per-thread, but a
+    future caller that reuses the context for another edit would otherwise
+    inherit a foreign frame).
+    """
+    scan = _EDIT_DISK_SCAN.get()
+    if scan is not None and scan.matches(content):
+        return scan
+    scan = _FileScan(content)
+    _EDIT_DISK_SCAN.set(scan)
     return scan
 
 
@@ -3830,6 +3893,12 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
 # unbounded one would cost more than the failure it reports. Each is applied
 # where it is named, and the whole message is capped last.
 
+#: Word overlap at or above which the closest region IS the hunk's own text.
+#: Only reachable when the two frames differ (on unchanged content the hunk
+#: would have matched, not been refused), so the report says which situation
+#: stands instead of printing "not found" beside "100% word overlap" with the
+#: caller's own text (review round 2, R10).
+_EDIT_SELF_MATCH_PERCENT = 100
 #: Failing hunks that get a full closest-region report. TWO, not three: a
 #: detailed report is up to ~15 rows in the tool card (six quoted lines, two
 #: candidates, the difference pair and the hint) and the expanded card paints
@@ -3841,12 +3910,21 @@ _EDIT_MAX_DETAILED_HUNKS = 2
 #: Further failing hunks that get one compact line each. Bounded because the
 #: failure count is caller-controlled: a 40-hunk batch that fails wholesale
 #: must not produce a 40-line report, and the count of the rest survives in the
-#: ``… and N more hunks failed (details suppressed)`` tail.
+#: ``… and N more hunks were refused (details suppressed)`` tail.
 _EDIT_MAX_COMPACT_HUNKS = 3
-#: Scans cached per edit call. Two, because a call has two frames that must not
-#: be confused: the in-memory state hunks are matched against, and the on-disk
-#: content the diagnostics describe (review round 1, R1).
-_EDIT_MAX_SCANS = 2
+#: Line views built per edit call. Two DOCUMENTED bounds, because the two
+#: frames are accounted for differently.
+#:
+#: The on-disk frame is built exactly once per call, pinned in its own slot
+#: (``_EDIT_DISK_SCAN``), no matter how many hunks fail or alternate with ones
+#: that write (review round 2, R11). The matching frame is a separate slot and
+#: is rebuilt only when a hunk writes, so a call builds one per distinct content
+#: version — one for an all-failing batch however long it is, and one per
+#: applying hunk otherwise. Both counts are pinned by
+#: ``test_edit_builds_one_scan_per_frame_not_one_per_hunk`` and
+#: ``test_edit_pins_the_disk_frame_across_an_alternating_batch``.
+_EDIT_MAX_DISK_SCANS = 1
+_EDIT_MATCHING_SCANS_PER_VERSION = 1
 #: Candidate regions reported per hunk (one with text, the rest as snippets).
 _EDIT_MAX_REGIONS = 3
 #: Candidate windows the full metric is run over (the prefilter's hard bound).
@@ -3898,17 +3976,53 @@ def _clip_line(text: str, limit: int = _EDIT_MAX_LINE_CHARS) -> str:
     return text[: limit - 1] + "…"
 
 
-def _read_hint(path: Path, first: int, last: int, anchor_line: int | None) -> str:
+def _no_region_hint(display_path: str, total_lines: int, anchor_line: int | None) -> str:
+    """What to do when the file holds nothing resembling the hunk.
+
+    Never an invented range. There is no region the search can point at, and
+    the range this used to emit was the head of the file — or, on an empty
+    file, the inverted ``1-0`` — naming a place the failure gave no reason to
+    look at (review round 2, R9). A range is emitted only from the caller's own
+    ``anchor_line``, clamped into the file, because that is the one thing the
+    refusal knows about where they meant to edit; without it the caller is sent
+    back to the region they were already thinking of.
+    """
+    if anchor_line is not None and total_lines >= 1:
+        first = max(1, min(anchor_line, total_lines))
+        last = min(total_lines, first + _EDIT_MAX_WINDOW_LINES - 1)
+        return (
+            f'  read(range="{first}-{last}", path="{display_path}") — start at the line you '
+            "anchored to, then anchor the hunk to the text you find there; nothing in the file "
+            "resembles this hunk."
+        )
+    return (
+        "  re-read the region you meant to change (a ranged `read`) and anchor the hunk to the "
+        "text you find there; nothing in the file resembles this hunk."
+    )
+
+
+def _read_hint(display_path: str, first: int, last: int, anchor_line: int | None) -> str:
     """The next ``read`` call, FIRST on its line, then what to do with it.
 
-    The call leads because it is the one token the caller acts on and the tool
-    card clips every row from the right: a hint whose ``range`` argument was
-    cut mid-argument is unusable (design round 1, D2). ``anchor_line`` is
-    echoed when the caller supplied one — it is the only hint the caller gave
-    the tool about where it meant to edit, and it costs nothing to repeat
-    (review round 1, R4).
+    The call leads because it is the one token the caller acts on, and the tool
+    card clips every row from the right: a hint whose ``range`` argument was cut
+    mid-argument is unusable (design round 1, D2). ``range`` comes before
+    ``path`` for the same reason — the row budget at the narrowest supported
+    width is ~50 cells, which no realistic path plus ``range=`` fits in, so the
+    argument that carries the actionable numbers is the one that must survive
+    the clip (design round 2, D2 residual). The arguments are named, so their
+    order costs the caller nothing, and the path is printed in the caller's own
+    spelling: it is what they can re-use, and it is already on the ``File:``
+    line and the card's summary row if the row does clip it.
+
+    ``anchor_line`` is echoed when the caller supplied one — it is the only hint
+    the caller gave the tool about where it meant to edit, and it costs nothing
+    to repeat (review round 1, R4).
     """
-    hint = f'  read(path="{path}", range="{first}-{last}") — confirm the current text, then retry'
+    hint = (
+        f'  read(range="{first}-{last}", path="{display_path}") — confirm the current text, '
+        "then retry"
+    )
     if anchor_line is not None:
         hint += f" (or read around line {anchor_line}, the anchor_line you gave)"
     return hint + "; skip the hunk if the change is already there."
@@ -4067,23 +4181,28 @@ def _is_pure_insertion(pattern_lines: list[str], file_lines: list[str]) -> bool:
     return prefix + suffix >= limit
 
 
-def _edit_not_found_compact(scan: _FileScan, number: int, old_text: str) -> list[str]:
+def _edit_not_found_compact(
+    scan: _FileScan, number: int, old_text: str, in_memory_moved: bool = False
+) -> list[str]:
     """One line for a failing hunk past the detailed-report cap.
 
     Keeps the two facts that tell the failures apart — this hunk failed, and
     roughly where the file says something similar — for about a tenth of a
     full report. ``scan`` is the ON-DISK frame, like the detailed report: a
     one-liner naming a line of the in-memory state would be the same wrong
-    answer, just shorter.
+    answer, just shorter. ``in_memory_moved`` adds the self-match clause when
+    the closest region is the hunk's own text (review round 2, R10).
     """
     regions = _closest_regions(scan, old_text.splitlines())
     if not regions:
         return [f"hunk {number}: old_text not found — no close match."]
     start, _end, overlap = regions[0]
+    self_match = in_memory_moved and _overlap_percent(overlap) >= _EDIT_SELF_MATCH_PERCENT
     if _overlap_percent(overlap) >= _EDIT_OVERLAP_LABEL_PERCENT:
+        tail = "; earlier hunks in this call would have replaced or moved it" if self_match else ""
         return [
             f"hunk {number}: old_text not found — closest text at line "
-            f"{start + 1} ({_percent(overlap)} word overlap)."
+            f"{start + 1} ({_percent(overlap)} word overlap){tail}."
         ]
     return [
         f"hunk {number}: old_text not found — no close match (nearest line "
@@ -4111,8 +4230,9 @@ def _edit_not_found_report(
     scan: _FileScan,
     number: int,
     old_text: str,
-    path: Path,
+    display_path: str,
     anchor_line: int | None = None,
+    in_memory_moved: bool = False,
 ) -> list[str]:
     """The closest-region report for one hunk whose ``old_text`` did not match.
 
@@ -4148,7 +4268,7 @@ def _edit_not_found_report(
         # line of it shares a word with this hunk, which is not the same claim.
         return head + [
             "  no close match in the file; no text in it shares any words with this hunk.",
-            _read_hint(path, 1, min(total_lines, _EDIT_MAX_WINDOW_LINES), anchor_line),
+            _no_region_hint(display_path, total_lines, anchor_line),
         ]
 
     start, end, overlap = regions[0]
@@ -4160,7 +4280,7 @@ def _edit_not_found_report(
         return head + [
             f"  no close match in the file; the nearest text is line {first} "
             f"({_percent(overlap)} word overlap).",
-            _read_hint(path, read_first, read_last, anchor_line),
+            _read_hint(display_path, read_first, read_last, anchor_line),
         ]
 
     shown_last = min(last, first + _EDIT_MAX_WINDOW_LINES - 1)
@@ -4173,6 +4293,15 @@ def _edit_not_found_report(
     width = len(str(shown_last))
     for line_number in range(first, shown_last + 1):
         lines.append(f"    {line_number:>{width}}| {_clip_line(file_lines[line_number - 1])}")
+    if in_memory_moved and _overlap_percent(overlap) >= _EDIT_SELF_MATCH_PERCENT:
+        # "not found" beside "100% word overlap" with the caller's own text is
+        # self-contradictory on its face; name the situation instead (review
+        # round 2, R10). The region IS the hunk's text, unchanged on disk — what
+        # is missing is the text this call's earlier hunks would have left.
+        lines.append(
+            "  (this is this hunk's own text, still on disk unchanged — an earlier hunk in "
+            "this call would have replaced or moved it)"
+        )
     for alt_start, alt_end, alt_overlap in regions[1:]:
         snippet = _clip_line(" ".join(file_lines[alt_start:alt_end]), _EDIT_MAX_SNIPPET_CHARS)
         lines.append(f'  also similar: line {alt_start + 1} ({_percent(alt_overlap)}) "{snippet}"')
@@ -4228,7 +4357,7 @@ def _edit_not_found_report(
                     "rather than reworded)"
                 )
 
-    lines.append(_read_hint(path, read_first, read_last, anchor_line))
+    lines.append(_read_hint(display_path, read_first, read_last, anchor_line))
     return lines
 
 
@@ -4313,7 +4442,10 @@ def _edit_refusal(
         for report in kept:
             lines.extend(report)
         if hidden > 0:
-            lines.append(f"… and {hidden} more hunks failed (details suppressed)")
+            # "were refused", not "failed": the suppressed hunks may be ambiguity
+            # refusals, and the header above just took the trouble to name each
+            # reason (review round 2, R12).
+            lines.append(f"… and {hidden} more hunks were refused (details suppressed)")
         return "\n".join(lines)
 
     kept: list[list[str]] = []
@@ -4434,7 +4566,9 @@ async def execute_edit(
     # same load: file IO plus pure-Python matching and difflib over the whole
     # file. Keeping that work on the Textual loop merely moved the reported
     # freeze from the old one-hunk path into the new implementation.
-    outcome = await asyncio.to_thread(_edit_file_result, path, hunks, params.anchor_line)
+    outcome = await asyncio.to_thread(
+        _edit_file_result, path, hunks, params.anchor_line, params.path
+    )
     if isinstance(outcome, str):
         return _error(tool_call_id, "edit", outcome)
     total_replacements, details = outcome
@@ -4450,16 +4584,18 @@ def _edit_file_result(
     path: Path,
     hunks: list[EditHunk],
     anchor_line: int | None,
+    caller_path: str = "",
 ) -> tuple[int, dict[str, Any]] | str:
     """Serialize one file transaction across parent/child AgentLoops."""
     with _file_transaction(path):
-        return _edit_file_result_locked(path, hunks, anchor_line)
+        return _edit_file_result_locked(path, hunks, anchor_line, caller_path)
 
 
 def _edit_file_result_locked(
     path: Path,
     hunks: list[EditHunk],
     anchor_line: int | None,
+    caller_path: str = "",
 ) -> tuple[int, dict[str, Any]] | str:
     """The current multi-hunk edit engine, synchronous for ``to_thread``.
 
@@ -4478,8 +4614,10 @@ def _edit_file_result_locked(
 
     Nothing here runs on the happy path: an all-exact batch builds no line
     views at all. The views are fetched through ``_scan_for`` on any hunk that
-    needs the tolerant pass (a tolerant SUCCESS builds one), and again on the
-    failure path for the diagnostics. Measured with the pre-change module
+    needs the tolerant pass (a tolerant SUCCESS builds one), and through
+    ``_scan_for_disk`` on the failure path, where the frame is pinned for the
+    call so the diagnostics describe the file on disk without being rebuilt
+    (review round 2, R11). Measured with the pre-change module
     loaded from a file into the same interpreter, 11 exact hunks over the
     104 KB corpus file come out at ~14 ms CPU either side of this change —
     both dominated by the diff details the result already carried, with the
@@ -4491,9 +4629,32 @@ def _edit_file_result_locked(
     DIAGNOSTICS are computed against ``original`` (the file on disk), because
     nothing was written and the caller's next move is a ``read`` of that file:
     a report naming in-memory lines quotes lines that do not contain the text
-    it shows (review round 1, R1 / QA round 1, Q1). When the two frames differ
-    the header says so.
+    it shows (review round 1, R1 / QA round 1, Q1). That includes the
+    ambiguity refusal's match list, which is located on ``original`` again
+    rather than on the state the matches were found in, so no line number in
+    the message can disagree with the ``read`` the caller is about to make
+    (review round 2, R8). When the two frames differ the header says so.
+
+    The disk frame is PINNED for the call (``_EDIT_DISK_SCAN``), so it is
+    built at most once even in a batch that applies and fails alternately
+    (review round 2, R11). Both frames start unset: an all-exact batch builds
+    neither.
     """
+    # A fresh frame for this call. The pin is lazy — the first hunk that needs
+    # the disk views builds them, and every later hunk reuses them — which is
+    # what keeps the happy path free of line indexing.
+    _EDIT_SCAN.set(None)
+    _EDIT_DISK_SCAN.set(None)
+    # What the hints print as the path. The message is for the CALLER, and the
+    # resolved absolute path is both longer than their own spelling and less
+    # useful to them: they have to paste this into a follow-up `read`, and an
+    # 81-character repo path pushed the range argument off the card's row at
+    # every width (design round 2, D2 residual). Their spelling is resolved by
+    # the same `_resolve_workspace_path` call above, and the card's summary row
+    # already shows it, so it is a valid argument to the tool for them. Empty
+    # only if a future caller bypasses the tool's own validation; the absolute
+    # path is the honest fallback then.
+    display_path = caller_path.strip() or str(path)
     with path.open("r", encoding="utf-8", newline="") as stream:
         original = stream.read()
     current = original
@@ -4543,9 +4704,19 @@ def _edit_file_result_locked(
             _record(
                 "did not match",
                 lambda: _edit_not_found_report(
-                    _scan_for(original), number, hunk.old_text, path, anchor_line
+                    _scan_for_disk(original),
+                    number,
+                    hunk.old_text,
+                    display_path,
+                    anchor_line,
+                    in_memory_moved=current != original,
                 ),
-                lambda: _edit_not_found_compact(_scan_for(original), number, hunk.old_text),
+                lambda: _edit_not_found_compact(
+                    _scan_for_disk(original),
+                    number,
+                    hunk.old_text,
+                    in_memory_moved=current != original,
+                ),
             )
             continue
         chosen = windows
@@ -4562,8 +4733,8 @@ def _edit_file_result_locked(
             if len(chosen) > 1:
                 _record(
                     "matched more than one place",
-                    lambda: [_ambiguous_report(current, number, chosen)],
-                    lambda: [_ambiguous_report(current, number, chosen)],
+                    lambda: [_ambiguous_report(original, current, number, chosen, hunk.old_text)],
+                    lambda: [_ambiguous_report(original, current, number, chosen, hunk.old_text)],
                 )
                 continue
         # Apply back-to-front so earlier offsets stay valid within this hunk.
