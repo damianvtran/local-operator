@@ -186,10 +186,12 @@ THEME_SYSTEM_PROMPT = (
 #: distinct titles and never settled — "HTML rendering and caching" to "markdown
 #: rendering" to "caching and rendering", every one of them a fair name for the
 #: same session. A command that never settles reads as broken, and it is not
-#: free: each cycle repaints the band, the tab, the projection and the sidebar.
-#: So equally-accurate alternatives resolve to the standing name, and the
-#: casefold fold at the call site turns that into an honest
-#: :data:`TITLE_UNCHANGED`.
+#: free: the store path repaints the status band (one update, which carries the
+#: terminal tab with it) and pushes the new name to the phone. The sidebar is
+#: NOT on that list — it re-reads on its own 2 s interval whether or not a title
+#: moved — and the case does not need it. So equally-accurate alternatives
+#: resolve to the standing name, and the casefold fold at the call site turns
+#: that into an honest :data:`TITLE_UNCHANGED`.
 #:
 #: The rule is narrow ON PURPOSE. The defect this whole prompt exists to fix was
 #: an anchor that kept the name ALWAYS; "no more accurate" is not that, and
