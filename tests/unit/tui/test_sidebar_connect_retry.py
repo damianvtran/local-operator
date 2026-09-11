@@ -364,7 +364,7 @@ async def test_the_status_stays_on_connecting_while_the_retry_is_live(monkeypatc
     """Mid-retry the app has not given up, so it must not tell the user it has.
 
     ``connection_error`` is what flips the status from ``Saved · Connecting…``
-    to ``Saved · Connection unavailable · Reselect to retry``. Asking the user
+    to ``Saved · Reconnect failed · Select again to retry``. Asking the user
     to act while the app is still working asks them to fix something that is
     fixing itself.
     """
@@ -1094,3 +1094,101 @@ def _always(value: Any) -> Any:
         return value
 
     return prepare
+
+
+class _LostDuringPreparation(RecoveringRemote):
+    """Binds cleanly, then loses its owner inside the prepare→commit window.
+
+    The state the belt's unconditional form exists for: the bind postcondition
+    sees a reachable owner, the owner is gone by the time the commit returns, and
+    the commit returned ``None`` (no frame to fail and no ``post_display_hook`` to
+    notice) — see `test_a_cold_session_whose_commit_returns_no_frame_is_still_refused`.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self._cold = False
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+
+    async def ensure_display_current(self) -> None:
+        # The loss lands HERE, between the bind postcondition and the commit.
+        self._cold = True
+
+
+@pytest.mark.asyncio
+async def test_a_cold_session_whose_commit_returns_no_frame_is_still_refused(monkeypatch):
+    """F/m2: the postcondition is not conditional on there being a frame.
+
+    ``ready is None`` is ``_commit_sidebar_session``'s early return for a
+    prepared replay that already IS the current transcript view. With the belt
+    gated on ``ready is not None`` the body fell straight through it having
+    already set ``display_only = False``, so an owner lost in this window was
+    published live with no frame to refuse and no hook left to notice — the
+    ``connect_attempts`` reset below then credited the round with a connect it
+    never made.
+    """
+    session = _LostDuringPreparation("lost")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        # Observed rather than allowed to run, so this test sees ONE refusal
+        # rather than the whole chain (the chain is pinned elsewhere).
+        rearmed = Mock()
+        monkeypatch.setattr(app, "_start_sidebar_connection", rearmed)
+        _instant_backoff(monkeypatch, attempts=2)
+
+        await app._connect_sidebar_source(source)
+        await asyncio.sleep(0)  # the re-arm is a `call_soon` callback
+
+        assert session.is_cold is True
+        assert source.display_only is True, "a cold session was published with no frame to refuse"
+        assert source.connect_attempts == 1, "the cold commit was counted as a completed connect"
+        rearmed.assert_called_once_with(source, continues_retry=True)
+
+
+@pytest.mark.asyncio
+async def test_the_connect_prepares_with_refresh_so_no_frame_return_is_unreachable(monkeypatch):
+    """F/m2: WHY that return cannot be reached from the sidebar connect path.
+
+    Two things together, rather than a prose claim. (1) The trigger that return
+    compares against is a presentation whose replay view already IS the current
+    transcript — demonstrated below on the real helper, so the premise is
+    executed rather than asserted. (2) The ONLY way to be handed that
+    presentation is `_prepare_sidebar_session`'s two shortcuts, and both are
+    guarded on ``not refresh``; the connect body passes ``refresh=True``, which
+    is what this pins. So the belt's extension above is defensive on this path —
+    it is kept because one property read is cheaper than a silent hole in the
+    postcondition this whole file exists for.
+    """
+    session = RecoveringRemote("fresh", heals_after=1)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        seen: list[dict[str, Any]] = []
+
+        async def prepare(*_args: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs)
+            return prepared
+
+        monkeypatch.setattr(app, "_prepare_sidebar_session", prepare)
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+
+        await app._connect_sidebar_source(source)
+        await asyncio.sleep(0)
+
+        # (1) the trigger, on the real helper.
+        assert app._capture_sidebar_presentation().replay.view is app._transcript_view()
+        # (2) the connect never asks for it.
+        assert seen == [{"refresh": True}], (
+            "the connect prepared without `refresh`, which re-opens the "
+            "current-view shortcuts `_commit_sidebar_session`'s early return needs"
+        )
+        # And a bound, cold-free connect with no frame still settles as connected.
+        assert source.display_only is False
+        assert session.is_cold is False
