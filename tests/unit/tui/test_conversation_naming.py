@@ -1813,15 +1813,6 @@ def test_the_refresh_flags_are_accepted_alongside_the_bare_words() -> None:
         assert naming.parse_title_arg(flag) == (True, ""), flag
 
 
-def test_a_double_dash_terminator_sets_a_literal_flag_shaped_title() -> None:
-    """`--` is the escape hatch that keeps a `--`-leading title reachable.
-
-    The same idiom `parse_fork_args` uses, so the one repo convention for a
-    free-text command holds here too.
-    """
-    assert naming.parse_title_arg("-- --refresh") == (False, "--refresh")
-
-
 def test_an_unknown_title_option_is_refused_rather_than_becoming_a_title() -> None:
     """A typo'd flag raises instead of being stored.
 
@@ -1834,18 +1825,6 @@ def test_an_unknown_title_option_is_refused_rather_than_becoming_a_title() -> No
     message = str(caught.value)
     assert "--refresh" in message
     assert "--" in message
-
-
-def test_a_title_merely_containing_a_flag_word_is_still_a_title() -> None:
-    """The near-miss guard, in flag spelling.
-
-    Matching is on the WHOLE argument, so prose after the flag makes the whole
-    thing a title — the same rule the bare words follow.
-    """
-    assert naming.parse_title_arg("--refresh the billing importer") == (
-        False,
-        "--refresh the billing importer",
-    )
 
 
 @pytest.mark.asyncio

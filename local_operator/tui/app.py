@@ -21894,6 +21894,16 @@ class OperatorApp(App[None]):
             # before the call instead, a refresh that came back "unchanged"
             # would still have silently re-armed automatic naming over a name
             # the user typed and is keeping.
+            #
+            # Dereferenced DIRECTLY, unlike the two routed handlers that probe
+            # with `getattr`, and the difference is the type rather than the
+            # care taken: `session` is `SessionProtocol` here, which makes
+            # `conversation_name_state` mandatory (see its declaration there),
+            # so a probe would guard a state pyright already forbids — and
+            # would silently skip the release if the member were ever dropped,
+            # where this line fails the type-check that is the real guard. The
+            # routed paths take `Any` (whatever facade a follower's owner
+            # holds) and have no such promise, so they must probe.
             session.conversation_name_state.release_user_set()
             stored = self._store_title_for(source, session, result.title)
             self._notice_for(source, naming.refresh_receipt(result, stored))
