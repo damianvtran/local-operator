@@ -12451,12 +12451,27 @@ class OperatorApp(App[None]):
         markers are resolved from the CHIP text, before the splice, because
         ``resolve_markers`` orders images by where the citation sits and a
         payload spliced in ahead of one would move it.
+
+        A ``$skill`` LEADING the argument expands here, through the same
+        ``_expand_invocation`` the bare-prompt path uses. The argument is its
+        OWN string, whose offset 0 is exactly where the user's ``$`` sits, so
+        the anchored parser needs no change to serve ``/team backend $research
+        fix the login bug`` — and the money/shell guards it gets from anchoring
+        (``$100``, a non-leading ``$research``) keep holding here unaltered.
+        Calling that method rather than re-resolving a body locally is what
+        keeps ONE answer to "what does an invocation expand to": the paste
+        splice into the request alone, the empty-body warning and the
+        never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
-        expanded = expand_pastes(request, attachments or {})
+        sent = self._expand_invocation(request, attachments)
+        # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
+        # argument as its row (the body belongs in the payload, never the
+        # ledger), everything else shows the paste-expanded text.
+        row = request if sent is not None else expand_pastes(request, attachments or {})
         # `typed=` keeps the naming split: the chip line names the thread, the
         # payload is what the model is sent.
-        self._submit_prompt(expanded, images, attachments, typed=request)
+        self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
     def _cmd_team(
         self,
