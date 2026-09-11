@@ -2773,6 +2773,11 @@ class TestInflightRefreshCoordination:
         Both halves are asserted because they are the same exit path: the
         adoption really ran on the freshest stored token (observed by wrapping
         the real method), and the refusal really followed it.
+
+        The refusal's REASON is asserted too (review round 3, M2): a local raise
+        cannot say what a server answered, so this arm carries the unattributed
+        code — the endpoint code's "the server returned no token" would blame a
+        server for a request that may never have gone out.
         """
         import time
 
@@ -2816,8 +2821,10 @@ class TestInflightRefreshCoordination:
 
         monkeypatch.setattr(provider, "_adopt_freshest_stored_token", spy_adopt)
 
-        with pytest.raises(auth_mod.McpRefreshContendedError):
+        with pytest.raises(auth_mod.McpRefreshContendedError) as refused:
             await provider._coordinate_inflight_refresh()
+
+        assert refused.value.reason_code == auth_mod.REFRESH_REFUSAL_UNATTRIBUTED
 
         # The adoption ran, and it took the freshest persisted token — the
         # freshness invariant the fall-through exists for still holds.
@@ -3849,9 +3856,15 @@ class TestDeadGrantTombstone:
         assert storage.grant_is_dead() is False
 
     @pytest.mark.asyncio
-    async def test_nothing_to_refresh_is_failed_not_dead(self) -> None:
+    async def test_nothing_to_refresh_is_unsent_not_dead(self) -> None:
         """F2c: a row with no refresh token is "nothing to spend", not proof
-        that the grant was rejected."""
+        that the grant was rejected.
+
+        The OUTCOME is its own member rather than ``"failed"`` (review round 3,
+        M2): ``"failed"`` is composed for the user as the endpoint text — "the
+        server returned no token" — and no request is made on this path at all,
+        so that sentence would be false about the wire and about the server.
+        """
         from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
         from local_operator.mcp import auth as auth_mod
@@ -3863,7 +3876,7 @@ class TestDeadGrantTombstone:
 
         outcome = await auth_mod._refresh_oauth_token_locked(self.URL, storage, self._endpoints())
 
-        assert outcome == "failed"
+        assert outcome == "unsent"
         assert storage.grant_is_dead() is False
 
     # --- F3: the proactive site spends nothing ----------------------------

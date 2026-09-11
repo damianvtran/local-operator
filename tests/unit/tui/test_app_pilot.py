@@ -12449,40 +12449,61 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
 async def test_the_durable_notice_carries_one_dash_and_no_orphaned_pointer() -> None:
     """D5: the notice must not append its pointer to a line that IS a command.
 
-    The auth requirement leads with ``run /mcp reauth notion — …``, so the
+    The auth requirement leads with ``/mcp reauth notion — …``, so the
     template's unconditional ``— /mcp for details`` gave the composed sentence
     TWO em-dashes (against the house one-dash rule) and pushed it to 107 cells,
     where the wrap orphaned the pointer onto a row of its own. The pointer is
     for diagnostic text ("command not found: …"); when the text is already the
     command, the reader has the answer.
-    """
-    failure = "run /mcp reauth notion — refresh unconfirmed"
-    diagnostic = "command not found: slack-mcp"
-    manager = FakeMcpManager(["notion", "slack"], [])
-    startup = McpStartupOutcome(
-        configured=("notion", "slack"),
-        failures={"notion": failure, "slack": diagnostic},
-    )
-    session = McpSession(manager=manager, startup=startup)
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 24)) as pilot:
-        for _ in range(6):
-            await pilot.pause()
-        app.query_one(Toast).dismiss_toast()
-        await pilot.pause()
-        rows = _transcript_text(app).split("\n")
-        notice = [row for row in rows if "MCP notion failed" in row]
-        assert notice, "the failure must survive the toast"
-        # The notice carries the transcript's spine indent and outcome glyph, so
-        # the assertion is on the sentence itself.
-        line = notice[0].strip().lstrip("✗ ").strip()
-        assert line == f"MCP notion failed: {failure}", notice[0]
-        assert line.count("—") == 1, line
-        assert "/mcp for details" not in line
 
-        # A DIAGNOSTIC failure still gets the pointer: the rule is about a line
-        # that already names /mcp, not about suppressing the signpost.
-        assert any(diagnostic in row and "/mcp for details" in row for row in rows), rows
+    Asserted at BOTH widths because that is what D9 pinned: at 100 columns the
+    notice is one row, and at 44 it wraps carrying the whole command — the bare
+    form is four cells shorter, which is the difference between the name being
+    handed over whole and being cut mid-word.
+    """
+    failure = "/mcp reauth notion — refresh unconfirmed"
+    diagnostic = "command not found: slack-mcp"
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion", "slack"], [])
+        startup = McpStartupOutcome(
+            configured=("notion", "slack"),
+            failures={"notion": failure, "slack": diagnostic},
+        )
+        session = McpSession(manager=manager, startup=startup)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            app.query_one(Toast).dismiss_toast()
+            await pilot.pause()
+            rows = _transcript_text(app).split("\n")
+            at = next((index for index, row in enumerate(rows) if "MCP notion failed" in row), None)
+            assert at is not None, "the failure must survive the toast"
+            # The notice carries the transcript's spine indent and outcome glyph,
+            # so the assertion is on the sentence itself; at 44 columns the row
+            # wraps, so the block is re-joined with normalised whitespace rather
+            # than asserted row by row (the wrap's missing hanging indent is
+            # D6's separate, deferred property).
+            block = [rows[at]]
+            for row in rows[at + 1 :]:
+                if not row.strip() or ("MCP " in row and "failed:" in row):
+                    break
+                block.append(row)
+            joined = " ".join(part.strip() for part in block if part.strip())
+            assert joined == f"✗ MCP notion failed: {failure}", joined
+            assert joined.count("—") == 1, joined
+            assert "/mcp for details" not in joined
+
+            # A DIAGNOSTIC failure still gets the pointer: the rule is about a
+            # line that already names /mcp, not about suppressing the signpost.
+            # Read across the wrap, since the diagnostic row wraps too at 44.
+            diagnostic_block = " ".join(
+                row.strip()
+                for row in rows[rows.index(next(r for r in rows if "MCP slack failed" in r)) :]
+                if row.strip()
+            )
+            assert diagnostic in diagnostic_block, diagnostic_block
+            assert "/mcp for details" in diagnostic_block, diagnostic_block
 
 
 @pytest.mark.asyncio
@@ -12492,21 +12513,23 @@ async def test_the_mid_session_auth_toast_leads_with_the_command() -> None:
     ``on_auth_required`` fires when a grant expires after boot. Its message
     already names the server (the auth line does so inside its command), so the
     old ``{ICON} MCP {name} {message}`` prefix rendered ``notion`` first — ahead
-    of the command the user has to run — and left ``notion run /mcp reauth`` with
-    no separator between them. The message now leads the card unchanged.
+    of the command the user has to run — and left ``notion /mcp reauth`` with no
+    separator between them. The message now leads the card unchanged, and D9's
+    bare command keeps it on one row at 100 columns.
     """
     from local_operator.tui.widgets.status_line import ICON_MCP
 
-    manager = FakeMcpManager(["notion"], ["notion"])
-    session = McpSession(manager=manager)
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 24)) as pilot:
-        for _ in range(6):
-            await pilot.pause()
-        manager.on_auth_required("notion", "run /mcp reauth notion — refresh unconfirmed")
-        for _ in range(4):
-            await pilot.pause()
-        toast = app.query_one(Toast)
-        assert toast.display is True
-        assert toast.message == f"{ICON_MCP} MCP run /mcp reauth notion — refresh unconfirmed"
-        assert "notion run /mcp" not in toast.message, "the name must not precede the command"
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion"], ["notion"])
+        session = McpSession(manager=manager)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            manager.on_auth_required("notion", "/mcp reauth notion — refresh unconfirmed")
+            for _ in range(4):
+                await pilot.pause()
+            toast = app.query_one(Toast)
+            assert toast.display is True
+            assert toast.message == f"{ICON_MCP} MCP /mcp reauth notion — refresh unconfirmed"
+            assert "notion /mcp" not in toast.message, "the name must not precede the command"

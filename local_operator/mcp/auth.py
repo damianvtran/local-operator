@@ -153,11 +153,12 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: (:data:`UNCONFIRMED_SEND_TTL_S`) and why a connect-phase failure clears it.
 GRANT_UNCONFIRMED_SEND_KEY = "grant_refresh_unconfirmed"
 
-#: Outcome of one refresh attempt. Seven-valued rather than ``bool`` because each
+#: Outcome of one refresh attempt. Multi-valued rather than ``bool`` because each
 #: refusal has its OWN truthful user-visible message (lock contention, a budget
 #: overrun, a server that answered without a token, a token endpoint that could
-#: not be reached, a possibly-spent token needing a fresh sign-in) and because
-#: the coordinator must tell a DEAD grant (never present this token again) from a
+#: not be reached, a token that was never sent because the row held nothing to
+#: present, a possibly-spent token needing a fresh sign-in) and because the
+#: coordinator must tell a DEAD grant (never present this token again) from a
 #: merely FAILED one (transient; today's behaviour is correct).
 #: CAUTION: every member is a truthy string — every call site must compare
 #: against a member explicitly, never test truthiness.
@@ -169,6 +170,8 @@ RefreshOutcome = Literal[
     "overran",
     "unacknowledged",
     "unreachable",
+    "unsent",
+    "unattributed",
 ]
 
 #: Refresh this far BEFORE the stored access token's deadline. A connect that
@@ -249,11 +252,24 @@ UNCONFIRMED_SEND_TTL_S = 3600.0
 #: * ``REFRESH_REFUSAL_UNCONFIRMED`` — a token may already be spent (it was
 #:   presented, or an earlier presentation was never acknowledged), so nothing
 #:   may be presented until an interactive grant replaces it.
+#: * ``REFRESH_REFUSAL_UNSENT`` — the exchange ran and found nothing it could
+#:   present (no stored refresh token, or no client registration to authenticate
+#:   with), so NO request was made. It has its own code because the
+#:   ``REFRESH_REFUSAL_ENDPOINT`` text ("the server returned no token") is false
+#:   about both the wire and the server for a request that never left the
+#:   machine (review round 3, M2).
+#: * ``REFRESH_REFUSAL_UNATTRIBUTED`` — a failure of our OWN coordination (a
+#:   re-read that raised, a lock that could never be taken, the post-condition
+#:   finding nothing usable) which cannot be attributed to a server answer at
+#:   all. Same reason as ``UNSENT`` for existing: the honest statement names no
+#:   server, so no server may be blamed for it.
 REFRESH_REFUSAL_LOCK = "lock"
 REFRESH_REFUSAL_INFLIGHT = "inflight"
 REFRESH_REFUSAL_ENDPOINT = "endpoint"
 REFRESH_REFUSAL_UNREACHABLE = "unreachable"
 REFRESH_REFUSAL_UNCONFIRMED = "unconfirmed"
+REFRESH_REFUSAL_UNSENT = "unsent"
+REFRESH_REFUSAL_UNATTRIBUTED = "unattributed"
 
 #: Bound on ACQUIRING the cross-process refresh lock. The critical section it
 #: guards is one token POST, the response read that may outlive it, and a couple
@@ -314,8 +330,17 @@ class McpAuthRequiredError(RuntimeError):
     SENT but never confirmed (:class:`McpRefreshUnconfirmedError`). The
     manager's ``_auth_required_text`` renders it as the tail of the actionable
     line, so the command still comes first. ``None`` (the default) keeps the
-    generic "authorization expired" wording, which is the truthful summary for
-    every other route into this error: the stored grant could not be refreshed.
+    app's house wording for a dead credential (``sign-in expired``), which is
+    the truthful summary for every other route into this error: the stored grant
+    could not be refreshed.
+
+    ``log_detail`` is the SEPARATE sentence for ``str(self)`` when the rendered
+    tail has to be shorter than the technical fact (review round 3, N3).
+    ``detail`` is what a user reads on a card that clamps it twice; ``str()``
+    feeds the logs, where the mechanism is the thing support needs. The two
+    audiences were separated deliberately by the reason-code seam, and collapsing
+    them back into one string is what made a shortened tail also shorten the log
+    line.
 
     ``reason_code`` is the STABLE CODE for why (:data:`REFRESH_REFUSAL_LOCK` and
     friends), and it is the seam user-visible copy is composed from: the manager
@@ -334,11 +359,15 @@ class McpAuthRequiredError(RuntimeError):
         server_url: str,
         *,
         detail: str | None = None,
+        log_detail: str | None = None,
         reason_code: str | None = None,
     ) -> None:
         message = f"MCP OAuth authorization required for {server_url}"
-        if detail is not None:
-            message = f"{message}: {detail}"
+        # ``log_detail`` when given, so a tail trimmed for the card does not trim
+        # the sentence the log keeps — see the class docstring.
+        sentence = log_detail if log_detail is not None else detail
+        if sentence is not None:
+            message = f"{message}: {sentence}"
         super().__init__(message)
         self.server_url = server_url
         self.detail = detail
@@ -423,13 +452,24 @@ class McpRefreshUnconfirmedError(McpAuthRequiredError):
     keeps the toast truthful — a refresh that was SENT but never confirmed is not
     an expired authorization — and it is kept SHORT because it is the tail of a
     line the startup toast then clamps (`refresh unconfirmed`, where the previous
-    sentence-length wording was itself truncated off the card).
+    sentence-length wording was itself truncated off the card). ``log_detail``
+    carries the mechanism that tail used to carry, for ``str(self)`` and the logs
+    only: a truncated copy string is not a reason to lose the fact from an
+    incident log (review round 3, N3).
     """
 
     def __init__(self, server_url: str) -> None:
         super().__init__(
             server_url,
             detail="refresh unconfirmed",
+            # The technical fact the card cannot fit: the marker was armed before
+            # the POST, so a token WAS presented by an exchange whose answer
+            # never arrived. Restored here rather than in ``detail`` (N3) because
+            # the log is where support reads the mechanism.
+            log_detail=(
+                "a token refresh was sent but never confirmed, so the presented "
+                "refresh token may already be spent and will not be presented again"
+            ),
             reason_code=REFRESH_REFUSAL_UNCONFIRMED,
         )
         # We necessarily HOLD a grant for this server (the refusal exists because
@@ -775,6 +815,31 @@ class McpTokenStorage:
         data = row.data
         return dict(data) if isinstance(data, dict) else None
 
+    def _row_was_removed(self) -> bool:
+        """Whether this server's credential row is DEFINITIVELY gone (a logout).
+
+        The one question every writer that MUTATES an existing row has to answer
+        the same way, which is why it lives here rather than being open-coded at
+        each call site (review round 3, M1: a third writer was answering it with
+        ``self._read() or {}``, so a ``/mcp logout`` racing the refresh path was
+        silently undone by a marker write that re-created the row it had just
+        deleted).
+
+        The two-valued answer is deliberate, and ``has_stored_row`` is three-
+        valued for the same reason: ``None`` means the store could not be read,
+        which is NOT evidence of removal, so an unreadable store keeps writing.
+        Dropping a rotation costs at most one interactive sign-in while keeping a
+        spent token risks the whole family — this predicate only ever fires on a
+        removal we actually observed.
+
+        Only the MUTATORS ask: ``set_tokens``, ``set_client_info`` and
+        ``seed_client_info`` are the CREATION funnel (a completed interactive
+        grant, a dynamic registration, a pinned-client seed), where absence is
+        the normal state of a server being logged into for the first time and
+        refusing to write would break every first login.
+        """
+        return self._read() is None and self.has_stored_row() is False
+
     def _write(self, creds: dict[str, Any]) -> None:
         store = self._store
         if store is None:
@@ -956,7 +1021,7 @@ class McpTokenStorage:
         Returns ``True`` when the response was written.
         """
         creds = self._read()
-        if creds is None and self.has_stored_row() is False:
+        if self._row_was_removed():
             logger.info(
                 "MCP token refresh for %s was NOT persisted: the credential row was "
                 "removed while this exchange was in flight (a logout or reauth), so "
@@ -1001,7 +1066,24 @@ class McpTokenStorage:
 
         Best-effort like every other write here: a store failure must not stop
         the POST, and losing the marker just restores the pre-marker behaviour.
+
+        A row removed underneath us (a ``/mcp logout`` racing this exchange) is
+        NOT re-created, which is the symmetry ``store_refresh_result`` and
+        ``mark_grant_dead`` already keep: an explicitly removed credential stays
+        removed, and a marker arming a presentation for a row that no longer
+        exists protects nothing. The refusal is logged at INFO rather than
+        silently swallowed, because a refresh running against a deleted row is
+        something support has to be able to read out of the log.
         """
+        if self._row_was_removed():
+            logger.info(
+                "MCP send marker for %s was NOT armed: the credential row was removed "
+                "while this exchange was being set up (a logout or reauth), so the "
+                "removal is honoured rather than re-created "
+                "[writer: McpTokenStorage.mark_send_unconfirmed]",
+                self.server_url,
+            )
+            return
         creds = self._read() or {}
         creds[GRANT_UNCONFIRMED_SEND_KEY] = {
             "digest": _refresh_token_digest(presented_refresh_token),
@@ -1166,7 +1248,10 @@ class McpTokenStorage:
         introducing a second write primitive.
 
         Returns ``True`` when the marker was written, ``False`` when it was
-        skipped or the write failed.
+        skipped or the write failed. A row removed underneath us (a racing
+        ``/mcp logout``) is the ``False`` case, whatever the token argument: the
+        removal is honoured, which is the answer its two sibling mutators give
+        too (review round 3, M1).
 
         Its caller :func:`_perform_refresh_exchange` holds
         :func:`_oauth_refresh_lock` for the whole call, and writes through the
@@ -1181,6 +1266,19 @@ class McpTokenStorage:
         detached exchange wrote with no lock at all; it does not any more.
         """
         try:
+            if self._row_was_removed():
+                # Same answer as its two siblings, for the same reason (review
+                # round 3, M1): a tombstone on a row the user just deleted is
+                # re-creating the credential the removal asked us to forget. The
+                # freshness compare below only covers the case where a token IS
+                # given; without this guard the no-token call re-created the row.
+                logger.info(
+                    "MCP dead-grant marker for %s was NOT written: the credential row "
+                    "was removed (a logout or reauth), so the removal is honoured "
+                    "rather than re-created [writer: McpTokenStorage.mark_grant_dead]",
+                    self.server_url,
+                )
+                return False
             creds = self._read() or {}
             if rejected_refresh_token is not None and not _payload_holds_refresh_token(
                 creds, rejected_refresh_token
@@ -3096,11 +3194,13 @@ async def _refresh_oauth_token_locked(
     spent with the exchange still running; a rotation that still lands is
     persisted), ``"unreachable"`` (the request never reached the wire, so
     nothing was presented and there is nothing to keep — a pre-send transport
-    failure, which is NOT a server rejection), ``"unacknowledged"`` (a token may
-    already be spent, so nothing was or may be presented until an interactive
-    grant), and ``"failed"`` for every other outcome, including "nothing to
-    refresh". Callers MUST compare against a member: every member is a truthy
-    string.
+    failure, which is NOT a server rejection), ``"unsent"`` (the row held
+    nothing this exchange could present, so no request was made — its own member
+    because a server may not be blamed for an answer it was never asked for),
+    ``"unacknowledged"`` (a token may already be spent, so nothing was or may be
+    presented until an interactive grant), and ``"failed"`` for an exchange the
+    server ANSWERED without a usable token. Callers MUST compare against a
+    member: every member is a truthy string.
 
     The caller holds the cross-process refresh lock and passes its HANDLE, which
     this function hands to the exchange task before its first cancellable await.
@@ -3278,8 +3378,11 @@ async def _perform_refresh_exchange(
         client_info = await storage.get_client_info()
         if tokens is None or not tokens.refresh_token or client_info is None:
             # Nothing to spend — a missing token is not evidence that the grant
-            # is dead, so this must never tombstone.
-            return "failed"
+            # is dead, so this must never tombstone. Its OWN outcome rather than
+            # "failed": no request is made on this path at all, and "failed" is
+            # composed for the user as the endpoint code, whose text blames the
+            # server for an answer it never gave (review round 3, M2).
+            return "unsent"
 
         if storage.grant_is_dead():
             # A grant the authorization server already rejected must cost no
@@ -3885,7 +3988,12 @@ def _make_refresh_coordinating_provider(
                     exc_info=True,
                 )
                 await self._adopt_freshest_stored_token(ctx)
-                outcome = "failed"
+                # NOT "failed". This arm is a LOCAL failure — a re-read that
+                # raised, a lock that could never be taken, an unexpected raise —
+                # so nothing here knows what a server did or did not answer, and
+                # the endpoint copy would blame one for a request that may never
+                # have gone out (review round 3, M2).
+                outcome = "unattributed"
             # The OUTCOMES are decided out here, deliberately: a refusal is a
             # DECISION, not a failure, and raising it inside the ``try`` above
             # would let the ``except Exception`` arm swallow it — which would put
@@ -3914,7 +4022,7 @@ def _make_refresh_coordinating_provider(
                 # reuse-detection POST. The honest disposition is an interactive
                 # sign-in, not a retry — see McpRefreshUnconfirmedError.
                 self._refuse_unconfirmed_exchange(ctx)
-            elif outcome in ("contended", "overran", "failed", "unreachable"):
+            elif outcome in ("contended", "overran", "failed", "unreachable", "unsent"):
                 self._refuse_unlocked_refresh(ctx, outcome)
             # POST-CONDITION, in ONE place so no exit path can miss it: we are
             # about to return into ``async_auth_flow``, whose very next act is to
@@ -3923,21 +4031,28 @@ def _make_refresh_coordinating_provider(
             # POST its in-memory refresh token with no lock and no re-read — the
             # unlocked spend this whole method exists to prevent. Refuse instead.
             #
-            # ``"failed"`` is the default reason rather than the lock: this arm
-            # is reached when the exchange ran (or could not be attributed to a
-            # single cause) and left nothing usable, and the message says the
-            # authorization server's answer was not a usable token.
-            self._refuse_unlocked_refresh(ctx, "failed")
+            # ``"unattributed"`` is the default reason rather than the endpoint
+            # code: this arm is reached when the exchange ran (or could not be
+            # attributed to a single cause) and left nothing usable, and NOTHING
+            # here establishes that a server answered us — the endpoint code's
+            # "the server returned no token" is a claim about a request that may
+            # never have gone out (review round 3, M2). The endpoint code is
+            # carried EXPLICITLY by the one outcome that did get an answer.
+            self._refuse_unlocked_refresh(ctx, "unattributed")
 
-        def _refuse_unlocked_refresh(self, ctx: Any, outcome: str = "failed") -> None:
+        def _refuse_unlocked_refresh(self, ctx: Any, outcome: str = "unattributed") -> None:
             """Never hand the SDK an in-memory refresh token we failed to refresh.
 
             The post-condition of :meth:`_coordinate_inflight_refresh`, called
             once at the end so no exit path can skip it. Reaching here with an
             invalid-but-refreshable context means coordination did not produce
             a working token this time (the lock was unavailable, the exchange
-            overran the connect's budget, the refresh returned ``"failed"``, or
-            the fall-through could not find a fresher stored one).
+            overran the connect's budget, the row held nothing it could present,
+            the server answered without a usable token, or our own re-read/lock
+            handling raised). The parameter DEFAULTS to the unattributed reason
+            for the last of those: a caller that forgets to pass one gets the
+            honest generic rather than the endpoint wording, which asserts
+            something about a server it has not established.
             ``async_auth_flow`` returns straight into the SDK's own flow at that
             point, and the SDK's ``_refresh_token`` POSTs
             ``ctx.current_tokens.refresh_token`` DIRECTLY — no lock, no re-read —
@@ -3969,16 +4084,19 @@ def _make_refresh_coordinating_provider(
             if not ctx.can_refresh_token() or ctx.is_token_valid():
                 return
             self._strip_in_memory_refresh_token(ctx)
-            # ``.get``'s default is the ANSWERED-but-unusable case, which is what
-            # every remaining outcome ("failed", and the post-condition's
-            # fall-through) actually is. ``unreachable`` must be listed: without
-            # its own arm a request that never left the machine would be reported
-            # to the user as a server refusal.
+            # Every code is listed EXPLICITLY, including the two local shapes,
+            # and the default is the UNATTRIBUTED code rather than the
+            # endpoint's. "failed" is the one outcome that DID get an answer (a
+            # non-200 carrying no usable token), so blaming the server is its
+            # alone to make: a request that never left the machine must never be
+            # rendered as a server refusal (review round 3, M2).
             reason_code = {
                 "contended": REFRESH_REFUSAL_LOCK,
                 "overran": REFRESH_REFUSAL_INFLIGHT,
                 "unreachable": REFRESH_REFUSAL_UNREACHABLE,
-            }.get(outcome, REFRESH_REFUSAL_ENDPOINT)
+                "unsent": REFRESH_REFUSAL_UNSENT,
+                "failed": REFRESH_REFUSAL_ENDPOINT,
+            }.get(outcome, REFRESH_REFUSAL_UNATTRIBUTED)
             # ARM THE SIDE CHANNEL BEFORE RAISING, and do it here rather than in
             # the raise's caller: the MCP transport will NOT deliver this error.
             # It runs the request inside anyio cancel scopes, so the raise

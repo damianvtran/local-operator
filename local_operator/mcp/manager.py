@@ -58,8 +58,10 @@ from local_operator.mcp.auth import (
     REFRESH_REFUSAL_ENDPOINT,
     REFRESH_REFUSAL_INFLIGHT,
     REFRESH_REFUSAL_LOCK,
+    REFRESH_REFUSAL_UNATTRIBUTED,
     REFRESH_REFUSAL_UNCONFIRMED,
     REFRESH_REFUSAL_UNREACHABLE,
+    REFRESH_REFUSAL_UNSENT,
     McpAuthChallengeError,
     McpAuthRequiredError,
     McpRefreshContendedError,
@@ -120,6 +122,15 @@ def _sdk_available() -> bool:
 #: quietly wrong the day the wording changes.
 MCP_SDK_MISSING_ERROR = missing_extra_error("mcp", "Connecting to MCP servers")
 
+#: Fallback for a refusal code this build does not know (a newer peer writes a
+#: code we cannot name), and the honest wording for our OWN failures that cannot
+#: be attributed to a server answer at all (``REFRESH_REFUSAL_UNATTRIBUTED``).
+#: Deliberately says only what is true of every refusal in the set — never
+#: ``str(exc)``, whose URL prefix would render as the fragment this whole mapping
+#: exists to remove. Defined ABOVE the table so the table can reference it rather
+#: than repeat the sentence.
+REFRESH_REFUSAL_UNKNOWN_TEXT = "the refresh did not complete"
+
 #: Short, user-visible text per TRANSIENT refresh refusal, keyed by the stable
 #: reason code the auth layer carries on the exception
 #: (:data:`~local_operator.mcp.auth.REFRESH_REFUSAL_LOCK` and friends). Composed
@@ -135,13 +146,18 @@ MCP_SDK_MISSING_ERROR = missing_extra_error("mcp", "Connecting to MCP servers")
 #:
 #: * NO full URL and no subsystem internals (no "refresh lock", no "rotation"):
 #:   the host line already names the server, and a user cannot act on our nouns;
-#: * the DISTINGUISHING word comes first, because the toast tail-truncates: all
-#:   four must differ within their first ~19 cells or the 44-column card renders
-#:   the same fragment for every one of them (design review D1);
+#: * the DISTINGUISHING word comes first, because the toast tail-truncates: every
+#:   entry must differ within its first ~19 cells or the 44-column card renders
+#:   the same fragment for all of them (design review D1);
 #: * the condition, not a promise: the two in-flight refusals read as states that
 #:   may clear on their own (another session is on it; the exchange is still
 #:   running), the other two name the server side as the problem, which is the
 #:   only "does this heal by itself?" signal a user can get;
+#: * NEVER blame a server for a request that did not go out. The two LOCAL
+#:   shapes — nothing in the row the exchange could present, and a failure of
+#:   our own coordination — get their own wording, because the endpoint code's
+#:   "the server returned no token" is false about the wire AND about the
+#:   server for both (review round 3, M2);
 #: * NO command and NO "retrying": for a transient refusal the remedy
 #:   mid-session is the manager's own backoff reconnect, while the startup gate
 #:   schedules nothing at all — so offering a command would send the user at a
@@ -149,18 +165,18 @@ MCP_SDK_MISSING_ERROR = missing_extra_error("mcp", "Connecting to MCP servers")
 #:   would be untrue at boot. Only the auth requirement
 #:   (``McpRefreshUnconfirmedError``) leads with a command, and it is rendered by
 #:   ``_auth_required_text``, not from this table.
+#:
+#: ``REFRESH_REFUSAL_UNATTRIBUTED`` shares :data:`REFRESH_REFUSAL_UNKNOWN_TEXT`
+#: rather than minting a near-synonym: both mean "we cannot name a cause", and
+#: two sentences for one honest statement would only invite them to drift.
 _REFRESH_REFUSAL_TEXT: dict[str, str] = {
     REFRESH_REFUSAL_LOCK: "another session is refreshing",
     REFRESH_REFUSAL_INFLIGHT: "refresh still in progress",
     REFRESH_REFUSAL_ENDPOINT: "the server returned no token",
     REFRESH_REFUSAL_UNREACHABLE: "cannot reach the server",
+    REFRESH_REFUSAL_UNSENT: "no stored token to send",
+    REFRESH_REFUSAL_UNATTRIBUTED: REFRESH_REFUSAL_UNKNOWN_TEXT,
 }
-
-#: Fallback for a refusal code this build does not know (a newer peer writes a
-#: code we cannot name). Deliberately says only what is true of every refusal in
-#: the set — never ``str(exc)``, whose URL prefix would render as the fragment
-#: this whole mapping exists to remove.
-REFRESH_REFUSAL_UNKNOWN_TEXT = "the refresh did not complete"
 
 # Fast-startup gate: how long discovery blocks before deferring slow servers.
 STARTUP_GATE_MS = 250
@@ -2179,13 +2195,23 @@ class McpManager:
 
         Leads with the COMMAND that fixes it rather than the diagnosis. The
         toast renders this after a ``failed: <name> — `` prefix and then clamps
-        to the card width, so the tail is what gets truncated: putting
-        ``run /mcp login <name>`` first keeps the one actionable thing on screen
-        even on a narrow terminal, where ``needs authorization — run /mcp login
-        <name>`` used to sever the command mid-word (design review D1). One
-        ``—`` only, so the composed line is not a chain of dashes (D4). The same
-        string lands in the durable transcript notice and in ``/mcp``, so one
-        helper keeps all three surfaces agreeing.
+        to the card width, so the tail is what gets truncated: putting the
+        command first keeps the one actionable thing on screen even on a narrow
+        terminal, where ``needs authorization — /mcp login <name>`` used to
+        sever the command mid-word (design review D1). One ``—`` only, so the
+        composed line is not a chain of dashes (D4). The same string lands in
+        the durable transcript notice and in ``/mcp``, so one helper keeps all
+        three surfaces agreeing.
+
+        The command is BARE (``/mcp reauth <name>``, not ``run /mcp reauth
+        <name>``), and that is a measurement rather than a style choice (design
+        review D9): the ``run `` wrapper spends four cells, which is exactly the
+        shortfall that pushed the reason past the toast card's clamp at 100
+        columns and cut the server name mid-word at 44. The bare form is also
+        the app's own habit for a runnable command (``/       command picker``
+        on the splash, ``sign-in expired — /login kimi`` in the usage panel),
+        and the name argument has to stay: ``/mcp reauth`` with no name is
+        ``usage: /mcp reauth <name>``, an instruction that errors when followed.
 
         ``login`` vs ``reauth`` is decided by whether a stored grant exists,
         not guessed. Reaching this error at all means the stored grant could
@@ -2208,10 +2234,10 @@ class McpManager:
             from local_operator.mcp.auth import server_has_stored_grant
 
             has_stored_grant = server_has_stored_grant(exc.server_url)
-        # ``detail`` is the ONE place a reason more specific than "expired" can
-        # reach this line, and it is rendered as the tail so the command still
-        # leads. Only a refresh that was SENT but never confirmed carries one
-        # today (see McpRefreshUnconfirmedError): calling that an expired
+        # ``detail`` is the ONE place a reason more specific than the default
+        # can reach this line, and it is rendered as the tail so the command
+        # still leads. Only a refresh that was SENT but never confirmed carries
+        # one today (see McpRefreshUnconfirmedError): calling that an expired
         # authorization would send the user looking for a grant that is
         # perfectly valid on disk. It is kept SHORT (``refresh unconfirmed``)
         # because this whole line is the tail of the toast's
@@ -2220,10 +2246,15 @@ class McpManager:
         # card (design review D4), which left the added reason invisible on the
         # first surface the user reads. The command still leads and there is
         # still exactly one dash, which is the rule D4's fix had to preserve.
+        # The default tail is the app's EXISTING house phrase for a dead
+        # credential (``sign-in expired`` — usage_panel.py), not a new coinage:
+        # the user has signed in, and what they need to know is that it stopped
+        # working. "authorization expired" spent five more cells to say the same
+        # thing less plainly.
         detail = getattr(exc, "detail", None)
         if has_stored_grant:
-            return f"run /mcp reauth {name} — {detail or 'authorization expired'}"
-        return f"run /mcp login {name} to authorize"
+            return f"/mcp reauth {name} — {detail or 'sign-in expired'}"
+        return f"/mcp login {name} to authorize"
 
     @staticmethod
     def _auth_challenge_text(name: str, exc: McpAuthChallengeError) -> str:
