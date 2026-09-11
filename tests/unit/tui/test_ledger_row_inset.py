@@ -127,9 +127,12 @@ def test_the_inset_ladder_is_the_same_for_every_row_type(make) -> None:
     assert _icon_column(Text(below)) == 0
     # ... and the inset the row paints IS the ledger's one derivation, at every
     # width and for every row type. The two assertions above pin the geometry
-    # at the boundary; this one pins that no builder has re-inlined a rule of
-    # its own beside `row_indent` — which is the shape the round-1 review
-    # (MINOR) rejected, and which no boundary test can see.
+    # at the boundary; this one pins the row against `row_indent`, so a
+    # re-inlined rule that DRIFTS from the shared one fails a test rather than
+    # only a review (the shape the round-1 review rejected). It does not forbid
+    # a byte-identical copy — a copy that never diverges is harmless — and no
+    # boundary test can see either case, which is why it is checked at four
+    # widths per row type.
     for width in (ROW_INDENT_MIN_WIDTH + 8, ROW_INDENT_MIN_WIDTH, ROW_INDENT_MIN_WIDTH - 1, 10):
         row = block._build_row(width).plain
         assert _icon_column(Text(row)) == row_indent(width), (width, row)

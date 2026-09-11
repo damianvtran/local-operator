@@ -79,9 +79,13 @@ The two sides of a pair are one-variable comparisons, and that is enforced
 rather than hoped for:
 
 - The shot scripts call `scripts.visual_capture.settle_status_line` before
-  saving, so the status band has left its `connecting…` pending sentinel (QA
-  round 1 on PR #972, Q2 — the committed peer pair used to carry that
-  unrelated footer difference).
+  saving. It waits on the band's own state — comparing against the
+  `MODEL_PENDING` sentinel the app pushes, not merely against an empty label —
+  and it reports on stderr if a band it can read never settles. (QA round 1 on
+  PR #972, Q2: the committed peer pair used to carry that unrelated footer
+  difference. Review round 2, M1: the first version of the helper tested the
+  label for truthiness, which the sentinel satisfies, so it waited one frame
+  and proved nothing.)
 - The BEFORE frames are the pre-fix builders run with the same harness and the
   same process cwd as the AFTER frames: the base worktree's copy of the
   scripts, invoked from this worktree, so the status bar's cwd segment reads
@@ -91,15 +95,36 @@ rather than hoped for:
   pair `278-305` and `414-441`; the expanded pair `687-713` (the summary row,
   since the peer receipt scrolled its collapsed summary off-frame).
 
+Reproducing a pair from scratch, with `$BASE` as the throwaway worktree path
+(any path you like — it is never the cwd, so it only shows up inside the base
+tree):
+
 ```
-# BEFORE: pre-fix code, identical harness and cwd
-cd ~/local-operator-worktrees/ledger-inset   # cwd only pins the status bar
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/lo-base972/scripts/peer_message_shot.py before.svg 100x30 collapsed
-# AFTER: this branch
+# 1. The pre-fix tree, cut at the last commit before this change. `origin/main`
+#    plus these scripts reproduces the defect; 5dd5e57e3 is the SHA the frames
+#    here were cut at.
+BASE=/tmp/lo-base972
+git worktree add --detach "$BASE" 5dd5e57e3
+ln -s "$PWD/.venv" "$BASE/.venv"          # throwaway only, see AGENTS.md
+cp scripts/visual_capture.py scripts/peer_message_shot.py scripts/wake_shot.py "$BASE/scripts/"
+
+# 2. BEFORE: pre-fix builders, identical harness, and the SAME cwd as AFTER
+#    (the status band paints the cwd, and the cwd is what the process started in).
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$BASE/scripts/peer_message_shot.py" before.svg 100x30 collapsed
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$BASE/scripts/wake_shot.py" before-wake.svg 100x30 collapsed
+
+# 3. AFTER: this branch, same cwd.
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/peer_message_shot.py after.svg 100x30 collapsed
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/wake_shot.py after-wake.svg 100x30 collapsed
+
 python3 rasterise.py before.svg before.png 2
 python3 probe.py before.svg
 ```
+
+The symlinked venv is the one AGENTS.md allows: a throwaway worktree used to
+take a before-frame, where the parent's code is what you want — every script
+here self-corrects with `sys.path.insert(0, ...)` at the top, so it reads the
+tree it lives in.
 
 The expanded frames confirm the expansion's own two-cell body indent
 (`OUTPUT_INDENT`) is untouched — its rows start on the same cell in both
