@@ -1020,3 +1020,61 @@ async def test_the_default_receipt_names_a_clamped_rung(tmp_path, monkeypatch) -
     assert any(
         n == "model_effort high (xhigh clamps to this model's nearest rung)" for n in notices
     ), notices
+
+
+class _MinimalSession(EffortSession):
+    """A session whose model offers ``minimal`` — the longest level name the
+
+    shared vocabulary can carry. No shipped ladder lists it today (the table
+    reserves the word for the day a model page names it, and OpenAI's listing is
+    the one that may), but a provider's own ladder reaches a spec through
+    discovery, and this receipt has to fit for the longest word it can be asked
+    to print. ``xhigh``/``medium`` are the only longer-than-``high`` names any
+    table ladder offers, so ``minimal`` is the worst case.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._spec = self._spec.model_copy(
+            update={
+                "reasoning_efforts": ("minimal", "low", "medium", "high"),
+                "reasoning_effort": "minimal",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_effort_already_set_receipt_holds_one_row_at_eighty_columns() -> None:
+    """The no-op branch of `/effort <level>` measured 74 cells and wrapped at 80
+    columns, widowing `default` — raised by the coder in the round-1 report; no
+    gate round had flagged it, because the set receipt beside it was the finding.
+
+    Same budget as its siblings (design review D2: a notice row holds
+    `width - 10` cells, 70 at 80 columns), and the same voice: an `already` line
+    is the codebase's shape for "nothing moved", so it must not wrap into two
+    rows while claiming a no-op.
+    """
+    app = OperatorApp(lambda: _factory(EffortSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        # `high` is Anthropic's documented default, so this set is a no-op.
+        await _submit(pilot, app, "/effort high")
+        receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
+    assert receipt == "reasoning effort: already high — /effort auto restores the default", receipt
+    assert len(receipt) <= 70, receipt
+
+
+@pytest.mark.asyncio
+async def test_the_already_set_receipt_fits_for_the_longest_level_name() -> None:
+    """The worst case the budget has to hold for: `minimal`, three cells longer
+    than the shared ladder's other words. A level name is DATA (a provider's
+    listing can state one), so the row cannot be sized against `high` alone."""
+    app = OperatorApp(lambda: _factory(_MinimalSession()))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort minimal")
+        receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
+    assert (
+        receipt == "reasoning effort: already minimal — /effort auto restores the default"
+    ), receipt
+    assert len(receipt) <= 70, receipt
