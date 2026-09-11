@@ -795,7 +795,34 @@ aggregator_router_model_info: ModelInfo = ModelInfo(
     max_tokens=-1,
     context_window=1_048_576,
     supports_images=True,
-    supports_prompt_cache=False,
+    # True, and the asymmetry is the whole argument. The router is a ROUTE, so
+    # whether caching applies depends on the model it selects; today every route
+    # caches (DeepSeek and Gemini both cache implicitly, and the aggregator
+    # keeps the conversation on one host once it has affinity), and a router
+    # that resolves to a non-caching model tomorrow pays almost nothing for this
+    # in `prompt_cache_key` is a routing hint the provider ignores if it does not
+    # cache, and a `cache_control` marker is inert on a provider that does not honour
+    # it (see ``clients._message_cache_markers``).
+    #
+    # A wrong False is not symmetric — it is what made this a defect. Both
+    # emissions are gated on this flag, so False sent NO routing key and NO cache
+    # marker on the router route, and a long agentic session paid full input
+    # price on every turn after the first: the largest avoidable cost in the
+    # largest conversations. It also disabled OpenRouter's provider sticky
+    # routing for exactly the route least able to predict where it lands, since
+    # the fallback (hashing the opening messages) only starts pinning after a hit
+    # it may never get.
+    #
+    # The catalogue cannot supply the answer, and for this provider it does not even
+    # get a chance to try: `discovery._merge_one` ORs a listing row against a static
+    # registry row, and `discovery._static_rows("radient")` is empty, so the merge for
+    # this provider runs with no registry input at all and its rows stay False
+    # whatever this flag says. What reads this flag is
+    # ``configure.resolve_model_info`` (static registry first) and then
+    # ``build_model_spec``, which is the one path the request builder calls — so this
+    # row is the only input that can turn caching on for the router route, and a
+    # ``False`` here is what withheld the key and the marker.
+    supports_prompt_cache=True,
     input_price=0.0,
     output_price=0.0,
     cache_writes_price=0.0,
