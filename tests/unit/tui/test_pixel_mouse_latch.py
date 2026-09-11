@@ -7,12 +7,14 @@ before this fix existed.
 
 THE FIX HAS TWO HALVES AND EACH HAS A TEST PROVING THE OTHER DOES NOT COVER IT.
 ``test_env_guard_alone_does_not_stop_a_delivered_report`` kills the
-"just set ``TEXTUAL_SMOOTH_SCROLL=0``" approach: the report arrives unsolicited
-from the terminal and latches the divisor regardless of what we negotiated, so
-the mode reset is load-bearing. ``test_reply_two_would_re_enable_the_mode``
-pins the converse: a bare reset leaves the mode supported-but-disabled, and
-that is precisely the reply Textual's driver answers by turning the mode back
-on, so the environment guard is load-bearing too.
+"just set ``TEXTUAL_SMOOTH_SCROLL=0``" approach: a report that reaches the
+parser latches the divisor regardless of what we negotiated, and mode 2048 is
+sticky per-VT, so a VT left dirty by an earlier app delivers one to a process
+that never asked — which is why the mode reset is load-bearing.
+``test_reply_two_would_re_enable_the_mode`` pins the converse: a bare reset
+leaves the mode supported-but-disabled, and that is precisely the reply
+Textual's driver answers by turning the mode back on, so the environment guard
+is load-bearing too.
 
 ``parser.feed(...)`` is a GENERATOR. Every call here is drained with ``list()``;
 a test that forgets this feeds nothing to the parser and asserts nothing.
@@ -58,7 +60,8 @@ from local_operator.tui.terminal_modes import (
 MOUSE_MOVE = "\x1b[<35;41;45M"
 
 #: ``CSI 48;rows;cols;pxH;pxW t`` for a 44x133 cell frame measuring 1064x704
-#: pixels: a 8x16 cell. Herdr-class terminals send this UNSOLICITED on resize.
+#: pixels: a 8x16 cell. A terminal sends this on resize once mode 2048 is set —
+#: by this process, or by an earlier one, since the mode is sticky per-VT.
 IN_BAND_REPORT = "\x1b[48;44;133;704;1064t"
 
 #: The reply to ``CSI ?2048$p`` that a terminal gives once the mode is reset:
@@ -102,12 +105,13 @@ def test_in_band_report_latches_pixel_mouse_coordinates() -> None:
 
 
 def test_env_guard_alone_does_not_stop_a_delivered_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The env-guard-alone approach does not defend against an UNSOLICITED report.
+    """The env-guard-alone approach does not defend against a DELIVERED report.
 
-    With smooth scrolling off Textual never negotiates mode 2048 — but a
-    Herdr-class terminal sends the report anyway, and the latch at
-    ``_xterm_parser.py:271-283`` checks nothing before setting ``mouse_pixels``.
-    This is why ``reset_in_band_resize`` exists.
+    With smooth scrolling off Textual never negotiates mode 2048 — but the latch
+    at ``_xterm_parser.py:271-283`` checks nothing before setting
+    ``mouse_pixels``, so it does not matter who asked. Mode 2048 is sticky
+    per-VT: an earlier app can leave it set and the reports arrive anyway. This
+    is why ``reset_in_band_resize`` exists.
     """
     monkeypatch.setattr(constants, "SMOOTH_SCROLL", False)
     parser = XTermParser()
