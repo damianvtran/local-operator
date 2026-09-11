@@ -9104,13 +9104,35 @@ class OperatorApp(App[None]):
         # (`:8512`), the reconnect gap replay (`on_history_rows_settled`), the
         # sidebar commit's top-up (`:6113`/`:6127`) and the older-page collect —
         # so the destination is one question with one answer, and a caller left
-        # to remember it is a caller that can forget it. It is also knowable
-        # HERE: the transcript is laid out before the first block is built, so
-        # this is the eventual destination and not a pre-layout zero (measured
-        # at 100x30 during the boot projection: `transcript_cw=142` against
-        # `fold_width=0`).
+        # to remember it is a caller that can forget it.
         #
-        # Without it the whole tail projection is folded at the 80-column
+        # Knowable HERE only while the transcript is LAID OUT, which is the case
+        # this exists for: the view is laid out before the first block is built,
+        # so the region is the eventual destination and not a pre-layout zero.
+        # Measured by spying on this method at boot — 96 at 100x30, 142 at
+        # 146x40, 146 at 150x40 — with the previous cut of this comment having
+        # quoted the 146x40 figure against the 100x30 label (review round 2,
+        # M5): a number in a comment has to be traceable to the run that read
+        # it, or the next reader cannot tell a measurement from a guess.
+        #
+        # OFF-LAYOUT the region is 0, and that is deliberate, not overlooked
+        # (QA round 2, Q2): with `display = False` — the subagent view and the
+        # org chart — the view reports `region=0 view=0` (measured at every grid
+        # above, restored to 96/142/146 on the way back), so a
+        # `HistoryRowsSettled` that lands in that state still authors at the 80
+        # column fallback and is repaired by the restore's resize. That is a
+        # wasted build, not a painted frame: measured on the base revision and
+        # this one alike, the first paint after the restore carries no
+        # fallback-authored block.
+        #
+        # NOT repaired with a cached last-known width, which is the obvious next
+        # idea and is worse than the zero: a cache outlives the pane that set
+        # it, and a width from a WIDE pane pinned as a fold inside a NARROW one
+        # clips rows that can no longer re-wrap — missing text, where the zero
+        # costs one off-screen build of rows that are then re-authored before
+        # anything is painted.
+        #
+        # Without any of this the whole tail projection is folded at the
         # fallback and the FIRST PAINT of a resumed conversation is a narrow
         # one: prose wrapped at 78 cells inside a 96-cell pane, with blank space
         # to its right — the operator's reported frame, and the reason the
@@ -9125,8 +9147,14 @@ class OperatorApp(App[None]):
         # `_mark_pending_tool_rows` below; the fold's own fallback re-asks the
         # same subtracted question for a target that never seeded.
         self._projection_live_call_ids = live_projection_call_ids(session)
-        fold_width = self._transcript_view().scrollable_content_region.width
         try:
+            # Inside the guard, with the projection it serves. `_transcript_view()`
+            # raises `NoMatches` once `#transcript` is gone — the shutdown reachable
+            # with a session-adoption worker in flight (`:18416`) — and the `finally`
+            # below resets the projection bookkeeping, so a read placed ahead of the
+            # `try` would skip those resets for a projection that never ran (review
+            # round 2, N4).
+            fold_width = self._transcript_view().scrollable_content_region.width
             projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
@@ -9886,12 +9914,13 @@ class OperatorApp(App[None]):
             # page and the tail cannot disagree about the destination, and the
             # hint reaches each block before it authors its rows — the half
             # `insert_blocks` cannot do for rows that already exist. Measured at
-            # 150x40 over three wheel-driven page mounts on `633baf258`:
-            # `scripts/resume_paging_probe.py fold ordinary 150x40` reported 108
-            # authoring folds with 72 of them at the 80-column fallback, and 6
-            # painted frames with a fallback-folded block inside the viewport;
-            # on this branch the same command reports 72 folds, 0 at the
-            # fallback, 0 frames.
+            # 150x40 over three wheel-driven page mounts on base `633baf258`:
+            # this branch's `scripts/resume_paging_probe.py fold ordinary 150x40`
+            # (the `fold` mode is part of this change, so it is run against that
+            # tree rather than checked out with it) reported 108 authoring folds
+            # with 72 of them at the 80-column fallback, and 6 painted frames
+            # with a fallback-folded block inside the viewport; on this branch
+            # the same command reports 72 folds, 0 at the fallback, 0 frames.
             self._project_settled_rows(page)
         finally:
             self._block_sink = None
