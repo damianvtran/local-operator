@@ -94,8 +94,24 @@ class SessionRegistration:
                 return
 
     def close(self) -> None:
-        """Deregister this session and stop answering notices."""
+        """Deregister this session and stop answering notices.
+
+        **``shutdown`` before ``close``, and that ordering is the whole of this
+        method's correctness.** The reader thread is parked in ``recv`` on this
+        socket, and ``close()`` alone does not send the peer its EOF while that
+        read holds the file description — measured on CI (Linux): the broker's
+        session table still held the pid for the whole 5 s the new guards polled
+        for, twice, while the same code deregistered in under a second on
+        macOS, whose ``close`` does revoke the descriptor. ``shutdown`` acts on
+        the socket rather than the descriptor, so it both makes the broker's
+        liveness peek see ``b""`` immediately and wakes the parked read; the
+        ``close`` afterwards only releases the descriptor.
+        """
         self._stopping.set()
+        try:
+            self._channel.shutdown(socket.SHUT_RDWR)
+        except OSError:  # pragma: no cover - already gone
+            pass
         try:
             self._channel.close()
         except OSError:  # pragma: no cover - already gone

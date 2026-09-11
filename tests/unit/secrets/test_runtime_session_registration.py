@@ -100,12 +100,16 @@ def _sessions(config_root: Path) -> set[int]:
     return set(status.get("sessions") or ())
 
 
-def _await_absent(config_root: Path, pid: int, timeout: float = 5.0) -> set[int]:
+def _await_absent(config_root: Path, pid: int, timeout: float = 10.0) -> set[int]:
     """Poll until ``pid`` leaves the broker's session table, or the deadline.
 
-    The broker notices a closed channel on its own liveness poll, so a
+    The broker notices a closed channel on its own 1 s liveness poll, so a
     deregistration is prompt but not instantaneous; asserting immediately would
-    test the poll interval rather than the deregistration.
+    test the poll interval rather than the deregistration. The bound matches the
+    one the existing deregistration test uses
+    (``test_a_dead_sessions_descendants_stop_being_authorized``) — a loaded CI
+    runner is slower than a workstation, and a tight bound there fails the
+    window rather than the behaviour.
     """
     deadline = time.monotonic() + timeout
     sessions = _sessions(config_root)
