@@ -3857,10 +3857,20 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
                 file=sys.stderr,
             )
             return 1
+        if not removed:
+            print("No QwenCloud console ticket stored.")
+            return 0
+        print("Removed the stored QwenCloud console ticket.")
+        # The advice belongs HERE and not only on the failure path: someone
+        # revoking this credential is usually doing it because it may be
+        # compromised, and success is the moment they stop worrying. Deleting
+        # the row ends local use, but SQLite can keep the freed page contents
+        # in the freelist until a VACUUM, and the SESSION ITSELF stays valid
+        # server-side regardless -- so this command cannot be the whole answer.
         print(
-            "Removed the stored QwenCloud console ticket."
-            if removed
-            else "No QwenCloud console ticket stored."
+            "  This ends local use of the cookie. The browser session itself is "
+            "still valid until you sign it out in the QwenCloud console — do "
+            "that too if the cookie may have been exposed."
         )
         return 0
 

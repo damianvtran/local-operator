@@ -88,6 +88,11 @@ def _resolve_db_path(store: Any) -> Path:
             "cannot determine the credential store's path, so its permissions "
             "cannot be checked; refusing to store a full-account session cookie"
         ) from exc
+    if value is None:
+        raise TicketStoreError(
+            "the credential store reports no path, so its permissions cannot "
+            "be checked; refusing to store a full-account session cookie"
+        )
     return Path(value)
 
 
@@ -155,7 +160,13 @@ def read_ticket_record(store: Any) -> dict[str, Any] | None:
     broad enough to cover a corrupt store would otherwise swallow it.
     """
     try:
-        rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
+        # `include_disabled=True`: a soft-deleted row (`disabled_cause` set) is
+        # filtered out of the default view (auth_store.py:578), which would
+        # make a cookie that is still ON DISK invisible here -- and `rm` would
+        # then report "No ... ticket stored." with exit 0 over a live
+        # full-account credential, the same false success this module exists
+        # to prevent. Precedent: `active_local_credential` (auth_store.py:585).
+        rows = store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER, include_disabled=True)
     except sqlite3.ProgrammingError:
         raise
     except (sqlite3.Error, OSError, json.JSONDecodeError) as exc:

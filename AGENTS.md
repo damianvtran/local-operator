@@ -2046,15 +2046,33 @@ and silently reverts a locally built console fetcher while leaving the row in
 place: nothing reads it, and the credential still looks healthy.
 `lop qwencloud-ticket status` reports that state explicitly.
 
-**Revocation must be provable, not assumed.** `rm` re-reads the store to
-confirm the row is gone, and exits **non-zero** saying the ticket may still be
-stored if it cannot prove otherwise — a locked or corrupt store is an ordinary
-outcome with `busy_timeout` at 5s on a busy machine. "Cannot read the store"
-and "nothing is stored" are deliberately different answers
-(`TicketStoreUnreadable`): collapsing them made `rm` report success with exit 0
-while the plaintext full-account cookie was still on disk, removing the user's
-only mitigation and telling them it had worked. `status` reports UNKNOWN for
-the same reason.
+**Revocation must be provable, not assumed — and `rm` is not a full revoke.**
+`rm` re-reads the store to confirm the row is gone from the API's view, and
+exits **non-zero** saying the ticket may still be stored if it cannot prove
+otherwise — a locked or corrupt store is an ordinary outcome with
+`busy_timeout` at 5s on a busy machine. "Cannot read the store" and "nothing is
+stored" are deliberately different answers (`TicketStoreUnreadable`):
+collapsing them made `rm` report success with exit 0 while the plaintext
+full-account cookie was still on disk, telling the user it had worked. `status`
+reports UNKNOWN for the same reason, and both read with
+`include_disabled=True` so a soft-deleted row cannot hide a cookie that is
+still present.
+
+Be precise about what that confirmation is worth, because it is easy to
+overclaim. Two things `rm` does NOT guarantee, both verified:
+
+- **The plaintext can outlive the row.** After a successful `rm`, `strings
+  auth.db` still returns the deleted row including the ticket; a `VACUUM`
+  clears it. That is ordinary SQLite freelist behaviour from
+  `delete_credential`, not specific to this credential — but it means `rm` is
+  not a secure erase.
+- **The session stays valid server-side.** Deleting the local row ends local
+  use and nothing more. The cookie remains a live browser session until it is
+  signed out in the QwenCloud console.
+
+So `rm` is not a substitute for revoking the session in the console, and it
+says so on the SUCCESS path rather than only when it fails — success is the
+moment a user worried about exposure stops looking.
 
 **Residual risk, stated plainly.** `~/.local-operator/auth.db` is plaintext
 SQLite with no OS keychain, protected only by its 0600 mode, and this cookie is
