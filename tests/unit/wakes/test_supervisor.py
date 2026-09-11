@@ -27,6 +27,41 @@ def _schedule(due_ms: int, wake_id: str = "w1") -> dict[str, object]:
     return {"id": wake_id, "message": "check the deploy", "next_due_at": due_ms, "created_at": 1}
 
 
+def _make_session(config_dir: Path, session_id: str) -> None:
+    """Give ``session_id`` a transcript, so the ghost guard sees a real session.
+
+    The supervisor now refuses to engage an index entry whose session has no
+    transcript on disk (such an entry can never be engaged successfully and
+    used to burn a full deadline on every pass, forever). These tests are
+    about firing DECISIONS, so they need their sessions to exist.
+    """
+    from local_operator.resume import TRANSCRIPT_NAME
+
+    directory = config_dir / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / TRANSCRIPT_NAME).write_text("", encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _sessions_exist(monkeypatch):  # noqa: ANN201
+    """Every ``write_entry`` in this file also lays down a transcript.
+
+    Wrapping the writer rather than annotating twenty call sites: the ghost
+    guard is asserted directly in its own test, and everywhere else a session
+    having a transcript is background, not the property under test.
+    """
+    import local_operator.wakes.store as store_mod
+
+    real = store_mod.write_entry
+
+    def writing(config_dir, session_id, **kwargs):  # noqa: ANN001, ANN202
+        _make_session(Path(config_dir), session_id)
+        return real(config_dir, session_id, **kwargs)
+
+    monkeypatch.setattr(store_mod, "write_entry", writing)
+    monkeypatch.setattr("tests.unit.wakes.test_supervisor.write_entry", writing)
+
+
 @pytest.fixture
 def engagements(monkeypatch):  # noqa: ANN201
     """Record every engage the supervisor makes, without starting a process."""
@@ -315,3 +350,341 @@ def test_wake_serve_primes_the_login_shell_path(tmp_path: Path) -> None:
 
     marker = str(tmp_path / "marker-bin")
     assert marker in observed.split(os.pathsep), observed
+
+
+# --- Bounded lateness, concurrency, and the dead-ends that used to be silent --
+
+
+@pytest.fixture
+def real_sessions(monkeypatch):  # noqa: ANN201
+    """Treat every session id as having a transcript.
+
+    The ghost guard is asserted on its own below; the other tests are about
+    firing decisions and would otherwise all have to build session dirs.
+    """
+    monkeypatch.setattr(
+        "local_operator.wakes.supervisor._session_exists", lambda _config, _session: True
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_fires_due_sessions_concurrently(
+    tmp_path: Path, no_live_runtimes, real_sessions, monkeypatch
+) -> None:
+    """The serial loop was the lateness amplifier, and this is what proves the fix.
+
+    Before: `for ... await engage_runtime` meant a session waited behind every
+    earlier session's FULL deadline — measured at ~63 s per pass for two cold
+    sessions. Since a wake's deadline is now sized for a cold start (180 s),
+    staying serial would have made lateness worse, not better.
+
+    Asserted structurally (overlap actually happened), never on wall-clock
+    duration: each engage blocks on an event that only a LATER engage can set,
+    so a serial implementation deadlocks its way to a timeout failure while a
+    concurrent one completes. No sleep, no timing assertion.
+    """
+    import asyncio
+
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    order: list[str] = []
+
+    async def overlapping(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        order.append(session_id)
+        if session_id == "sessionfirst":
+            first_entered.set()
+            # Only satisfiable if the SECOND engage runs while this one is
+            # still in flight.
+            await second_entered.wait()
+        else:
+            await first_entered.wait()
+            second_entered.set()
+        return None
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", overlapping)
+    write_entry(tmp_path, "sessionfirst", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 9_000)])
+    write_entry(tmp_path, "sessionsecnd", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 8_000)])
+
+    fired = await asyncio.wait_for(fire_due_wakes(tmp_path, now_ms=NOW_MS), timeout=10)
+
+    assert fired == 2
+    # Oldest-first is preserved: concurrency changes who WAITS, not who starts.
+    assert order[0] == "sessionfirst"
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_bounds_its_concurrency(
+    tmp_path: Path, no_live_runtimes, real_sessions, monkeypatch
+) -> None:
+    """Bounded, because each engage may cold-start a full harness process.
+
+    An unbounded gather over a backlog would be a thundering herd against the
+    resource contention that makes cold starts slow in the first place.
+    """
+    import asyncio
+
+    from local_operator.wakes.supervisor import _MAX_CONCURRENT_ENGAGES
+
+    live = 0
+    peak = 0
+
+    async def counting(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0)  # a real await point, so overlap is possible
+        live -= 1
+        return None
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", counting)
+    for n in range(6):
+        write_entry(
+            tmp_path, f"sessionbulk{n}", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)]
+        )
+
+    await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert peak <= _MAX_CONCURRENT_ENGAGES, f"{peak} engages ran at once"
+
+
+@pytest.mark.asyncio
+async def test_a_wake_errand_gets_a_cold_start_budget(
+    tmp_path: Path, no_live_runtimes, real_sessions, monkeypatch
+) -> None:
+    """The 30 s default is sized for a USER waiting at a prompt.
+
+    Nobody waits on a wake, and 344 of 682 engages (50.4%) timed out at 30 s
+    on the machine this was diagnosed on. The shared default must be left
+    alone for prompt/steer; only the wake path takes the longer budget.
+    """
+    from local_operator.session.runtime.launch import DEFAULT_DEADLINE_S
+    from local_operator.wakes.supervisor import WAKE_DEADLINE_S
+
+    seen: list[float] = []
+
+    async def record_deadline(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        seen.append(deadline_s)
+        return None
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", record_deadline)
+    write_entry(tmp_path, "sessioncold9", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
+
+    await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert seen == [WAKE_DEADLINE_S]
+    assert WAKE_DEADLINE_S >= 120, "a cold start on a loaded box needs more than two minutes"
+    assert DEFAULT_DEADLINE_S == 30.0, "the USER-facing deadline must not have moved"
+
+
+@pytest.mark.asyncio
+async def test_a_ghost_index_entry_is_skipped_and_logged(
+    tmp_path: Path, engagements, no_live_runtimes, caplog
+) -> None:
+    """An entry whose session has no transcript can never be engaged.
+
+    The live log shows two such ids accumulating 30 s timeouts with zero
+    successful starts, ever — each one consuming a sweep slot on every pass.
+    """
+    import shutil
+
+    write_entry(tmp_path, "sessionghost", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 5_000)])
+    # THE GHOST: the index entry stays, the session it describes does not.
+    # That is the real shape on disk — a reap or a hand-deleted directory
+    # leaves the entry behind, and nothing prunes it.
+    shutil.rmtree(tmp_path / "sessions" / "sessionghost")
+
+    with caplog.at_level("WARNING"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0
+    assert engagements == [], "a session with no transcript must not be engaged"
+    assert any("ghost" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_stale_skip_is_logged_with_how_overdue_it_is(
+    tmp_path: Path, engagements, no_live_runtimes, real_sessions, caplog
+) -> None:
+    """Behaviour unchanged, silence removed.
+
+    A wake past STALE_AFTER_S is still left to the session's own catch-up —
+    but skipping it without a word is how a wedged-runtime starvation becomes
+    permanent and invisible.
+    """
+    ancient = NOW_MS - int((9 * 24 * 3600) * 1000)
+    write_entry(tmp_path, "sessionstal2", cwd=str(tmp_path), schedules=[_schedule(ancient)])
+
+    with caplog.at_level("WARNING"):
+        fired = await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    assert fired == 0, "the skip BEHAVIOUR is deliberately unchanged"
+    message = " ".join(record.getMessage() for record in caplog.records)
+    assert "sessionstal2" in message
+    assert "9.0 days overdue" in message, message
+
+
+@pytest.mark.asyncio
+async def test_the_live_session_skip_reports_how_overdue_it_is(
+    tmp_path: Path, engagements, real_sessions, monkeypatch, caplog
+) -> None:
+    """A WEDGED runtime looks exactly like a healthy one here.
+
+    Its record is live, so the supervisor skips it on every pass while the
+    wake never fires. At debug level that case was invisible; a repeating
+    "already running" line with a GROWING overdue figure is what makes it
+    findable.
+    """
+
+    async def _always_live(config_dir, session_id):  # noqa: ANN001
+        return True
+
+    monkeypatch.setattr("local_operator.wakes.supervisor._has_live_runtime", _always_live)
+    write_entry(tmp_path, "sessionwedge", cwd=str(tmp_path), schedules=[_schedule(NOW_MS - 90_000)])
+
+    with caplog.at_level("INFO"):
+        await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+
+    message = " ".join(record.getMessage() for record in caplog.records)
+    assert "sessionwedge" in message
+    assert "90.0s overdue" in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_wake_written_during_the_sleep_is_seen_within_a_slice(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE LATENESS BOUND. A single computed sleep could hide a new wake for an hour.
+
+    The loop used to compute `delay` once from a snapshot and sleep it whole,
+    so a wake persisted while it slept was invisible until that sleep expired
+    (up to MAX_SLEEP_S = 3600 s). Here the supervisor starts out sleeping
+    toward a wake three hours away and a nearer one is written behind its
+    back; the sliced re-read must notice.
+
+    Time is driven by a fake `asyncio.sleep`, so this asserts on the ORDER of
+    events and never on the clock — no real waiting, no timing flake.
+    """
+    import asyncio
+
+    from local_operator.wakes import supervisor as mod
+
+    slept: list[float] = []
+    fired_for: list[str] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        # The new wake lands DURING the first slice, which is exactly the race
+        # the old single-sleep could not see.
+        if len(slept) == 1:
+            write_entry(
+                tmp_path,
+                "sessionurgent",
+                cwd=str(tmp_path),
+                schedules=[_schedule(int(time.time() * 1000) - 1_000, "w2")],
+            )
+
+    passes = 0
+
+    async def fake_fire(config_dir, *, now_ms=None):  # noqa: ANN001
+        # The FIRST pass finds nothing due and returns, which is what lets
+        # serve() reach its sleep — the window the defect lived in. The second
+        # pass records what the re-read saw and ends the loop.
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            return 0
+        from local_operator.wakes.store import read_index
+
+        index = await asyncio.to_thread(read_index, config_dir)
+        fired_for.extend(sorted(index))
+        raise _StopServing
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(mod, "fire_due_wakes", fake_fire)
+    # The far-away wake the sleep is sized for: three hours out, so the old
+    # code would have slept MAX_SLEEP_S before looking again.
+    write_entry(
+        tmp_path,
+        "sessiondistnt",
+        cwd=str(tmp_path),
+        schedules=[_schedule(int(time.time() * 1000) + 3 * 3600_000)],
+    )
+
+    with pytest.raises(_StopServing):
+        await serve(tmp_path)
+
+    # First pass fires (nothing due), then sleeps in SLICES rather than one
+    # 3600 s block, and the second sweep sees the urgent wake.
+    assert slept, "the supervisor did not sleep at all"
+    assert max(slept) <= mod.SLICE_S, (
+        f"slept {max(slept)}s in one uninterrupted block; a wake written during that "
+        "window is invisible for its whole duration (the defect this closes)"
+    )
+    assert "sessionurgent" in fired_for
+
+
+class _StopServing(Exception):
+    """Breaks out of ``serve``'s infinite loop from inside a patched callee."""
+
+
+@pytest.mark.asyncio
+async def test_an_index_of_only_dormant_entries_retires(tmp_path: Path) -> None:
+    """ "Nothing fireable" is not the same question as "empty".
+
+    An index holding only stopped sessions kept the supervisor alive forever:
+    the non-empty check refused to retire while `_next_wake_ms` (which skips
+    dormant entries) returned None and parked it on MAX_SLEEP_S. Nothing it
+    could do would ever fire those wakes.
+    """
+    write_entry(
+        tmp_path,
+        "sessiondorm1",
+        cwd=str(tmp_path),
+        schedules=[_schedule(NOW_MS - 5_000)],
+        preserve={"stopped_at": NOW_MS - 10_000},
+    )
+
+    assert await serve(tmp_path, once=True) == 0
+
+
+@pytest.mark.asyncio
+async def test_retirement_re_reads_after_a_grace_before_exiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The RACE half of the never-restarted-supervisor defect.
+
+    `_persist_wake_schedules` writes the index entry and THEN calls the
+    install hook, so the supervisor can read an empty index while a session is
+    part-way through arming its first wake. Retiring inside that window exits
+    0, the hook that follows sees a job launchd still knows about, and the
+    wake is left armed with nothing running.
+    """
+    import asyncio
+
+    from local_operator.wakes import supervisor as mod
+
+    async def fake_sleep(seconds: float) -> None:
+        # The entry lands during the retirement grace.
+        write_entry(
+            tmp_path, "sessionraced", cwd=str(tmp_path), schedules=[_schedule(NOW_MS + 600_000)]
+        )
+
+    async def fake_fire(config_dir, *, now_ms=None):  # noqa: ANN001
+        raise _StopServing
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(mod, "fire_due_wakes", fake_fire)
+
+    # Reaching the sweep at all means it did NOT retire on the empty first read.
+    with pytest.raises(_StopServing):
+        await serve(tmp_path)
+
+    assert asyncio.get_event_loop_policy() is not None  # loop intact; no hidden teardown

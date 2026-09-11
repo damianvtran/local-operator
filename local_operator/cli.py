@@ -729,6 +729,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove the supervisor; scheduled wakes then fire only when a session is open",
     )
+    # THE ROLLOUT PATH, and the reason this is a subcommand rather than only a
+    # flag on `status`. Repair-on-demand lives in the install hook, which runs
+    # on a wake PERSIST — so a machine whose supervisor is stale or stopped
+    # cannot be fixed without some session happening to schedule a wake. After
+    # an upgrade that is exactly the wrong dependency: the running supervisor
+    # is still executing the old code, and there may be no session about to
+    # persist. This command makes the repair reachable directly.
+    wake_sub.add_parser(
+        "install",
+        help="install or repair the supervisor now (restarts a stale or stopped one)",
+        parents=[parent_parser],
+    )
     wake_list = wake_sub.add_parser(
         "list",
         help="every scheduled wake on this machine, soonest first",
@@ -2893,6 +2905,7 @@ def _wake_rows() -> "list[dict[str, Any]]":
 
     from local_operator.paths import config_dir
     from local_operator.wakes.store import read_index
+    from local_operator.wakes.supervisor import STALE_AFTER_S
 
     now_ms = int(_time.time() * 1000)
     rows: list[dict[str, Any]] = []
@@ -2935,6 +2948,21 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     ),
                     "limit": raw.get("limit"),
                     "fired_count": raw.get("fired_count") or 0,
+                    # RELIABILITY FIELDS. The three questions the operator
+                    # could not previously answer about a wake that seemed not
+                    # to fire: is it late right now, how late, and has it been
+                    # late so long the supervisor has given up on it (past
+                    # STALE_AFTER_S it is skipped, deliberately, and left to
+                    # the session's own catch-up). `overdue` is a plain bool
+                    # rather than "due_in_s < 0" recomputed by every consumer.
+                    "overdue": due < now_ms,
+                    "overdue_s": max((now_ms - due) / 1000.0, 0.0),
+                    "stale": (now_ms - due) / 1000.0 > STALE_AFTER_S,
+                    # Written by the session (the one writer of schedule
+                    # state), absent on an entry that has not fired since the
+                    # fields were added rather than defaulted to a lie.
+                    "last_fired_at": entry.get("last_fired_at"),
+                    "last_attempt_at": entry.get("last_attempt_at"),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -2999,6 +3027,16 @@ def wake_command(args: argparse.Namespace) -> int:
                 left = row.get("until_in_s")
                 if left is not None:
                     repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
+            # RELIABILITY MARKS, after the dormant one and in escalating
+            # order: a stale wake is also overdue, and saying so twice on one
+            # line is noise — stale is the stronger statement because it means
+            # the supervisor has stopped trying.
+            if row["stale"]:
+                mark += " (STALE — no longer fired by the supervisor)"
+            elif row["overdue"]:
+                mark += " (OVERDUE)"
+            if row.get("last_fired_at"):
+                repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
             print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
         return 0
 
@@ -3007,6 +3045,7 @@ def wake_command(args: argparse.Namespace) -> int:
         ensure_supervisor_installed,
         is_supported,
         plist_path,
+        supervisor_state,
         uninstall,
     )
 
@@ -3015,28 +3054,102 @@ def wake_command(args: argparse.Namespace) -> int:
         print(f"supervisor: {outcome.reason}")
         return 0
 
+    from local_operator.harness.wake import format_duration
+    from local_operator.wakes.supervisor import STALE_AFTER_S
+
+    STALE_AFTER_DAYS = STALE_AFTER_S / 86400.0
+
     rows = _wake_rows()
-    installed = is_supported() and plist_path().exists()
-    if getattr(args, "install", False):
+    # `install` as a subcommand and `status --install` are the same operation;
+    # the hook is idempotent and now REPAIRS, so both routes reach the fix.
+    wants_install = command == "install" or getattr(args, "install", False)
+    if wants_install:
         outcome = ensure_supervisor_installed(config_dir())
-        installed = outcome.installed
         print(f"supervisor: {outcome.reason}")
 
+    # RUNNING, not merely present. `plist_path().exists()` was an even weaker
+    # test than the install hook's `_is_loaded()` — it reported "installed"
+    # for a supervisor that had exited, which is the blind spot that let armed
+    # wakes sit unfired. The file is still reported separately, because "the
+    # plist is there but nothing runs" is a distinct, actionable state.
+    state = supervisor_state(config_dir()) if is_supported() else None
+    plist_present = is_supported() and plist_path().exists()
+    # UNVERIFIABLE is a third state, distinct from stopped and from absent:
+    # the store being asked about is not one launchd can supervise (an
+    # isolated run, a config dir outside the real home), so the global label
+    # answers about a DIFFERENT store. Nothing about it may be rendered here.
+    verifiable = bool(state and state.verifiable)
+    running = bool(state and state.running and state.verifiable)
+    uptime_s: float | None = None
+    if verifiable and state and state.pid:
+        uptime_s = _process_uptime_s(state.pid)
+
     upcoming = [row for row in rows if not row["dormant"]]
+    overdue = [row for row in upcoming if row["overdue"]]
+    stale = [row for row in upcoming if row["stale"]]
     payload = {
         "supported": is_supported(),
-        "installed": installed,
+        # Kept as "a supervisor is in place" for readers that already parse
+        # it, but it now means RUNNING rather than "a file exists".
+        "installed": running,
         "plist": str(plist_path()) if is_supported() else "",
         "scheduled": len(rows),
         "armed": len(upcoming),
         "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        # The machine-readable reliability block: the same facts the human
+        # rendering shows, for a monitoring caller that should not scrape it.
+        "supervisor": {
+            # False whenever the answer would be about another store, so a
+            # monitoring caller cannot read this block as a verdict on THIS
+            # one. The pid is withheld for the same reason.
+            "verifiable": verifiable,
+            "running": running,
+            "loaded": bool(state and state.loaded and verifiable),
+            "plist_present": plist_present,
+            "pid": state.pid if (verifiable and state) else None,
+            "uptime_s": uptime_s,
+            "state": state.detail if state else "",
+        },
+        "overdue": len(overdue),
+        "stale": len(stale),
+        "max_overdue_s": max((row["overdue_s"] for row in overdue), default=0.0),
     }
     if args.json:
         print(_json_dumps(payload))
         return 0
 
-    print(f"supervisor:  {'installed' if installed else 'not installed'}")
-    if installed is False and is_supported() and rows:
+    if state is not None and not verifiable:
+        # Never another store's pid. Saying "running" here would be the very
+        # failure this command exists to remove, one level up: it would report
+        # wakes as supervised while the running process watches a different
+        # store. Observed during validation, where an isolated run printed the
+        # operator's real LaunchAgent pid.
+        print("supervisor:  cannot be verified for this store")
+        print(f"             ({state.detail})")
+        print("             (wakes here fire only while a session is open)")
+    elif running:
+        detail = f"running (pid {state.pid})" if state and state.pid else "running"
+        if uptime_s is not None:
+            detail += f", up {_format_duration(uptime_s)}"
+        print(f"supervisor:  {detail}")
+    elif state and state.loaded:
+        # The exact state that produced the permanent misses: launchd knows
+        # the job, `launchctl print` returns 0, and nothing is running.
+        print(f"supervisor:  loaded but NOT running ({state.detail or 'stopped'})")
+        print("             (nothing will fire these — run 'lop wake install')")
+    elif plist_present:
+        print("supervisor:  not loaded (a plist exists but launchd has no job)")
+        print("             (run 'lop wake install')")
+    else:
+        print("supervisor:  not installed")
+    installed = running
+    if (
+        installed is False
+        and is_supported()
+        and rows
+        and verifiable
+        and not (state and state.loaded)
+    ):
         # The ACTIONABLE branch. Round 1 (D4): this command reported "not
         # installed" beside three armed wakes and an overdue one, which is
         # precisely the failure the subcommand exists to surface — and then
@@ -3044,7 +3157,7 @@ def wake_command(args: argparse.Namespace) -> int:
         # had just told them. The unsupported branch below already got two
         # explanatory lines; the fixable one got none.
         print("             (nothing will fire these while their sessions are")
-        print("              closed — run 'lop wake status --install')")
+        print("              closed — run 'lop wake install')")
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole
@@ -3054,6 +3167,18 @@ def wake_command(args: argparse.Namespace) -> int:
     print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
     if upcoming:
         print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+    if overdue:
+        # The headline the operator was missing. A wake being overdue is not
+        # itself a fault (a sweep may be in flight), but "3 overdue, worst 24m"
+        # beside a stopped supervisor is the whole diagnosis on one line.
+        worst = max(row["overdue_s"] for row in overdue)
+        print(f"overdue:     {len(overdue)} (worst {_format_duration(worst)})")
+    if stale:
+        print(
+            f"stale:       {len(stale)} past {int(STALE_AFTER_DAYS)}d — the supervisor "
+            "no longer fires these;"
+        )
+        print("             they are delivered when their session is next opened")
     return 0
 
 
@@ -3076,6 +3201,45 @@ def _format_due(seconds: float) -> str:
     else:
         text = f"{int(seconds // 86400)}d"
     return f"{text} overdue" if overdue else f"in {text}"
+
+
+def _process_uptime_s(pid: int) -> float | None:
+    """How long ``pid`` has been alive, or ``None`` when it cannot be read.
+
+    ``ps -o etime=`` rather than a dependency: this is one line on a status
+    surface, and ``psutil`` is deliberately not a dependency of this project.
+    Every failure is None — an uptime is a nicety on a line whose real payload
+    is the pid, and a status command must never fail because a subprocess did.
+    """
+    import subprocess as _subprocess
+
+    try:
+        result = _subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["ps", "-p", str(pid), "-o", "etime="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, _subprocess.SubprocessError):
+        return None
+    raw = result.stdout.strip()
+    if result.returncode != 0 or not raw:
+        return None
+    # `[[dd-]hh:]mm:ss` — parsed right to left so every form falls out of the
+    # same loop rather than needing a format branch per shape.
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+    parts = raw.split(":")
+    if not all(part.strip().isdigit() for part in parts) or len(parts) > 3:
+        return None
+    seconds = 0.0
+    for power, part in enumerate(reversed(parts)):
+        seconds += int(part) * (60**power)
+    return seconds + days * 86400
 
 
 def stop_command(args: argparse.Namespace) -> int:

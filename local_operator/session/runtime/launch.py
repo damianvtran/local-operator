@@ -165,8 +165,16 @@ class WakeErrand:
     So the supervisor's job is strictly to make a runtime EXIST for a session
     whose wake is due; the session then does what it would have done had a
     terminal been open. ``schedule_id`` and ``occurrence_ms`` are carried for
-    the log line and for the derived ``command_id``, which is what keeps a
-    supervisor retry from starting two runtimes for one occurrence.
+    the log line and for a derived ``command_id``.
+
+    **The ``command_id`` is not what dedupes a wake**, and believing it was
+    obscured where the real guarantee lives. :func:`_deliver` returns early
+    for a ``WakeErrand`` without sending any op, so the id never reaches a
+    runtime and no duplicate-command check ever sees it. What actually keeps a
+    supervisor retry from producing two SERVING runtimes for one occurrence is
+    the engage loop itself: an engage that finds a live record reuses it, and
+    the transcript lease admits only one serving runtime however many
+    candidate processes were spawned.
     """
 
     schedule_id: str
