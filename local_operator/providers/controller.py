@@ -94,6 +94,10 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
 
+#: Row namespace for the QwenCloud console session cookie. Not a registry
+#: provider -- see :meth:`ProviderController._qwencloud_console_creds`.
+QWENCLOUD_CONSOLE_PROVIDER = "qwencloud-console"
+
 
 @dataclasses.dataclass(frozen=True)
 class CatalogueEntry:
@@ -813,6 +817,32 @@ class ProviderController:
             parts.append(fingerprint_secret(env_key))
         return fingerprint_accounts(parts)
 
+    def _qwencloud_console_creds(self, provider: str) -> dict[str, Any] | None:
+        """The stored console session cookie for QwenCloud Token Plan, if any.
+
+        A SEPARATE namespace (``qwencloud-console``) rather than a row under
+        ``alibaba-token-plan``, because :meth:`has_any_credential` matches on
+        the provider column with no type or field filter: a row there would
+        flip ``is_usable`` and then ``can_report_usage``, and local-operator
+        would believe it could CHAT through alibaba-token-plan on a read-only
+        console cookie. It would also join the cache fingerprint and sit one
+        field name away from the API-key cascade's ``data["key"]`` read.
+
+        ``qwencloud-console`` is deliberately NOT in ``PROVIDER_REGISTRY``;
+        it is a row namespace, following the ``mcp-oauth`` precedent.
+        """
+        if credential_provider_id(provider) != "alibaba-token-plan":
+            return None
+        try:
+            rows = self.auth_store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER)
+        except Exception:  # noqa: BLE001 — an unreadable store has no ticket
+            return None
+        for row in rows:
+            data = getattr(row, "data", None)
+            if isinstance(data, dict) and data.get("ticket"):
+                return dict(data)
+        return None
+
     def _expected_oauth_identities(self, provider: str) -> list[str]:
         """Stored OAuth identities for ``provider``, including refresh-failed.
 
@@ -1324,6 +1354,29 @@ class ProviderController:
                     continue
                 access = accesses_by_id.get(identity)
                 if access is None:
+                    # The stored grant minted no bearer this cycle (expired,
+                    # no refresh token, or the store omitted it). For QwenCloud
+                    # that is the STEADY state, not a transient miss: the row's
+                    # `expires` is in the past and neither ProviderDefinition
+                    # declares a refresh_token, so `_ensure_oauth_fresh` can
+                    # never revive it. A console session cookie stored
+                    # separately can still answer, and this is the only place
+                    # it is reachable -- with `expected` non-empty the API-key
+                    # route below is dead code for this provider.
+                    console = self._qwencloud_console_creds(provider)
+                    if console is None:
+                        continue
+                    try:
+                        report = await self._fetch_one(
+                            client, provider, access=None, extra_creds=console
+                        )
+                    except Exception:  # noqa: BLE001 — one bad account, not the provider
+                        continue
+                    if report is None:
+                        continue
+                    if not report.identity:
+                        report.identity = identity
+                    live[report_identity_key(report) or identity] = report
                     continue
                 if access.credential_invalid:
                     # The store minted no bearer and said why: the grant is
@@ -1700,6 +1753,7 @@ class ProviderController:
         provider: str,
         *,
         access: OAuthAccess | None,
+        extra_creds: dict[str, Any] | None = None,
     ) -> UsageReport | None:
         """One report for one account.
 
@@ -1726,7 +1780,10 @@ class ProviderController:
                 api_key = await self.auth_store.get_api_key(provider)
             except Exception:  # noqa: BLE001 — a refresh failure is not fatal here
                 api_key = None
-        if not access_token and not api_key:
+        if not access_token and not api_key and not extra_creds:
+            # A console credential is neither an access token nor an API key,
+            # and is the only thing that can answer for an account whose OAuth
+            # grant is dead.
             return None
         # BOTH are handed over, and the dispatcher picks the route each can reach.
         # Passing only one was how the API-key half of a dual-route provider became
@@ -1743,6 +1800,10 @@ class ProviderController:
             # sk-sp inference key vs. OAuth usage token) spend the right one,
             # where access_token is already the wire-mapped key.
             oauth_creds=access.raw if access is not None and access.kind == "oauth" else None,
+            # A credential from outside the provider registry -- the QwenCloud
+            # console session cookie. Kept out of `oauth_creds` because that is
+            # the raw OAuth row, already read for its `access` field.
+            extra_creds=extra_creds,
         )
         if report is not None and not report.identity and access is not None:
             # Whose account this is. The field existed and no fetcher ever set it, so
