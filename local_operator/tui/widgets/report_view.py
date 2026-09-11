@@ -49,8 +49,12 @@ for a line-API widget: ``Widget.get_selection`` extracts text only from a
 ``Text``/``Content`` returned by ``_render()``, and this widget returns neither,
 so without the overrides below a drag over the report selected nothing, painted
 nothing and handed ``ctrl+c`` an empty string — a silent loss of an affordance
-that exists on the ``Static`` body it replaces. ``RichLog`` carries the same two
-overrides for the same reason: the text, and the per-line highlight.
+that exists on the ``Static`` body it replaces. ``Log`` carries the same two
+overrides for the same reason (``textual/widgets/_log.py``: ``get_selection`` and
+``selection_updated``): the text, and the per-line highlight. It is ``Log``, not
+``RichLog``, that is the model for all three of the selection hooks here —
+``Log`` is also the only widget in the library that stamps its strips with
+``apply_offsets``, which is what makes the drag resolvable at all.
 """
 
 from __future__ import annotations
@@ -65,25 +69,6 @@ from textual.scroll_view import ScrollView
 from textual.selection import Selection
 from textual.strip import Strip
 from textual.visual import Visual, visualize
-
-
-def _cell_to_char(plain: str, cells: int) -> int:
-    """Character index at cell column ``cells`` of ``plain``.
-
-    Selection offsets arrive in CELLS (a terminal address by column) while
-    ``Text.stylize`` spans are CHARACTER indices, and the two only agree while
-    every glyph is one cell wide. This report's labels are free text — a session
-    name can carry CJK or an emoji — so the conversion is done rather than
-    assumed; without it the highlight drifts a cell per wide glyph before the
-    selection start. Iterative on purpose: it runs once per selected line, per
-    repaint, and only while a drag is live.
-    """
-    column = 0
-    for index, char in enumerate(plain):
-        if column >= cells:
-            return index
-        column += cell_len(char)
-    return len(plain)
 
 
 class ReportView(ScrollView):
@@ -124,8 +109,9 @@ class ReportView(ScrollView):
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The text under a drag selection — the affordance a line API loses.
 
-        This is `RichLog.get_selection`'s shape, joined over the same model the
-        strips are built from, so what is copied is exactly what is painted.
+        This is `Log.get_selection`'s shape (`textual/widgets/_log.py`, which is
+        also where the offset stamp below comes from), joined over the same model
+        the strips are built from, so what is copied is exactly what is painted.
         """
         return selection.extract("\n".join(line.plain for line in self._lines)), "\n"
 
@@ -141,7 +127,9 @@ class ReportView(ScrollView):
 
         A strip bakes in the component style it was rendered with, so a theme or
         stylesheet change leaves every cached line pinning the previous ramp
-        (`RichLog` and `OptionList` clear their caches here for the same reason).
+        (`RichLog.notify_style_update` clears its line cache on this hook for the
+        same reason; `OptionList` refreshes here and clears its caches on
+        `_on_resize` instead, which is the other half of the same idea).
         """
         super().notify_style_update()
         self._strips.clear()
@@ -267,9 +255,16 @@ class ReportView(ScrollView):
         meta on the segments it renders (``_compositor.get_widget_and_offset_at``),
         so a strip returned without it resolves the pointer's line to nothing —
         the drag then has a start and no end, which textually means "select to
-        the end of everything". ``RichLog`` stamps its strips for exactly this
-        reason; the base ``Static`` body got the same meta from Textual's own
-        render path.
+        the end of everything". ``Log`` stamps its strips for exactly this reason
+        (it is the library's only ``apply_offsets`` caller); the base ``Static``
+        body got the same meta from Textual's own render path.
+
+        The stamp's x is ``scroll_offset.x``, and that is only honest because the
+        strip is served UNCROPPED and the axis is pinned: ``Log`` crops by
+        ``scroll_x`` before stamping, while this widget strips at the line's own
+        width and lets the compositor crop, so enabling horizontal scrolling
+        here would offset every meta by ``scroll_x`` without any test noticing.
+        If that axis is ever turned on, crop-then-stamp first.
         """
         width = self.size.width
         if width != self._strip_width:
@@ -312,15 +307,33 @@ class ReportView(ScrollView):
             max(width, cell_len(line.plain)),
             1,
             self.visual_style,
+            # The generic path resolves a selection against the visual it is
+            # handed, and this one is a SINGLE LINE, so every strip would read
+            # the span of body line 0: a selection starting on line 0 (which is
+            # where `/analytics` opens — the `Totals` line) then banded EVERY
+            # line of the report, 1394 cells over 28 rows where 4 rows are
+            # selected (measured, 120x45). The span above is applied by the only
+            # code that knows this line's index, so the visual must not apply one.
+            apply_selection=False,
         )[0]
 
     def _selection_span(self, index: int) -> tuple[int, int] | None:
         """Character span of the live selection on body line ``index``.
 
-        ``Selection.get_span`` answers in the widget's own content coordinates,
-        which for this widget are body line indices — the same numbering
-        ``set_line`` and the report's layout use. ``-1`` means "to the end of the
-        line", which is resolved here because only the line knows its length.
+        ``Selection`` offsets are CHARACTER offsets, not cell columns, and they
+        are read raw here on purpose: ``Strip.apply_offsets`` advances ``x`` by
+        ``len(segment.text)`` per segment, ``Compositor.get_widget_and_offset_at``
+        counts characters into the segment the pointer landed on, and
+        ``Selection.extract`` (``get_selection`` above) slices the plain string
+        with the same numbers. Converting them a second time from cells — which
+        an earlier revision did — is the identity only while every glyph is one
+        cell wide, and drifts the highlight by a character per wide glyph while
+        the copy stays right, i.e. the frame ends up describing different
+        characters than ctrl+c hands over. This is `Log._render_line_strip`'s
+        arithmetic.
+
+        ``-1`` means "to the end of the line", which is resolved here because
+        only the line knows its length.
         """
         selection = self.text_selection
         if selection is None:
@@ -328,7 +341,5 @@ class ReportView(ScrollView):
         span = selection.get_span(index)
         if span is None:
             return None
-        start_cells, end_cells = span
-        plain = self._lines[index].plain
-        end_cells = cell_len(plain) if end_cells == -1 else end_cells
-        return _cell_to_char(plain, start_cells), _cell_to_char(plain, end_cells)
+        start, end = span
+        return start, len(self._lines[index].plain) if end == -1 else end
