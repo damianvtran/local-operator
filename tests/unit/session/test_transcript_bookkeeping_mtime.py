@@ -155,19 +155,24 @@ async def test_a_rebuild_does_not_attempt_a_restore(tmp_path):
 async def test_the_flag_refuses_a_batch_carrying_real_work(tmp_path):
     """``preserve_mtime`` must not be able to freeze the clock over a turn.
 
-    QA round 1. ``BOOKKEEPING_CUSTOM_TYPES`` is defined in ``transcript.py``
-    and cited by both :meth:`Transcript.append_message` and
-    :meth:`Transcript._write_entries` as the rule that governs this flag —
-    "an append carrying only :data:`BOOKKEEPING_CUSTOM_TYPES`" — but no code
-    path evaluates it: the restore keys on the boolean alone. A caller that
-    passes ``preserve_mtime=True`` on a batch containing a real user message
-    therefore erases that turn from ``retention.session_activity``, which is
-    the ONE RANKING CLOCK shared with ``session.cleanup``: the session ranks
-    as older than it is on the picker AND ages toward deletion.
+    :func:`_is_bookkeeping_batch` is the gate this pins: the restore runs only
+    when EVERY row in the batch is a :data:`BOOKKEEPING_CUSTOM_TYPES` record,
+    so ``preserve_mtime`` is a request the writer validates rather than an
+    instruction it obeys.
 
-    Only ``Session.journal_incident`` passes the flag today, so this is not
-    reachable in production — it is one careless caller away, and nothing
-    guards it. The docstring's claim is the contract; this pins it.
+    The QA round-1 defect was the absence of that gate. ``transcript.py``
+    defined ``BOOKKEEPING_CUSTOM_TYPES`` and both
+    :meth:`Transcript.append_message` and :meth:`Transcript._write_entries`
+    cited it as the governing rule — "an append carrying only
+    :data:`BOOKKEEPING_CUSTOM_TYPES`" — while the restore keyed on the boolean
+    alone, so a batch containing a real user message was clock-frozen: that
+    turn vanished from ``retention.session_activity``, the ONE RANKING CLOCK
+    shared with ``session.cleanup``, leaving the session ranked older than it
+    is on the picker AND ageing toward deletion.
+
+    ``Session.journal_incident`` is still the only caller that passes the
+    flag, so the defect was never reachable in production — it was one
+    careless caller away. This keeps it that way.
     """
     from local_operator.session.retention import session_activity
     from local_operator.session.transcript import Transcript
