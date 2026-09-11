@@ -871,13 +871,13 @@ class RuntimeServer:
         call through a cross-thread hop for no benefit."""
         if self._server is not None:
             return
-        # Same pin as `start`, and here it is defence in depth rather than a
-        # closed race: this path reaches `_serve` through a direct `await` on
-        # the caller's own task, with no scheduling point in between, so today
-        # nothing can re-point the config dir first. The pin is still the
-        # invariant — the record's directory is decided when the runtime is
-        # asked to start, never when the publisher is built — and it is what
-        # keeps that true if `_serve` ever gains a yield before the publisher.
+        # The pin is LOAD-BEARING on this path too, not defence in depth:
+        # `_serve` reaches its first yield — `await asyncio.start_server` —
+        # BEFORE it builds the publisher, so a config dir that moves while this
+        # await is suspended is otherwise resolved by `RecordPublisher` inside
+        # `_serve`, and the record lands in a directory this runtime never
+        # started in. (The caller-visible half of the same rule is
+        # `RuntimeServer.record_path`.)
         self._config_root = config_dir()
         self._loop = asyncio.get_running_loop()
         await self._serve()
@@ -3310,6 +3310,28 @@ class RuntimeServer:
         authorization model, so nothing should be encouraged to copy it out.
         """
         return self._record
+
+    @property
+    def record_path(self) -> Path:
+        """The file this runtime published its discovery record to.
+
+        Read off the PUBLISHER, never recomputed from the config dir. The two
+        only agree by circumstance: the record's directory is pinned when the
+        runtime is asked to start, while ``_serve`` reaches its first yield —
+        ``await asyncio.start_server`` — before it builds the publisher. A
+        config dir that moves during that yield therefore leaves a
+        ``config_dir()`` recomputation naming a ``<pid>.json`` no runtime ever
+        wrote, and a caller that prints or dials this path has to have the file
+        that exists (QA round 2, Q2 forced exactly that window).
+
+        Raises rather than returning ``None``, like :attr:`record`'s habit of
+        answering directly: asking an unstarted runtime where its record is has
+        no useful answer, and a caller cannot print ``None`` as a path.
+        """
+        publisher = self._publisher
+        if publisher is None:
+            raise RuntimeError("this runtime has not published a record yet")
+        return publisher.path
 
     @property
     def projection_sink(self) -> ProjectionSink | None:
