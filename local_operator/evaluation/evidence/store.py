@@ -30,6 +30,7 @@ from local_operator.evaluation.evidence.models import (
     AbandonmentReason,
     AbandonmentRecord,
     ActionBatchPayload,
+    AgentStopPayload,
     BudgetCommitmentPayload,
     CleanupPayload,
     ContextCompactionPayload,
@@ -758,6 +759,7 @@ class EvidenceWriter:
             ActionBatchPayload,
             EnvironmentStepPayload,
             UserSimulatorExchangePayload,
+            AgentStopPayload,
         )
         if event.kind == "preflight":
             if self._phase_preflight is not None or self._sequence != 0:
@@ -842,6 +844,7 @@ class EvidenceWriter:
                 ActionBatchPayload,
                 EnvironmentStepPayload,
                 UserSimulatorExchangePayload,
+                AgentStopPayload,
             ),
         ) or (isinstance(payload, LifecycleTransitionPayload) and payload.state == "running"):
             self._phase_execution = True
