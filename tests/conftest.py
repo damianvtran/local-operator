@@ -366,6 +366,58 @@ def fresh_served_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(failover, "_SERVED_SELECTORS", set())
 
 
+#: Where `pytest_runtest_call` leaves the temp roots it saw while they existed.
+#: Read back by `_secret_config_dirs` in the sweep's teardown; see that function
+#: and the hook for why a path that can still be NAMED after its directory is
+#: gone is the whole trick.
+_SWEEP_ROOT_KEY: pytest.StashKey[tuple[Path, ...]] = pytest.StashKey()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
+    """Record this test's temp roots BEFORE pytest deletes them.
+
+    `tmp_path` removes its own directory at ITS teardown whenever the retention
+    policy is ``failed`` and the test passed — unconditionally, in pytest's own
+    fixture generator (`_pytest/tmpdir.py`) — and it always tears down BEFORE an
+    autouse fixture declared here: those are finalised last, because they are set
+    up first. So by the time the broker sweep looked for its candidates, the
+    directories the test actually used were already gone and `rglob` found
+    nothing; measured on this machine, one run of `tests/unit/secrets/test_cli.py`
+    left 28 live key-holding brokers, one per store-touching test.
+
+    The paths are what the sweep needs, not the contents: `socket_path()` is a
+    pure function of the directory NAME, and a config dir deep enough to need
+    the fallback (pytest's tmp_path always is) puts the socket in
+    ``$TMPDIR/lop-secrets-<uid>-<digest>``, which removing the config dir does
+    not touch. So capturing during the CALL phase — after the test body, while
+    every fixture is still set up — is enough, and it is the only point where
+    both the paths and the environment that produced them still exist.
+    """
+    try:
+        yield
+    finally:
+        item.stash[_SWEEP_ROOT_KEY] = _temp_roots(item)
+
+
+def _temp_roots(item: pytest.Item) -> tuple[Path, ...]:
+    """``tmp_path`` and every directory under it, as they were at call time.
+
+    Every directory, rather than a list of the shapes the suite is known to use:
+    the module docstring of `_secret_config_dirs` records where a hardcoded list
+    already failed. `Exception`, not `OSError`, for the same reason the sweep
+    itself suppresses broadly — a test may have replaced the path machinery this
+    walk depends on, and discovering nothing is the right failure here.
+    """
+    tmp_path = getattr(item, "funcargs", {}).get("tmp_path")
+    if not isinstance(tmp_path, Path):
+        return ()
+    with suppress(Exception):
+        if tmp_path.is_dir():
+            return (tmp_path, *(child for child in tmp_path.rglob("*") if child.is_dir()))
+    return ()
+
+
 @pytest.fixture(autouse=True)
 def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> Iterator[None]:
     """Kill any secret broker a test caused to start, and remove its runtime dir.
@@ -390,7 +442,9 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     down too.
 
     Teardown-only: each test gets fresh temporary directories, so there is
-    nothing to clean up beforehand.
+    nothing to clean up beforehand. The CANDIDATES are captured during the call
+    phase (`pytest_runtest_call` below), because pytest reclaims `tmp_path`
+    before this fixture is finalised — see `_temp_roots` for the measurement.
     """
     yield
 
@@ -406,9 +460,22 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     if not candidates:
         return
 
-    # Imported in the teardown rather than at module scope: this conftest is
-    # loaded for every test session, and the secrets client drags in
-    # fcntl/socket machinery a run that touches no store never needs.
+    _stop_brokers_in(candidates)
+
+
+def _stop_brokers_in(candidates: list[Path]) -> None:
+    """SIGTERM the broker in each candidate config dir, then drop its runtime dir.
+
+    A function rather than an in-fixture loop so the behaviour is reachable from
+    a test: `test_broker_sweep.py` drives it against a REAL broker, and against a
+    real broker it must NOT touch. The safety property is the caller's — the
+    candidate list is derived from the test's own temp roots, never from a
+    process-name sweep — and this function is what makes that property testable
+    rather than merely asserted in a docstring.
+    """
+    # Imported here rather than at module scope: this conftest is loaded for
+    # every test session, and the secrets client drags in fcntl/socket
+    # machinery a run that touches no store never needs.
     from local_operator.secrets import client
     from local_operator.secrets.keys import secrets_dir
     from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
@@ -458,6 +525,15 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
 def _secret_config_dirs(request: pytest.FixtureRequest, home: Path) -> list[Path]:
     """Every directory this test could have used as a config dir.
 
+    Three sources, all of them the test's OWN temp roots:
+
+    * ``home/.local-operator`` — the config dir a test that leaves HOME alone
+      resolves to, since `isolate_environment` points HOME at a scratch dir.
+    * the roots `pytest_runtest_call` recorded while they existed, which is the
+      only way to see a config dir pytest has since reclaimed (see `_temp_roots`).
+    * whatever is still under ``tmp_path`` right now, for a test that failed
+      during setup and so never reached the call phase.
+
     Derived from the test's temporary directories rather than read back from
     ``LOCAL_OPERATOR_CONFIG_DIR``: ``monkeypatch`` has already undone the test's
     ``setenv`` by the time an autouse fixture declared here tears down, so the
@@ -476,15 +552,5 @@ def _secret_config_dirs(request: pytest.FixtureRequest, home: Path) -> list[Path
     store pay one ``getattr``.
     """
     candidates = [home / ".local-operator"]
-    tmp_path = getattr(request.node, "funcargs", {}).get("tmp_path")
-    if not isinstance(tmp_path, Path):
-        return candidates
-    # `Exception`, not `OSError`: this walk runs in the teardown of EVERY test,
-    # and a test that monkeypatched `Path.exists`/`is_dir` to raise has not had
-    # that undone yet. Discovering nothing is the right failure here — the
-    # sweep skips a directory, it does not fail the test that just passed.
-    with suppress(Exception):
-        if tmp_path.is_dir():
-            candidates.append(tmp_path)
-            candidates.extend(child for child in tmp_path.rglob("*") if child.is_dir())
-    return candidates
+    candidates.extend(request.node.stash.get(_SWEEP_ROOT_KEY, ()))
+    return candidates + [root for root in _temp_roots(request.node) if root not in set(candidates)]
