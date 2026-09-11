@@ -1790,9 +1790,72 @@ async def test_a_paged_block_is_folded_at_its_destination_width_not_the_fallback
 
     assert folds, "the paging path performed no authoring fold to check"
     at_fallback = [kind for kind, width in folds if width == FALLBACK_WIDTH]
+    # The PAINTED half is asserted FIRST, deliberately. Both halves describe the
+    # same defect, but only this one is read off the compositor — it says a
+    # frame was put in front of the reader with rows authored at another width —
+    # and an assertion that never executes on the tree it indicts proves
+    # nothing. Review round 1, M3: with the fold half first, this one was
+    # unreachable pre-fix, because the earlier assert always fired.
+    assert not painted_at_fallback, (
+        "a paged block was painted from rows authored at the "
+        f"{FALLBACK_WIDTH}-column fallback inside a {pane}-cell pane: {painted_at_fallback}"
+    )
     assert not at_fallback, (
         f"{len(at_fallback)} of {len(folds)} folds during paging were at the "
         f"{FALLBACK_WIDTH}-column fallback while the pane was wide: {sorted(set(folds))}"
     )
     assert all(width == pane for _, width in folds), sorted(set(folds))
+
+
+@pytest.mark.asyncio
+async def test_the_first_paint_of_a_resumed_conversation_is_not_folded_at_the_fallback() -> None:
+    """Cold resume's tail projection owes the frame the same width a page does.
+
+    The operator's reported frame is THIS one: the paint that reveals a resumed
+    conversation. `_render_resumed_history` projects the tail through the same
+    renderer, and before the width reached that seam every block in it was
+    authored at the 80-column fallback, so the frame carried prose wrapped at 78
+    cells inside a 96 or 146-cell pane with blank space to its right — and the
+    layout's resize re-authored all of it one hop later, which is why the
+    SETTLED frame looked correct and the report was hard to place (QA round 1,
+    Q1: one paint at 100x30, 80 blocks at `box=96 built=80`, rows ending at cell
+    81 of 96).
+
+    Asserted over every paint of the boot settle, not just the first, because
+    the reveal is one frame among several and a reader cannot tell which one
+    they arrived on.
+    """
+    session = FakeSession()
+    session._history = _wrapping_history(count=140)
+    app = OperatorApp(lambda: _factory(session))
+    painted_at_fallback: list[str] = []
+    paints = 0
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app._transcript_view()
+        refresh = app.screen._compositor_refresh
+
+        def capture() -> None:
+            nonlocal paints
+            refresh()
+            paints += 1
+            pane = view.scrollable_content_region.width
+            if not pane:
+                return
+            for block in view.blocks():
+                if block.size.width <= FALLBACK_WIDTH:
+                    continue
+                if getattr(block, "_built_width", None) != FALLBACK_WIDTH:
+                    continue
+                painted_at_fallback.append(
+                    f"paint {paints}: {type(block).__name__} box={block.size.width} "
+                    f"authored at {FALLBACK_WIDTH}"
+                )
+
+        app.screen._compositor_refresh = capture
+        try:
+            await settled(app, pilot)
+        finally:
+            app.screen._compositor_refresh = refresh
+
+    assert paints, "no paint was observed"
     assert not painted_at_fallback, painted_at_fallback

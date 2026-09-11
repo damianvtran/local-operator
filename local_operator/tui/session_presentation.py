@@ -182,8 +182,8 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
             super().__init__()
             self.notice = notice
 
-    def __init__(self, text: str) -> None:
-        super().__init__(text, "note")
+    def __init__(self, text: str, *, fold_width: int = 0) -> None:
+        super().__init__(text, "note", fold_width=fold_width)
         self._interactive = True
         self.add_class("interactive-notice")
 
@@ -494,6 +494,9 @@ class PreparedReplay(ReplayState):
         if self._resume_pending_head:
             from local_operator.tui.app import RESUME_OLDER_NOTICE
 
+            # No width: a prepared replay is authored offscreen for a parked
+            # view (see `project_settled_rows`' `fold_width` note), and this
+            # notice is folded when that view is laid out.
             self._resume_head_notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
             self.blocks.insert(0, self._resume_head_notice)
         if self._resume_pending_tail:
@@ -724,16 +727,30 @@ def project_settled_rows(
     rows no frontend painted and bounding it could hide one.
 
     ``fold_width`` is the width every block this pass BUILDS will be given.
-    Zero is "not supplied", which is right for a pass that mounts where it
-    authors (the tail) and wrong for a PAGE collected for insertion above
-    the viewport: those blocks are built detached, so every one of them folds
-    at the 80-column fallback, pins that fold as its height, and is then
-    re-authored by the first layout's resize — a second build per block and a
-    painted frame whose rows wrap at 80 inside a 146-cell pane. The caller
-    that knows the destination (``OperatorApp._collect_resume_page_blocks``)
-    supplies it here so the rows are authored at the right width the first
-    and only time. It is threaded to CONSTRUCTION rather than applied after,
-    because a block that wraps in ``__init__`` never reads a later hint.
+    Zero means "not supplied", and it is only right where there is no
+    destination to name: a prepared replay authors offscreen for a parked view
+    and is laid out inside it before that view is revealed.
+
+    Every other caller has a destination and must name it, because a block
+    built without one folds at the 80-column fallback, pins that fold as its
+    height, and is re-authored by the first layout's resize — a second build
+    per block and a painted frame whose rows wrap at 78 cells inside a 96 or
+    146-cell pane. `OperatorApp._project_settled_rows` derives it from the live
+    transcript for the tail, the reconnect gap replay, the sidebar commit's
+    top-up and the older-page collect, so those four cannot disagree about the
+    destination. It is threaded to CONSTRUCTION rather than applied after,
+    because a block that wraps in ``__init__`` never reads a hint set later.
+
+    The one authoring seam on a live transcript that still has no width is
+    ``TranscriptView.append_block`` / ``OperatorApp._append_block``: a live
+    prompt, notice or running card is built first and mounted second, so its
+    rows come out of the fallback too and are saved only by that same resize.
+    Deliberately not part of this seam: no painted narrow frame was observed on
+    it (the append's mount and resize both complete before the paint; measured
+    at 150x40 and 160x40 by review round 1 and the design round), so it is a
+    wasted build rather than a visible defect — recorded in the PR's "not
+    addressed" list, and it cannot be fixed from here because a hint applied at
+    append arrives after the rows exist.
     """
     from contextlib import nullcontext
 
@@ -832,7 +849,13 @@ def project_settled_rows(
     # #451/#452 exist to prevent. One extra mount of a one-line notice is
     # not the cost this bound is avoiding.
     if self._block_sink is None and self._resume_pending_head and self._resume_head_notice is None:
-        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE)
+        # The width goes to construction here for the same reason every other
+        # block in this pass gets it: a notice wraps itself in `__init__`, and
+        # this one is authored and mounted in the same pass as the rows below
+        # it, so a fallback fold here is a painted frame with a 36-cell
+        # sentence wrapped inside a 96-cell pane (QA round 1, Q1 caught exactly
+        # this row: `OlderHistoryNotice box=96 authored at 80`).
+        notice = OlderHistoryNotice(RESUME_OLDER_NOTICE, fold_width=fold_width)
         self._resume_head_notice = notice
         self._append_block(notice)
         appended = True
