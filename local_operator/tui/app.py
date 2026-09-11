@@ -1119,15 +1119,44 @@ class _PagingLease:
     will never complete — a wedged owner socket that no disconnect event
     reaches — so the next such request retires it rather than standing down
     against a gate that nothing will ever release. A holder that HAS mounted
-    is merely settling, and keeps its gate (F1): a dropped ``insert_blocks``
-    settle is a TranscriptView defect outside this path, and breaking that
-    lease would re-consume a cursor whose rows are already painted. A fetch
-    that has not yet returned is indistinguishable from a wedge, so the
-    request is also the reader's way out of a hung wait.
+    is merely settling, and keeps its gate (F1): breaking that lease would
+    re-consume a cursor whose rows are already painted. A fetch that has not
+    yet returned is indistinguishable from a wedge, so the request is also
+    the reader's way out of a hung wait.
+
+    ``mounted_view`` is what makes "merely settling" a CHECKABLE claim rather
+    than an assumption. A settling lease is released by the callback
+    ``insert_blocks`` scheduled on that view; if the view's message pump is
+    gone, that callback can never run and the lease is unsettleable — the
+    live-lock this field exists to make recoverable. ``insert_blocks`` now
+    honours its ``on_settled`` contract even on a closing pump, so no
+    first-party path should reach that state; this is the total answer for
+    the state machine rather than a second implementation of the release,
+    and it is why the escape reads the VIEW's liveness instead of a timeout.
     """
 
     source_token: str
     mounted: bool = False
+    mounted_view: Any | None = None
+
+    def can_settle(self) -> bool:
+        """Whether the callback that would release this lease can still run.
+
+        An unmounted lease is a fetch in flight: its release comes from the
+        fetch's own completion, not from a view, so it is never declared
+        unsettleable here (``_break_abandoned_paging_lease`` owns that case).
+        A mounted lease is answered by the view it painted into: a widget
+        whose pump is closed will never deliver another callback, so a gate
+        waiting on one is waiting forever.
+        """
+        if not self.mounted:
+            return True
+        view = self.mounted_view
+        if view is None:
+            return True
+        return bool(getattr(view, "is_mounted", True)) and not (
+            getattr(view, "_closing", False) or getattr(view, "_closed", False)
+        )
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -8829,6 +8858,17 @@ class OperatorApp(App[None]):
                 # including one started before a switch away and back. Filling
                 # resumes from that transaction's own settle callback rather
                 # than sending a second request against the same cursor (F1).
+                #
+                # Not a silent return, though: this attempt is over, and
+                # leaving `_resume_fill_active` set would tell
+                # `_reconcile_head_notice` a fill is still on its way to a
+                # better frame, which is the R6 skip — so the row keeps
+                # whatever copy it had rather than describing the geometry it
+                # actually has. The holder's own settle re-enters the fill
+                # (that is why filling is not restarted here); what this owes
+                # is an honest row in the meantime (AC3).
+                self._resume_fill_active = False
+                self._reconcile_head_notice()
                 return
             self.run_worker(
                 self._fetch_older_display_page(source, lease, on_settled=settled),
@@ -8919,8 +8959,12 @@ class OperatorApp(App[None]):
             # geometry (UX U1) and "click to load" looks idle while a load is
             # already underway (UX U3 / D2). Loading copy until a page mounts
             # is the honest state; a second click or ctrl+home may still
-            # retire the lease. A holder that HAS mounted is merely settling
-            # and falls through so R6's skip still applies.
+            # retire the lease. A holder that HAS mounted falls through so
+            # R6's skip still applies — either it is settling (its release is
+            # on its way) or its view is gone, in which case the ordinary
+            # "scroll up"/"click to load" copy is once again TRUE: an explicit
+            # ask retires an unsettleable lease (`_PagingLease.can_settle`)
+            # and proceeds to a real fetch rather than standing down.
             self._restate_head_notice(
                 notice,
                 RESUME_AUDIT_LOADING_NOTICE if audit else RESUME_LOADING_NOTICE,
@@ -9615,8 +9659,28 @@ class OperatorApp(App[None]):
         the gesture should now proceed to a fresh fetch.
         """
         lease = self._paging_leases.get(source.token)
-        if lease is None or lease.mounted:
+        if lease is None:
             return False
+        if lease.mounted and lease.can_settle():
+            # Merely settling, and its release can still arrive. Standing down
+            # is correct here and retiring would re-consume a cursor whose
+            # rows are already painted (F1).
+            return False
+        # Either nothing was ever mounted (the wedged-fetch case above), or a
+        # page WAS mounted into a view whose pump is gone, so the callback
+        # that releases this lease can never run. The second is the live-lock
+        # AC1 forbids: without this the gate stayed shut for the life of the
+        # app, `_resume_paging` stood every gesture down, and the head notice
+        # went on advertising a control that could not answer. The lease is
+        # keyed by SOURCE TOKEN, which outlives any one view, so a reader
+        # returning to that conversation inherited the dead gate too.
+        #
+        # Safe for the same reason the unmounted case is: the retired lease
+        # loses ownership, so a late completion releases nothing and publishes
+        # nothing. It is not a lost page either — the rows this lease mounted
+        # are already in `_resume_mounted_ids`, and the id dedupe in
+        # `_mount_older_resume_page` drops any that a re-issue delivers twice.
+        #
         # Cancel the wedged fetch's worker so its coroutine unwinds through
         # its own `finally` (which now releases nothing, having lost the gate)
         # rather than lingering against the retired lease.
@@ -9834,11 +9898,24 @@ class OperatorApp(App[None]):
             # are still answering must see a working transaction, not a
             # wedge. Mutated on this object so identity (F1) is unchanged.
             lease.mounted = True
+            # WHICH view owes this lease its release, so "still settling" can
+            # be checked rather than assumed. `insert_blocks` schedules the
+            # releasing callback on this widget; a later ask asserting the
+            # lease is merely settling is only entitled to stand down while
+            # that widget can still deliver it (`_PagingLease.can_settle`).
+            lease.mounted_view = transcript
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
             # Hidden-only pages still yield; otherwise initial fill projects
             # several raw pages synchronously without letting input run.
-            transcript.call_after_refresh(release_gate)
+            #
+            # The SAME unkept promise as the insert path: `call_after_refresh`
+            # refuses on a closing pump and returns False rather than raising,
+            # so a hidden-only page mounted against a view that is going away
+            # left this source's lease held forever. Yield when the pump can
+            # still yield; release inline when it cannot.
+            if not transcript.call_after_refresh(release_gate):
+                release_gate()
 
     def _collect_resume_page_blocks(self, page: list[Any]) -> list[Any]:
         """Build the blocks for one deferred page WITHOUT mounting them.

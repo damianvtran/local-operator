@@ -1749,3 +1749,129 @@ async def test_a_user_aborted_call_restores_the_duration_it_ran_for() -> None:
     assert cards[0]._state == "interrupted"
     assert cards[0]._duration == pytest.approx(2.5)
     assert "2.5s" in cards[0]._build_row(100).plain
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_insert_settle_still_releases_the_paging_gate() -> None:
+    """``insert_blocks`` owes ``on_settled`` even when its refresh never comes.
+
+    THE DEFECT THIS PINS. ``call_after_refresh`` is ``post_message``, and
+    ``post_message`` RETURNS FALSE for a pump that is closing or closed — it
+    does not raise and it does not queue. ``insert_blocks`` ignored that
+    return, which made ``on_settled`` a promise it could silently fail to
+    keep. Its one production caller is ``_mount_older_resume_page``, which
+    hands it the release of the single-flight paging lease AFTER flagging
+    that lease ``mounted``. So a dropped settle stranded the lease in
+    ``_paging_leases`` permanently:
+
+    * ``_resume_paging`` stayed True for the source token, which outlives any
+      one view, so a reader returning to that conversation inherited it;
+    * ``_check_resume_page`` returned at ``not in_zone or _resume_paging``;
+    * ``_break_abandoned_paging_lease`` refused, by design, to retire a
+      MOUNTED lease;
+    * ``_reconcile_head_notice`` paints loading copy only for an UNMOUNTED
+      lease, so the row went on saying "older messages above".
+
+    The reader is then left with a control that answers nothing, for the life
+    of the app — reproduced against the operator's real 731-row journal, where
+    five clicks and ``ctrl+home`` all moved zero rows.
+
+    Reached here the way a real teardown reaches it: refuse exactly the settle
+    the insert schedules, once, which is the same False Textual returns when
+    ``_release_sidebar_preparation`` removes a view under an in-flight page.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        token = app._interaction.token
+        assert app._resume_pending_head, "nothing deferred: the gate cannot be armed"
+        assert token not in app._paging_leases
+
+        real = view.call_after_refresh
+        refused = {"hit": False}
+
+        def refuse(callback, *args, **kwargs):
+            if not refused["hit"] and getattr(callback, "__name__", "") == "settle_then_restore":
+                refused["hit"] = True
+                return False
+            return real(callback, *args, **kwargs)
+
+        view.call_after_refresh = refuse  # type: ignore[assignment]
+        app._mount_older_resume_page()
+        view.call_after_refresh = real  # type: ignore[assignment]
+        for _ in range(80):
+            await pilot.pause()
+
+        assert refused["hit"], "the settle was never refused; the hazard was not armed"
+        # THE INVARIANT: the gate is open. Pre-fix this held a mounted lease
+        # forever and every assertion below failed in sequence.
+        assert token not in app._paging_leases
+        assert app._resume_paging is False
+
+        # And the affordance still answers, which is the user-visible half:
+        # the head notice is a control, and activating it must make the head
+        # progress rather than stand down against a gate nothing will release.
+        notice = app._resume_head_notice
+        assert isinstance(notice, OlderHistoryNotice)
+        before = len(app._resume_pending_head)
+        blocks_before = len(view.blocks())
+        notice.post_message(OlderHistoryNotice.Requested(notice))
+        for _ in range(120):
+            await pilot.pause()
+        assert (
+            len(app._resume_pending_head) < before
+        ), "activating the head notice after a dropped settle loaded nothing"
+        assert len(view.blocks()) > blocks_before
+
+
+@pytest.mark.asyncio
+async def test_an_unsettleable_mounted_lease_is_recoverable_by_an_explicit_ask() -> None:
+    """AC1's other half: a gate whose release provably cannot arrive.
+
+    ``_break_abandoned_paging_lease`` refuses a MOUNTED lease because a holder
+    that has painted rows is normally just settling, and retiring it would let
+    a second fetch re-consume a cursor whose rows are already on screen (F1).
+    That reasoning is sound only while the settle can still run. A lease
+    mounted into a view whose pump is gone can never be released by it, and
+    the old predicate could not tell the two apart — so it stood the reader
+    down forever rather than for a frame.
+
+    ``_PagingLease.can_settle`` makes that a CHECKABLE question by recording
+    which view owes the release, so the state machine is total: every "no" is
+    either recoverable or honestly reported.
+
+    The F1 guarantee is pinned in the same breath — a mounted lease whose view
+    is alive is still refused, which is what
+    ``test_a_mounted_lease_survives_a_second_click`` asserts from the other
+    side.
+    """
+    session = FakeSession()
+    session._history = _agentic_history(200, followups=1)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _wait_for_resume(pilot, app)
+        for _ in range(60):
+            await pilot.pause()
+        view = app.query_one(TranscriptView)
+        source = app._interaction
+
+        lease = app._acquire_paging_lease(source)
+        assert lease is not None
+        lease.mounted = True
+        lease.mounted_view = view
+        # A live view owes a release that can still arrive: refuse (F1).
+        assert lease.can_settle() is True
+        assert app._break_abandoned_paging_lease(source) is False
+        assert app._paging_leases.get(source.token) is lease
+
+        # The same lease against a view that can never deliver it again.
+        await view.remove()
+        assert lease.can_settle() is False
+        assert app._break_abandoned_paging_lease(source) is True
+        assert source.token not in app._paging_leases
+        assert app._resume_paging is False
