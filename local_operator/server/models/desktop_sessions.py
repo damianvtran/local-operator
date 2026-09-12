@@ -33,6 +33,48 @@ class SessionList(BaseModel):
     limit: int = 100
 
 
+class SessionSearchRow(BaseModel):
+    """One past conversation the search admitted, and WHY it did.
+
+    Deliberately not a :class:`SessionRow`: this is the answer to a SEARCH, so
+    it carries the two facts only the search can know and a renderer cannot
+    recompute. ``rank`` is the relevance tier the row matched in (0 name, 1 id,
+    2 body, 3 soft — see ``local_operator.session.session_search``), decided
+    against the body digest index, which the client does not have; the order of
+    ``sessions`` already follows it, but sending the tier lets a client merge
+    these rows into a list it holds locally without losing the ordering. And
+    ``body_match`` says the conversation is why the row surfaced, so a client
+    can label it instead of showing a row with no visible reason for being in
+    the results.
+
+    ``name``/``mtime``/``forked`` come along for the same reason the phone's
+    payload carries them: a client that has never listed this session (a store
+    larger than its own page, a row created since its last poll) can still
+    render and open it.
+    """
+
+    id: str
+    name: str
+    mtime: float
+    forked: bool = False
+    rank: int
+    body_match: bool = False
+
+
+class SessionSearch(BaseModel):
+    """A search answer: the matching rows, best first, and the query they
+    answer.
+
+    ``query`` is echoed rather than assumed: a client debounces keystrokes, so
+    responses arrive out of order, and it must be able to tell which of its
+    queries this is the answer to without trusting arrival order.
+    """
+
+    sessions: list[SessionSearchRow]
+    query: str = ""
+    limit: int = 100
+
+
 class CreatedSession(BaseModel):
     binding: dict[str, str | None] = Field(default_factory=dict)
     session_id: str

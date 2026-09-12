@@ -28,6 +28,14 @@ async def capabilities():
                 "profile_catalogue": 1,
                 "team_catalogue": 1,
                 "session_catalogue": 2,
+                # Searching past conversations by their CONTENT (name, id, exact
+                # body, bounded soft match) rather than by the page a client
+                # already holds. Its own key rather than a bump of
+                # `session_catalogue`: a client can render the catalogue
+                # perfectly well against a backend whose search route does not
+                # exist, and gating the list on the search version would hide a
+                # working surface because a newer one is missing.
+                "session_search": 1,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
                 # Named for this map's convention (`<subsystem>: <version>`); the

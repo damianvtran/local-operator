@@ -2628,57 +2628,40 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
 def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     """Past sessions matching ``query`` by name, id, or conversation body.
 
-    Mirrors the TUI picker's two channels: a name/id substring match, and a
-    body match through the cached search index (re-digested only for
-    transcripts that changed). A row that matched ONLY on its body is marked
-    ``body_match`` so the UI can say why it surfaced — otherwise it reads as a
-    result the filter had no reason to return.
+    One call into ``session_search.search_store``, which is the SAME admission,
+    soft-matching and ranking the TUI's ``/resume`` picker and the desktop chat
+    search use. Before this it was a private second implementation: name/id and
+    an EXACT body substring only, no typo/prefix tier and no ranking, so a query
+    the picker resolved confidently found nothing on the phone. The phone's own
+    composition is only what it RENDERS from the answer — the dict shape below
+    is the wire format, not a second filter.
+
+    ``body_match`` marks a row the conversation surfaced (exact body, a past
+    name, or a soft match) rather than its visible name, so the phone can say
+    why it is on screen instead of showing a row with no visible reason.
+
+    No try/except around the call on purpose. A search that silently answers
+    "nothing matched" when the store could not be read is indistinguishable
+    from a correct empty result, and that is the failure this path exists to
+    avoid; ``build_index`` already degrades on its own (an absent or corrupt
+    cache costs a rebuild, never a raise), so the only exceptions reaching here
+    describe a store that genuinely could not be walked, which belongs in the
+    response as an error.
     """
     from local_operator.paths import config_dir
-    from local_operator.resume import fork_haystack, recent_session_rows
-    from local_operator.session.search_index import build_index, search_digests
+    from local_operator.session.session_search import search_store
 
-    cfg = config_dir()
-    rows = recent_session_rows(cfg, limit=200)
-    needle = query.strip().lower()
-    if not needle:
-        return [
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                "body_match": False,
-                "forked": r.forked,
-            }
-            for r in rows[:limit]
-        ]
-    try:
-        digests = build_index(cfg, [r.id for r in rows])
-        body_hits = search_digests(digests, needle)
-    except Exception:  # noqa: BLE001 — a broken index degrades to name/id only
-        body_hits = set()
-    out = []
-    for r in rows:
-        # Through the picker's own composition, so typing `fork` on the phone
-        # finds the rows the phone visibly tags — the same what-is-shown-is-
-        # searchable invariant `resume.fork_haystack` documents.
-        name_hit = needle in fork_haystack(r).lower() or needle in r.id.lower()
-        body_hit = r.id in body_hits
-        if not (name_hit or body_hit):
-            continue
-        out.append(
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                # Marked only when the name/id did NOT explain the match.
-                "body_match": body_hit and not name_hit,
-                "forked": r.forked,
-            }
-        )
-        if len(out) >= limit:
-            break
-    return out
+    matches = search_store(config_dir(), query, limit=limit)
+    return [
+        {
+            "id": match.row.id,
+            "name": match.row.name,
+            "mtime": match.row.mtime,
+            "body_match": match.body_match,
+            "forked": match.row.forked,
+        }
+        for match in matches
+    ]
 
 
 def _tmp_dir() -> str:
