@@ -188,6 +188,12 @@ def report_from_dict(data: Any) -> UsageReport | None:
                 resets_at_ms=limit.get("resets_at_ms"),
                 tier=str(limit.get("tier", "")),
                 shared=bool(limit.get("shared", False)),
+                # Decoded explicitly like every other field: this rebuild is
+                # field-by-field rather than ``UsageLimit(**limit)``, so a new
+                # field omitted here is silently dropped on the CACHED path
+                # while the live fetch still carries it — the annotation would
+                # appear on a cold `/usage` and vanish on every warm one.
+                detail=str(limit.get("detail", "")),
             )
             for limit in data.get("limits", [])
         ]

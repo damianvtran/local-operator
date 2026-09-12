@@ -29,6 +29,8 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.usage_panel import (
     BAR_UNKNOWN,
+    MARK_KNOWN,
+    MARK_UNKNOWN,
     PANEL_MAX_WIDTH,
     PANEL_MIN_WIDTH,
     PANEL_PADDING_ROWS,
@@ -115,6 +117,115 @@ def test_a_remaining_only_balance_renders_its_number() -> None:
     assert "12.50 USD left" in joined, lines
     assert "70 left" in joined, lines
     assert "voucher $2.50 + cash $10.00" in joined, lines
+
+
+def _balance(limit_id: str, label: str, remaining: float, **kwargs) -> UsageLimit:
+    """A balance-only row: a `remaining` with no denominator to derive from."""
+    return UsageLimit(
+        id=limit_id,
+        label=label,
+        amount=UsageAmount(remaining=remaining, unit="usd"),
+        window="lifetime",
+        **kwargs,
+    )
+
+
+def test_a_statused_balance_row_is_drawn_as_a_number_we_have() -> None:
+    """The mark said "not reported" for a balance the endpoint had just
+    reported: a balance-only amount has no fraction BY CONSTRUCTION, so keying
+    the mark on the fraction could only ever draw it hollow."""
+    lines = _lines([_report(_balance("deepseek:balance:usd", "Balance (USD)", 120.0, status="ok"))])
+    row = next(line for line in lines if "Balance (USD)" in line)
+    assert row.startswith(f"{MARK_KNOWN} "), row
+    # The BAR stays dotted: a proportion genuinely is unknown here.
+    assert BAR_UNKNOWN in row, row
+
+
+def test_a_row_with_no_status_at_all_is_still_drawn_as_unknown() -> None:
+    """The mark keys on knowledge, not on having a row: a provider that reports
+    neither a fraction nor a status has told us nothing."""
+    lines = _lines([_report(UsageLimit(id="a:?", label="Mystery", amount=UsageAmount(unit="usd")))])
+    row = next(line for line in lines if "Mystery" in line)
+    assert row.startswith(f"{MARK_UNKNOWN} "), row
+
+
+def test_the_footer_does_not_call_a_reported_balance_unreported() -> None:
+    """`2 not reported` for two balances the panel is printing was the footer
+    contradicting the rows directly above it."""
+    stats = collect_stats(
+        [
+            _report(
+                _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok"),
+                _balance("deepseek:balance:usd", "Balance (USD)", 120.0, status="ok"),
+                provider="deepseek",
+            )
+        ]
+    )
+    assert stats.unknown == 0
+    assert stats.describe() == "2 windows"
+
+
+def test_an_exhausted_balance_reads_as_exhausted_in_the_tally() -> None:
+    """A dead account and a funded one must not tally alike."""
+    stats = collect_stats(
+        [
+            _report(
+                _balance("deepseek:balance:usd", "Balance (USD)", 0.0, status="exhausted"),
+                provider="deepseek",
+            )
+        ]
+    )
+    assert (stats.exhausted, stats.unknown) == (1, 0)
+    assert stats.describe() == "1 window · 1 exhausted"
+
+
+def test_a_limit_detail_renders_directly_under_its_own_row() -> None:
+    """The split is an annotation on one meter, so it has to sit against that
+    meter rather than at the end of the block."""
+    lines = _lines(
+        [
+            _report(
+                _balance(
+                    "deepseek:balance:usd",
+                    "Balance (USD)",
+                    120.0,
+                    status="ok",
+                    detail="100.00 USD paid · 20.00 USD granted",
+                ),
+                _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok"),
+                provider="deepseek",
+            )
+        ]
+    )
+    index = next(i for i, line in enumerate(lines) if "Balance (USD)" in line)
+    assert lines[index + 1].strip() == "100.00 USD paid · 20.00 USD granted", lines
+    # And the row without a split gets no line of its own.
+    assert lines[index + 2].lstrip().startswith(MARK_KNOWN), lines
+
+
+def test_a_detail_is_never_kept_without_the_meter_it_annotates() -> None:
+    """The row and its detail are ONE cut unit. Compaction slices at cut points,
+    so a cut between them would leave `100.00 USD paid` floating under whatever
+    meter happened to precede it."""
+    report = _report(
+        _balance("deepseek:balance:cny", "Balance (CNY)", 863.0, status="ok", detail="CNY split"),
+        _balance("deepseek:balance:usd", "Balance (USD)", 120.0, status="ok", detail="USD split"),
+        provider="deepseek",
+    )
+    body = build_usage_body([report], WIDTH, 0.0)
+    for index in sorted(body.details):
+        assert index not in body.cuts, (index, sorted(body.cuts))
+
+    start, _ = body.blocks[0]
+    panel = UsagePanel()
+    panel._offset = start
+    for budget in range(1, len(body.lines) + 1):
+        window, _ = panel._window_rows(body, budget)
+        rows = [row.plain for row in window]
+        text = "\n".join(rows)
+        for currency in ("CNY", "USD"):
+            if f"{currency} split" in text:
+                assert f"Balance ({currency})" in text, (budget, rows)
 
 
 def test_amounts_print_the_unit_label_not_the_raw_key() -> None:

@@ -445,7 +445,13 @@ def _limit_row(  # noqa: ANN001
 
     fraction = limit.amount.fraction()
     row = Text()
-    row.append(f"{MARK_KNOWN if fraction is not None else MARK_UNKNOWN} ", style=mark_style)
+    # The mark keys on whether the WINDOW's state is known, not on whether a
+    # proportion could be computed. A balance-only row has no denominator by
+    # construction, so keying the mark on `fraction` drew every reported
+    # balance as a figure we do not have. The BAR still keys on the fraction:
+    # the proportion genuinely is unknown there, and dots say so honestly.
+    known = limit.effective_status() != "unknown"
+    row.append(f"{MARK_KNOWN if known else MARK_UNKNOWN} ", style=mark_style)
 
     label = limit.label
     if limit.tier:
@@ -672,12 +678,19 @@ class UsageBody:
     keeps that decision with the code that knows which row is which — a
     substring test would silently start matching an account whose identity
     happens to contain the copy.
+
+    ``details`` holds the LINE INDICES of limit-detail rows, identified the same
+    way and for the same reason: a detail is the second row of a two-row cut
+    unit whose first row is the meter it annotates, and compaction keeps or
+    drops the pair together. ``100.00 USD paid · 20.00 USD granted`` stranded
+    under some other provider's meter is worse than not showing the split.
     """
 
     lines: list[Text]
     cuts: frozenset[int]
     blocks: tuple[tuple[int, int], ...] = ()
     notes: frozenset[int] = frozenset()
+    details: frozenset[int] = frozenset()
 
 
 def build_usage_body(  # noqa: ANN001
@@ -702,6 +715,7 @@ def build_usage_body(  # noqa: ANN001
     cuts: set[int] = set()
     blocks: list[tuple[int, int]] = []
     notes: set[int] = set()
+    details: set[int] = set()
     if not reports:
         return UsageBody(lines, frozenset({0}))
 
@@ -750,9 +764,22 @@ def build_usage_body(  # noqa: ANN001
         lines.append(Text())
         for limit in report.limits:
             lines.append(_limit_row(limit, columns, now_ms, degraded=bool(account_note)))
+            detail = getattr(limit, "detail", "")
+            if detail:
+                # Indented under its meter and truncated to the same body width
+                # as every other composed row, so a long split loses its tail
+                # rather than widening the card.
+                row = Text(f"{TIER_INDENT}{detail}", style=dim)
+                row.truncate(max(1, width), overflow="ellipsis")
+                lines.append(row)
+                details.add(len(lines) - 1)
+            # The cut point goes AFTER the detail, never between it and its
+            # meter: `cuts` is where a short viewport may stop, so cutting
+            # between them is what would leave an annotation with nothing to
+            # annotate. One cut unit, no new glue mechanism.
             cuts.add(len(lines))
         blocks.append((block_start, len(lines)))
-    return UsageBody(lines, frozenset(cuts), tuple(blocks), frozenset(notes))
+    return UsageBody(lines, frozenset(cuts), tuple(blocks), frozenset(notes), frozenset(details))
 
 
 class UsagePanel(Static):
@@ -1606,18 +1633,38 @@ class UsagePanel(Static):
         meter can show the sentence that says the meter is old; dropping a
         *meter* to keep it is the honest trade, because an unlabelled stale
         number is worse than one fewer number.
+
+        Compaction works in CUT UNITS, not rows: a meter carrying a detail line
+        is two rows the cut set marks as one unit, and a budget that cannot
+        hold both drops the pair rather than keeping either half. Splitting
+        them would show a credit split with no meter, or a meter whose
+        annotation silently belongs to the row above it.
         """
         for start, end in body.blocks:
             if self._offset == start and end - start > budget:
                 if budget <= 1:
                     return [body.lines[start]], end
-                indices = [index for index in range(start + 1, end) if index + 1 in body.cuts]
-                notes = [body.lines[i] for i in indices if i in body.notes]
-                meters = [body.lines[i] for i in indices if i not in body.notes]
-                # Notes first, then the last meters that still fit beside them.
-                room = max(0, budget - 1 - len(notes))
-                kept = [*notes[: budget - 1], *meters[-room:]] if room else notes[: budget - 1]
-                return [body.lines[start], *kept], end
+                tails = [index for index in range(start + 1, end) if index + 1 in body.cuts]
+                # A detail row is the tail of its cut unit but says nothing
+                # without the meter directly above it, so the pair travels as
+                # one. Every other row is its own unit, exactly as before.
+                units = [[i - 1, i] if i in body.details else [i] for i in tails]
+                notes = [unit for unit in units if unit[0] in body.notes]
+                meters = [unit for unit in units if unit[0] not in body.notes]
+                notes = notes[: budget - 1]
+                # Notes first, then as many WHOLE trailing meter units as the
+                # rows left over hold — from the end, because the meters nearest
+                # the tail are the ones the scroll position is asking for. A
+                # pair that does not fit is dropped entire rather than halved.
+                room = budget - 1 - sum(len(unit) for unit in notes)
+                kept: list[list[int]] = []
+                for unit in reversed(meters):
+                    if len(unit) > room:
+                        break
+                    kept.insert(0, unit)
+                    room -= len(unit)
+                rows = [index for unit in (*notes, *kept) for index in unit]
+                return [body.lines[start], *(body.lines[i] for i in rows)], end
         end = self._window_end(body, budget)
         return body.lines[self._offset : end], end
 

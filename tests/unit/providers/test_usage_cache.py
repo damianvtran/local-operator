@@ -70,6 +70,17 @@ def test_report_round_trips_through_the_wire_format() -> None:
     assert limit.shared is True
 
 
+def test_round_trip_keeps_a_limits_detail_line() -> None:
+    """The decoder rebuilds a limit field by field rather than by splatting the
+    dict, so a field it forgets is dropped on the CACHED path only: the credit
+    split would show on a cold `/usage` and vanish on every warm one."""
+    report = _report()
+    report.limits[0].detail = "100.00 USD paid · 20.00 USD granted"
+    restored = report_from_dict(report_to_dict(report))
+    assert restored is not None
+    assert restored.limits[0].detail == "100.00 USD paid · 20.00 USD granted"
+
+
 def test_report_from_dict_rejects_garbage_as_a_miss() -> None:
     # A schema change or a corrupt row must read as a cache MISS, never an
     # exception on the /usage path.
