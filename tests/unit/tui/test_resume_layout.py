@@ -13,6 +13,7 @@ from local_operator.tui.widgets.session_picker import (
     LIST_MIN,
     NAME_MAX,
     NAME_P75,
+    PICKER_MIN_WIDTH,
     PREVIEW_MAX,
     PREVIEW_MIN,
     STACK_BELOW_COLS,
@@ -47,20 +48,63 @@ def test_the_name_field_never_narrows_as_the_terminal_grows() -> None:
     breakpoint value can satisfy the invariant. ``NAME_MAX`` makes both layouts
     saturate at the same value, so past the breakpoint the two are equal. This
     fails against any breakpoint-only fix.
+
+    THE SWEEP STARTS AT :data:`PICKER_MIN_WIDTH`, not at 80, and that floor is
+    the difference between a test and a decoration. A review re-introduced the
+    conditional-gutter form of the D16 bug and swept 80-240: **zero shrinks**,
+    green, the invariant apparently intact. The bug's whole footprint lives
+    below 80, where the ``show_id`` flip moves — so a sweep that starts at 80
+    passes the exact defect it exists to prevent.
+
+    THE ONE PERMITTED EXCEPTION is the ``show_id`` flip, and it is pinned here
+    rather than excused by a floor. When the id column first fits, the name
+    gives up its 14 cells: a real narrowing, and a deliberate trade — the id is
+    what a user copies into ``/resume <id>``, so it appears as soon as there is
+    room. Pinning it means asserting THREE things a regression would break: it
+    happens at exactly one width, that width is identical on both query paths,
+    and nothing else in 30-240 narrows at all. The path-identity clause is what
+    catches the conditional gutter specifically — with that bug the flip sits
+    at 70 unfiltered and 72 while querying, because the reservation differs by
+    query state, so a test that merely allowed "one shrink somewhere" would
+    still wave it through.
     """
-    # BOTH query states, because they are two different reservations and only
-    # one of them was covered when this shipped. With a query active the soft
-    # gutter is reserved, and at the flip that reservation came out of the name
-    # field on the side-by-side side but not on the stacked side — 64 -> 63 at
-    # 158 -> 159, one shrink event, invisible to a no-query sweep.
+    flips: dict[bool, list[int]] = {}
     for querying in (False, True):
-        widths = [plan_layout(width, 40, querying=querying).name_width for width in range(80, 241)]
+        widths = {
+            width: plan_layout(width, 40, querying=querying)
+            for width in range(PICKER_MIN_WIDTH, 241)
+        }
         shrinks = [
-            (width, before, after)
-            for width, before, after in zip(range(81, 241), widths, widths[1:])
-            if after < before
+            (width, widths[width - 1].name_width, widths[width].name_width)
+            for width in range(PICKER_MIN_WIDTH + 1, 241)
+            if widths[width].name_width < widths[width - 1].name_width
         ]
-        assert shrinks == [], f"name narrowed as the terminal grew (querying={querying}): {shrinks}"
+        # Every shrink must BE the id-column flip, and there must be exactly one.
+        for width, before, after in shrinks:
+            assert not widths[width - 1].show_id and widths[width].show_id, (
+                f"name narrowed at {width} without the id appearing "
+                f"(querying={querying}): {before} -> {after}"
+            )
+        assert len(shrinks) == 1, (
+            f"expected exactly one narrowing — the id flip — over "
+            f"{PICKER_MIN_WIDTH}-240 (querying={querying}), got {shrinks}"
+        )
+        flips[querying] = [
+            width
+            for width in range(PICKER_MIN_WIDTH + 1, 241)
+            if widths[width].show_id and not widths[width - 1].show_id
+        ]
+        assert flips[querying] == [shrinks[0][0]], (
+            f"the id column flips at {flips[querying]} but the name narrows at "
+            f"{shrinks[0][0]} (querying={querying}) — those must be the same width"
+        )
+
+    assert flips[False] == flips[True], (
+        f"the id column appears at a different width depending on whether a "
+        f"query is active ({flips[False]} unfiltered vs {flips[True]} querying) — "
+        f"the reservation is leaking the query state into the layout, which is "
+        f"the conditional-gutter form of D16"
+    )
 
 
 def test_the_breakpoint_is_where_side_by_side_reaches_the_cap() -> None:

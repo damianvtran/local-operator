@@ -96,23 +96,12 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 
 logger = logging.getLogger(__name__)
 
-#: Width the card will take when the terminal allows it, and the floor it will
-#: not go below. Both are CELL counts of the card's content, inside its
-#: padding; :meth:`SessionPickerScreen._card_width` resolves the actual value
-#: against the screen every paint.
-PICKER_MAX_WIDTH = 74
+#: The narrowest terminal this picker still draws something usable in. The
+#: full-screen redesign has no maximum to pair with it — the panes take the
+#: terminal — but the floor survives because the shed ladders are tested
+#: against it: it is the width at which the key hints must still state the way
+#: out (``test_the_way_out_is_stated_at_every_width_the_picker_supports``).
 PICKER_MIN_WIDTH = 30
-
-#: Cells the card leaves between itself and the terminal's edges, on top of its
-#: own padding, so it reads as floating rather than as a panel bolted to the
-#: side.
-PICKER_WIDTH_MARGIN = 6
-
-#: Cells of the card's own padding on EACH side, mirroring the horizontal half
-#: of ``padding: 1 2``. Distinct from :data:`CARD_PADDING_ROWS`: a cell budget
-#: and a row budget happen to be the same number here, and spending one for
-#: the other is a bug waiting for the stylesheet to change.
-PICKER_PADDING_CELLS = 2
 
 #: Name column floor. Below this a name is not identifiable, so the id and then
 #: the age give up their cells first — they are lookup keys, and the name is
@@ -130,11 +119,14 @@ NAME_MIN_CELLS = 16
 #: which evicts the older parent before its newer children — "no previous
 #: sessions" was false and told the user nothing about why.
 #:
-#: It must also FIT: this string is the card's own empty body, and the card
-#: is capped at :data:`PICKER_MAX_WIDTH` cells. The first wording ran to 76
-#: cells and hung two past the rule at full width — and much further on a
-#: narrow terminal, where every neighbouring row sheds cells to fit. Anything
-#: edited here is measured against that cap, not eyeballed.
+#: It must also FIT. The picker is full-screen now, so there is no fixed cap to
+#: measure against — but the constraint did not go away, it moved: this string
+#: is the RESULTS PANE's empty body, and that pane is a fraction of the
+#: terminal (``plan_layout``). The first wording ran to 76 cells and hung two
+#: past the rule of the 74-cell card this replaced; at 80 columns the pane is
+#: narrower still. It wraps rather than truncating (``_wrap_cells``), because
+#: the "subagent runs are not listed" clause is the EXPLANATION and not
+#: decoration. Anything edited here is measured against the narrow case.
 RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are not listed"
 
 #: Below this terminal width the two panes STACK vertically.
@@ -179,6 +171,18 @@ STACK_BELOW_COLS = 161
 #: exceed it: at the cap nothing truncates, so equal fields also means equally
 #: zero truncation rather than equally bad. Design round 3 measured the result:
 #: capacity 53 → 69 → 69 → 69 → 69 across 80 → 180, zero shrink events.
+#:
+#: THE ONE EXCEPTION TO "NEVER NARROWS", stated here because an invariant with
+#: an undocumented exception is an invariant nobody can check: the name DOES
+#: give up 14 cells at the width where the id column first fits (72 on this
+#: store's measurements). That is a deliberate trade rather than the D16
+#: defect — the id is the field a user copies into ``/resume <id>``, so it
+#: appears as soon as there is room for it — and it is PINNED by
+#: ``test_the_name_field_never_narrows_as_the_terminal_grows`` rather than
+#: excused: that test asserts the narrowing happens at exactly one width, that
+#: the width is the id flip, and that it is the same width whether or not a
+#: query is active. The last clause is the load-bearing one; see
+#: :data:`SOFT_GUTTER_CELLS`.
 NAME_MAX = 64
 
 #: p75 of the 141 real session names (median 33, p90 43, p95 46). Gates whether
@@ -214,20 +218,15 @@ LIST_MIN = 6
 #: leaving the cursor exactly as stable.
 _PRECISE_HITS_ENOUGH = 3
 
-#: Non-row lines the card always draws: header, rule, blank spacer, the
-#: position counter, and the key hints. Reserved UNCONDITIONALLY (the counter
-#: included, even when the list fits) so the height never depends on content
-#: the user is about to change by typing a filter — a footer that appeared and
-#: vanished as the list narrowed would move the card under the cursor.
-CARD_CHROME_ROWS = 5
-
-#: The card's own padding rows, mirroring ``padding: 1 2`` in the stylesheet.
+#: Rows the picker's container costs on top of the lines its panes draw.
+#:
+#: A survivor of the card era, kept because it still has a reader: the
+#: real-stylesheet height test adds it to the composed line count to check
+#: nothing is clipped (``test_the_panes_fit_the_terminal_at_every_height_on_
+#: the_real_stylesheet``). Textual clips SILENTLY — rows past the region are
+#: simply not drawn and nothing reads back that it happened — so that test is
+#: the only thing standing between a layout change and an invisible clip.
 CARD_PADDING_ROWS = 2
-
-#: Share of the terminal the card may occupy, mirroring ``max-height: 80%``.
-#: Kept in step by hand because Textual clips SILENTLY: rows past the cap are
-#: simply not drawn and nothing reads back that it happened.
-CARD_MAX_HEIGHT_FRACTION = 0.8
 
 #: The cursor glyph, matching the command picker's. A caret plus a row ground
 #: rather than a reversed row: the transcript behind this card is dim, and a
@@ -436,6 +435,14 @@ ID_CELLS = 12
 #: unreserved overflowed the pane (measured: a 59-cell row + 3 in a 59-cell
 #: pane) and wrapped it onto its own line, breaking the one-row-per-session
 #: arithmetic the cursor depends on.
+#:
+#: Reserved UNCONDITIONALLY — never "only while a query is active". Making the
+#: reservation depend on the query makes the LAYOUT depend on it too: the id
+#: column then first fits at a different width in each state (70 unfiltered
+#: against 72 querying), and the name field narrows at a width that moves as
+#: the user types. That is the conditional-gutter form of D16, and it is what
+#: ``test_the_name_field_never_narrows_as_the_terminal_grows`` detects by
+#: asserting the flip width is identical on both paths.
 SOFT_GUTTER_CELLS = 2
 
 #: Cells of indent the grep-style context line is drawn at, under its row.
@@ -1671,31 +1678,6 @@ class SessionPickerScreen(ModalScreen[str | None]):
         return None
 
     # -- geometry ------------------------------------------------------------
-    def _screen_size(self) -> tuple[int, int]:
-        """The box the card's ``max-height``/``max-width`` actually resolve in.
-
-        ``self.size`` (this Screen's own CONTENT box), not ``self.app.size``
-        (the terminal). ``Screen { padding: 1 }`` insets the content box by two
-        rows and two cells, so measuring the terminal over-counted the room by
-        exactly that — and since the stylesheet's ``max-height: 80%`` resolves
-        against the content box, the card asked for more rows than the
-        container would draw and Textual clipped the difference SILENTLY, off
-        the bottom, taking the footer with it at every height from 14 to 23.
-        ``UsagePanel`` already measures the screen for the same reason.
-        """
-        try:
-            size = self.size
-            if not size.width or not size.height:  # not laid out yet
-                size = self.app.size
-        except Exception:  # pragma: no cover - only before the app has a screen
-            return 80, 24
-        # Reported HONESTLY. Clamping the width up to ``PICKER_MIN_WIDTH`` here
-        # made a 24-column terminal measure as 30, and every budget derived
-        # from it then overflowed the screen by the difference — the floor
-        # belongs where the preference is applied (``_card_width``), not in the
-        # measurement it is applied to.
-        return max(1, size.width), max(8, size.height)
-
     def _layout(self) -> PickerLayout:
         """The geometry for the CURRENT terminal size.
 
@@ -2544,8 +2526,8 @@ _FOOTER_DROP_ORDER_SCROLLING = ("type", "pgup/pgdn", "↑↓")
 _MARKER_LEGEND: tuple[str, str] = (BODY_MATCH_MARKER.strip(), "matched inside")
 
 #: Where the legends do NOT live: the key row below. The full key-hint row is 69
-#: cells against a card capped at :data:`PICKER_MAX_WIDTH` (74), so a 24-cell
-#: legend could only appear there by evicting a key — and the keys must win,
+#: cells, and the card this replaced was capped at 74, so a 24-cell legend
+#: could only appear there by evicting a key — and the keys must win,
 #: because they OPERATE the card while a legend teaches. Design round 1 resolved
 #: that by ranking the legend above the two disposable hints, which made it
 #: paint on a list that FITS one page and never on one that scrolls; against
@@ -2697,10 +2679,10 @@ def _footer_hints(
     is more than a clipped row says.
 
     KEYS ONLY. The mark legends moved to the counter's row in design round 2 —
-    see :func:`_meta_legends` — because the full key row is 69 cells against a
-    card capped at :data:`PICKER_MAX_WIDTH`, so a legend could only appear here
-    by evicting a key. This function no longer has to choose between teaching a
-    mark and stating how to leave the card.
+    see :func:`_meta_legends` — because the full key row is 69 cells and the
+    card this replaced was capped at 74, so a legend could only appear here by
+    evicting a key. This function no longer has to choose between teaching a
+    mark and stating how to leave the picker.
 
     ``scrolls`` says the list is longer than one page, which REORDERS the shed:
     ``pgup/pgdn`` sheds first on a list that fits one page (paging there is a
