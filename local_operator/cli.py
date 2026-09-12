@@ -452,6 +452,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # QwenCloud console session cookie: the credential the personal Token Plan
+    # usage window needs and no login flow can mint (a browser session cookie
+    # cannot be refreshed headlessly). stdlib-only registration, same rule.
+    qwencloud_parser = subparsers.add_parser(
+        "qwencloud-ticket",
+        help="Store the QwenCloud console session cookie that /usage reads",
+    )
+    qwencloud_actions = qwencloud_parser.add_subparsers(dest="qwencloud_command")
+    qwencloud_actions.add_parser(
+        "set", help="Store the cookie; the value is read from STDIN, never argv"
+    )
+    qwencloud_actions.add_parser(
+        "status", help="Whether a cookie is stored and how old it is; never the value"
+    )
+    qwencloud_actions.add_parser("rm", help="Remove the stored cookie")
+
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
@@ -3706,6 +3722,166 @@ def login_status_command() -> int:
         auth_store.close()
 
 
+def qwencloud_ticket_command(args: argparse.Namespace) -> int:
+    """Store / inspect / remove the QwenCloud console session cookie.
+
+    The value is read from STDIN and never from argv: a command line is
+    readable by any process running as you (`ps`) and lands in shell history.
+    This mirrors `lop secret set NAME`.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore()
+    try:
+        return _qwencloud_ticket_action(getattr(args, "qwencloud_command", None), store)
+    finally:
+        # Same discipline as every sibling command in this file (see
+        # `login_command`, `logout_command`, `login_status_command`): the store
+        # owns a SQLite connection and, lazily, the usage cache's, and a verb
+        # that returns without closing leaks both.
+        store.close()
+
+
+def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
+    """One `qwencloud-ticket` verb, against an already-open store.
+
+    Split from the command so the store's lifetime is owned in exactly one
+    place, and so a test can drive a verb against a temp store it still needs
+    to read assertions from afterwards.
+    """
+    from local_operator.providers.qwencloud_console import (
+        QWENCLOUD_TICKET_STALE_MS,
+        TicketStoreError,
+        delete_ticket,
+        read_ticket_record,
+        store_ticket,
+    )
+
+    if command == "set":
+        if sys.stdin is None or sys.stdin.isatty():
+            print(
+                "lop qwencloud-ticket set: the value is read from stdin, never from "
+                "the command line (argv is readable by any process running as you).\n"
+                "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+                file=sys.stderr,
+            )
+            return 2
+        value = sys.stdin.read()
+        if value.endswith("\n"):
+            value = value[:-1]
+        try:
+            store_ticket(store, value)
+        except TicketStoreError as exc:
+            print(f"lop qwencloud-ticket set: {exc}", file=sys.stderr)
+            return 1
+        # The length is read back as confirmation, but the write already
+        # succeeded -- so a store that cannot be re-read afterwards must not
+        # turn into "(0 characters)", which reads as "nothing was stored" on
+        # the one command whose job is handling the secret. Report the length
+        # written instead, and never a zero after a successful write.
+        try:
+            record = read_ticket_record(store)
+        except TicketStoreError:
+            record = None
+        length = record["length"] if record else len(value.strip())
+        print(f"Stored QwenCloud console ticket ({length} characters).")
+        return 0
+
+    if command == "status":
+        # Shares `rm`'s hazard in a quieter form: reporting "nothing stored"
+        # for an unreadable store would tell the user the cookie is already
+        # gone when it is on disk and readable by anything that can open the
+        # file.
+        try:
+            record = read_ticket_record(store)
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket status: {exc}\n"
+                "  Whether a ticket is stored is UNKNOWN; this is not the same "
+                "as none being stored.",
+                file=sys.stderr,
+            )
+            return 1
+        if record is None:
+            print("No QwenCloud console ticket stored.")
+            print("  printf %s '<TICKET>' | lop qwencloud-ticket set")
+            return 0
+        captured = record.get("captured_at")
+        age_ms = 0
+        if captured:
+            age_ms = int(time.time() * 1000) - int(captured)
+            days = age_ms / 86_400_000
+            age = f"{days:.1f} days old"
+        else:
+            age = "age unknown"
+        print(f"QwenCloud console ticket stored ({record['length']} characters, {age}).")
+        if captured and age_ms > QWENCLOUD_TICKET_STALE_MS:
+            print(
+                "  This is older than a console session usually lasts. If /usage has "
+                "stopped showing the 7 Day Credits window, capture a fresh cookie."
+            )
+        # A `lop /update` or `uv tool upgrade` reinstalls from PyPI and reverts
+        # a locally built console fetcher while leaving this row in place --
+        # a silent "nothing reads it" state. Say so instead of looking healthy.
+        # Probed with getattr rather than a direct import: the symbol is absent
+        # by design in a build without the console fetcher, and an import of a
+        # name that may not exist is a static-analysis error rather than the
+        # runtime question actually being asked ("does this build read it?").
+        try:
+            from local_operator.providers import usage as _usage_module
+
+            has_fetcher = hasattr(_usage_module, "fetch_qwencloud_console_usage")
+        except ImportError:
+            has_fetcher = False
+        if not has_fetcher:
+            print(
+                "  WARNING: this build has no QwenCloud console fetcher, so the stored "
+                "ticket is not read by anything. Reinstall local-operator from a build "
+                "that includes it."
+            )
+        return 0
+
+    if command == "rm":
+        # A revoke that cannot PROVE it worked must not report success. This is
+        # the only mitigation the user has for a full-account cookie held in
+        # plaintext, so "probably gone" is the one answer this command may not
+        # give: it would remove the mitigation and say it had worked.
+        try:
+            removed = delete_ticket(store)
+        except TicketStoreError as exc:
+            print(
+                f"lop qwencloud-ticket rm: {exc}\n"
+                "  The ticket MAY STILL BE STORED. Re-run once the store is "
+                "readable, and revoke the session in the QwenCloud console to "
+                "be certain.",
+                file=sys.stderr,
+            )
+            return 1
+        if not removed:
+            print("No QwenCloud console ticket stored.")
+            return 0
+        print("Removed the stored QwenCloud console ticket.")
+        # The advice belongs HERE and not only on the failure path: someone
+        # revoking this credential is usually doing it because it may be
+        # compromised, and success is the moment they stop worrying. Deleting
+        # the row ends local use, but SQLite can keep the freed page contents
+        # in the freelist until a VACUUM, and the SESSION ITSELF stays valid
+        # server-side regardless -- so this command cannot be the whole answer.
+        print(
+            "  This ends local use of the cookie. The browser session itself is "
+            "still valid until you sign it out in the QwenCloud console — do "
+            "that too if the cookie may have been exposed."
+        )
+        return 0
+
+    print(
+        "usage: lop qwencloud-ticket {set,status,rm}\n"
+        "  printf %s '<TICKET>' | lop qwencloud-ticket set",
+        file=sys.stderr,
+    )
+    return 2
+
+
 _MCP_INTERACTIVE_LOGIN_TIMEOUT_MS = 10 * 60_000
 
 
@@ -4857,6 +5033,8 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "qwencloud-ticket":
+            return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":
