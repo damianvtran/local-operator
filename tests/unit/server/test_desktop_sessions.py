@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -759,3 +760,128 @@ async def test_stored_mime_is_allowlisted_before_it_becomes_a_header(tmp_path):
         response = await attachment("0123456789ab", ref.digest, request)
         assert response.media_type == mime
         assert response.body == raw
+
+
+async def _seed_searchable_session(root: Path, session_id: str, *, opener: str, body: str) -> None:
+    """A real canonical session on disk, written through the real transcript.
+
+    Async rather than an ``asyncio.run`` wrapper because every caller already
+    runs inside the event loop the test client owns.
+    """
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    session = root / "sessions" / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    transcript = Transcript(session)
+    for role, text in (("user", opener), ("assistant", body)):
+        await transcript.append_message(
+            Message(role=cast(Any, role), content=[TextContent(text=text)])
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_finds_a_session_by_what_was_said_in_it(tmp_path, monkeypatch):
+    """The whole point of the route: a session whose opener says nothing about
+    the subject it became is still findable by the subject.
+
+    Driven over real loopback HTTP through the app, because the thing being
+    verified is the WIRE contract the desktop chat search consumes — a unit call
+    into the search module would not exercise the route, its auth gate, or the
+    response model.
+    """
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+    from local_operator.session.session_search import RANK_BODY
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    await _seed_searchable_session(
+        tmp_path,
+        "aaaa1111",
+        opener="hey can you look at this thing",
+        body="The retention sweep is evicting live session directories.",
+    )
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+
+    with TestClient(app) as client:
+        denied = client.get("/v1/desktop/sessions/search?q=retention")
+        assert denied.status_code in (401, 403)
+        response = client.get(
+            "/v1/desktop/sessions/search?q=retention",
+            headers={"Authorization": "Bearer token"},
+        )
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["query"] == "retention"
+    assert [row["id"] for row in result["sessions"]] == ["aaaa1111"]
+    # The row's own name does not contain the query, so the answer says why it
+    # surfaced rather than leaving the client to guess.
+    assert result["sessions"][0]["body_match"] is True
+    assert result["sessions"][0]["rank"] == RANK_BODY
+    assert result["sessions"][0]["name"] == "hey can you look at this thing"
+
+
+@pytest.mark.asyncio
+async def test_search_is_declared_before_the_session_id_route(tmp_path, monkeypatch):
+    """FastAPI matches in declaration order, so a parent route declared first
+    would swallow ``/v1/desktop/sessions/search`` and answer with a session
+    snapshot (a 404 for an id that does not exist) instead of search results.
+    Pinned on the routing table itself, not on one request's outcome: a later
+    edit that reorders the handlers is what this catches."""
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import _iter_routes, app
+
+    paths = [
+        path
+        for path, _methods in _iter_routes(app.routes)
+        if path.startswith("/v1/desktop/sessions")
+    ]
+    assert paths.index("/v1/desktop/sessions/search") < paths.index(
+        "/v1/desktop/sessions/{session_id}"
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/desktop/sessions/search?q=", headers={"Authorization": "Bearer token"}
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_or_invalid_query_is_refused_without_echoing_it(tmp_path, monkeypatch):
+    """The query is bounded at the boundary, and the refusal must not quote the
+    rejected input back: this route sits under `/v1/desktop/`, where pydantic's
+    default 422 body would echo whatever the caller sent."""
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(tmp_path))
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    secret_looking = "x" * 300
+
+    with TestClient(app) as client:
+        too_long = client.get(
+            f"/v1/desktop/sessions/search?q={secret_looking}",
+            headers={"Authorization": "Bearer token"},
+        )
+        bad_limit = client.get(
+            "/v1/desktop/sessions/search?q=ok&limit=501",
+            headers={"Authorization": "Bearer token"},
+        )
+
+    assert too_long.status_code == 422
+    assert secret_looking not in too_long.text
+    assert bad_limit.status_code == 422
