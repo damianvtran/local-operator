@@ -1,0 +1,1184 @@
+{
+  "tag": "base",
+  "repo": "/private/tmp/designer994base",
+  "route": "container",
+  "frames": [
+    {
+      "label": "start",
+      "svg": "/private/tmp/des994/base/base-start.svg",
+      "svg_md5": "f333950999f147816da2c9288751c495",
+      "painted_body_rows": [
+        "         \u258c\u00a0Totals\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00b7\u00a0measured                                                                                 \n",
+        "         \u00a0\u00a0Total\u00a0billed\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens\u00a0\u00a0\u00a042M\u00a0in\u00a0\u00b7\u00a00\u00a0out                                                            \n",
+        "         \u00a0\u00a0Context\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0fresh\u00a0\u00b7\u00a00\u00a0cached\u00a0\u00b7\u00a00\u00a0written                                          \n",
+        "         \u00a0\u00a0\u00a0\u251c\u00a0Fresh\u00a0(uncached)\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input,\u00a0billed\u00a0at\u00a0full\u00a0rate                                            \n",
+        "         \u00a0\u00a0\u00a0\u251c\u00a0Cache\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0input\u00a0served\u00a0from\u00a0cache                                                   \n",
+        "         \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                                                \n",
+        "         \u00a0\u00a0Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking                                                  \n",
+        "         \u00a0\u00a0Cache\u00a0hit\u00a0rate\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0of\u00a0context\u00a0served\u00a0from\u00a0cache                                              \n",
+        "         \u00a0\u00a0Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens                                                     \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens                                                       \n",
+        "         \u00a0\u00a0Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%                                                              \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0provider                                                                                                  \n",
+        "         \u00a0\u00a0anthropic\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens   $42.00\u00a0\u00a0\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                  \u2587         \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents                                                                        \n",
+        "         \u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a04\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a036M\u00a0tokens   $36.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a05\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a035M\u00a0tokens   $35.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a06\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a034M\u00a0tokens   $34.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a07\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a033M\u00a0tokens   $33.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a08\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a032M\u00a0tokens   $32.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a09\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a031M\u00a0tokens   $31.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a010\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a030M\u00a0tokens   $30.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a011\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a029M\u00a0tokens   $29.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n"
+      ],
+      "scroll_y": 0.0
+    },
+    {
+      "label": "pagedown-first",
+      "svg": "/private/tmp/des994/base/base-pagedown-first.svg",
+      "svg_md5": "222def9928d49bc7daa79638a2dd6e21",
+      "painted_body_rows": [
+        "         \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                                                \n",
+        "         \u00a0\u00a0Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking                                                  \n",
+        "         \u00a0\u00a0Cache\u00a0hit\u00a0rate\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0of\u00a0context\u00a0served\u00a0from\u00a0cache                                    \u2586         \n",
+        "         \u00a0\u00a0Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens                                                     \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens                                                       \n",
+        "         \u00a0\u00a0Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%                                                              \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0provider                                                                                                  \n",
+        "         \u00a0\u00a0anthropic\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens   $42.00\u00a0\u00a0\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents                                                                        \n",
+        "         \u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a04\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a036M\u00a0tokens   $36.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                  \u2585         \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a05\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a035M\u00a0tokens   $35.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a06\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a034M\u00a0tokens   $34.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a07\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a033M\u00a0tokens   $33.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a08\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a032M\u00a0tokens   $32.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a09\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a031M\u00a0tokens   $31.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a010\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a030M\u00a0tokens   $30.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a011\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a029M\u00a0tokens   $29.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a012\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a028M\u00a0tokens   $28.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a013\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a027M\u00a0tokens   $27.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a014\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a026M\u00a0tokens   $26.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a015\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a025M\u00a0tokens   $25.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a016\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a024M\u00a0tokens   $24.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n"
+      ],
+      "scroll_y": 5.0,
+      "frame_summary": {
+        "all_frames": 2,
+        "body_frames": 2,
+        "rows_per_body_frame": [
+          29,
+          29
+        ],
+        "cells_per_body_frame": [
+          2958,
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          3.0,
+          5.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "pagedown-settled",
+      "svg": "/private/tmp/des994/base/base-pagedown-settled.svg",
+      "svg_md5": "03aac32d31f220d8080d37cd83e431e2",
+      "painted_body_rows": [
+        "           \u00a0\u00a0Session\u00a0number\u00a012\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a028M\u00a0tokens   $28.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a013\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a027M\u00a0tokens   $27.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a014\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a026M\u00a0tokens   $26.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a015\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a025M\u00a0tokens   $25.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a016\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a024M\u00a0tokens   $24.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a017\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a023M\u00a0tokens   $23.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a018\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a022M\u00a0tokens   $22.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a019\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a021M\u00a0tokens   $21.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a020\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a020M\u00a0tokens   $20.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a021\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a019M\u00a0tokens   $19.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a022\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a018M\u00a0tokens   $18.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a023\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a017M\u00a0tokens   $17.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a024\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a016M\u00a0tokens   $16.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a025\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a015M\u00a0tokens   $15.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a026\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a014M\u00a0tokens   $14.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a027\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a013M\u00a0tokens   $13.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a028\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a012M\u00a0tokens   $12.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a029\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a011M\u00a0tokens   $11.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a030\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a010M\u00a0tokens   $10.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a031\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a09M\u00a0tokens    $9.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a032\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a08M\u00a0tokens    $8.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a033\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a07M\u00a0tokens    $7.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a034\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a06M\u00a0tokens    $6.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a035\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a05M\u00a0tokens    $5.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a036\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a04M\u00a0tokens    $4.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a037\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a03M\u00a0tokens    $3.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a038\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02M\u00a0tokens    $2.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a039\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01M\u00a0tokens    $1.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0unpricedses\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0tokens       $\u2014\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u2014\u00a0cache                  \u2587         \n"
+      ],
+      "scroll_y": 29.0
+    },
+    {
+      "label": "end",
+      "svg": "/private/tmp/des994/base/base-end.svg",
+      "svg_md5": "be45e14d28b7ddc881384e0c9ed305c9",
+      "painted_body_rows": [
+        "           \u00a0\u00a0Session\u00a0number\u00a014\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a026M\u00a0tokens   $26.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a015\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a025M\u00a0tokens   $25.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a016\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a024M\u00a0tokens   $24.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a017\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a023M\u00a0tokens   $23.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a018\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a022M\u00a0tokens   $22.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a019\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a021M\u00a0tokens   $21.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a020\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a020M\u00a0tokens   $20.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a021\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a019M\u00a0tokens   $19.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a022\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a018M\u00a0tokens   $18.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a023\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a017M\u00a0tokens   $17.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a024\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a016M\u00a0tokens   $16.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a025\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a015M\u00a0tokens   $15.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a026\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a014M\u00a0tokens   $14.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a027\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a013M\u00a0tokens   $13.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a028\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a012M\u00a0tokens   $12.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                  \u2581         \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a029\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a011M\u00a0tokens   $11.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a030\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a010M\u00a0tokens   $10.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a031\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a09M\u00a0tokens    $9.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a032\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a08M\u00a0tokens    $8.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a033\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a07M\u00a0tokens    $7.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a034\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a06M\u00a0tokens    $6.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a035\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a05M\u00a0tokens    $5.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a036\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a04M\u00a0tokens    $4.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a037\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a03M\u00a0tokens    $3.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a038\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02M\u00a0tokens    $2.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a039\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01M\u00a0tokens    $1.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0unpricedses\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0tokens       $\u2014\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u2014\u00a0cache                            \n",
+        "                                                                                                                        \n",
+        "         \u00a0\u00a0+\u00a0lower\u00a0bound\u00a0(some\u00a0calls\u00a0unpriced)\u00a0\u00a0\u00a0$\u2014\u00a0no\u00a0published\u00a0price                                                  \n"
+      ],
+      "scroll_y": 31.0,
+      "frame_summary": {
+        "all_frames": 16,
+        "body_frames": 16,
+        "rows_per_body_frame": [
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29
+        ],
+        "cells_per_body_frame": [
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          2958,
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          29.0,
+          29.0,
+          29.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          31.0,
+          31.0,
+          31.0,
+          31.0,
+          31.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "home",
+      "svg": "/private/tmp/des994/base/base-home.svg",
+      "svg_md5": "f333950999f147816da2c9288751c495",
+      "painted_body_rows": [
+        "         \u258c\u00a0Totals\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00b7\u00a0measured                                                                                 \n",
+        "         \u00a0\u00a0Total\u00a0billed\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens\u00a0\u00a0\u00a042M\u00a0in\u00a0\u00b7\u00a00\u00a0out                                                            \n",
+        "         \u00a0\u00a0Context\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0fresh\u00a0\u00b7\u00a00\u00a0cached\u00a0\u00b7\u00a00\u00a0written                                          \n",
+        "         \u00a0\u00a0\u00a0\u251c\u00a0Fresh\u00a0(uncached)\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input,\u00a0billed\u00a0at\u00a0full\u00a0rate                                            \n",
+        "         \u00a0\u00a0\u00a0\u251c\u00a0Cache\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0input\u00a0served\u00a0from\u00a0cache                                                   \n",
+        "         \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                                                \n",
+        "         \u00a0\u00a0Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking                                                  \n",
+        "         \u00a0\u00a0Cache\u00a0hit\u00a0rate\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0of\u00a0context\u00a0served\u00a0from\u00a0cache                                              \n",
+        "         \u00a0\u00a0Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens                                                     \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens                                                       \n",
+        "         \u00a0\u00a0Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%                                                              \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0provider                                                                                                  \n",
+        "         \u00a0\u00a0anthropic\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens   $42.00\u00a0\u00a0\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                  \u2587         \n",
+        "                                                                                                                        \n",
+        "         \u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents                                                                        \n",
+        "         \u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a04\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a036M\u00a0tokens   $36.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a05\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a035M\u00a0tokens   $35.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a06\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a034M\u00a0tokens   $34.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a07\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a033M\u00a0tokens   $33.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a08\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a032M\u00a0tokens   $32.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a09\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a031M\u00a0tokens   $31.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a010\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a030M\u00a0tokens   $30.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+        "           \u00a0\u00a0Session\u00a0number\u00a011\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a029M\u00a0tokens   $29.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n"
+      ],
+      "scroll_y": 0.0,
+      "frame_summary": {
+        "all_frames": 62,
+        "body_frames": 62,
+        "rows_per_body_frame": [
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29
+        ],
+        "cells_per_body_frame": [
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          29,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958,
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          29.0,
+          29.0,
+          29.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          30.0,
+          31.0,
+          31.0,
+          31.0,
+          31.0,
+          31.0,
+          31.0,
+          28.0,
+          27.0,
+          25.0,
+          24.0,
+          23.0,
+          21.0,
+          20.0,
+          19.0,
+          18.0,
+          17.0,
+          16.0,
+          15.0,
+          14.0,
+          13.0,
+          12.0,
+          11.0,
+          11.0,
+          10.0,
+          9.0,
+          7.0,
+          7.0,
+          6.0,
+          6.0,
+          5.0,
+          5.0,
+          4.0,
+          4.0,
+          4.0,
+          3.0,
+          3.0,
+          3.0,
+          2.0,
+          2.0,
+          2.0,
+          2.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            9,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ],
+          [
+            110,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "resize",
+      "svg": "/private/tmp/des994/base/base-resize.svg",
+      "svg_md5": "73d8c40ba2a6bce399a013e927ac169b",
+      "painted_body_rows": [
+        "        \u258c\u00a0Totals\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00b7\u00a0measured                                                              \n",
+        "        \u00a0\u00a0Total\u00a0billed\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens\u00a0\u00a0\u00a042M\u00a0in\u00a0\u00b7\u00a00\u00a0out                                         \n",
+        "        \u00a0\u00a0Context\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0fresh\u00a0\u00b7\u00a00\u00a0cached\u00a0\u00b7\u00a00\u00a0written                       \n",
+        "        \u00a0\u00a0\u00a0\u251c\u00a0Fresh\u00a0(uncached)\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input,\u00a0billed\u00a0at\u00a0full\u00a0rate                         \n",
+        "        \u00a0\u00a0\u00a0\u251c\u00a0Cache\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0input\u00a0served\u00a0from\u00a0cache                                \n",
+        "        \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                             \n",
+        "        \u00a0\u00a0Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking                               \n",
+        "        \u00a0\u00a0Cache\u00a0hit\u00a0rate\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0of\u00a0context\u00a0served\u00a0from\u00a0cache                  \u2585        \n",
+        "        \u00a0\u00a0Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens                                  \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens                                    \n",
+        "        \u00a0\u00a0Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%                                           \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0By\u00a0provider                                                                               \n",
+        "        \u00a0\u00a0anthropic\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens   $42.00\u00a0\u00a0\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents                                                     \n",
+        "        \u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n"
+      ],
+      "scroll_y": 0.0
+    },
+    {
+      "label": "resize-pagedown-first",
+      "svg": "/private/tmp/des994/base/base-resize-pagedown-first.svg",
+      "svg_md5": "73d8c40ba2a6bce399a013e927ac169b",
+      "painted_body_rows": [
+        "        \u258c\u00a0Totals\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00b7\u00a0measured                                                              \n",
+        "        \u00a0\u00a0Total\u00a0billed\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens\u00a0\u00a0\u00a042M\u00a0in\u00a0\u00b7\u00a00\u00a0out                                         \n",
+        "        \u00a0\u00a0Context\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0fresh\u00a0\u00b7\u00a00\u00a0cached\u00a0\u00b7\u00a00\u00a0written                       \n",
+        "        \u00a0\u00a0\u00a0\u251c\u00a0Fresh\u00a0(uncached)\u00a0\u00a0\u00a042M\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input,\u00a0billed\u00a0at\u00a0full\u00a0rate                         \n",
+        "        \u00a0\u00a0\u00a0\u251c\u00a0Cache\u00a0read\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0input\u00a0served\u00a0from\u00a0cache                                \n",
+        "        \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                             \n",
+        "        \u00a0\u00a0Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking                               \n",
+        "        \u00a0\u00a0Cache\u00a0hit\u00a0rate\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0of\u00a0context\u00a0served\u00a0from\u00a0cache                  \u2585        \n",
+        "        \u00a0\u00a0Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens                                  \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens                                    \n",
+        "        \u00a0\u00a0Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%                                           \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0By\u00a0provider                                                                               \n",
+        "        \u00a0\u00a0anthropic\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a042M\u00a0tokens   $42.00\u00a0\u00a0\u00a0\u00a0\u00a042\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "                                                                                                    \n",
+        "        \u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents                                                     \n",
+        "        \u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n",
+        "          \u00a0\u00a0Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache         \n"
+      ],
+      "scroll_y": 0.0,
+      "frame_summary": {
+        "all_frames": 0,
+        "body_frames": 0,
+        "rows_per_body_frame": [],
+        "cells_per_body_frame": [],
+        "scroll_y_per_body_frame": [],
+        "x_span_per_body_frame": []
+      }
+    }
+  ],
+  "events": [
+    {
+      "geometry": {
+        "label": "start",
+        "grid": [
+          120,
+          45
+        ],
+        "body_region": [
+          9,
+          8,
+          102,
+          29
+        ],
+        "body_size": [
+          102,
+          29
+        ],
+        "viewport_height": 29,
+        "viewport_width": 101,
+        "virtual_size": [
+          101,
+          60
+        ],
+        "max_scroll_y": 31.0,
+        "scroll_y": 0.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "pagedown_first": {
+        "all_frames": 2,
+        "body_frames": 2,
+        "rows_per_body_frame": [
+          29,
+          29
+        ],
+        "cells_per_body_frame": [
+          2958,
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          3.0,
+          5.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "geometry": {
+        "label": "resize",
+        "grid": [
+          100,
+          35
+        ],
+        "body_region": [
+          8,
+          7,
+          84,
+          21
+        ],
+        "body_size": [
+          84,
+          21
+        ],
+        "viewport_height": 21,
+        "viewport_width": 83,
+        "virtual_size": [
+          83,
+          60
+        ],
+        "max_scroll_y": 39.0,
+        "scroll_y": 0.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "resize_pagedown_first": {
+        "all_frames": 0,
+        "body_frames": 0,
+        "rows_per_body_frame": [],
+        "cells_per_body_frame": [],
+        "scroll_y_per_body_frame": [],
+        "x_span_per_body_frame": []
+      }
+    }
+  ],
+  "report_lines": [
+    "\u258c Totals   42 calls \u00b7 measured",
+    "  Total billed          42M tokens   42M in \u00b7 0 out",
+    "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+    "   \u251c Fresh (uncached)   42M          new input, billed at full rate",
+    "   \u251c Cache read         0            input served from cache",
+    "   \u2514 Cache write        0            new input written to cache",
+    "  Output                0            0 generation, 0 thinking",
+    "  Cache hit rate        0%           of context served from cache",
+    "  Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+    "",
+    "\u258c Where input went   \u2248 estimated split of context tokens",
+    "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+    "",
+    "\u258c By provider",
+    "  anthropic                           42M tokens   $42.00     42 calls     0% cache",
+    "",
+    "\u258c By session   totals include subagents",
+    "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+    "    Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+    "    Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+    "    Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+    "    Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+    "    Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+    "    Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+    "    Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+    "    Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+    "    Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+    "    Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+    "    Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+    "    Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+    "    Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+    "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+    "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+    "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+    "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+    "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+    "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+    "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+    "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+    "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+    "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+    "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+    "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+    "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+    "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+    "    Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+    "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+    "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+    "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+    "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+    "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+    "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+    "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+    "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+    "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+    "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+    "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+    "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+    "",
+    "  + lower bound (some calls unpriced)   $\u2014 no published price"
+  ],
+  "geometry_start": {
+    "label": "start",
+    "grid": [
+      120,
+      45
+    ],
+    "body_region": [
+      9,
+      8,
+      102,
+      29
+    ],
+    "body_size": [
+      102,
+      29
+    ],
+    "viewport_height": 29,
+    "viewport_width": 101,
+    "virtual_size": [
+      101,
+      60
+    ],
+    "max_scroll_y": 31.0,
+    "scroll_y": 0.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "geometry_resize": {
+    "label": "resize",
+    "grid": [
+      100,
+      35
+    ],
+    "body_region": [
+      8,
+      7,
+      84,
+      21
+    ],
+    "body_size": [
+      84,
+      21
+    ],
+    "viewport_height": 21,
+    "viewport_width": 83,
+    "virtual_size": [
+      83,
+      60
+    ],
+    "max_scroll_y": 39.0,
+    "scroll_y": 0.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "seam": {
+    "start_content_rows": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ],
+    "first_content_rows": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33
+    ],
+    "content_rows_in_common": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ],
+    "start_last_content_row": 28,
+    "first_first_content_row": 5,
+    "gap_rows_skipped": -24,
+    "painted_rows_repeated_across_the_two_frames": [
+      "Conversation\u00a0\u00a0\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00a01k\u00a0~100%",
+      "Est.\u00a0cost\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0$42.00     \u00a0\u00a0\u2248\u00a0list\u00a0price\u00a0\u00d7\u00a0tokens",
+      "Output\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0generation,\u00a00\u00a0thinking",
+      "Session\u00a0number\u00a010\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a030M\u00a0tokens   $30.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a011\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a029M\u00a0tokens   $29.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a01\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a039M\u00a0tokens   $39.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a02\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a038M\u00a0tokens   $38.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a03\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a037M\u00a0tokens   $37.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a05\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a035M\u00a0tokens   $35.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a06\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a034M\u00a0tokens   $34.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a07\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a033M\u00a0tokens   $33.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a08\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a032M\u00a0tokens   $32.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "Session\u00a0number\u00a09\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a031M\u00a0tokens   $31.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache",
+      "\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache",
+      "\u258c\u00a0By\u00a0provider",
+      "\u258c\u00a0By\u00a0session\u00a0\u00a0\u00a0totals\u00a0include\u00a0subagents",
+      "\u258c\u00a0Where\u00a0input\u00a0went\u00a0\u00a0\u00a0\u2248\u00a0estimated\u00a0split\u00a0of\u00a0context\u00a0tokens",
+      "\u276f\u00a0\u25b8\u00a0Session\u00a0number\u00a00\u00a0+1\u00a0subagent\u00a0\u00a0\u00a0\u00a040.5M\u00a0tokens   $40.50\u00a0\u00a0\u00a0\u00a0\u00a0\u00a02\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache"
+    ],
+    "first_painted_top_row": "         \u00a0\u00a0\u00a0\u2514\u00a0Cache\u00a0write\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0new\u00a0input\u00a0written\u00a0to\u00a0cache                                                \n",
+    "start_painted_last_row": "           \u00a0\u00a0Session\u00a0number\u00a011\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a029M\u00a0tokens   $29.00\u00a0\u00a0\u00a0\u00a0\u00a0\u00a01\u00a0calls\u00a0\u00a0\u00a0\u00a0\u00a00%\u00a0cache                            \n",
+    "step_rows": 5.0
+  }
+}

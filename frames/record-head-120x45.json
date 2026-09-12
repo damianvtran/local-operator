@@ -1,0 +1,735 @@
+{
+  "tag": "head",
+  "repo": "/private/tmp/designer994",
+  "route": "key",
+  "frames": [
+    {
+      "label": "start",
+      "svg": "/private/tmp/des994/head/head-start.svg",
+      "svg_md5": "f333950999f147816da2c9288751c495",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 0.0
+    },
+    {
+      "label": "pagedown-first",
+      "svg": "/private/tmp/des994/head/head-pagedown-first.svg",
+      "svg_md5": "03aac32d31f220d8080d37cd83e431e2",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 29.0,
+      "frame_summary": {
+        "all_frames": 2,
+        "body_frames": 1,
+        "rows_per_body_frame": [
+          29
+        ],
+        "cells_per_body_frame": [
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          29.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "pagedown-settled",
+      "svg": "/private/tmp/des994/head/head-pagedown-settled.svg",
+      "svg_md5": "03aac32d31f220d8080d37cd83e431e2",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 29.0
+    },
+    {
+      "label": "end",
+      "svg": "/private/tmp/des994/head/head-end.svg",
+      "svg_md5": "be45e14d28b7ddc881384e0c9ed305c9",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 31.0,
+      "frame_summary": {
+        "all_frames": 1,
+        "body_frames": 1,
+        "rows_per_body_frame": [
+          29
+        ],
+        "cells_per_body_frame": [
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          31.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "home",
+      "svg": "/private/tmp/des994/head/head-home.svg",
+      "svg_md5": "f333950999f147816da2c9288751c495",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 0.0,
+      "frame_summary": {
+        "all_frames": 2,
+        "body_frames": 2,
+        "rows_per_body_frame": [
+          29,
+          29
+        ],
+        "cells_per_body_frame": [
+          2958,
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          31.0,
+          0.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ],
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "label": "resize",
+      "svg": "/private/tmp/des994/head/head-resize.svg",
+      "svg_md5": "73d8c40ba2a6bce399a013e927ac169b",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 0.0
+    },
+    {
+      "label": "resize-pagedown-first",
+      "svg": "/private/tmp/des994/head/head-resize-pagedown-first.svg",
+      "svg_md5": "43e8f14ca595c088a9d947efe6cf661e",
+      "painted_body_rows": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "scroll_y": 21.0,
+      "frame_summary": {
+        "all_frames": 1,
+        "body_frames": 1,
+        "rows_per_body_frame": [
+          21
+        ],
+        "cells_per_body_frame": [
+          1764
+        ],
+        "scroll_y_per_body_frame": [
+          21.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            8,
+            92
+          ]
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "geometry": {
+        "label": "start",
+        "grid": [
+          120,
+          45
+        ],
+        "body_region": [
+          9,
+          8,
+          102,
+          29
+        ],
+        "body_size": [
+          102,
+          29
+        ],
+        "viewport_height": 29,
+        "viewport_width": 101,
+        "virtual_size": [
+          101,
+          60
+        ],
+        "max_scroll_y": 31.0,
+        "scroll_y": 0.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "pagedown_first": {
+        "all_frames": 2,
+        "body_frames": 1,
+        "rows_per_body_frame": [
+          29
+        ],
+        "cells_per_body_frame": [
+          2958
+        ],
+        "scroll_y_per_body_frame": [
+          29.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            9,
+            111
+          ]
+        ]
+      }
+    },
+    {
+      "geometry": {
+        "label": "end",
+        "grid": [
+          120,
+          45
+        ],
+        "body_region": [
+          9,
+          8,
+          102,
+          29
+        ],
+        "body_size": [
+          102,
+          29
+        ],
+        "viewport_height": 29,
+        "viewport_width": 101,
+        "virtual_size": [
+          101,
+          60
+        ],
+        "max_scroll_y": 31.0,
+        "scroll_y": 31.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "geometry": {
+        "label": "home",
+        "grid": [
+          120,
+          45
+        ],
+        "body_region": [
+          9,
+          8,
+          102,
+          29
+        ],
+        "body_size": [
+          102,
+          29
+        ],
+        "viewport_height": 29,
+        "viewport_width": 101,
+        "virtual_size": [
+          101,
+          60
+        ],
+        "max_scroll_y": 31.0,
+        "scroll_y": 0.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "geometry": {
+        "label": "resize",
+        "grid": [
+          100,
+          35
+        ],
+        "body_region": [
+          8,
+          7,
+          84,
+          21
+        ],
+        "body_size": [
+          84,
+          21
+        ],
+        "viewport_height": 21,
+        "viewport_width": 83,
+        "virtual_size": [
+          83,
+          60
+        ],
+        "max_scroll_y": 39.0,
+        "scroll_y": 0.0,
+        "content_lines": 60,
+        "scrollbar_visible": true
+      }
+    },
+    {
+      "resize_pagedown_first": {
+        "all_frames": 1,
+        "body_frames": 1,
+        "rows_per_body_frame": [
+          21
+        ],
+        "cells_per_body_frame": [
+          1764
+        ],
+        "scroll_y_per_body_frame": [
+          21.0
+        ],
+        "x_span_per_body_frame": [
+          [
+            8,
+            92
+          ]
+        ]
+      }
+    }
+  ],
+  "report_lines": [
+    "\u258c Totals   42 calls \u00b7 measured",
+    "  Total billed          42M tokens   42M in \u00b7 0 out",
+    "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+    "   \u251c Fresh (uncached)   42M          new input, billed at full rate",
+    "   \u251c Cache read         0            input served from cache",
+    "   \u2514 Cache write        0            new input written to cache",
+    "  Output                0            0 generation, 0 thinking",
+    "  Cache hit rate        0%           of context served from cache",
+    "  Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+    "",
+    "\u258c Where input went   \u2248 estimated split of context tokens",
+    "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+    "",
+    "\u258c By provider",
+    "  anthropic                           42M tokens   $42.00     42 calls     0% cache",
+    "",
+    "\u258c By session   totals include subagents",
+    "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+    "    Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+    "    Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+    "    Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+    "    Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+    "    Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+    "    Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+    "    Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+    "    Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+    "    Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+    "    Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+    "    Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+    "    Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+    "    Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+    "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+    "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+    "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+    "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+    "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+    "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+    "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+    "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+    "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+    "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+    "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+    "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+    "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+    "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+    "    Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+    "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+    "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+    "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+    "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+    "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+    "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+    "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+    "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+    "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+    "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+    "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+    "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+    "",
+    "  + lower bound (some calls unpriced)   $\u2014 no published price"
+  ],
+  "geometry_start": {
+    "label": "start",
+    "grid": [
+      120,
+      45
+    ],
+    "body_region": [
+      9,
+      8,
+      102,
+      29
+    ],
+    "body_size": [
+      102,
+      29
+    ],
+    "viewport_height": 29,
+    "viewport_width": 101,
+    "virtual_size": [
+      101,
+      60
+    ],
+    "max_scroll_y": 31.0,
+    "scroll_y": 0.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "geometry_end": {
+    "label": "end",
+    "grid": [
+      120,
+      45
+    ],
+    "body_region": [
+      9,
+      8,
+      102,
+      29
+    ],
+    "body_size": [
+      102,
+      29
+    ],
+    "viewport_height": 29,
+    "viewport_width": 101,
+    "virtual_size": [
+      101,
+      60
+    ],
+    "max_scroll_y": 31.0,
+    "scroll_y": 31.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "geometry_home": {
+    "label": "home",
+    "grid": [
+      120,
+      45
+    ],
+    "body_region": [
+      9,
+      8,
+      102,
+      29
+    ],
+    "body_size": [
+      102,
+      29
+    ],
+    "viewport_height": 29,
+    "viewport_width": 101,
+    "virtual_size": [
+      101,
+      60
+    ],
+    "max_scroll_y": 31.0,
+    "scroll_y": 0.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "geometry_resize": {
+    "label": "resize",
+    "grid": [
+      100,
+      35
+    ],
+    "body_region": [
+      8,
+      7,
+      84,
+      21
+    ],
+    "body_size": [
+      84,
+      21
+    ],
+    "viewport_height": 21,
+    "viewport_width": 83,
+    "virtual_size": [
+      83,
+      60
+    ],
+    "max_scroll_y": 39.0,
+    "scroll_y": 0.0,
+    "content_lines": 60,
+    "scrollbar_visible": true
+  },
+  "seam": {
+    "start_content_rows": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ],
+    "first_content_rows": [
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57
+    ],
+    "content_rows_in_common": [],
+    "start_last_content_row": 28,
+    "first_first_content_row": 29,
+    "gap_rows_skipped": 0,
+    "painted_rows_repeated_across_the_two_frames": [],
+    "first_painted_top_row": "",
+    "start_painted_last_row": "",
+    "step_rows": 29.0
+  }
+}

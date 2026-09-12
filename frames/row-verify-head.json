@@ -1,0 +1,2316 @@
+{
+  "lines": {
+    "120x45": [
+      "\u258c Totals   42 calls \u00b7 measured",
+      "  Total billed          42M tokens   42M in \u00b7 0 out",
+      "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+      "   \u251c Fresh (uncached)   42M          new input, billed at full rate",
+      "   \u251c Cache read         0            input served from cache",
+      "   \u2514 Cache write        0            new input written to cache",
+      "  Output                0            0 generation, 0 thinking",
+      "  Cache hit rate        0%           of context served from cache",
+      "  Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+      "",
+      "\u258c Where input went   \u2248 estimated split of context tokens",
+      "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+      "",
+      "\u258c By provider",
+      "  anthropic                           42M tokens   $42.00     42 calls     0% cache",
+      "",
+      "\u258c By session   totals include subagents",
+      "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+      "    Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+      "    Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+      "    Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+      "    Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+      "    Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+      "    Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+      "    Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+      "    Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+      "    Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+      "    Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+      "    Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+      "    Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+      "    Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+      "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+      "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+      "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+      "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+      "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+      "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+      "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+      "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+      "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+      "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+      "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+      "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+      "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+      "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+      "    Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+      "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+      "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+      "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+      "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+      "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+      "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+      "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+      "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+      "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+      "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+      "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+      "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+      "",
+      "  + lower bound (some calls unpriced)   $\u2014 no published price"
+    ],
+    "100x35": [
+      "\u258c Totals   42 calls \u00b7 measured",
+      "  Total billed          42M tokens   42M in \u00b7 0 out",
+      "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+      "   \u251c Fresh (uncached)   42M          new input, billed at full rate",
+      "   \u251c Cache read         0            input served from cache",
+      "   \u2514 Cache write        0            new input written to cache",
+      "  Output                0            0 generation, 0 thinking",
+      "  Cache hit rate        0%           of context served from cache",
+      "  Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+      "",
+      "\u258c Where input went   \u2248 estimated split of context tokens",
+      "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+      "",
+      "\u258c By provider",
+      "  anthropic                           42M tokens   $42.00     42 calls     0% cache",
+      "",
+      "\u258c By session   totals include subagents",
+      "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+      "    Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+      "    Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+      "    Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+      "    Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+      "    Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+      "    Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+      "    Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+      "    Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+      "    Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+      "    Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+      "    Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+      "    Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+      "    Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+      "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+      "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+      "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+      "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+      "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+      "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+      "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+      "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+      "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+      "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+      "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+      "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+      "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+      "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+      "    Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+      "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+      "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+      "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+      "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+      "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+      "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+      "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+      "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+      "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+      "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+      "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+      "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+      "",
+      "  + lower bound (some calls unpriced)   $\u2014 no published price"
+    ]
+  },
+  "checks": {
+    "head:start": {
+      "scroll_y": 0.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "         \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "           Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "           Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "            \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "            \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "            \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "           Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "           Cache hit rate        0%           of context served from cache",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "           Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "         \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "           Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "         \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "           anthropic                           42M tokens   $42.00     42 calls     0% cache                  \u2587",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "         \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "         \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "             Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "             Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "             Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 21,
+          "painted": "             Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 22,
+          "painted": "             Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 23,
+          "painted": "             Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 24,
+          "painted": "             Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 25,
+          "painted": "             Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 26,
+          "painted": "             Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 27,
+          "painted": "             Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 28,
+          "painted": "             Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "26 MISMATCH"
+    },
+    "head:pagedown-first": {
+      "scroll_y": 29.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 29,
+          "painted": "             Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+          "expected": "    Session number 12                 28M tokens   $28.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 30,
+          "painted": "             Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+          "expected": "    Session number 13                 27M tokens   $27.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 34,
+          "painted": "             Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 35,
+          "painted": "             Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 36,
+          "painted": "             Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 37,
+          "painted": "             Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 38,
+          "painted": "             Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 39,
+          "painted": "             Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 40,
+          "painted": "             Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 41,
+          "painted": "             Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 42,
+          "painted": "             Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+          "expected": "    Session number 25                 15M tokens   $15.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 43,
+          "painted": "             Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+          "expected": "    Session number 26                 14M tokens   $14.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 44,
+          "painted": "             Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+          "expected": "    Session number 27                 13M tokens   $13.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 45,
+          "painted": "             Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+          "expected": "    Session number 28                 12M tokens   $12.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 46,
+          "painted": "             Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+          "expected": "    Session number 29                 11M tokens   $11.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 47,
+          "painted": "             Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+          "expected": "    Session number 30                 10M tokens   $10.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 48,
+          "painted": "             Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+          "expected": "    Session number 31                  9M tokens    $9.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 49,
+          "painted": "             Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+          "expected": "    Session number 32                  8M tokens    $8.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 50,
+          "painted": "             Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+          "expected": "    Session number 33                  7M tokens    $7.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 51,
+          "painted": "             Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+          "expected": "    Session number 34                  6M tokens    $6.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 52,
+          "painted": "             Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+          "expected": "    Session number 35                  5M tokens    $5.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 53,
+          "painted": "             Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+          "expected": "    Session number 36                  4M tokens    $4.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 54,
+          "painted": "             Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+          "expected": "    Session number 37                  3M tokens    $3.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 55,
+          "painted": "             Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+          "expected": "    Session number 38                  2M tokens    $2.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 56,
+          "painted": "             Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+          "expected": "    Session number 39                  1M tokens    $1.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 57,
+          "painted": "             unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache                  \u2587",
+          "expected": "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache"
+        }
+      ],
+      "verdict": "29 MISMATCH"
+    },
+    "head:pagedown-settled": {
+      "scroll_y": 29.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 29,
+          "painted": "             Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+          "expected": "    Session number 12                 28M tokens   $28.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 30,
+          "painted": "             Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+          "expected": "    Session number 13                 27M tokens   $27.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 34,
+          "painted": "             Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 35,
+          "painted": "             Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 36,
+          "painted": "             Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 37,
+          "painted": "             Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 38,
+          "painted": "             Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 39,
+          "painted": "             Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 40,
+          "painted": "             Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 41,
+          "painted": "             Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 42,
+          "painted": "             Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+          "expected": "    Session number 25                 15M tokens   $15.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 43,
+          "painted": "             Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+          "expected": "    Session number 26                 14M tokens   $14.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 44,
+          "painted": "             Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+          "expected": "    Session number 27                 13M tokens   $13.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 45,
+          "painted": "             Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+          "expected": "    Session number 28                 12M tokens   $12.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 46,
+          "painted": "             Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+          "expected": "    Session number 29                 11M tokens   $11.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 47,
+          "painted": "             Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+          "expected": "    Session number 30                 10M tokens   $10.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 48,
+          "painted": "             Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+          "expected": "    Session number 31                  9M tokens    $9.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 49,
+          "painted": "             Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+          "expected": "    Session number 32                  8M tokens    $8.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 50,
+          "painted": "             Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+          "expected": "    Session number 33                  7M tokens    $7.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 51,
+          "painted": "             Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+          "expected": "    Session number 34                  6M tokens    $6.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 52,
+          "painted": "             Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+          "expected": "    Session number 35                  5M tokens    $5.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 53,
+          "painted": "             Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+          "expected": "    Session number 36                  4M tokens    $4.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 54,
+          "painted": "             Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+          "expected": "    Session number 37                  3M tokens    $3.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 55,
+          "painted": "             Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+          "expected": "    Session number 38                  2M tokens    $2.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 56,
+          "painted": "             Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+          "expected": "    Session number 39                  1M tokens    $1.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 57,
+          "painted": "             unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache                  \u2587",
+          "expected": "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache"
+        }
+      ],
+      "verdict": "29 MISMATCH"
+    },
+    "head:end": {
+      "scroll_y": 31.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 34,
+          "painted": "             Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 35,
+          "painted": "             Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 36,
+          "painted": "             Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 37,
+          "painted": "             Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 38,
+          "painted": "             Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 39,
+          "painted": "             Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 40,
+          "painted": "             Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 41,
+          "painted": "             Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 42,
+          "painted": "             Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+          "expected": "    Session number 25                 15M tokens   $15.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 43,
+          "painted": "             Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+          "expected": "    Session number 26                 14M tokens   $14.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 44,
+          "painted": "             Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+          "expected": "    Session number 27                 13M tokens   $13.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 45,
+          "painted": "             Session number 28                 12M tokens   $12.00      1 calls     0% cache                  \u2581",
+          "expected": "    Session number 28                 12M tokens   $12.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 46,
+          "painted": "             Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+          "expected": "    Session number 29                 11M tokens   $11.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 47,
+          "painted": "             Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+          "expected": "    Session number 30                 10M tokens   $10.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 48,
+          "painted": "             Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+          "expected": "    Session number 31                  9M tokens    $9.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 49,
+          "painted": "             Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+          "expected": "    Session number 32                  8M tokens    $8.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 50,
+          "painted": "             Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+          "expected": "    Session number 33                  7M tokens    $7.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 51,
+          "painted": "             Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+          "expected": "    Session number 34                  6M tokens    $6.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 52,
+          "painted": "             Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+          "expected": "    Session number 35                  5M tokens    $5.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 53,
+          "painted": "             Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+          "expected": "    Session number 36                  4M tokens    $4.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 54,
+          "painted": "             Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+          "expected": "    Session number 37                  3M tokens    $3.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 55,
+          "painted": "             Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+          "expected": "    Session number 38                  2M tokens    $2.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 56,
+          "painted": "             Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+          "expected": "    Session number 39                  1M tokens    $1.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 57,
+          "painted": "             unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+          "expected": "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache"
+        },
+        {
+          "row": 28,
+          "content_index": 59,
+          "painted": "           + lower bound (some calls unpriced)   $\u2014 no published price",
+          "expected": "  + lower bound (some calls unpriced)   $\u2014 no published price"
+        }
+      ],
+      "verdict": "28 MISMATCH"
+    },
+    "head:home": {
+      "scroll_y": 0.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "         \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "           Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "           Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "            \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "            \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "            \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "           Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "           Cache hit rate        0%           of context served from cache",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "           Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "         \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "           Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "         \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "           anthropic                           42M tokens   $42.00     42 calls     0% cache                  \u2587",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "         \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "         \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "             Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "             Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "             Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 21,
+          "painted": "             Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 22,
+          "painted": "             Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 23,
+          "painted": "             Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 24,
+          "painted": "             Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 25,
+          "painted": "             Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 26,
+          "painted": "             Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 27,
+          "painted": "             Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 28,
+          "painted": "             Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "26 MISMATCH"
+    },
+    "head:resize": {
+      "scroll_y": 0.0,
+      "rows_checked": 21,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "        \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "          Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "          Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "           \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "           \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "           \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "          Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "          Cache hit rate        0%           of context served from cache                  \u2585",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "          Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "        \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "          Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "        \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "          anthropic                           42M tokens   $42.00     42 calls     0% cache",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "        \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "        \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "            Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "            Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "            Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "18 MISMATCH"
+    },
+    "head:resize-pagedown-first": {
+      "scroll_y": 21.0,
+      "rows_checked": 21,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 21,
+          "painted": "            Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 22,
+          "painted": "            Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 23,
+          "painted": "            Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 24,
+          "painted": "            Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 25,
+          "painted": "            Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 26,
+          "painted": "            Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 27,
+          "painted": "            Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 28,
+          "painted": "            Session number 11                 29M tokens   $29.00      1 calls     0% cache\u2586",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 29,
+          "painted": "            Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+          "expected": "    Session number 12                 28M tokens   $28.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 30,
+          "painted": "            Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+          "expected": "    Session number 13                 27M tokens   $27.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 31,
+          "painted": "            Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 32,
+          "painted": "            Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 33,
+          "painted": "            Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 34,
+          "painted": "            Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 35,
+          "painted": "            Session number 18                 22M tokens   $22.00      1 calls     0% cache\u2583",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 36,
+          "painted": "            Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 37,
+          "painted": "            Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 38,
+          "painted": "            Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 39,
+          "painted": "            Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 40,
+          "painted": "            Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 41,
+          "painted": "            Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "21 MISMATCH"
+    },
+    "base:start": {
+      "scroll_y": 0.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "         \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "           Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "           Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "            \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "            \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "            \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "           Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "           Cache hit rate        0%           of context served from cache",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "           Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "         \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "           Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "         \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "           anthropic                           42M tokens   $42.00     42 calls     0% cache                  \u2587",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "         \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "         \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "             Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "             Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "             Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 21,
+          "painted": "             Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 22,
+          "painted": "             Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 23,
+          "painted": "             Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 24,
+          "painted": "             Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 25,
+          "painted": "             Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 26,
+          "painted": "             Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 27,
+          "painted": "             Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 28,
+          "painted": "             Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "26 MISMATCH"
+    },
+    "base:pagedown-first": {
+      "scroll_y": 5.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 5,
+          "painted": "            \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 1,
+          "content_index": 6,
+          "painted": "           Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 2,
+          "content_index": 7,
+          "painted": "           Cache hit rate        0%           of context served from cache                                    \u2586",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 3,
+          "content_index": 8,
+          "painted": "           Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 5,
+          "content_index": 10,
+          "painted": "         \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 6,
+          "content_index": 11,
+          "painted": "           Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 8,
+          "content_index": 13,
+          "painted": "         \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 9,
+          "content_index": 14,
+          "painted": "           anthropic                           42M tokens   $42.00     42 calls     0% cache",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 16,
+          "painted": "         \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 12,
+          "content_index": 17,
+          "painted": "         \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 18,
+          "painted": "             Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 19,
+          "painted": "             Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 20,
+          "painted": "             Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 21,
+          "painted": "             Session number 4                  36M tokens   $36.00      1 calls     0% cache                  \u2585",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 22,
+          "painted": "             Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 23,
+          "painted": "             Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 24,
+          "painted": "             Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 25,
+          "painted": "             Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 26,
+          "painted": "             Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 27,
+          "painted": "             Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 28,
+          "painted": "             Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 29,
+          "painted": "             Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+          "expected": "    Session number 12                 28M tokens   $28.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 30,
+          "painted": "             Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+          "expected": "    Session number 13                 27M tokens   $27.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "26 MISMATCH"
+    },
+    "base:pagedown-settled": {
+      "scroll_y": 29.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 29,
+          "painted": "             Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+          "expected": "    Session number 12                 28M tokens   $28.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 30,
+          "painted": "             Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+          "expected": "    Session number 13                 27M tokens   $27.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 34,
+          "painted": "             Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 35,
+          "painted": "             Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 36,
+          "painted": "             Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 37,
+          "painted": "             Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 38,
+          "painted": "             Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 39,
+          "painted": "             Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 40,
+          "painted": "             Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 41,
+          "painted": "             Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 42,
+          "painted": "             Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+          "expected": "    Session number 25                 15M tokens   $15.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 43,
+          "painted": "             Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+          "expected": "    Session number 26                 14M tokens   $14.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 44,
+          "painted": "             Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+          "expected": "    Session number 27                 13M tokens   $13.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 45,
+          "painted": "             Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+          "expected": "    Session number 28                 12M tokens   $12.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 46,
+          "painted": "             Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+          "expected": "    Session number 29                 11M tokens   $11.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 47,
+          "painted": "             Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+          "expected": "    Session number 30                 10M tokens   $10.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 48,
+          "painted": "             Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+          "expected": "    Session number 31                  9M tokens    $9.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 49,
+          "painted": "             Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+          "expected": "    Session number 32                  8M tokens    $8.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 50,
+          "painted": "             Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+          "expected": "    Session number 33                  7M tokens    $7.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 51,
+          "painted": "             Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+          "expected": "    Session number 34                  6M tokens    $6.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 52,
+          "painted": "             Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+          "expected": "    Session number 35                  5M tokens    $5.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 53,
+          "painted": "             Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+          "expected": "    Session number 36                  4M tokens    $4.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 54,
+          "painted": "             Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+          "expected": "    Session number 37                  3M tokens    $3.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 55,
+          "painted": "             Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+          "expected": "    Session number 38                  2M tokens    $2.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 56,
+          "painted": "             Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+          "expected": "    Session number 39                  1M tokens    $1.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 57,
+          "painted": "             unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache                  \u2587",
+          "expected": "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache"
+        }
+      ],
+      "verdict": "29 MISMATCH"
+    },
+    "base:end": {
+      "scroll_y": 31.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 31,
+          "painted": "             Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+          "expected": "    Session number 14                 26M tokens   $26.00      1 calls     0% cache"
+        },
+        {
+          "row": 1,
+          "content_index": 32,
+          "painted": "             Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+          "expected": "    Session number 15                 25M tokens   $25.00      1 calls     0% cache"
+        },
+        {
+          "row": 2,
+          "content_index": 33,
+          "painted": "             Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+          "expected": "    Session number 16                 24M tokens   $24.00      1 calls     0% cache"
+        },
+        {
+          "row": 3,
+          "content_index": 34,
+          "painted": "             Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+          "expected": "    Session number 17                 23M tokens   $23.00      1 calls     0% cache"
+        },
+        {
+          "row": 4,
+          "content_index": 35,
+          "painted": "             Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+          "expected": "    Session number 18                 22M tokens   $22.00      1 calls     0% cache"
+        },
+        {
+          "row": 5,
+          "content_index": 36,
+          "painted": "             Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+          "expected": "    Session number 19                 21M tokens   $21.00      1 calls     0% cache"
+        },
+        {
+          "row": 6,
+          "content_index": 37,
+          "painted": "             Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+          "expected": "    Session number 20                 20M tokens   $20.00      1 calls     0% cache"
+        },
+        {
+          "row": 7,
+          "content_index": 38,
+          "painted": "             Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+          "expected": "    Session number 21                 19M tokens   $19.00      1 calls     0% cache"
+        },
+        {
+          "row": 8,
+          "content_index": 39,
+          "painted": "             Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+          "expected": "    Session number 22                 18M tokens   $18.00      1 calls     0% cache"
+        },
+        {
+          "row": 9,
+          "content_index": 40,
+          "painted": "             Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+          "expected": "    Session number 23                 17M tokens   $17.00      1 calls     0% cache"
+        },
+        {
+          "row": 10,
+          "content_index": 41,
+          "painted": "             Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+          "expected": "    Session number 24                 16M tokens   $16.00      1 calls     0% cache"
+        },
+        {
+          "row": 11,
+          "content_index": 42,
+          "painted": "             Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+          "expected": "    Session number 25                 15M tokens   $15.00      1 calls     0% cache"
+        },
+        {
+          "row": 12,
+          "content_index": 43,
+          "painted": "             Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+          "expected": "    Session number 26                 14M tokens   $14.00      1 calls     0% cache"
+        },
+        {
+          "row": 13,
+          "content_index": 44,
+          "painted": "             Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+          "expected": "    Session number 27                 13M tokens   $13.00      1 calls     0% cache"
+        },
+        {
+          "row": 14,
+          "content_index": 45,
+          "painted": "             Session number 28                 12M tokens   $12.00      1 calls     0% cache                  \u2581",
+          "expected": "    Session number 28                 12M tokens   $12.00      1 calls     0% cache"
+        },
+        {
+          "row": 15,
+          "content_index": 46,
+          "painted": "             Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+          "expected": "    Session number 29                 11M tokens   $11.00      1 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 47,
+          "painted": "             Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+          "expected": "    Session number 30                 10M tokens   $10.00      1 calls     0% cache"
+        },
+        {
+          "row": 17,
+          "content_index": 48,
+          "painted": "             Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+          "expected": "    Session number 31                  9M tokens    $9.00      1 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 49,
+          "painted": "             Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+          "expected": "    Session number 32                  8M tokens    $8.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 50,
+          "painted": "             Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+          "expected": "    Session number 33                  7M tokens    $7.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 51,
+          "painted": "             Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+          "expected": "    Session number 34                  6M tokens    $6.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 52,
+          "painted": "             Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+          "expected": "    Session number 35                  5M tokens    $5.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 53,
+          "painted": "             Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+          "expected": "    Session number 36                  4M tokens    $4.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 54,
+          "painted": "             Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+          "expected": "    Session number 37                  3M tokens    $3.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 55,
+          "painted": "             Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+          "expected": "    Session number 38                  2M tokens    $2.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 56,
+          "painted": "             Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+          "expected": "    Session number 39                  1M tokens    $1.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 57,
+          "painted": "             unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+          "expected": "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache"
+        },
+        {
+          "row": 28,
+          "content_index": 59,
+          "painted": "           + lower bound (some calls unpriced)   $\u2014 no published price",
+          "expected": "  + lower bound (some calls unpriced)   $\u2014 no published price"
+        }
+      ],
+      "verdict": "28 MISMATCH"
+    },
+    "base:home": {
+      "scroll_y": 0.0,
+      "rows_checked": 29,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "         \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "           Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "           Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "            \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "            \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "            \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "           Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "           Cache hit rate        0%           of context served from cache",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "           Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "         \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "           Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "         \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "           anthropic                           42M tokens   $42.00     42 calls     0% cache                  \u2587",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "         \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "         \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "             Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "             Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "             Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        },
+        {
+          "row": 21,
+          "content_index": 21,
+          "painted": "             Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+          "expected": "    Session number 4                  36M tokens   $36.00      1 calls     0% cache"
+        },
+        {
+          "row": 22,
+          "content_index": 22,
+          "painted": "             Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+          "expected": "    Session number 5                  35M tokens   $35.00      1 calls     0% cache"
+        },
+        {
+          "row": 23,
+          "content_index": 23,
+          "painted": "             Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+          "expected": "    Session number 6                  34M tokens   $34.00      1 calls     0% cache"
+        },
+        {
+          "row": 24,
+          "content_index": 24,
+          "painted": "             Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+          "expected": "    Session number 7                  33M tokens   $33.00      1 calls     0% cache"
+        },
+        {
+          "row": 25,
+          "content_index": 25,
+          "painted": "             Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+          "expected": "    Session number 8                  32M tokens   $32.00      1 calls     0% cache"
+        },
+        {
+          "row": 26,
+          "content_index": 26,
+          "painted": "             Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+          "expected": "    Session number 9                  31M tokens   $31.00      1 calls     0% cache"
+        },
+        {
+          "row": 27,
+          "content_index": 27,
+          "painted": "             Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+          "expected": "    Session number 10                 30M tokens   $30.00      1 calls     0% cache"
+        },
+        {
+          "row": 28,
+          "content_index": 28,
+          "painted": "             Session number 11                 29M tokens   $29.00      1 calls     0% cache",
+          "expected": "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "26 MISMATCH"
+    },
+    "base:resize": {
+      "scroll_y": 0.0,
+      "rows_checked": 21,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "        \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "          Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "          Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "           \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "           \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "           \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "          Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "          Cache hit rate        0%           of context served from cache                  \u2585",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "          Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "        \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "          Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "        \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "          anthropic                           42M tokens   $42.00     42 calls     0% cache",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "        \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "        \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "            Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "            Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "            Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "18 MISMATCH"
+    },
+    "base:resize-pagedown-first": {
+      "scroll_y": 0.0,
+      "rows_checked": 21,
+      "mismatches": [
+        {
+          "row": 0,
+          "content_index": 0,
+          "painted": "        \u258c Totals   42 calls \u00b7 measured",
+          "expected": "\u258c Totals   42 calls \u00b7 measured"
+        },
+        {
+          "row": 1,
+          "content_index": 1,
+          "painted": "          Total billed          42M tokens   42M in \u00b7 0 out",
+          "expected": "  Total billed          42M tokens   42M in \u00b7 0 out"
+        },
+        {
+          "row": 2,
+          "content_index": 2,
+          "painted": "          Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+          "expected": "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written"
+        },
+        {
+          "row": 3,
+          "content_index": 3,
+          "painted": "           \u251c Fresh (uncached)   42M          new input, billed at full rate",
+          "expected": "   \u251c Fresh (uncached)   42M          new input, billed at full rate"
+        },
+        {
+          "row": 4,
+          "content_index": 4,
+          "painted": "           \u251c Cache read         0            input served from cache",
+          "expected": "   \u251c Cache read         0            input served from cache"
+        },
+        {
+          "row": 5,
+          "content_index": 5,
+          "painted": "           \u2514 Cache write        0            new input written to cache",
+          "expected": "   \u2514 Cache write        0            new input written to cache"
+        },
+        {
+          "row": 6,
+          "content_index": 6,
+          "painted": "          Output                0            0 generation, 0 thinking",
+          "expected": "  Output                0            0 generation, 0 thinking"
+        },
+        {
+          "row": 7,
+          "content_index": 7,
+          "painted": "          Cache hit rate        0%           of context served from cache                  \u2585",
+          "expected": "  Cache hit rate        0%           of context served from cache"
+        },
+        {
+          "row": 8,
+          "content_index": 8,
+          "painted": "          Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+          "expected": "  Est. cost             $42.00       \u2248 list price \u00d7 tokens"
+        },
+        {
+          "row": 10,
+          "content_index": 10,
+          "painted": "        \u258c Where input went   \u2248 estimated split of context tokens",
+          "expected": "\u258c Where input went   \u2248 estimated split of context tokens"
+        },
+        {
+          "row": 11,
+          "content_index": 11,
+          "painted": "          Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+          "expected": "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%"
+        },
+        {
+          "row": 13,
+          "content_index": 13,
+          "painted": "        \u258c By provider",
+          "expected": "\u258c By provider"
+        },
+        {
+          "row": 14,
+          "content_index": 14,
+          "painted": "          anthropic                           42M tokens   $42.00     42 calls     0% cache",
+          "expected": "  anthropic                           42M tokens   $42.00     42 calls     0% cache"
+        },
+        {
+          "row": 16,
+          "content_index": 16,
+          "painted": "        \u258c By session   totals include subagents",
+          "expected": "\u258c By session   totals include subagents"
+        },
+        {
+          "row": 17,
+          "content_index": 17,
+          "painted": "        \u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+          "expected": "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache"
+        },
+        {
+          "row": 18,
+          "content_index": 18,
+          "painted": "            Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+          "expected": "    Session number 1                  39M tokens   $39.00      1 calls     0% cache"
+        },
+        {
+          "row": 19,
+          "content_index": 19,
+          "painted": "            Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+          "expected": "    Session number 2                  38M tokens   $38.00      1 calls     0% cache"
+        },
+        {
+          "row": 20,
+          "content_index": 20,
+          "painted": "            Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+          "expected": "    Session number 3                  37M tokens   $37.00      1 calls     0% cache"
+        }
+      ],
+      "verdict": "18 MISMATCH"
+    }
+  }
+}

@@ -1,0 +1,1100 @@
+[
+  {
+    "label": "tall-120x45-pagedown",
+    "keys": [
+      "pagedown"
+    ],
+    "geometry": {
+      "grid": [
+        120,
+        45
+      ],
+      "body_region": [
+        9,
+        8,
+        102,
+        29
+      ],
+      "viewport_height": 29,
+      "max_scroll_y": 31.0,
+      "scroll_y": 0.0,
+      "content_lines": 60,
+      "scrollbar_visible": true
+    },
+    "geometry_after": {
+      "scroll_y": 29.0,
+      "max_scroll_y": 31.0,
+      "viewport_height": 29
+    },
+    "body_frames": [
+      {
+        "scroll_y": 11.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 14.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 16.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 17.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 19.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 20.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 21.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 22.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 23.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 24.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 25.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 25.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 26.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 26.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 27.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 27.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      }
+    ],
+    "before_md5": "f333950999f147816da2c9288751c495",
+    "after_md5": "03aac32d31f220d8080d37cd83e431e2",
+    "unchanged": false,
+    "row_mismatches": [],
+    "painted_rows": [
+      "    Session number 12                 28M tokens   $28.00      1 calls     0% cache",
+      "    Session number 13                 27M tokens   $27.00      1 calls     0% cache",
+      "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+      "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+      "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+      "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+      "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+      "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+      "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+      "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+      "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+      "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+      "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+      "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+      "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+      "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+      "    Session number 28                 12M tokens   $12.00      1 calls     0% cache",
+      "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+      "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+      "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+      "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+      "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+      "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+      "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+      "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+      "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+      "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+      "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+      "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache                  \u2587"
+    ]
+  },
+  {
+    "label": "tall-120x45-end-then-pagedown",
+    "keys": [
+      "end",
+      "pagedown"
+    ],
+    "geometry": {
+      "grid": [
+        120,
+        45
+      ],
+      "body_region": [
+        9,
+        8,
+        102,
+        29
+      ],
+      "viewport_height": 29,
+      "max_scroll_y": 31.0,
+      "scroll_y": 0.0,
+      "content_lines": 60,
+      "scrollbar_visible": true
+    },
+    "geometry_after": {
+      "scroll_y": 31.0,
+      "max_scroll_y": 31.0,
+      "viewport_height": 29
+    },
+    "body_frames": [
+      {
+        "scroll_y": 2.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 3.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 4.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 6.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 7.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 8.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 10.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 11.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 12.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 13.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 14.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 15.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 16.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 17.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 18.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 19.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 20.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 20.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 21.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 22.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 23.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 23.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 24.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 24.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 25.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 25.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 26.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 26.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 27.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 27.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 29.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 29,
+        "cells": 2958
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 29,
+        "cells": 29
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 29,
+        "cells": 29
+      }
+    ],
+    "before_md5": "f333950999f147816da2c9288751c495",
+    "after_md5": "be45e14d28b7ddc881384e0c9ed305c9",
+    "unchanged": false,
+    "row_mismatches": [],
+    "painted_rows": [
+      "    Session number 14                 26M tokens   $26.00      1 calls     0% cache",
+      "    Session number 15                 25M tokens   $25.00      1 calls     0% cache",
+      "    Session number 16                 24M tokens   $24.00      1 calls     0% cache",
+      "    Session number 17                 23M tokens   $23.00      1 calls     0% cache",
+      "    Session number 18                 22M tokens   $22.00      1 calls     0% cache",
+      "    Session number 19                 21M tokens   $21.00      1 calls     0% cache",
+      "    Session number 20                 20M tokens   $20.00      1 calls     0% cache",
+      "    Session number 21                 19M tokens   $19.00      1 calls     0% cache",
+      "    Session number 22                 18M tokens   $18.00      1 calls     0% cache",
+      "    Session number 23                 17M tokens   $17.00      1 calls     0% cache",
+      "    Session number 24                 16M tokens   $16.00      1 calls     0% cache",
+      "    Session number 25                 15M tokens   $15.00      1 calls     0% cache",
+      "    Session number 26                 14M tokens   $14.00      1 calls     0% cache",
+      "    Session number 27                 13M tokens   $13.00      1 calls     0% cache",
+      "    Session number 28                 12M tokens   $12.00      1 calls     0% cache                  \u2581",
+      "    Session number 29                 11M tokens   $11.00      1 calls     0% cache",
+      "    Session number 30                 10M tokens   $10.00      1 calls     0% cache",
+      "    Session number 31                  9M tokens    $9.00      1 calls     0% cache",
+      "    Session number 32                  8M tokens    $8.00      1 calls     0% cache",
+      "    Session number 33                  7M tokens    $7.00      1 calls     0% cache",
+      "    Session number 34                  6M tokens    $6.00      1 calls     0% cache",
+      "    Session number 35                  5M tokens    $5.00      1 calls     0% cache",
+      "    Session number 36                  4M tokens    $4.00      1 calls     0% cache",
+      "    Session number 37                  3M tokens    $3.00      1 calls     0% cache",
+      "    Session number 38                  2M tokens    $2.00      1 calls     0% cache",
+      "    Session number 39                  1M tokens    $1.00      1 calls     0% cache",
+      "    unpricedses                         0 tokens       $\u2014      1 calls      \u2014 cache",
+      "",
+      "  + lower bound (some calls unpriced)   $\u2014 no published price"
+    ]
+  },
+  {
+    "label": "tall-120x45-home-then-pageup",
+    "keys": [
+      "home",
+      "pageup"
+    ],
+    "geometry": {
+      "grid": [
+        120,
+        45
+      ],
+      "body_region": [
+        9,
+        8,
+        102,
+        29
+      ],
+      "viewport_height": 29,
+      "max_scroll_y": 31.0,
+      "scroll_y": 0.0,
+      "content_lines": 60,
+      "scrollbar_visible": true
+    },
+    "geometry_after": {
+      "scroll_y": 0.0,
+      "max_scroll_y": 31.0,
+      "viewport_height": 29
+    },
+    "body_frames": [],
+    "before_md5": "f333950999f147816da2c9288751c495",
+    "after_md5": "f333950999f147816da2c9288751c495",
+    "unchanged": true,
+    "row_mismatches": [],
+    "painted_rows": [
+      "\u258c Totals   42 calls \u00b7 measured",
+      "  Total billed          42M tokens   42M in \u00b7 0 out",
+      "  Context read          42M          42M fresh \u00b7 0 cached \u00b7 0 written",
+      "   \u251c Fresh (uncached)   42M          new input, billed at full rate",
+      "   \u251c Cache read         0            input served from cache",
+      "   \u2514 Cache write        0            new input written to cache",
+      "  Output                0            0 generation, 0 thinking",
+      "  Cache hit rate        0%           of context served from cache",
+      "  Est. cost             $42.00       \u2248 list price \u00d7 tokens",
+      "",
+      "\u258c Where input went   \u2248 estimated split of context tokens",
+      "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+      "",
+      "\u258c By provider",
+      "  anthropic                           42M tokens   $42.00     42 calls     0% cache                  \u2587",
+      "",
+      "\u258c By session   totals include subagents",
+      "\u276f \u25b8 Session number 0 +1 subagent    40.5M tokens   $40.50      2 calls     0% cache",
+      "    Session number 1                  39M tokens   $39.00      1 calls     0% cache",
+      "    Session number 2                  38M tokens   $38.00      1 calls     0% cache",
+      "    Session number 3                  37M tokens   $37.00      1 calls     0% cache",
+      "    Session number 4                  36M tokens   $36.00      1 calls     0% cache",
+      "    Session number 5                  35M tokens   $35.00      1 calls     0% cache",
+      "    Session number 6                  34M tokens   $34.00      1 calls     0% cache",
+      "    Session number 7                  33M tokens   $33.00      1 calls     0% cache",
+      "    Session number 8                  32M tokens   $32.00      1 calls     0% cache",
+      "    Session number 9                  31M tokens   $31.00      1 calls     0% cache",
+      "    Session number 10                 30M tokens   $30.00      1 calls     0% cache",
+      "    Session number 11                 29M tokens   $29.00      1 calls     0% cache"
+    ]
+  },
+  {
+    "label": "small-fits-120x45-pagedown",
+    "keys": [
+      "pagedown"
+    ],
+    "geometry": {
+      "grid": [
+        120,
+        45
+      ],
+      "body_region": [
+        9,
+        8,
+        102,
+        29
+      ],
+      "viewport_height": 29,
+      "max_scroll_y": 0.0,
+      "scroll_y": 0.0,
+      "content_lines": 22,
+      "scrollbar_visible": false
+    },
+    "geometry_after": {
+      "scroll_y": 0.0,
+      "max_scroll_y": 0.0,
+      "viewport_height": 29
+    },
+    "body_frames": [],
+    "before_md5": "fe02f0fcc8665e0e0305c6afae37dbb1",
+    "after_md5": "fe02f0fcc8665e0e0305c6afae37dbb1",
+    "unchanged": true,
+    "row_mismatches": [],
+    "painted_rows": [
+      "\u258c Totals   100 calls (2 failed) \u00b7 measured",
+      "  Total billed          3.6M tokens  3.5M in \u00b7 120k out",
+      "  Context read          3.5M         420k fresh \u00b7 3M cached \u00b7 80k written",
+      "   \u251c Fresh (uncached)   420k         new input, billed at full rate",
+      "   \u251c Cache read         3M           input served from cache",
+      "   \u2514 Cache write        80k          new input written to cache",
+      "  Output                120k         80k generation, 40k thinking",
+      "  Cache hit rate        86%          of context served from cache",
+      "  Est. cost             $4.20        \u2248 list price \u00d7 tokens",
+      "",
+      "\u258c Where input went   \u2248 estimated split of context tokens",
+      "  Conversation   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 1.8M ~46%",
+      "  Tool results   \u2588\u2588\u2588\u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 900k ~23%",
+      "  System prompt  \u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 500k ~13%",
+      "  Images (est.)  \u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 400k ~10%",
+      "  Tool schemas   \u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 300k ~ 8%",
+      "",
+      "\u258c By provider",
+      "  anthropic      3.6M tokens   $4.20    100 calls    86% cache",
+      "",
+      "\u258c By session",
+      "\u276f my session     3.6M tokens   $4.20    100 calls    86% cache",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "label": "small-fits-120x45-end",
+    "keys": [
+      "end"
+    ],
+    "geometry": {
+      "grid": [
+        120,
+        45
+      ],
+      "body_region": [
+        9,
+        8,
+        102,
+        29
+      ],
+      "viewport_height": 29,
+      "max_scroll_y": 0.0,
+      "scroll_y": 0.0,
+      "content_lines": 22,
+      "scrollbar_visible": false
+    },
+    "geometry_after": {
+      "scroll_y": 0.0,
+      "max_scroll_y": 0.0,
+      "viewport_height": 29
+    },
+    "body_frames": [],
+    "before_md5": "fe02f0fcc8665e0e0305c6afae37dbb1",
+    "after_md5": "fe02f0fcc8665e0e0305c6afae37dbb1",
+    "unchanged": true,
+    "row_mismatches": [],
+    "painted_rows": [
+      "\u258c Totals   100 calls (2 failed) \u00b7 measured",
+      "  Total billed          3.6M tokens  3.5M in \u00b7 120k out",
+      "  Context read          3.5M         420k fresh \u00b7 3M cached \u00b7 80k written",
+      "   \u251c Fresh (uncached)   420k         new input, billed at full rate",
+      "   \u251c Cache read         3M           input served from cache",
+      "   \u2514 Cache write        80k          new input written to cache",
+      "  Output                120k         80k generation, 40k thinking",
+      "  Cache hit rate        86%          of context served from cache",
+      "  Est. cost             $4.20        \u2248 list price \u00d7 tokens",
+      "",
+      "\u258c Where input went   \u2248 estimated split of context tokens",
+      "  Conversation   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 1.8M ~46%",
+      "  Tool results   \u2588\u2588\u2588\u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 900k ~23%",
+      "  System prompt  \u2588\u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 500k ~13%",
+      "  Images (est.)  \u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 400k ~10%",
+      "  Tool schemas   \u2588\u2588\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7\u00b7 300k ~ 8%",
+      "",
+      "\u258c By provider",
+      "  anthropic      3.6M tokens   $4.20    100 calls    86% cache",
+      "",
+      "\u258c By session",
+      "\u276f my session     3.6M tokens   $4.20    100 calls    86% cache",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "label": "tall-narrow-60x24-pagedown",
+    "keys": [
+      "pagedown"
+    ],
+    "geometry": {
+      "grid": [
+        60,
+        24
+      ],
+      "body_region": [
+        6,
+        7,
+        48,
+        11
+      ],
+      "viewport_height": 11,
+      "max_scroll_y": 49.0,
+      "scroll_y": 0.0,
+      "content_lines": 60,
+      "scrollbar_visible": true
+    },
+    "geometry_after": {
+      "scroll_y": 11.0,
+      "max_scroll_y": 49.0,
+      "viewport_height": 11
+    },
+    "body_frames": [
+      {
+        "scroll_y": 2.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 4.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 6.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 7.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 8.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 9.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 10.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 10.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 11.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 11.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 11.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 11.0,
+        "rows": 11,
+        "cells": 11
+      }
+    ],
+    "before_md5": "41ab15d92821fdccddc6332b9bc5f090",
+    "after_md5": "7442b8472f2385cfc20310c6a158d553",
+    "unchanged": false,
+    "row_mismatches": [],
+    "painted_rows": [
+      "  Conversation  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 1k ~100%",
+      "",
+      "\u258c By provider",
+      "  anthropic                          42M tokens",
+      "                                               \u2587",
+      "\u258c By session   totals include subagents",
+      "\u276f \u25b8 Session number 0 +1 subagent   40.5M tokens",
+      "    Session number 1                 39M tokens",
+      "    Session number 2                 38M tokens",
+      "    Session number 3                 37M tokens",
+      "    Session number 4                 36M tokens"
+    ]
+  },
+  {
+    "label": "tall-narrow-60x24-end",
+    "keys": [
+      "end"
+    ],
+    "geometry": {
+      "grid": [
+        60,
+        24
+      ],
+      "body_region": [
+        6,
+        7,
+        48,
+        11
+      ],
+      "viewport_height": 11,
+      "max_scroll_y": 49.0,
+      "scroll_y": 0.0,
+      "content_lines": 60,
+      "scrollbar_visible": true
+    },
+    "geometry_after": {
+      "scroll_y": 49.0,
+      "max_scroll_y": 49.0,
+      "viewport_height": 11
+    },
+    "body_frames": [
+      {
+        "scroll_y": 3.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 7.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 9.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 12.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 14.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 15.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 17.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 19.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 21.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 22.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 24.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 25.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 27.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 28.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 30.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 31.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 32.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 33.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 35.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 36.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 37.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 38.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 39.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 39.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 40.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 41.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 42.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 42.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 43.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 43.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 44.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 45.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 45.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 45.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 46.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 46.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 47.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 47.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 47.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 47.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 48.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 48.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 48.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 48.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 48.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 49.0,
+        "rows": 11,
+        "cells": 528
+      },
+      {
+        "scroll_y": 49.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 49.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 49.0,
+        "rows": 11,
+        "cells": 11
+      },
+      {
+        "scroll_y": 49.0,
+        "rows": 11,
+        "cells": 11
+      }
+    ],
+    "before_md5": "41ab15d92821fdccddc6332b9bc5f090",
+    "after_md5": "8782b4ab1248638457816a59da17736a",
+    "unchanged": false,
+    "row_mismatches": [],
+    "painted_rows": [
+      "    Session number 32                 8M tokens",
+      "    Session number 33                 7M tokens",
+      "    Session number 34                 6M tokens",
+      "    Session number 35                 5M tokens",
+      "    Session number 36                 4M tokens",
+      "    Session number 37                 3M tokens",
+      "    Session number 38                 2M tokens",
+      "    Session number 39                 1M tokens",
+      "    unpricedses                        0 tokens\u2581",
+      "",
+      "  + lower bound (some calls unpriced)   $\u2014 no p"
+    ]
+  }
+]
