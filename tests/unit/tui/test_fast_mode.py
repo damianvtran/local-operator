@@ -13,7 +13,7 @@ over a request that is not fast is a claim about the user's money.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -257,7 +257,11 @@ async def test_a_provider_refusal_takes_the_dial_off_the_band_and_the_memory() -
         session.set_model(session.model.model_copy(update={"fast_mode": False}))
         assert app._status is not None
         app._status.update(fast=_fast_label_for_test(session))
-        app._pending_frontend_state = _State(session.model)
+        from types import SimpleNamespace
+
+        app._pending_frontend_session = cast(
+            Any, SimpleNamespace(frontend_state=_State(session.model))
+        )
         app._apply_pending_frontend_state(getattr(app, "_frontend_session_generation", 0))
         for _ in range(4):
             await pilot.pause()

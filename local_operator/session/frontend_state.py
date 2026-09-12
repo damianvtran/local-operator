@@ -2402,12 +2402,19 @@ class SnapshotJobs:
         # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
         # stay immutable while consumers retain their abstract container API.
         self._values = [_public_job(value) for value in values]
+        # Roster rendering asks get() once per row. A linear lookup made one
+        # paint quadratic in the number of children; retain the first duplicate
+        # ID to preserve the old next(...) behaviour for malformed extensions.
+        self._by_id: dict[str, JobState] = {}
+        for value in self._values:
+            self._by_id.setdefault(value.id, value)
 
     def list(self) -> list[JobState]:
         return [_public_job(value) for value in self._values]
 
     def get(self, job_id: str) -> JobState | None:
-        return next((_public_job(value) for value in self._values if value.id == job_id), None)
+        value = self._by_id.get(job_id)
+        return _public_job(value) if value is not None else None
 
 
 class SnapshotWakeScheduler:
@@ -3000,6 +3007,9 @@ class FrontendStateStore:
                 subscriber(update.model_copy(deep=True))
             return self.state
         changes = copy.deepcopy(update.changes)
+        # A malformed field later in a jobs delta must not advance a plan's
+        # watermark: validation either installs the entire update or nothing.
+        todo_sequences = dict(self._todo_sequences)
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
@@ -3018,23 +3028,33 @@ class FrontendStateStore:
                     del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
                 raw["trajectory"] = trajectory
                 raw["todos"] = _wire_value(prior.todos) if prior is not None else None
-                if (
-                    job_id in update.job_todo_updates
-                    and update.sequence > self._todo_sequences.get(job_id, -1)
+                if job_id in update.job_todo_updates and update.sequence > todo_sequences.get(
+                    job_id, -1
                 ):
                     raw["todos"] = update.job_todo_updates[job_id]
-                    self._todo_sequences[job_id] = update.sequence
+                    todo_sequences[job_id] = update.sequence
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
             retained = {str(row["id"]) for row in rebuilt}
-            self._todo_sequences = {
-                key: seq for key, seq in self._todo_sequences.items() if key in retained
+            todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
+        # Validate only the supplied fields, through the MODEL rather than a
+        # bare TypeAdapter: its before-validators normalize Usage/ModelSpec,
+        # and extra='allow' preserves fields introduced by a newer runtime.
+        # Defaults fill this ephemeral model but are never installed. Dumping
+        # the previous state here serialized every child's retained trajectory
+        # for each scalar streaming edge, blocking the viewer's keyboard loop.
+        patch = FrontendSessionState.model_validate(
+            {
+                "session_id": self._state.session_id,
+                **changes,
+                "epoch": update.epoch,
+                "sequence": update.sequence,
             }
-        payload = self._state.model_dump()
-        payload.update(changes)
-        payload["epoch"] = update.epoch
-        payload["sequence"] = update.sequence
-        self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+        )
+        normalized = {name: getattr(patch, name) for name in patch.model_fields_set}
+        candidate = self._state.model_copy(update=normalized)
+        self._state = _freeze_state_jobs(candidate, jobs_are_canonical="jobs" not in changes)
+        self._todo_sequences = todo_sequences
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
         return self.state

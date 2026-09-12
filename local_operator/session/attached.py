@@ -3812,7 +3812,7 @@ class AttachedSession:
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
         state = self._frontend_store.apply_update(update)
-        self._apply_frontend_facades(state)
+        self._apply_frontend_facades(state, changed_fields=set(update.changes))
         if update.degraded:
             # The owner shed this delta's body to keep the line under the socket
             # limit. The sequence was consumed on both sides, so the gap check
@@ -3858,8 +3858,15 @@ class AttachedSession:
                 continue
             self._on_frontend_update(update.model_dump(mode="json"))
 
-    def _apply_frontend_facades(self, state: FrontendSessionState) -> None:
-        """Refresh compatibility facades after one canonical install."""
+    def _apply_frontend_facades(
+        self, state: FrontendSessionState, *, changed_fields: set[str] | None = None
+    ) -> None:
+        """Refresh changed facades; a full snapshot replaces every collection.
+
+        Scalar deltas arrive at token cadence. Rebuilding the job/comms facade
+        on each one copied the entire child roster despite no child changing.
+        None means full install, distinct from an empty degraded delta.
+        """
         self._streaming = state.streaming
         self._generation = state.generation
         self._model = state.selected_model
@@ -3884,10 +3891,13 @@ class AttachedSession:
             and get_provider_definition(selected.provider) is not None
         ):
             self._birth_model = ModelSpec(provider=selected.provider, model_id=selected.model_id)
-        self.jobs.replace(state.jobs)
-        self._subagent_comms.replace(state.jobs)
-        self.wake_scheduler.replace(state.wakes)
-        self.mcp_manager.replace(state.mcp_servers)
+        if changed_fields is None or "jobs" in changed_fields:
+            self.jobs.replace(state.jobs)
+            self._subagent_comms.replace(state.jobs)
+        if changed_fields is None or "wakes" in changed_fields:
+            self.wake_scheduler.replace(state.wakes)
+        if changed_fields is None or "mcp_servers" in changed_fields:
+            self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
         if isinstance(startup, Mapping):
             from local_operator.session.mcp_status import McpStartupOutcome

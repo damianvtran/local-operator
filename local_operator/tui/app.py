@@ -8104,20 +8104,22 @@ class OperatorApp(App[None]):
     def _invalidate_pending_frontend_state(self) -> None:
         """Retire queued paints before another session becomes authoritative."""
         self._frontend_session_generation = getattr(self, "_frontend_session_generation", 0) + 1
-        self._pending_frontend_state = None
+        self._pending_frontend_session = None
         # The old callback remains queued in Textual, but it carries the retired
         # generation and returns without clearing a newer session's scheduled bit.
         self._frontend_apply_scheduled = False
 
     def _on_frontend_update(self, update: Any) -> None:
         session = self._session
-        state = getattr(session, "frontend_state", None) if session is not None else None
         # Socket and local callbacks share this seam. A burst can publish several
         # ordered fields before Textual gets its next turn; only the latest
         # complete snapshot needs painting, while scheduling every intermediate
         # one repeats the full status/band scan and delays keyboard handling.
         generation = getattr(self, "_frontend_session_generation", 0)
-        self._pending_frontend_state = state
+        # Retain the session, not a public snapshot. frontend_state detaches all
+        # child row shells; reading it before the scheduled-bit guard repeated
+        # that O(children) work for EVERY update in a coalesced burst.
+        self._pending_frontend_session = session
         if getattr(self, "_frontend_apply_scheduled", False):
             return
         self._frontend_apply_scheduled = True
@@ -8129,8 +8131,9 @@ class OperatorApp(App[None]):
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
-        state = getattr(self, "_pending_frontend_state", None)
-        self._pending_frontend_state = None
+        session = getattr(self, "_pending_frontend_session", None)
+        self._pending_frontend_session = None
+        state = getattr(session, "frontend_state", None) if session is not None else None
         # ONLY on an ordered update, never on the adoption snapshot painted by
         # `_adopt_session`. That snapshot is taken BEFORE the remembered choice
         # is restored onto the fresh session's spec (whose dial defaults off),
