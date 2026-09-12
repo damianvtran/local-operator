@@ -64,7 +64,7 @@ from typing import Any
 
 import pytest
 from textual import events
-from textual._compositor import ChopsUpdate, Compositor
+from textual._compositor import ChopsUpdate, Compositor, LayoutUpdate
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.analytics_panel import _SCROLLBAR_GUTTER
@@ -117,7 +117,15 @@ class _BodyFrames:
 
         def patched(comp, full=False, screen_stack=None, simplify=False):
             out = original(comp, full=full, screen_stack=screen_stack, simplify=simplify)
-            record: dict[str, Any] = {"kind": "other"}
+            # EVERY frame is recorded, chops or not — a ``LayoutUpdate`` or a
+            # no-op paint inside the gesture is evidence about that gesture too —
+            # so the kind is named and the offset taken for all of them. The
+            # non-chop shapes carry no ``rows``/``cells``, which ``describe``
+            # must respect rather than assume away (review round 2, minor-2).
+            record: dict[str, Any] = {
+                "kind": "none",
+                "scroll_y": float(self.scroll.scroll_offset.y),
+            }
             if isinstance(out, ChopsUpdate):
                 spans = list(out.spans)
                 record = {
@@ -132,6 +140,8 @@ class _BodyFrames:
                     # later.
                     "scroll_y": float(self.scroll.scroll_offset.y),
                 }
+            elif isinstance(out, LayoutUpdate):
+                record["kind"] = "layout"
             self.frames.append(record)
             return out
 
@@ -170,11 +180,29 @@ class _BodyFrames:
         return [f for f in self.frames if f["kind"] == "chops" and f["rows"] <= self.viewport]
 
     def describe(self) -> str:
-        """The frames, as a failure message a reader can act on."""
-        return "; ".join(
-            f"{f['kind']} rows={sorted(f['rows'])[:3]}... scroll_y={f.get('scroll_y')}"
-            for f in self.frames
-        )
+        """The frames, as a failure message a reader can act on.
+
+        Rendered per KIND rather than by reading ``rows`` unconditionally. A
+        frame that is not a chop (a ``LayoutUpdate``, or a paint that changed
+        nothing) has no ``rows``/``cells`` at all — the earlier formatter read
+        ``f['rows']`` for every frame and raised ``KeyError: 'rows'`` while
+        BUILDING the assertion message, so a genuine failure reported a broken
+        formatter instead of the frame counts it had just measured (review round
+        2, minor-2: 2 of 8 failing cells, and 2 of 6 repeats of the
+        ``page_down`` cell). Naming the kind keeps those frames in the evidence
+        instead of dropping them, because a layout update landing mid-gesture is
+        exactly the sort of thing the reader of this message needs to see.
+        """
+
+        def one(frame: dict[str, Any]) -> str:
+            if frame["kind"] != "chops":
+                return f"{frame['kind']} scroll_y={frame['scroll_y']}"
+            return (
+                f"{frame['kind']} rows={sorted(frame['rows'])[:3]}... "
+                f"cells={frame['cells']} scroll_y={frame['scroll_y']}"
+            )
+
+        return "; ".join(one(frame) for frame in self.frames)
 
 
 def _target(scroll: Any, gesture: str, before: float) -> float:
