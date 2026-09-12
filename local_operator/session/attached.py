@@ -2819,6 +2819,52 @@ class AttachedSession:
             return set()
         return self._unanswered_tail_call_ids()
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """The instant each in-flight call began, keyed by call id.
+
+        Answered from the folded state this viewer already keeps, which is the
+        same fold the local owner keeps over its own events — one rule, two
+        transports — so a switch between a conversation this process owns and
+        one it merely watches seeds the same anchor.
+
+        The values arrive as ``ToolExecutionStartEvent.started_at_epoch`` on
+        the wire (and in the attach seed's ``live_events``), which is why the
+        producer stamps them rather than this side guessing: an attached
+        viewer has no access to the executor's clock, and a value it invented
+        from its own arrival would be the fabricated age the row's blank
+        column exists to refuse. A call absent from the map has no known
+        start; callers withhold the clock for it.
+
+        Empty rather than raising while the store is unsynchronized: a facade
+        before its first sync has no live calls to date, and the reader probes
+        this through ``getattr``. Through ``getattr`` for the store too — the
+        protocol conformance suite builds both session shapes with ``__new__``,
+        which is exactly what makes a member answering off ``self._frontend_store``
+        raise there rather than report "nothing yet".
+        """
+        store = getattr(self, "_frontend_store", None)
+        if store is None:
+            return {}
+        return store.live_tool_start_epochs()
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase, and the instant that phase began.
+
+        Folded from the same events this viewer already receives, so a band
+        drawn here dates its ``thinking``/``responding``/``composing`` arm from
+        the producer's phase edge rather than from the moment the viewer
+        arrived — the half of the operator's report that a per-call stamp
+        cannot answer, since a model call in flight is not a tool call.
+
+        ``("", None)`` before the first sync: no phase matches, and the reader
+        withholds the clock instead of counting from its own attach. Read
+        through ``getattr`` for the reason the sibling accessor above states.
+        """
+        store = getattr(self, "_frontend_store", None)
+        if store is None:
+            return ("", None)
+        return store.activity_phase_clock()
+
     @property
     def display_history_revision(self) -> int:
         return self._display_revision

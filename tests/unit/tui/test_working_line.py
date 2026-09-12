@@ -32,6 +32,7 @@ how the app routes messages internally.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -51,6 +52,7 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
     CompactionStarted,
+    RetryStarted,
     ToolComposing,
     ToolEnded,
     ToolStarted,
@@ -59,6 +61,7 @@ from local_operator.tui.events import (
     TurnEnded,
     TurnStarted,
 )
+from local_operator.tui.widgets import tool_card as card_mod
 from local_operator.tui.widgets.tool_card import format_duration
 from local_operator.tui.widgets.transcript import (
     DEFAULT_ACTIVITY,
@@ -68,6 +71,21 @@ from local_operator.tui.widgets.transcript import (
 )
 
 from .test_app_pilot import FakeSession, _factory
+
+
+def _clock_seconds(text: str) -> float:
+    """The seconds a ``format_duration`` reading names, for RANGE assertions.
+
+    A band reading is wall time between the seed and the read, so pinning it to
+    an exact ``27s`` asserts that the machine is fast — the failure mode
+    AGENTS.md names ("prefer a structural invariant to a numeric one"), and one
+    this file's own first CI run demonstrated: a loaded shard spent a second
+    between computing the age and reading the row, and `27s` came back `28s`
+    on a change that was correct. What is worth asserting is the ORDER — the
+    call's own age, not a zero taken at paint time.
+    """
+    assert text.endswith("s") and text[:-1].isdigit(), text
+    return float(text[:-1])
 
 
 def _working(app: OperatorApp) -> WorkingBlock | None:
@@ -103,10 +121,35 @@ def _is_last(app: OperatorApp) -> bool:
     return bool(blocks) and isinstance(blocks[-1], WorkingBlock)
 
 
-def _started(tool_call_id: str, tool_name: str, **args: Any) -> ToolStarted:
+def _started(
+    tool_call_id: str, tool_name: str, epoch: float | None = None, **args: Any
+) -> ToolStarted:
     return ToolStarted(
-        ToolExecutionStartEvent(tool_call_id=tool_call_id, tool_name=tool_name, args=args)
+        ToolExecutionStartEvent(
+            tool_call_id=tool_call_id, tool_name=tool_name, args=args, started_at_epoch=epoch
+        )
     )
+
+
+class _PhaseSession(FakeSession):
+    """A session that publishes the folded working-line phase and its zero.
+
+    The live half of ``FrontendSessionState.activity_phase`` /
+    ``activity_phase_started_at``, which is what a viewer coming back to a
+    session mid-model-call receives. ``epochs`` is the per-call map beside it,
+    kept here because both are read through the same session object.
+    """
+
+    def __init__(self, phase: str = "", started_at: float | None = None) -> None:
+        super().__init__()
+        self.phase: tuple[str, float | None] = (phase, started_at)
+        self.epochs: dict[str, float] = {}
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        return self.phase
+
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        return self.epochs
 
 
 def _ended(tool_call_id: str, tool_name: str) -> ToolEnded:
@@ -401,9 +444,13 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
     clock". Naming the tool is exactly what turns an adjacent generic clock
     into a claim about it, so the label is kept and the number is dropped.
 
-    The number is not recoverable by trying harder: ``ToolExecutionStartEvent``
-    carries no timestamp, so the true age of an adopted call does not exist on
-    this surface at any price. Withholding it is the only honest rendering.
+    The number is recoverable, and ONLY when somebody recorded it: this row is
+    now seeded from the session's folded ``ToolExecutionStartEvent.
+    started_at_epoch`` for the call, so an adopted call with a live producer
+    behind it reports its real age (the sibling test below). What this test
+    pins is the case where no such instant exists — a legacy producer, a
+    ``subagent_view`` child row — because the fix must not turn "unknown" into
+    "the moment I arrived" for them.
 
     Asserted on the text ``_paint`` COMPOSES rather than on the rendered strip,
     for the reason the width test above documents: Textual clips a strip to the
@@ -414,7 +461,14 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app.post_message(TurnStarted())
-        app.post_message(_started("c0", "await_job", job_id="7a73c97ffc54"))
+        # The producer's own stamp is what makes the start knowable. Supplied
+        # here because that is what a live call ALWAYS carries (one factory in
+        # `harness/loop.py` stamps all three dispatch sites), and because an
+        # epoch-less start event is by definition a call whose start nothing on
+        # this surface knows — QA round 1, Q1: it mounts clockless rather than
+        # dating itself from the viewer's arrival, and an undateable batch
+        # withholds the band (D6).
+        app.post_message(_started("c0", "await_job", epoch=time.time(), job_id="7a73c97ffc54"))
         await pilot.pause()
         line = _working(app)
         assert line is not None
@@ -429,9 +483,9 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
 
         line.set_content = spy  # type: ignore[method-assign]
 
-        # A tool this viewer WATCHED start: its own zero is knowable, so the
-        # clock is true and must still be shown. Wound back rather than slept,
-        # the way the sibling clock tests do it — and wound back on the CARD,
+        # A tool the producer STAMPED: its own zero is knowable, so the clock
+        # is true and must still be shown. Wound back rather than slept, the
+        # way the sibling clock tests do it — and wound back on the CARD,
         # because a running batch's clock counts from the oldest call's own
         # start rather than from the phase change (design round 3, D9).
         card = app._tool_cards["c0"]
@@ -458,6 +512,167 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
         assert format_duration(30) not in painted, painted
 
         line.set_content = original  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_the_band_reports_the_true_age_of_a_tool_it_can_date() -> None:
+    """The other half of D6: a KNOWN start is the work's own zero.
+
+    Same frame as the test above — a card adopted for a call already running,
+    named by the band — with the session's folded epoch supplied. The number is
+    then the call's real age rather than the phase's, which is the whole point:
+    the row refused a clock because it had no start, not because a start was
+    unknowable.
+    """
+    aged = 27.0
+    session = _PhaseSession("running", None)
+    session.epochs = {"c0": time.time() - aged}
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = session
+        app.post_message(TurnStarted())
+        # The start event carries its own producer stamp, which is what the
+        # live path reads; the session map is the fallback for a re-delivery.
+        app.post_message(_started("c0", "await_job", epoch=time.time() - aged))
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+
+        card = app._tool_cards["c0"]
+        assert card.started_at is not None, "a call whose start is known dates itself"
+        # Age-only, so the reading is the call's, not the phase's: the band
+        # counts from the oldest live card's own start (D9). The band's number
+        # is asserted as a RANGE (`aged` up to a generous ceiling) rather than
+        # as the string `27s`: the reading grows while the test runs, and the
+        # failure worth catching is the wrong ORDER of magnitude — a zero taken
+        # when the row was painted.
+        shown = _clock_seconds(line._clock_text())
+        assert aged <= shown < aged + 30, line._clock_text()
+
+
+@pytest.mark.asyncio
+async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's report names TWO clocks; this is the non-tool one.
+
+    ``thinking``/``responding``/``composing`` have no tool call behind them, so
+    a per-call anchor cannot date them and the phase's zero used to exist only
+    inside the widget the viewer built. Switching back to a session mid-model-
+    call therefore showed the thinking indicator counting from the switch.
+
+    The session folds the phase's own start instant from the producer's events
+    and hands it over as ``clock_from_epoch``, which the widget converts ONCE
+    (see ``WorkingBlock.set_activity``) so every tick after that is monotonic.
+    The mismatch case is asserted alongside: a folded phase that is not the
+    phase this app derived must NOT supply an instant, and the row falls back to
+    its own zero rather than reporting an age belonging to another phase.
+    """
+    aged = 27.0
+    session = _PhaseSession("thinking", time.time() - aged)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = session
+        app.post_message(TurnStarted())
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+        assert line.activity == DEFAULT_ACTIVITY
+        # The frame after a switch back: the age is the model call's.
+        shown = _clock_seconds(line._clock_text())
+        assert aged <= shown < aged + 30, line._clock_text()
+
+        # Converted ONCE, not per refresh — asserted with the clock ADJUSTED,
+        # because on a healthy clock a re-seed is arithmetically a no-op and the
+        # difference is invisible: `time.monotonic()` and `time.time()` advance
+        # together, so re-deriving `clock() - (now - epoch)` lands on the same
+        # float. What is not a no-op is the day something moves the wall clock.
+        # The session's epoch is an instant, so a repaint that re-converted it
+        # would move the anchor by the ADJUSTMENT, and a row 27s into a model
+        # call would report an hour; the monotonic zero taken once does not.
+        seeded = line._clock_from
+        jumped = SimpleNamespace(time=lambda: time.time() + 3600.0, monotonic=time.monotonic)
+        monkeypatch.setattr(card_mod, "time", jumped)
+        app._refresh_working_activity()
+        app._refresh_working_activity()
+        assert line._clock_from == seeded, "the phase's anchor moved on a repaint"
+        assert _clock_seconds(line._clock_text()) == pytest.approx(
+            shown, abs=2.0
+        ), "a wall-clock jump moved a counter that is supposed to be immune to one"
+
+        # A fold that disagrees with the derived phase supplies nothing, so the
+        # row is back to its phase zero. The instant belongs to the phase it was
+        # folded in, and using it here would print a true number about the WRONG
+        # thing — the failure mode the whole design round guards.
+        session.phase = ("responding", time.time() - aged)
+        app._refresh_working_activity()
+        assert _clock_seconds(line._clock_text()) < 5, line._clock_text()
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> None:
+    """Review round 1, R1: the fallback arm must ask for the phase it DERIVED.
+
+    ``compacting context`` and ``retrying (attempt N)`` are whole-turn labels
+    with no phase of their own: the fold models no compaction or retry edge, so
+    its phase is still whatever preceded the pass. The gate that supplies
+    ``clock_from_epoch`` is phase EQUALITY by string, and while that arm asked
+    for ``ACTIVITY_PHASE_THINKING`` by name, the equality held for these labels
+    too — so the previous phase's zero was handed to a line that was NOT in that
+    phase. A freshly started ``retrying`` row printed the age of the attempt
+    that had just failed, and a ``compacting context`` row printed the age of
+    what preceded the pass, which is the plausible-wrong-age class this whole
+    change exists to refuse.
+
+    The fix is that the arm asks for the phase it derives
+    (``self._working_fallback``). The ordinary fallback is unaffected, because
+    there the label and the folded phase ARE the same string; asserted first,
+    so a fix cannot pass by withholding every fallback.
+    """
+    aged = 27.0  # the reviewer's probe used 10m to make the number unmissable;
+    # any seed older than the 5s bound below fails the same way, and `27s`
+    # keeps `_clock_seconds` reading the row's own grammar (a 10m reading is
+    # `10m`, not `600s`).
+    session = _PhaseSession("thinking", time.time() - aged)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = session
+        app.post_message(TurnStarted())
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+        assert _activity(app) == DEFAULT_ACTIVITY
+        # The ordinary case: label == folded phase, so the seed is the row's own
+        # and must still be used.
+        assert _clock_seconds(line._clock_text()) >= aged
+        # ``compacting context``: the fold has no such phase, so its zero is NOT
+        # this label's and must not be handed over. The row then counts from the
+        # phase it just entered — the start of the pass — which is the honest
+        # reading for a pass that has just begun.
+        app.post_message(CompactionStarted("auto"))
+        await pilot.pause()
+        assert _activity(app) == "compacting context"
+        shown = _clock_seconds(line._clock_text())
+        assert shown < 5, (
+            f"a freshly started `compacting context` row reads {shown}s: the fold's "
+            "thinking zero was supplied for a label the fold does not derive"
+        )
+
+        # ``retrying (attempt N)`` is the same shape and over-reported by the
+        # whole failed attempt, which is a real misread of "is this stuck".
+        app.post_message(RetryStarted(2, "upstream exploded", None))
+        await pilot.pause()
+        assert _activity(app) == "retrying (attempt 2)"
+        shown = _clock_seconds(line._clock_text())
+        assert shown < 5, (
+            f"a freshly started retry row reads {shown}s: the previous attempt's "
+            "zero was supplied for a label the fold does not derive"
+        )
 
 
 @pytest.mark.asyncio
@@ -488,7 +703,12 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app.post_message(TurnStarted())
-        app.post_message(_started("old", "await_job", job_id="7a73c97ffc54"))
+        # Both cards carry the producer's own stamp, as a live batch always
+        # does (one factory in `harness/loop.py` stamps every dispatch site).
+        # An epoch-less start event would mount clockless instead (QA round 1,
+        # Q1) and there would be no batch clock to be truthful about; the
+        # properties asserted below are about the ANCHOR, not about provenance.
+        app.post_message(_started("old", "await_job", epoch=time.time(), job_id="7a73c97ffc54"))
         await pilot.pause()
         line = _working(app)
         assert line is not None
@@ -498,7 +718,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # back rather than slept, as the sibling clock tests do it.
         aged = 14.0
         app._tool_cards["old"]._started = time.monotonic() - aged
-        app.post_message(_started("new", "read", path="a.py"))
+        app.post_message(_started("new", "read", epoch=time.time(), path="a.py"))
         await pilot.pause()
         app._refresh_working_activity()
         # The batch's clock is the OLDEST call's age: both cards date
@@ -513,7 +733,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
 
         survivor = app._tool_cards["new"]
         survivor_started = survivor.started_at
-        assert survivor_started is not None, "the survivor watched its own start"
+        assert survivor_started is not None, "the survivor's own start is known"
         survivor_age = time.monotonic() - survivor_started
         shown = line._clock_text()
         # THE ASSERTION THAT FAILS ON THE OLD CODE, which showed ~14s here.
@@ -528,7 +748,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # clock. The survivor's own zero is unchanged by its sibling settling,
         # so a batch losing a call every twenty seconds still shows a number
         # past twenty — the "has this been stuck" question the clock answers.
-        app.post_message(_started("third", "bash", command="ls"))
+        app.post_message(_started("third", "bash", epoch=time.time(), command="ls"))
         await pilot.pause()
         app._refresh_working_activity()
         assert line._clock_text() == format_duration(time.monotonic() - survivor_started), (

@@ -89,7 +89,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from rich.cells import cell_len
@@ -474,6 +474,30 @@ def format_duration(seconds: float) -> str:
         return "100d+"
     hours = remainder // 3600
     return f"{days}d{hours}h" if hours else f"{days}d"
+
+
+def monotonic_from_epoch(epoch: float, *, clock: Callable[[], float] = time.monotonic) -> float:
+    """A monotonic instant whose age is ``now - epoch``, for a threaded clock.
+
+    The one conversion from the wall-clock stamps that travel on events
+    (``ToolExecutionStartEvent.started_at_epoch``, the session's folded
+    ``activity_phase_started_at``) into the clocks the widgets tick on. It is
+    one function because both widgets that seed a counter from a producer's
+    instant — ``ToolCard`` and ``WorkingBlock`` — must divide, negate and clamp
+    it identically; the status band's ``seed_duration`` applies the same rule
+    to the turn's own start instant, and keeps its own spelling because it
+    takes an injectable ``now_epoch`` this helper has no use for.
+
+    Conversion is AGE-ONLY and happens ONCE. Everything that ticks afterwards
+    counts on ``clock()``, so a system-clock adjustment, a DST jump or a
+    laptop resuming from sleep after the seed cannot move a counter that is
+    already running: only the interval that had already elapsed is taken from
+    wall time. The clamp matters for the same reason — an epoch in the future
+    (a peer's clock ahead of ours, a stamp written by a machine whose clock
+    was later corrected) means "age unknown, treat as new" rather than a
+    negative elapsed time that would render as a nonsense duration.
+    """
+    return clock() - max(0.0, time.time() - epoch)
 
 
 def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
@@ -915,6 +939,27 @@ def _row_text() -> Text:
     return Text(no_wrap=True, overflow="ellipsis")
 
 
+class _UnknownStart:
+    """Sentinel type for :data:`START_UNKNOWN`; never instantiated twice."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - a debugging aid only
+        return "START_UNKNOWN"
+
+
+#: Passed as :class:`ToolCard`'s ``started_at`` when the card is being mounted
+#: for a call that is ALREADY in flight and no epoch for it exists anywhere —
+#: a legacy producer re-delivered to a rebuilt transcript, or a facade whose
+#: fold carries nothing for the call. It exists because ``None`` already means
+#: something else on that parameter ("this call begins now", true for a card
+#: built by the event that starts it), and the two must not be conflated: the
+#: first mounts CLOCKLESS, the second legitimately takes the mount instant as
+#: zero. Any other consumer that can only say "unknown" must use this rather
+#: than ``clock()``, which would print the viewer's arrival as the call's age.
+START_UNKNOWN = _UnknownStart()
+
+
 class ToolCard(ExpandableActionBlock):
     """A tool execution: ONE row, on a state-tinted elevation step.
 
@@ -947,8 +992,17 @@ class ToolCard(ExpandableActionBlock):
         args: dict[str, object] | None = None,
         intent: str | None = None,
         user_run: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+        started_at: float | None | _UnknownStart = None,
     ) -> None:
         super().__init__()
+        #: Injected so elapsed time is testable without sleeping, exactly as
+        #: ``StatusLine`` takes one. Monotonic, not wall clock: a duration that
+        #: jumps when the system clock is adjusted is worse than no duration,
+        #: which is why the epochs that arrive from outside this widget are
+        #: converted to an AGE once (:func:`monotonic_from_epoch`) and every
+        #: tick after that is taken from here.
+        self._clock = clock
         self.tool_call_id = tool_call_id
         self.navigation_anchor_id = f"tool:{tool_call_id}"
         # tool_name is MODEL-CONTROLLED: the loop takes it from the tool call
@@ -1031,7 +1085,35 @@ class ToolCard(ExpandableActionBlock):
         #: measured from here would be how long ago the panel drew the row.
         #: The settled states already refuse to invent that number — see
         #: :meth:`restore` — and the running state has to refuse it too.
-        self._started: float | None = time.monotonic()
+        #:
+        #: A card constructed for a call that is LIVE right now takes ``clock()``
+        #: here, and that is correct for the call this row was mounted for: the
+        #: row appears with the event that started it, so the two instants
+        #: coincide. The case it is NOT correct for is a start event whose call
+        #: began EARLIER than this card — a re-delivered seed on a view that has
+        #: no row for the call, which is the same switch a restored row takes.
+        #: ``started_at`` is then passed and the row wears the call's real age
+        #: instead of the handler's arrival. It is the same conversion the two
+        #: adopt paths use (:meth:`restore`, :meth:`begin_running`), and it is
+        #: deliberately one rule in three places rather than a constructor that
+        #: quietly disagreed with them about what "running" means.
+        #:
+        #: That leaves the case where the call began earlier AND no epoch
+        #: exists, which neither ``None`` ("begins now") nor a float can
+        #: express — hence :data:`START_UNKNOWN` and the withheld clock above.
+        if isinstance(started_at, _UnknownStart):
+            # The third answer, and the one the two-valued signature could not
+            # say: this row is mounted for a call ALREADY in flight and nobody
+            # recorded when it began. `None` here would mean "the call begins
+            # now", which is a lie for this row — the age it would print is the
+            # viewer's arrival wearing the call's name — and a real epoch is
+            # simply absent. So the row mounts CLOCKLESS, the same withheld
+            # reading `restore` and `begin_running` take for a missing epoch.
+            self._started = None
+        elif started_at is not None:
+            self._started = monotonic_from_epoch(started_at, clock=self._clock)
+        else:
+            self._started = self._clock()
         self._expanded = False
         #: A host that knows the user ran this call TO SEE its output (the
         #: composer's bang-mode) asks the card to open the moment it settles,
@@ -1245,7 +1327,7 @@ class ToolCard(ExpandableActionBlock):
         never learned when its call started must paint a blank column, not a
         number that says the tool returned instantly.
         """
-        return None if self._started is None else time.monotonic() - self._started
+        return None if self._started is None else self._clock() - self._started
 
     @property
     def started_at(self) -> float | None:
@@ -1273,6 +1355,7 @@ class ToolCard(ExpandableActionBlock):
         details: dict[str, Any] | None = None,
         error: str = "",
         duration_s: float | None = None,
+        started_at: float | None = None,
     ) -> None:
         """Adopt a card for a call from a PREVIOUS session, or another agent's.
 
@@ -1298,12 +1381,31 @@ class ToolCard(ExpandableActionBlock):
         further on. `subagent_view.entry_block` rebuilds a child's whole
         trajectory as blocks, and an entry with no outcome yet is a call that
         is STILL GOING: the card has to stay live. It just must not time
-        itself, because its ``_started`` is when the page painted the row —
-        so ``_started`` is cleared here and the running row blanks its
-        duration exactly as its settled siblings blank theirs. Without this
-        the replayed live row counted up from zero (and reset to zero every
-        time an earlier entry changed and the page rebuilt it), inventing
-        precisely the number this method exists to refuse.
+        itself, because its ``_started`` was when the page painted the row —
+        so ``_started`` is cleared here and the running row blanks its duration
+        exactly as its settled siblings blank theirs. Without this the replayed
+        live row counted up from zero (and reset to zero every time an earlier
+        entry changed and the page rebuilt it), inventing precisely the number
+        this method exists to refuse.
+
+        ``started_at`` is what makes the running arm able to KNOW its zero, and
+        it is passed only when that is true: the session's folded
+        ``ToolExecutionStartEvent.started_at_epoch`` for this call — the
+        producer's own stamp of when the tool began, which a viewer that
+        attaches mid-turn otherwise has no way to recover. Given one, the row
+        resumes the call's TRUE age instead of counting from the switch (the
+        reported frame: a `bash` row reading `27s` that restarted at the
+        moment the reader returned to the conversation). Given ``None`` — a
+        legacy producer, a `subagent_view` child row, any facade with no fold —
+        the arm keeps its old clockless behaviour, because stamping the fold or
+        arrival instant in its place is the one thing this path must never do:
+        for an attached viewer that number is invented, not measured.
+
+        The conversion is AGE-ONLY and happens once, here
+        (:func:`monotonic_from_epoch`); every tick afterwards is taken from
+        ``self._clock()``, so a wall-clock adjustment after the seed cannot
+        move a counter that is already running. Settled states ignore
+        ``started_at`` entirely — they are rendered from ``_duration``.
         """
         self._settle_live()
         self._state = state
@@ -1333,7 +1435,13 @@ class ToolCard(ExpandableActionBlock):
             # the freeze comes back with the outcome.
             self._finalized = False
             # Only the clock stays withheld; the expansion still offers the
-            # command.
+            # command. Seeded first, in that order, so a row whose start IS
+            # known arms from the call's true age and its tick timer starts
+            # with it; a row whose start is not known reaches `_refresh_row`
+            # with `_started` still None and blanks the column.
+            if started_at is not None:
+                self._started = monotonic_from_epoch(started_at, clock=self._clock)
+                self._start_clock()
             self._refresh_row()
             return
         self.remove_class("tool-running")
@@ -1388,13 +1496,13 @@ class ToolCard(ExpandableActionBlock):
                 parent.invalidate_name_col()
         self._compose_bytes = argument_bytes
         if self._compose_started is None:
-            self._compose_started = time.monotonic()
+            self._compose_started = self._clock()
         self._start_clock()
         self._render_composing()
 
     def _render_composing(self) -> None:
-        started = self._compose_started or time.monotonic()
-        elapsed = max(0, int(time.monotonic() - started))
+        started = self._compose_started or self._clock()
+        elapsed = max(0, int(self._clock() - started))
         clock = format_duration(elapsed)
         # The FACTS lead and the label sheds whole, the same shape this file
         # already uses for a tool summary. Boilerplate-first, `composing…` was
@@ -1436,9 +1544,12 @@ class ToolCard(ExpandableActionBlock):
         no clock the row simply stops animating between events, which is the
         right degradation for a timer whose entire job is cosmetic.
 
-        A REPLAYED live card (``restore(state="running")``) gets none: it has
-        no start time to count from and nothing streams into it, so every
-        tick would repaint an unchanged row. See :attr:`_started`.
+        A live card with NO start time to count from gets none — a replayed
+        row with no epoch, a mount for a call already in flight whose start
+        nobody stamped — because every tick would repaint a duration the row
+        cannot know. A ``restore(state="running")`` that IS given the call's
+        epoch does arm the timer: the guard is ``_started``, not the path that
+        set it. See :attr:`_started`.
         """
         if self._started is None or not self._navigation_visible:
             return
@@ -1524,7 +1635,11 @@ class ToolCard(ExpandableActionBlock):
         self._live_dirty = False
 
     def begin_running(
-        self, tool_name: str, args: dict[str, object] | None, intent: str | None
+        self,
+        tool_name: str,
+        args: dict[str, object] | None,
+        intent: str | None,
+        started_at: float | None = None,
     ) -> None:
         """Adopt a composing row as the real execution of the call it announced.
 
@@ -1532,18 +1647,32 @@ class ToolCard(ExpandableActionBlock):
         in the transcript in the right place, and replacing it would make the
         ledger flicker a row out and an identical row back in at the moment the
         call finally starts.
+
+        ``started_at`` is the session's folded epoch for this call — the
+        producer's own stamp of when the tool began — and it is what lets a
+        re-delivered ``ToolStarted`` give the row back its TRUE age. Without it
+        the re-entry had only two options, both wrong: restart the clock from
+        the re-entry instant (`0s` on arrival, ticking from the switch), or keep
+        the clock withheld because no surface ever learned when the call began.
+        A live row and the switched-to row for the same call now share one
+        anchor rather than differing by event→handler latency.
         """
         self._stop_clock()
         # A card restored onto the screen mid-execution (`restore(state="running")`)
-        # holds ``_started=None`` DELIBERATELY: no surface ever learned when
-        # the call began, so it refuses to invent an elapsed time. A re-delivered
+        # holds ``_started=None`` DELIBERATELY whenever NOBODY learned when the
+        # call began, so it refuses to invent an elapsed time. A re-delivered
         # ``ToolStarted`` reaches exactly that card — `/resume` onto the running
         # turn, or a switch away and back replaying the owner's live seed — and
         # restarting the clock here would fabricate `0s` at arrival, tick from
         # the RESUME instant, and settle the receipt to "time since the
-        # command" instead of the call's life. The withheld clock survives
-        # re-entry; only a card that can date itself restarts.
-        clockless = self._state == "running" and self._started is None
+        # command" instead of the call's life.
+        #
+        # So the withheld clock survives re-entry, and it is *filled in* when
+        # the call's start is knowable after all (a `started_at` epoch): the
+        # row's own zero is then the call's, not the viewer's. The two are the
+        # same rule, not two arms — a card with no zero and no epoch stays
+        # clockless, which is the honest rendering for a legacy producer.
+        clockless = self._state == "running" and self._started is None and started_at is None
         # Whether this call PROMOTES the row: the two things that decide whether
         # the spine may move because of it (see the invalidation at the end).
         was_composing = self._state == "composing"
@@ -1559,9 +1688,18 @@ class ToolCard(ExpandableActionBlock):
         # so a `write` that executed in 0.1s settled as `✓ 2.4s`, and on the
         # reported 1m41s case would have read `✓ 101s`. Two receipts on one
         # ledger would then be measuring different things with no way to tell
-        # which from the row. Unless the clock was withheld (above): a
-        # clockless card has no zero to restart from.
-        self._started = None if clockless else time.monotonic()
+        # which from the row. Unless the clock was withheld (above): a clockless
+        # card has no zero to restart from.
+        #
+        # The restart is also the reason the epoch has to be threaded THIS far
+        # rather than only into `restore`: a switch back re-delivers the seed's
+        # start event through the event controller, which reaches this method on
+        # the very card `restore` just restored. Seeding only one of the two
+        # left the other resetting the row to zero — the reported frame.
+        if started_at is not None:
+            self._started = monotonic_from_epoch(started_at, clock=self._clock)
+        else:
+            self._started = None if clockless else self._clock()
         self._state = "running"
         # The same construction the constructor uses, so an adopted row is
         # byte-identical to one that had never been a composing row — including
@@ -2031,12 +2169,17 @@ class ToolCard(ExpandableActionBlock):
         # rewriting itself around a moving middle.
         #
         # Both trailing clauses are dropped for a REPLAYED live card, which
-        # knows neither. It has no start time (see :attr:`_started`), and
-        # nothing streams into it — the surface rebuilding it never calls
-        # `set_partial_detail` — so `no output yet` there is not a caveat that
-        # will lift, it is a permanent claim about a child's tool that this
-        # card has no way to make. `⋯ running` alone is the whole of what it
-        # honestly knows.
+        # knows neither. Its start time is absent unless the session supplied
+        # the call's own epoch (see :attr:`_started`), and nothing streams into
+        # it — the surface rebuilding it never calls `set_partial_detail` — so
+        # `no output yet` there is not a caveat that will lift, it is a
+        # permanent claim about a child's tool that this card has no way to
+        # make. `⋯ running` alone is the whole of what it honestly knows.
+        #
+        # The two clauses are dropped together even though the start can now be
+        # known: `no output yet` is what genuinely cannot be claimed here, and
+        # the elapsed half is painted by the status column instead, next to the
+        # outcome glyph it will settle into.
         header = LIVE_HEADER_RUNNING
         elapsed = self._elapsed()
         if elapsed is not None:
@@ -2576,13 +2719,17 @@ class ToolCard(ExpandableActionBlock):
             # holds and the row does not jump on settling.
             #
             dim = bindings.style("tool.status.running_duration")
-            # A REPLAYED live row has no CLOCK. `subagent_view` rebuilds a
-            # child's trajectory into cards and leaves the outcome-less ones
-            # running, and `_mark_pending_tool_rows` repaints a row the owner is
-            # still executing; in both, `_started` is when the PAGE painted the
-            # row — so a clock here counted up from zero and reset to zero every
-            # time an earlier entry changed. A clock started from the wrong zero
-            # is worse than no clock.
+            # A REPLAYED live row has a clock only when its call's start is
+            # KNOWN. `subagent_view` rebuilds a child's trajectory into cards
+            # and leaves the outcome-less ones running, and
+            # `_mark_pending_tool_rows` repaints a row the owner is still
+            # executing; in both, the start is knowable only if somebody
+            # supplied it — the session's folded epoch for a call a live
+            # producer stamped (see `restore`), nothing at all for a child row
+            # or a legacy producer. Where nothing was supplied, `_started` would
+            # be when the PAGE painted the row, so a clock here counted up from
+            # zero and reset to zero every time an earlier entry changed. A
+            # clock started from the wrong zero is worse than no clock.
             #
             # "No clock" is NOT "no state", though, and returning `[]` made this
             # the only row in the ladder with an empty status column — silent in
