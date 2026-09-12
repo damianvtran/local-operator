@@ -327,6 +327,41 @@ def test_an_empty_ticket_is_refused(store: AuthStore) -> None:
     assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER) == []
 
 
+@pytest.mark.parametrize(
+    ("label", "ticket"),
+    [
+        ("embedded newline", "line1\nline2\nline3"),
+        ("CRLF injection", "abc\r\nX-Evil: 1"),
+        ("NUL byte", "abc\x00def"),
+        ("non-latin-1", "fake-console-ticket-\u3042"),
+    ],
+)
+def test_a_ticket_that_could_never_reach_the_wire_is_refused(
+    store: AuthStore, label: str, ticket: str
+) -> None:
+    """Each of these makes httpx refuse the cookie header LOCALLY.
+
+    The console fetcher then swallows it (`except httpx.HTTPError: return
+    None`) and the panel renders "no windows reported" with nothing linking
+    it to the paste, so storing it and reporting success is exactly the
+    plausible-degraded-state bug controller.py:268-278 names. Measured on a
+    real TCP socket, not MockTransport, which does not validate header
+    values.
+    """
+    with pytest.raises(TicketStoreError):
+        store_ticket(store, ticket)
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER) == [], label
+
+
+def test_the_refusal_message_never_echoes_the_value(store: AuthStore) -> None:
+    """A full-account cookie must not land in a terminal or a log."""
+    secret = "fake-console-ticket-with\nan-embedded-newline"
+    with pytest.raises(TicketStoreError) as excinfo:
+        store_ticket(store, secret)
+    assert "an-embedded-newline" not in str(excinfo.value)
+    assert "fake-console-ticket-with" not in str(excinfo.value)
+
+
 def test_read_ticket_record_never_returns_the_value(store: AuthStore) -> None:
     store_ticket(store, FAKE_TICKET)
     record = read_ticket_record(store)

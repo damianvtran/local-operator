@@ -123,11 +123,62 @@ def _require_private_modes(db_path: Path) -> None:
             )
 
 
+def _reject_unsendable(ticket: str) -> None:
+    """Refuse a ticket that could never reach the gateway, before storing it.
+
+    The value's only use is interpolation into a ``cookie:`` request header
+    (usage.py's console fetcher), and httpx validates header values locally:
+    an embedded newline, CR or NUL raises ``LocalProtocolError`` and a
+    non-latin-1 character raises ``UnicodeEncodeError``. The fetcher catches
+    ``httpx.HTTPError`` and returns None, so the panel renders "no windows
+    reported" with nothing linking it back to the paste. Storing such a value
+    and reporting success is the failure controller.py:268-278 names: a bug
+    dressed as a plausible degraded state.
+
+    Rejecting at the boundary rather than sanitising follows
+    ``credentials._reject_control_chars`` (credentials.py:29-40), which
+    refuses the same byte classes for the same reason -- a legitimate token
+    never contains one. The message never echoes the value: this is a
+    full-account session cookie.
+
+    CR and LF are NOT special-cased apart from the other control bytes. The
+    interesting one is CRLF, which would be header injection if httpx did not
+    stop it, but a value carrying any of them is equally incapable of being
+    sent, so one rule covers both.
+    """
+    for char in ticket:
+        if ord(char) < 0x20 or ord(char) == 0x7F:
+            name = "a newline" if char in "\r\n" else f"a control character (0x{ord(char):02x})"
+            raise TicketStoreError(
+                f"the ticket contains {name}, so it could never be sent as a "
+                f"cookie header and would fail silently. Paste the "
+                f"login_qwencloud_ticket value as a SINGLE line, with no line "
+                f"breaks"
+            )
+    try:
+        # The exact encode httpx performs on a header value; doing it here
+        # turns a `UnicodeEncodeError` raised from INSIDE the fetcher -- which
+        # the fetcher's `except httpx.HTTPError` does not catch, breaching
+        # usage.py:51-53's "a fetcher never raises" -- into a clear rejection
+        # at the one place the user can act on it.
+        ticket.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise TicketStoreError(
+            "the ticket contains a non-ASCII character, so it could never be "
+            "sent as a cookie header. Copy the login_qwencloud_ticket value "
+            "exactly, with no surrounding text"
+        ) from exc
+
+
 def store_ticket(store: Any, ticket: str, *, now_ms: int | None = None) -> None:
     """Upsert the console cookie. Never returns or logs the value."""
     ticket = ticket.strip()
     if not ticket:
         raise TicketStoreError("empty ticket value")
+    # Validated BEFORE the mode check and the write: a value that can never
+    # reach the wire must not be stored at all, and must not be reported as
+    # stored.
+    _reject_unsendable(ticket)
     _require_private_modes(_resolve_db_path(store))
     payload = {
         # `ticket`, never `key`: the API-key cascade reads `data["key"]`, and
