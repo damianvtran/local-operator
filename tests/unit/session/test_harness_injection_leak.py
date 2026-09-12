@@ -433,3 +433,23 @@ async def test_a_marker_carrying_a_legacy_notice_replays_without_it(tmp_path) ->
     elision = "\n".join(texts)
     assert "2 harness-injected message(s)" in elision
     assert "older user message(s) you wrote were dropped" not in elision
+
+
+def test_a_plain_stored_notice_is_a_notice_row_whatever_its_provenance() -> None:
+    """QA round 2 Q1: the notice rule is NOT scoped to carried copies.
+
+    The audit phase of the attached viewer replays STORED rows, and a stored row
+    from before the stamp existed has no ``provider_payload`` at all — so a rule
+    that needed a carried marker let the four plain switch notices on the
+    operator's session come back into view the moment the carried copies were
+    shed. Text is the test for any user row now; the cost (a pasted notice loses
+    its DISPLAY row, and nothing else) is pinned by the fold tests.
+    """
+    plain = Message(role="user", content=[TextContent(text=LEGACY_NOTICE)])
+
+    assert is_harness_notice_row(plain)
+    assert plain.provider_payload is None, "the fixture must be the unprovenanced shape"
+    assert not is_harness_notice_row(Message.user("why did the model change?"))
+    # A DELIVERY envelope is not a notice: it has its own parser, and a person
+    # quoting one keeps their words (pinned in the fold tests).
+    assert not is_harness_notice_row(Message.user("<parent-message>\nwhy does my log show this?"))

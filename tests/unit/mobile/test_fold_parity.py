@@ -82,6 +82,9 @@ from local_operator.incidents import format_model_switch_message
 from local_operator.mobile.projection import ProjectionFold, fold_messages_to_entries
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
 from local_operator.session.shell_record import shell_record_messages
+from local_operator.session.transcript import ENTRY_MESSAGE
+from local_operator.session.transcript import TranscriptEntry as JournalEntry
+from local_operator.session.transcript import replay_entries
 
 
 def _page_rows(history: Sequence[AgentMessage]) -> list[TranscriptEntry]:
@@ -463,12 +466,55 @@ def test_a_harness_injected_row_is_never_painted_as_the_users_words() -> None:
         assert [row.kind for row in rows] == ["user"]
         assert notice not in " ".join(row.text for row in rows)
 
-    # Negative control: the same WORDING without the stamp is the user's own
-    # words — pasting a notice to ask about it is a realistic thing to do — so
-    # the decision must key on the stamp and never on the text.
+    # The LIMIT of the rule, pinned here because it is a trade and not a free
+    # win: the same wording with no stamp and no carried marker — a pasted notice,
+    # a realistic prompt — is ALSO hidden on both folds, because the audit phase
+    # serves stored rows whose only surviving evidence is the text (QA round 2 Q1
+    # found four such rows painted on the operator's session). The row is not lost
+    # anywhere else; only the renderer drops it, exactly as the chrome prompts
+    # above already do.
     quoted = [Message(role="user", content=[TextContent(text=notice)])]
-    assert [row.text for row in _page_rows(quoted)] == [notice]
-    assert [row.text for row in _attach_rows(quoted)] == [notice]
+    assert _page_rows(quoted) == []
+    assert _attach_rows(quoted) == []
+
+
+def test_a_stored_notice_row_is_hidden_in_the_audit_phase_too() -> None:
+    """QA round 2 Q1: the heal must not open the mirror.
+
+    Shedding the carried copies removed their ids from the hoisted suppression
+    set, so the plain stored rows an older build wrote — no stamp, no marker,
+    served verbatim by the audit phase — came back into view. The decision is
+    therefore text-based for any ``role="user"`` row, in whichever phase serves
+    it, and this pins the audit arm of that: a stored notice replayed through
+    ``replay_entries(..., mode="audit")`` paints nothing on either fold while the
+    row itself stays in the journal.
+    """
+    notice = _switch_notice()
+
+    def journal_row(entry_id: str, text: str) -> JournalEntry:
+        """A stored row as the JOURNAL holds it: no ``provider_payload`` at all."""
+        return JournalEntry(
+            id=entry_id,
+            ts=1.0,
+            type=ENTRY_MESSAGE,
+            payload={
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        )
+
+    entries = [
+        journal_row("stored-notice", notice),
+        journal_row("mine", "why did the model change?"),
+    ]
+
+    replayed = replay_entries(entries, None, mode="audit")
+    assert "stored-notice" in [getattr(row, "id", "") for row in replayed]
+
+    for rows in (_page_rows(replayed), _attach_rows(replayed)):
+        assert [row.kind for row in rows] == ["user"]
+        assert rows[0].text == "why did the model change?"
 
 
 def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
