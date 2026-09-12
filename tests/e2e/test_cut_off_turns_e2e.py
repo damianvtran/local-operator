@@ -23,6 +23,7 @@ needed: everything runs on ``hosting: test`` / ``model_name: mock``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.session.attached import RECOVERY_GIVE_UP_S
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import Transcript
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
@@ -450,6 +452,141 @@ async def test_the_next_turn_after_a_restore_carries_the_incident(
             try:
                 await viewer.dispose()
             except Exception:  # noqa: BLE001
+                pass
+        if child.poll() is None:
+            _reap(child, config)
+
+
+@pytest.mark.asyncio
+async def test_a_tui_owned_stop_through_the_dispose_route_reports_interrupted(
+    headless_tui_env: Path,
+) -> None:
+    """Cell D — the OTHER rung of the kill switch: in-process, no control op.
+
+    Cell C drives ``lop stop`` over the socket, which is the one rung that has
+    recorded the deliberate verdict since the taxonomy landed. The route the
+    user's own bare ``/stop`` takes in a TUI-owned session is this one — the app
+    disposes the session in place — and it published ``kind=error,
+    cause=disposed``: "the session was disposed while this turn was running" on
+    a cancel the user asked for, on the default path (review round 1,
+    BLOCKER-1). Asserted on the durable store, because a live-only notice would
+    have hidden it.
+
+    The turn is parked in the REAL ``bash`` tool (an in-process session with a
+    scripted tool call), so it is genuinely mid-flight when the stop lands —
+    the same shape the socket-rung cell uses, without a spawned runtime.
+    """
+    from local_operator.session.attention import AttentionStore, conversation_identity
+    from local_operator.tools.builtin import build_bash_tool
+    from local_operator.tui.app import OperatorApp
+    from tests.e2e.harness import tool_call_turn, wait_for_adoption
+
+    config = headless_tui_env
+    session_id = "cutoffdispose1"
+    directory = _seed(config, session_id)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="holding the turn open",
+                tool_name="bash",
+                tool_call_id="call-parked",
+                arguments={"command": "sleep 30"},
+            ),
+            text_turn("the stop landed before this"),
+        ]
+    )
+    session = build_session(directory, stream, tools=[build_bash_tool()], cwd=config)
+
+    async def factory() -> Any:
+        # The app awaits its factory: production's boots or attaches and is a
+        # coroutine, so handing it a session directly fails adoption with
+        # "'Session' object can't be awaited" rather than adopting it.
+        return session
+
+    app = OperatorApp(factory)
+    with bounded(90, "cut-off: dispose-route stop"):
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_for_adoption(app, pilot)
+            # NOT awaited: an in-process session's ``prompt`` returns when the
+            # turn ends, so awaiting it here would block until the parked tool
+            # had finished and left nothing to stop.
+            task = asyncio.create_task(session.prompt("hold this turn open"))
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if getattr(session, "is_streaming", False):
+                    await asyncio.sleep(0.5)
+                    break
+                await asyncio.sleep(0.05)
+            assert session.is_streaming, "the turn never started"
+            assert app._session is session, "the app must own the session for this route"
+
+            await app._stop_local_session()
+            await pilot.pause()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(task, timeout=30)
+
+        state = AttentionStore().state(conversation_identity(directory))
+        assert state["kind"] == "interrupted", state
+        assert state["cause"] == "user-stop", state
+        assert _incidents(directory) == [], "a stop the user asked for is not an incident"
+
+
+@pytest.mark.asyncio
+async def test_a_watched_runtime_killed_mid_turn_ends_with_a_named_cut_off(
+    headless_tui_env: Path,
+) -> None:
+    """The operator's reported flow: the session dies while you are WATCHING it.
+
+    The successor-boot cells above classify a death after the fact. This one is
+    the screen in front of the user when it happens, and it used to be the worst
+    outcome of the change: a viewer built through ``connect()`` has
+    ``_can_go_cold`` False, so the recovery loop took its legacy give-up arm and
+    synthesised the BARE abort a user's Esc produces — ``aborted=True,
+    error=None`` — while the branch that named a cause was unreachable. Measured
+    at the time: card ``interrupted ⊘ 11s``, no notice, no reason, durable state
+    still ``kind=None`` at t≈98 s (QA round 1, Q-1; UX U1).
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.session.attached import COLD_FALLBACK_S
+
+    config = headless_tui_env
+    session_id = "cutoffwatched1"
+    directory = _seed(config, session_id)
+    child = _spawn(config, session_id)
+    viewer = None
+    ends: list[AgentEndEvent] = []
+    try:
+        with bounded(120, "cut-off: watched kill"):
+            viewer = await _attach(config, session_id)
+            assert viewer._can_go_cold is False, "this cell is about the legacy arm"
+            viewer.subscribe(
+                lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+            )
+            await _park_a_turn(viewer, directory)
+            started = time.monotonic()
+            child.kill()
+            child.wait(timeout=10)
+
+            deadline = time.monotonic() + COLD_FALLBACK_S + 15
+            while time.monotonic() < deadline and not ends:
+                await asyncio.sleep(0.05)
+            elapsed = time.monotonic() - started
+            assert len(ends) == 1, f"expected one synthesised end, got {len(ends)}"
+            (end,) = ends
+            # The taxonomy shape, not a bare abort: this is what lets every
+            # existing surface paint a failure with a reason.
+            assert end.aborted is False, end
+            assert end.error, "a cut-off must carry the notice"
+            assert end.cut_off_cause == "owner-lost", end
+            assert (
+                elapsed < RECOVERY_GIVE_UP_S
+            ), f"the cut-off waited {elapsed:.1f}s, which is the give-up path"
+            assert "cut off" in str(end.error)
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001 — teardown of a killed owner
                 pass
         if child.poll() is None:
             _reap(child, config)

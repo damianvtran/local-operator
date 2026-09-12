@@ -1013,7 +1013,19 @@ class ProjectionFold:
             p.streaming = False
             self._streaming_ended = True
             p.queued_count = 0
-            p.stop_reason = "aborted" if event.aborted else "completed"
+            # A CUT-OFF TURN IS AN ABORT, not a completion. The taxonomy flips an
+            # involuntary end to `aborted=False, error=<notice>` so every
+            # existing surface paints it as a failure, and this fold naively read
+            # that as "the turn finished" — which silently removed the phone's
+            # only recovery affordance for exactly the sessions the operator
+            # reports losing (`composer.tsx` gates `interrupted — tap to resume`
+            # on `stop_reason === "aborted"`, review round 1 MAJOR-1). The field
+            # means "why streaming last stopped", and a turn that was cut off
+            # stopped without finishing; `cut_off`/`cut_off_cause` is how the
+            # session states that, so it is read here rather than inferred from
+            # `aborted` alone.
+            cut_off = bool(event.cut_off or event.cut_off_cause)
+            p.stop_reason = "aborted" if (event.aborted or cut_off) else "completed"
             self._close_open_message()
             if event.error:
                 self._append(

@@ -343,7 +343,10 @@ CUT_OFF_CAUSES: dict[str, str] = {
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     "runtime-killed": "the runtime disappeared without exiting cleanly while this turn was running",
     "install-mid-update": "a local-operator install was being replaced on disk while this turn was running",
-    "owner-lost": "the session's runtime went away while this turn was running",
+    # About what the VIEWER can verify, not about what happened to the process:
+    # the arm that paints it is the recovery loop's give-up, which also fires
+    # for a live-but-silent owner (record present, pid alive, nothing answers).
+    "owner-lost": "the session's runtime stopped answering while this turn was running",
     "disposed": "the session was disposed while this turn was running",
 }
 ```
@@ -393,8 +396,15 @@ ways.
      `started_at`);
    - a `turn_cut_off`/outcome marker from an earlier run of the same token
      (§3.2's live path) → that marker's `kind`/`cause`/`reason`, verbatim;
-   - nothing at all → `error`, `cause="runtime-killed"`, with the detail
-     "the cause could not be determined".
+   - nothing at all → `error`, **no cause**, reason `CUT_OFF_UNKNOWN`
+     ("the turn was cut off and the cause could not be determined"). The first
+     draft named `runtime-killed` here with a "(the cause could not be
+     determined)" parenthetical, and every surface that trims a parenthetical —
+     the sidebar's `_error_label`, which drops one by design for the build pair
+     — asserted a mechanism in the one case where nothing is known (design/UX
+     review round 1, D3/U3). Leaving `cause` empty also keeps
+     `cause_from_reason(reason)` — the inverse every reader uses — agreeing with
+     the sentence instead of naming an unobserved cause.
 3. **The provisional anchor stays.** `provisional_anchor(token)` is the real
    "this record is replaceable" signal. `_supersedes_provisional`
    (`session/attention.py:115-147`) currently *also* requires
@@ -405,6 +415,20 @@ ways.
    describes. Pin it with the test in §8.1.
 
 ### 3.5 Journals on restore, once per orphaned run
+
+**The saved-marker branch journals too** (QA round 1, Q-2; review MINOR-2). A
+runtime that publishes its own outcome and then dies cannot narrate it:
+`journal_incident` refuses once `_disposed` is set, and the dispose rung sets
+that flag before the turn's `finally` publishes — so the whole update/shutdown/
+retire family reached every SURFACE and no MODEL, which is exactly the operator's
+reported family ("interruptions … have something to do with updates"). The
+successor is the only writer left, so `_import_transcript_outcome` returns the
+tuple for a saved marker whose `kind == "error"` **and** whose `cause` is a
+`CUT_OFF_CAUSES` token. Both conditions are load-bearing: a provider error
+carries no cause and a deliberate stop carries `user-stop`, and narrating either
+as a cut-off incident would commit the taxonomy's own misclassification in the
+reader meant to repair it. Deduped on the token like the orphaned-run half, so a
+second boot narrates nothing.
 
 `bootstrap_transcript` is called from `Session.__init__` (where a `Session`
 exists to journal) **and** from the mobile daemon sweep (where it does not). So
@@ -423,6 +447,35 @@ the journaling belongs at the caller that has a session:
   (`session/session.py:675-697`).
 
 ---
+
+### 3.6 Where the deliberate verdict is written (review round 1, BLOCKER-1)
+
+`interrupted` requires POSITIVE evidence of a deliberate act, and the verdict has
+to be recorded while the act is still knowable — `Session.dispose()` notes
+`disposed` unconditionally, so an un-noted dispose publishes the user's own cancel
+as `kind=error, cause=disposed`.
+
+Only the `stop` control op used to record it. The route a bare `/stop` actually
+takes on a TUI-owned session is `tui/app.py::_stop_local_session` → `await
+session.dispose()`, with a peer's `lop stop` reaching the same method through
+`TuiSessionHandle.request_stop` — so the DEFAULT path published a false failure,
+and neither the unit guard (which set `_attention_outcome` directly) nor the e2e
+cell (which used `stop_session`, the one rung that did record it) could see it.
+Measured with the real `Session.dispose()`: unnoted → `error`/`disposed`, noted →
+`interrupted`/`user-stop`.
+
+The verdict is therefore written at the deliberate rungs, and only there:
+
+* `OperatorApp._stop_local_session` (before the dispose),
+* `ServingSessionHandle._note_deliberate_stop`, called by `request_stop`
+  (unchanged), `abort` (the phone's stop button) and `cancel_gracefully` (a
+  supervisor's cancel) — one helper, so the three stay in step,
+* and NOT in `Session.dispose()` itself, whose involuntary teardowns (a reload,
+  an unmount, `_mobile_teardown`) are cut-offs and must keep saying so.
+
+A retirement outranks all three: while `_retiring_cause` is latched, the runtime
+is already ending that turn for its own reason and the cut-off verdict belongs to
+the retire path, which recorded it when it latched.
 
 ## 4. Restored subagent rows (D3)
 
@@ -448,7 +501,23 @@ this order:
    today's behaviour.
 
 The row gains an additive `cut_off_cause: str = ""` field, so the subagent panel
-can show *why* rather than only that it stopped. The three-surface vocabulary
+can show *why* rather than only that it stopped.
+
+**RESOLVED ON BOTH WRITERS, from one function** (UX round 1, U2). There are two
+restorers of the same roster: this cold viewer, and the successor runtime's
+`AsyncJobManager` — whose table is what the session publishes as the live
+roster. Written separately, the viewer's resolved rows survived under a second:
+measured at t+1.2 s `completed|interrupted|completed|interrupted`, and by
+t+1.9 s all four back to a blanket `interrupted` with the cause dropped, because
+the owner's restore replaced them. The resolution therefore lives in
+`session/restored_rows.py` and both paths call it (`Session._load_subagent_roster`
+before `jobs.restore`, and `_restore_cold_subagents`).
+
+`cut_off_cause` is **deliberately not persisted**: the sidecar's `jobs` rows are
+validated by strict `extra="forbid"` models, so a field an older owner does not
+know makes it DROP the whole row at resume — a worse degradation than losing a
+cause that costs nothing to re-derive. `_ROSTER_ROW_FIELDS` stays as it is, and
+`JobState.from_job` carries the value from the manager's row to the wire. The three-surface vocabulary
 already exists (`tui/widgets/subagent_panel.py:230-260`, `:385-390`,
 `subagent_view.py:466`, `:1186-1189`) and a design round decides whether the
 panel prints the cause inline or behind the existing row detail.
@@ -566,13 +635,21 @@ append its `interrupted` row when `aborted=False`. So the live copy is just the
 text is recognised as an MCP or provider auth failure, so a cut-off sentence
 passes through unchanged.
 
-**Tool cards.** `_finalize_turn` retires stranded live cards to
-`⊘ interrupted` unconditionally (`tui/app.py:34286`, `widgets/tool_card.py:1140-1171`).
-On a cut-off turn that word now contradicts the notice. Two options for the
-design round: (a) reuse `⊘ interrupted` and accept the vocabulary mismatch;
-(b) add a `cut off` card state. I recommend (a) for this change and (b) only if
-the designer says the mismatch reads badly — (b) touches the card, the panel and
-`subagent_view`, which is a larger diff than the whole of PR A.
+**Tool cards.** `_finalize_turn` retires stranded live cards, and the WORD comes
+from the turn's verdict (`widgets/tool_card.py::mark_interrupted(cut_off=...)`).
+This was offered to the design round as a choice between reusing `⊘ interrupted`
+and adding a state; the design round took the word (round 1, D2) and it is the
+cheaper of the two — the glyph, the column and the dim tier are untouched, so no
+new design surface, and the row stops calling the same death `interrupted` under
+a `✗ turn cut off` notice. Rendered: `bash  sleep 30   cut off ⊘  9.7s`.
+
+**The bound the paint lands on.** The recovery loop checks its deadline at the
+top of a pass, so a pass that slept its pacing delay past `COLD_FALLBACK_S`
+reported the cut-off one sleep late — measured at 9.4 s against a bound of 8.0.
+The sleep is now capped at the deadline (`paced` in `_recover_runtime`), and the
+watched SIGKILL paints at 8.03 s measured from the kill (the residual hundredth
+is the notification lag before the loop's deadline even starts: the loop's clock
+begins when it notices the drop, not when the process died).
 
 ### 6.2 TUI — the next resume / an unwatched session
 
@@ -589,7 +666,14 @@ Change the error branch to carry the reason:
 > while this turn was running.
 
 and generalise `_adopt_own_interrupt_notice` (`tui/app.py:18467-18511`) to
-adopt an `error` row too. **Without that generalisation a cut-off paints twice**:
+adopt an `error` row too. **The row's tier comes with it** (design round 1, D1):
+the error branch passed no kind, so it took `NoticeBlock`'s `info` default — a
+dim `·` in the same fill as the routine `Interrupted` control one branch down —
+for an outcome the live surface paints `✗` danger. Both surfaces now take the
+sentence AND the tier from `harness/rows.py::completion_notice`, which is where
+this repo's row decisions belong; `interrupted` deliberately stays `info` on the
+replay (the live row's `warning` is a turn-scoped statement a receipt is not
+making). **Without that generalisation a cut-off paints twice**:
 the live `on_turn_ended` error notice has no `completion_anchor_id`, so the
 poller cannot dedupe it and appends its own. The same duplicate is believed to
 exist **today for provider errors** — `_own_interrupt_notice` is only ever set
@@ -620,11 +704,25 @@ text="Stopped with an error" if attention["kind"] == "error" else "Interrupted"
 becomes
 
 ```python
-if attention["kind"] == "error":
-    text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
-else:
-    text = "Interrupted"
+text, severity = completion_notice(attention["kind"], attention.get("reason") or "")
+# ... TranscriptEntry(..., text=text, details={"severity": severity})
 ```
+
+BOTH halves matter, and the second was missing at first (design round 1, D4):
+the frame carried an empty `details`, and the phone's `NoticeRow` picks its glyph
+and ink from `details.severity` — so a cut-off rendered as the same dim `·` as
+`Interrupted`, a routine receipt, on the surface the operator reads from a phone.
+The severity is derived in `harness/rows.py` (the module that owns these rows for
+both surfaces) rather than at the serialization boundary, so the TUI's poller and
+the phone cannot disagree about the tier of one outcome.
+
+**And `stop_reason` must not read a cut-off as a completion** (review round 1,
+MAJOR-1). `fold_event` set `stop_reason = "aborted" if event.aborted else
+"completed"`, and the taxonomy flip reports a cut-off as `aborted=False` — so the
+phone told the user the turn had FINISHED and silently dropped
+`interrupted — tap to resume`, the only recovery affordance there is, for exactly
+the sessions the operator reports losing. It now prefers `cut_off`/`cut_off_cause`
+(§9 risk 2's third reader of `aborted`, resolved in favour of the reader).
 
 Phone notification copy is unchanged (`tui/notify.py:139-146, 197-207` already
 has a distinct `interrupted` category and an `error` category —
@@ -679,7 +777,13 @@ and every surface) lands and is reviewed before the runtime-lifecycle work.
 | `session/runtime/control.py` | the stop rung records a deliberate cause before triggering |
 | `update.py` | `classify_import_failure` (§5.2) |
 | `mobile/daemon.py` | the fold/projection seams log the named failure (`:110`, `:535`) |
-| `session/attached.py` | `_restored_job_rows(jobs, records=self._durable_roster_records(...))` + child-tail resolution and the additive `cut_off_cause` field (§4) |
+| `session/restored_rows.py` | NEW: the one row-resolution policy, called by BOTH restorers (§4) |
+| `session/attached.py` | `resolve_restored_rows(jobs, records=...)` on the cold path; the named `owner-lost` verdict on both legacy synthesised ends (§6.1) |
+| `session/session.py` | `_load_subagent_roster` resolves the rows through the same function before `jobs.restore` (§4) |
+| `harness/jobs.py` | the non-persisted `cut_off_cause` on `AsyncJob`, carried so the wire row can say why (§4) |
+| `harness/rows.py` | `completion_notice` — the returned-to row's sentence and tier, for both surfaces (§6.2, §6.4) |
+| `mobile/projection.py` | `stop_reason` prefers `cut_off`/`cut_off_cause`, so a cut-off keeps the phone's resume affordance (§6.4) |
+| `tui/app.py`, `tui/widgets/tool_card.py`, `tui/events.py` | the end event's cut-off verdict reaches the stranded card WORD (§6.1); `_stop_local_session` records the deliberate verdict (§3.6) |
 | `docs/design-cut-off-turns.md` | this file, marked implemented |
 
 Order: PR A first (PR B's `begin_retire` reason and the row causes render
@@ -799,10 +903,12 @@ never the operator's live `~/.local-operator`)
 2. **The `aborted=False` rewrite is the riskiest single semantic choice.**
    Anything that reads `aborted` as "the turn was interrupted" now sees
    `error` instead. §6.1's tool-card vocabulary is the visible consequence, and
-   test 15 pins the notice count. If a third reader of `aborted` turns up, the
-   fallback is to keep `aborted=True` and add `cut_off`/`cut_off_cause`, teaching
-   the poller and `_finalize_turn` to prefer them — a larger diff with the same
-   outcome.
+   test 15 pins the notice count. **The third reader this risk predicted DID turn
+   up**: `mobile/projection.py`'s `stop_reason` (round 1, MAJOR-1), which the
+   phone uses to decide whether to offer `interrupted — tap to resume` — the
+   predicted fallback (prefer `cut_off`/`cut_off_cause`) is what was applied, so
+   `aborted` is left alone and no surface has to be taught a new field. Treat this
+   entry as answered rather than as a standing option.
 3. **Two rows for one outcome.** The dedupe between the live turn-end notice and
    the attention poller is anchored on `completion_anchor_id`, which the live row
    cannot carry at paint time. §6.2's generalisation of `_adopt_own_interrupt_notice`

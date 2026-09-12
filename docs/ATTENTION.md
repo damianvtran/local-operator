@@ -22,10 +22,24 @@ operator-facing sentence) whenever it knows why the turn ended.
 **The default flipped for an unfinished run.** Resuming an unfinished journaled
 run records an **error** naming the cause, not an interruption: a cut-off the
 harness cannot explain is not a stop. Only POSITIVE evidence of a deliberate act
-— a recorded stop marker, or the stop rung's own `user-stop` cause — records an
-`interrupted`. The one exception is a run that published its own outcome before
-the process went away: that marker is replayed verbatim, so a deliberate stop
-that settled is still an interruption.
+— a recorded stop marker, or a deliberate rung's own `user-stop` cause — records
+an `interrupted`. "Deliberate rung" means every route a person's stop takes:
+the `stop` control op (`/stop`, `lop stop`), the in-process dispose a bare
+`/stop` performs on a TUI-owned session, the phone's `abort` button and a
+supervisor's `cancel`. An INVOLUNTARY teardown (a reload, an unmount, a session
+swap) is a cut-off and keeps saying so.
+
+`cause` is empty when the harness has no evidence at all — the reason then says
+the cause could not be determined, and nothing names a mechanism nobody
+observed. A cause is set only where one was established.
+
+The one exception is a run that published its own outcome before the process
+went away: that marker is replayed verbatim, so a deliberate stop that settled is
+still an interruption. A marker that reports a CUT-OFF is also journaled at that
+boot (`session_incident`), once per token, because the process that published it
+could not journal it itself — `journal_incident` refuses once the session is
+disposed, and the dispose rung sets that flag before the turn's `finally`
+publishes.
 Copied fork journals cannot reuse another conversation's token.
 
 A receipt advances through the supplied token's sequence using a monotonic

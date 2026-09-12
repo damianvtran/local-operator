@@ -161,6 +161,12 @@ from local_operator.session.protocol import (
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
+
+# The roster-row resolution shared with the cold viewer. Imported here so the
+# OWNER path (this module's `_load_subagent_roster`) and the viewer path
+# (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
+# about one persisted row (UX review round 1, U2).
+from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
 from local_operator.tools.builtin import (
     TODO_REMINDER_MESSAGE_TYPE,
@@ -6196,12 +6202,20 @@ class Session:
         A turn that ALREADY ended with a real provider/tool error is left alone:
         that error is a more specific diagnosis than "the runtime went away",
         and overwriting it would throw away the only text that names the actual
-        fault.
+        fault. The guard reads ``event.error`` ALONE and not
+        ``event.error and not event.aborted`` (review round 1, MINOR-1): the loop
+        emits a provider failure on an aborted turn itself
+        (``harness/loop.py:945`` — ``aborted=True, error=<stream_error>``), so
+        the narrower test let a cut-off overprint the vendor's own "quota
+        exhausted" with a generic sentence, which is this method's contract
+        broken by its own guard. ``_publish_attention_outcome`` reads the verdict
+        back off the event (``cut_off_cause``), so the durable reason agrees with
+        the live row instead of naming a different failure.
         """
         cause = self._cut_off_cause
         if not cause:
             return event
-        if event.error and not event.aborted:
+        if event.error:
             return event
         detail = self._cut_off_detail
         return event.model_copy(
@@ -6329,7 +6343,16 @@ class Session:
         # the two facts it needs rather than re-deriving them: ``cut_off`` says
         # the end marker is an involuntary stop, and ``aborted`` alone still
         # means the deliberate one.
-        cut_off = bool(self._cut_off_cause)
+        #
+        # READ OFF THE EVENT, not off the local flag (review round 1, MINOR-1).
+        # The flag says a cut-off was NOTICED; the event says one was
+        # CLASSIFIED, and the two differ in exactly one case — a cut-off that
+        # coincided with a real provider error, which the classifier deliberately
+        # leaves alone. Reading the flag there would publish the cut-off sentence
+        # as the reason while the transcript, the live row and the model all hold
+        # the provider's message: the store and the surfaces disagreeing about
+        # one turn's failure is the class of bug this taxonomy exists to remove.
+        cut_off = bool(outcome.cut_off_cause)
         kind = (
             "error"
             if (outcome.error or cut_off)
@@ -11561,7 +11584,17 @@ class Session:
                 logger.warning("dropping malformed persisted subagent row: %r", raw)
         if rows:
             try:
-                self.jobs.restore(rows)
+                # RESOLVE BEFORE RESTORE, through the SAME resolver the cold
+                # viewer uses (``session/restored_rows.py``). This is the writer
+                # that matters for what the user ends up looking at: the manager
+                # publishes this table as the session's roster, so rows restored
+                # raw would replace the viewer's record-resolved rows within a
+                # second of the session opening — a settled ``completed`` child
+                # back to a blanket ``interrupted``, with the cause dropped
+                # (UX review round 1, U2). ``AsyncJobManager.restore`` cannot do
+                # this itself: the record facts live here, in the roster
+                # payload, and not in the manager's table.
+                self.jobs.restore(resolve_restored_rows(rows, roster_records(details)))
             except Exception:  # noqa: BLE001 - a bad snapshot must not stop boot
                 logger.warning("could not restore subagent job rows", exc_info=True)
         if isinstance(details.get("accounting"), list):

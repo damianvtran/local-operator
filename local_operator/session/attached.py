@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -102,12 +101,10 @@ from local_operator.session.protocol import (
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
+from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
-    ENTRY_MESSAGE,
-    TRANSCRIPT_FILENAME,
     Transcript,
-    TranscriptEntry,
     read_replay_suffix,
     replay_entries,
 )
@@ -490,182 +487,6 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
     return cls.model_validate(data)
-
-
-#: Outcomes a roster RECORD can carry that already settle a child's state. Any
-#: other value (``None``, or a token a newer runtime invented) means "the
-#: record did not settle it" and the row falls through to the child's own
-#: transcript.
-_SETTLED_RECORD_OUTCOMES = frozenset({"completed", "failed", "error", "interrupted"})
-
-#: How much of a child transcript's TAIL the cold restore reads to decide whether
-#: the child was still working. Bounded because rule 2 runs per unsettled child
-#: and a 50 MB journal must not be parsed to answer one question; the shape
-#: examined is structural (what the LAST row is), so a sliced tail is enough.
-_CHILD_TAIL_BYTES = 256 * 1024
-
-
-def _record_field(record: Any, name: str, default: Any = None) -> Any:
-    """One field off a roster record, which is a raw sidecar DICT.
-
-    The sidecar stores ``records`` as plain JSON objects (``SubagentComms.snapshot``
-    output), while ``jobs`` come back as ``JobState`` models — so the one reader
-    that consults both cannot assume either shape. Kept as a named helper rather
-    than a ``getattr``/``[]`` dance at each call site so the dict-vs-model
-    distinction is stated once.
-    """
-    if isinstance(record, Mapping):
-        return record.get(name, default)
-    return getattr(record, name, default)
-
-
-def _child_tail_state(session_dir: Any) -> str:
-    """``"mid-turn"`` / ``"finished"`` / ``"unknown"`` for one child's journal.
-
-    Structural, never semantic — the only question is what the child's LAST
-    message row is:
-
-    * a ``tool`` result, or an assistant message whose ``tool_calls`` have no
-      rows after them → the child was CUT OFF MID-TURN;
-    * an assistant message with no pending tool call → the child actually
-      FINISHED and only its parent's record was lost.
-
-    Anything else, or anything unreadable, answers ``"unknown"`` so the row
-    keeps today's ``interrupted`` spelling instead of inventing an outcome. A
-    bounded tail read is deliberate: the journal is append-mostly, so the last
-    256 KiB is the part that carries the answer.
-    """
-    if not session_dir:
-        return "unknown"
-    try:
-        path = Path(session_dir) / TRANSCRIPT_FILENAME
-        if not path.exists():
-            return "unknown"
-        with path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            start = max(0, size - _CHILD_TAIL_BYTES)
-            handle.seek(start)
-            blob = handle.read()
-        lines = blob.split(b"\n")
-        if start > 0:
-            # The first line is the tail of a row whose head is before the
-            # window; it cannot be parsed as a whole row.
-            lines = lines[1:]
-        last_payload: dict[str, Any] | None = None
-        for raw in lines:
-            if not raw.strip():
-                continue
-            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
-            if entry is not None and entry.type == ENTRY_MESSAGE:
-                last_payload = entry.payload
-    except (OSError, ValueError):
-        return "unknown"
-    if last_payload is None:
-        return "unknown"
-    role = str(last_payload.get("role") or "")
-    if role == "tool":
-        return "mid-turn"
-    if role == "assistant":
-        return "mid-turn" if last_payload.get("tool_calls") else "finished"
-    return "unknown"
-
-
-def _restored_job_row(job: Any, record: Any | None) -> Any:
-    """One non-terminal job row, resolved against the record and the child.
-
-    Resolution order (design §4), because each step is stronger evidence than
-    the next:
-
-    1. **The record settled it.** ``records[].outcome`` names how the child
-       ended, and that is a fact, not an inference — a row restored as a bare
-       ``interrupted`` beside a record reading ``completed`` was the D3 defect.
-    2. **The record did not, so the child's own transcript decides** — the
-       mid-turn / finished question above. The reason goes on the row so the
-       panel can say WHY rather than only that it stopped.
-    3. **No record and no transcript** → today's ``interrupted``, now naming
-       ``owner-lost`` rather than carrying no cause at all.
-    """
-    record_outcome = ""
-    if record is not None:
-        record_outcome = str(_record_field(record, "outcome") or "")
-    if record_outcome in _SETTLED_RECORD_OUTCOMES:
-        return job.model_copy(
-            update={"status": record_outcome, "restored": True, "cut_off_cause": ""}
-        )
-    tail = _child_tail_state(_record_field(record, "session_dir") if record is not None else None)
-    if tail == "finished":
-        # The child produced a settled answer; only its parent's record of that
-        # was lost. Reporting the child as cut off would be a lie the panel then
-        # offers to resume.
-        return job.model_copy(update={"status": "completed", "restored": True, "cut_off_cause": ""})
-    if tail == "mid-turn":
-        return job.model_copy(
-            update={"status": "interrupted", "restored": True, "cut_off_cause": "owner-lost"}
-        )
-    return job.model_copy(
-        update={"status": "interrupted", "restored": True, "cut_off_cause": "owner-lost"}
-    )
-
-
-def _roster_records(payload: Mapping[str, Any]) -> Sequence[Any]:
-    """The sidecar's ``records`` list, or an empty sequence when it has none.
-
-    Typed here rather than inline so the ``Any`` coming out of a raw JSON dict
-    is narrowed once: the caller passes it straight into ``_restored_job_rows``,
-    whose ``records`` parameter is a ``Sequence``.
-    """
-    records = payload.get("records")
-    return records if isinstance(records, list) else ()
-
-
-def _restored_job_rows(jobs: Sequence[Any], records: Sequence[Any] = ()) -> list[Any]:
-    """Roster rows as they must appear with NO runtime alive.
-
-    The persisted roster records what each job's state WAS when it was
-    written. With no runtime there is by definition nothing running, so a row
-    restored verbatim paints a spinner for a child that cannot be working and
-    the band counts it as live activity (UX review round 1, U1). That is worse
-    than the empty panel this change replaces: an empty panel is obviously
-    incomplete, while phantom activity is confidently wrong, and it invites a
-    cancel that finds nothing. Non-terminal rows are common on disk — a
-    session whose terminal was closed mid-run persists them by design.
-
-    The rule is the one ``AsyncJobManager.restore`` already applies on the
-    owner path, reproduced here because the cold viewer never builds a
-    manager:
-
-    * a ``running`` row that was PARKED (``queued``) never started, so it has
-      no transcript to show or resume and is DROPPED — an ``interrupted`` row
-      would invite a resume that finds nothing;
-    * any other non-terminal row becomes ``interrupted``, the restore-only
-      status that means "was cut off mid-run"; live readers already treat it
-      as terminal, and it is what lets the panel offer to resume the child.
-
-    Anything already terminal is untouched: ``completed``/``failed``/
-    ``cancelled`` are facts the last runtime settled and this process must not
-    relitigate.
-
-    ``records`` is the roster sidecar's ``records`` list, whose ``outcome`` and
-    ``session_dir`` are what make a restored row diagnosable rather than a
-    blanket ``interrupted``. It is optional so an older sidecar (or a caller
-    that has none) keeps today's behaviour exactly.
-    """
-    by_id: dict[str, Any] = {}
-    for record in records:
-        job_id = str(_record_field(record, "job_id") or "")
-        if job_id:
-            by_id[job_id] = record
-    rows: list[Any] = []
-    for job in jobs:
-        status = str(getattr(job, "status", "") or "")
-        if status == "running":
-            if bool(getattr(job, "queued", False)):
-                continue
-            rows.append(_restored_job_row(job, by_id.get(str(getattr(job, "id", "") or ""))))
-            continue
-        rows.append(job.model_copy(update={"restored": True}))
-    return rows
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -1499,8 +1320,8 @@ class AttachedSession:
             # is the only route to the child's own transcript when the record
             # does not settle it. Without them every non-terminal row came back
             # as a blanket ``interrupted``" (design §4, D3).
-            "jobs": _restored_job_rows(
-                self._durable_roster(state, payload=payload), records=_roster_records(payload)
+            "jobs": resolve_restored_rows(
+                self._durable_roster(state, payload=payload), records=roster_records(payload)
             )
         }
         if isinstance(payload.get("accounting"), list):
@@ -4377,7 +4198,15 @@ class AttachedSession:
             # keeps the two from drifting into a vocabulary nobody can read.
             from local_operator.incidents import cause_from_reason
 
-            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error) or "owner-lost"})
+            # NO ``or "owner-lost"`` FALLBACK. `cause_from_reason` is the
+            # inverse of `format_cut_off_notice`, so an empty answer means the
+            # event's error is NOT a cut-off sentence — and stamping the token
+            # anyway mislabelled every other error as an owner loss. The one
+            # concrete case is `_settle_suspect_turn`'s `"turn failed"`
+            # placeholder for a provider error, which then carried
+            # `cut_off_cause="owner-lost"` on a row that was never cut off
+            # (review round 1, MINOR-3).
+            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error)})
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -4576,11 +4405,16 @@ class AttachedSession:
             # change exists to fix, and the reason this branch names a cause
             # rather than leaving a class marker.
             #
-            # Reached ONLY for a runtime the recovery loop has confirmed gone
-            # (a deliberate stop returns above, and ``refresh=True`` never
-            # ends a turn), so this cannot paint an error over a healthy
-            # session that merely dropped a socket — the autorefresh design's
-            # invariant, kept.
+            # Reached for a runtime this viewer can no longer hear. A deliberate
+            # stop returns above and ``refresh=True`` never ends a turn, but the
+            # give-up arm below ALSO arrives here for a live-but-silent owner (a
+            # record is present and its pid is alive, and nothing answers), so
+            # the sentence it paints says what the viewer can verify rather than
+            # asserting a death it cannot establish (review round 1, MINOR-3).
+            # What it must never do is paint an error over a healthy session
+            # that merely dropped a socket: that case rebinds inside
+            # ``COLD_FALLBACK_S`` and never reaches this branch — the autorefresh
+            # design's invariant, kept.
             try:
                 self._end_turn_locally(
                     direct=True,
@@ -4738,6 +4572,23 @@ class AttachedSession:
         # fired for a no-record viewer too, marking a dead runtime as merely
         # unresponsive (QA round 1 Q849-1, review round 1 R3).
         record_seen = False
+
+        def paced(seconds: float) -> float:
+            """``seconds``, shortened so the loop wakes AT the cold deadline.
+
+            The deadline is checked at the top of a pass, so a pass that slept
+            ``delay`` past it reported the cut-off one sleep late: measured at
+            9.4 s against ``COLD_FALLBACK_S`` of 8.0 on the watched SIGKILL,
+            with this cap in place 8.01 s. (Both figures run from the KILL; the
+            loop's deadline starts when it notices the drop, so the residual
+            hundredth is the notification lag, not the pacing.) The sleep is
+            otherwise untouched: once the deadline is behind us the original
+            pacing returns, because a bound that yielded a zero sleep would turn
+            the chase into a hot loop against the registry.
+            """
+            remaining = cold_deadline - time.monotonic()
+            return min(seconds, remaining) if remaining > 0 else seconds
+
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
@@ -4763,17 +4614,32 @@ class AttachedSession:
                     # to clear it. That is strictly worse than the false
                     # "interrupted" this PR removes — review round 1,
                     # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
-                    # after this long with no runtime, an in-flight turn is
-                    # honestly aborted. ``_end_turn_locally`` clears
-                    # ``_suspect_generation``, so this fires at most once and
-                    # the retry loop continues underneath it.
+                    # after this long with no runtime the turn is CUT OFF, and it
+                    # says so with a named cause rather than with the bare abort a
+                    # user's Esc produces. ``_end_turn_locally`` clears
+                    # ``_suspect_generation``, so this fires at most once and the
+                    # retry loop continues underneath it.
+                    #
+                    # THIS IS THE ARM THE OPERATOR'S REPORT LANDS ON, which is why
+                    # it needs the verdict as much as ``_go_cold`` does. The
+                    # owner-death branch there carries it, but it is reachable only
+                    # when ``_can_go_cold`` holds — and that is False for every
+                    # viewer built through ``connect()``, which is what the TUI
+                    # builds. Measured on this head: a SIGKILLed runtime painted
+                    # ``interrupted ⊘`` with no notice, no reason and durable state
+                    # still ``kind=None`` at t≈98 s, byte-identical to the user's
+                    # own cancel (QA round 1, Q-1; UX U1).
                     if self._suspect_generation is not None:
                         logger.info(
                             "no runtime for %s after %.0fs; ending the in-flight turn",
                             self._session_id,
                             COLD_FALLBACK_S,
                         )
-                        self._end_turn_locally(direct=True)
+                        self._end_turn_locally(
+                            direct=True,
+                            aborted=False,
+                            error=format_cut_off_notice("owner-lost"),
+                        )
                     # ...and AFTER that verdict, the loop itself must reach one.
                     # Ending the turn left ``_recovering`` set, and the only
                     # other exits are the cold branch above (unreachable here)
@@ -4906,7 +4772,7 @@ class AttachedSession:
                         # rule — a pass that did not bind leaves no trace of
                         # the runtime it tried.
                         self._discard_rejected_client()
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(paced(delay))
                         # ``_RECOVERY_DIAL_CAP_S``, not the 0.5 this loop shared
                         # with ``_bind_under_lock``: the ``continue`` below
                         # skips the sleep at the bottom of the loop, so this is
@@ -4996,10 +4862,21 @@ class AttachedSession:
                     else:
                         callback = self._takeover_callback
                         if callback is not None:
-                            # Takeover means the owner is gone: the turn did
-                            # abort. Synthesise before the app disposes this
-                            # facade, or the working line never learns.
-                            self._end_turn_locally(direct=True)
+                            # Takeover means the owner is gone and the turn did
+                            # NOT complete, so the synthesised end names that
+                            # rather than carrying the bare abort a user's Esc
+                            # produces. The same shape this loop's cold arm passes,
+                            # so the two ways of losing an owner cannot disagree
+                            # about what losing one looks like; a DELIBERATE stop
+                            # never reaches here, because the stop check returns
+                            # earlier in the pass. Synthesise before the app
+                            # disposes this facade, or the working line never
+                            # learns.
+                            self._end_turn_locally(
+                                direct=True,
+                                aborted=False,
+                                error=format_cut_off_notice("owner-lost"),
+                            )
                             result = callback(local)
                             if inspect.isawaitable(result):
                                 await result
@@ -5010,7 +4887,7 @@ class AttachedSession:
                         # disconnect can happen; if it did not, avoid leaking
                         # the writer lease we just won.
                         await local.dispose()
-                await asyncio.sleep(delay)
+                await asyncio.sleep(paced(delay))
                 delay = min(delay * 1.7, 0.5)
         finally:
             self._recovering = False

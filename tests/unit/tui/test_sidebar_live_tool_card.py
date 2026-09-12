@@ -260,9 +260,13 @@ async def test_switching_to_a_session_parked_in_a_tool_paints_a_live_row(
             retirements: list[int] = []
             original_retire = OperatorApp._retire_live_tool_cards
 
-            def counted_retire(self: OperatorApp) -> int:
+            def counted_retire(self: OperatorApp, **kwargs: Any) -> int:
+                # ``**kwargs`` because the real signature grows with the turn
+                # verdict (`cut_off=`, D2); a double that pinned the old
+                # signature failed the moment the caller learned to pass it,
+                # which is a false alarm about the test's own scaffolding.
                 retirements.append(len(self._tool_cards) + len(self._composing_cards))
-                return original_retire(self)
+                return original_retire(self, **kwargs)
 
             monkeypatch.setattr(OperatorApp, "_retire_live_tool_cards", counted_retire)
 

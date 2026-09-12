@@ -349,10 +349,21 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
     * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
       the record's build, pid and start time as the detail — this is the case
       study's shape, and the one that used to read as a user cancel;
-    * nothing at all → ``error`` / ``runtime-killed``, saying plainly that the
-      cause could not be determined.
+    * nothing at all → ``error`` / no cause, saying plainly that the cause could
+      not be determined.
+
+    THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
+    the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
+    parenthetical bolted on, and every surface that prints the reason made that
+    a contradiction: the sidebar's ``_error_label`` drops a parenthetical by
+    design (it is built for the build pair), so the one surface that trims the
+    detail stated a definite cause in the one case where nothing is known
+    (design/UX review round 1, D3/U3). ``CUT_OFF_UNKNOWN`` already exists for
+    this branch and needs no hedging, and leaving ``cause`` empty is what keeps
+    ``cause_from_reason(reason)`` — the inverse every reader relies on —
+    agreeing with the reason instead of naming a mechanism nobody observed.
     """
-    from local_operator.incidents import render_cut_off_reason
+    from local_operator.incidents import CUT_OFF_UNKNOWN, render_cut_off_reason
 
     if _stopped_marker(directory):
         return "interrupted", "user-stop", render_cut_off_reason("user-stop")
@@ -363,11 +374,7 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
             "runtime-killed",
             render_cut_off_reason("runtime-killed", detail=_record_detail(dead)),
         )
-    return (
-        "error",
-        "runtime-killed",
-        render_cut_off_reason("runtime-killed", detail=" (the cause could not be determined)"),
-    )
+    return "error", "", CUT_OFF_UNKNOWN
 
 
 def _import_transcript_outcome(
@@ -375,8 +382,9 @@ def _import_transcript_outcome(
 ) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
 
-    Returns the ``(kind, cause, reason, token)`` this call PUBLISHED for an
-    orphaned in-flight run, or ``None`` when it published nothing new. The
+    Returns the ``(kind, cause, reason, token)`` this call PUBLISHED — for an
+    orphaned in-flight run, or for the dying runtime's own saved marker when that
+    marker reports a CUT-OFF — and ``None`` when it published nothing new. The
     caller that owns a ``Session`` (and can therefore journal) uses it to
     narrate the cut-off once per token; the daemon sweep, which has no session,
     ignores it.
@@ -419,14 +427,37 @@ def _import_transcript_outcome(
             # kind, cause and reason. This is the one path that can report a
             # deliberate stop as `interrupted` after the process is gone, so
             # nothing here may re-derive the kind from the absence of evidence.
+            kind = str(saved.get("kind") or "")
+            cause = str(saved.get("cause") or "")
+            reason = str(saved.get("reason") or "")
             store.publish(
                 identity,
                 saved["token"],
                 saved["anchor"],
-                saved["kind"],
-                reason=str(saved.get("reason") or ""),
-                cause=str(saved.get("cause") or ""),
+                kind,
+                reason=reason,
+                cause=cause,
             )
+            if kind == "error" and cause:
+                # A CUT-OFF the dying runtime could not narrate itself. Its own
+                # `_journal_cut_off_once` is refused by `journal_incident`'s
+                # `_disposed` guard — the dispose rung sets that flag before
+                # the turn's `finally` publishes — so the update/shutdown/retire
+                # family reached every SURFACE and no MODEL (review round 1,
+                # MINOR-2 + QA Q-2). Returning the tuple is what makes THIS
+                # boot journal it: `Session._journal_restored_cut_off` narrates
+                # it once per token, so the next turn's context opens with
+                # `[session incident]` rather than a model re-guessing what its
+                # last half-delivered request did.
+                #
+                # A `cause` is required rather than merely expected, and the
+                # `kind` is read rather than re-derived: only a cut-off carries
+                # a token from `CUT_OFF_CAUSES` (`_publish_attention_outcome`
+                # stores `cause=""` for a provider error and `user-stop` for a
+                # recorded stop), and narrating a provider error or a user's own
+                # `/stop` as a cut-off incident would be the taxonomy's own
+                # misclassification committed by the reader meant to repair it.
+                return kind, cause, reason, str(saved["token"])
         return None
     if store.state(identity)["completion_token"]:
         return None

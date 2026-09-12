@@ -36,6 +36,24 @@ CUT_OFF = (
 REASON = "the runtime retired so the next engage would run a newer build"
 
 
+class DeliberateStopSession(FakeSession):
+    """A fake owner that reports whether it was told the stop was deliberate.
+
+    Bare ``/stop`` on a TUI-owned session ends in ``Session.dispose()``, and a
+    real session's dispose notes ``disposed`` — the involuntary default. So the
+    one thing this route must do is record the user's verdict first, and this
+    is the flag a test can see it on (``FakeSession`` has no taxonomy of its
+    own).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deliberate_stops = 0
+
+    def note_deliberate_stop(self) -> None:
+        self.deliberate_stops += 1
+
+
 class OutcomeSession(FakeSession):
     """A fake owner that publishes one outcome, controllable per test."""
 
@@ -185,3 +203,144 @@ async def test_an_interrupted_outcome_keeps_its_own_spelling(tmp_path, monkeypat
         # cut-off the user did not ask for, and appending "stopped by the user"
         # to a row that already says Interrupted is noise.
         assert _notice_texts(app) == ["Interrupted"]
+
+
+def _notice_blocks(app: OperatorApp) -> list[Any]:
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    return [b for b in app._transcript_view().blocks() if isinstance(b, NoticeBlock)]
+
+
+@pytest.mark.asyncio
+async def test_the_poller_paints_a_cut_off_in_the_danger_tier(tmp_path, monkeypatch) -> None:
+    """D1: one cut-off must not be an alarm live and a whisper on return.
+
+    The poller's error branch passed no kind, so it took ``NoticeBlock``'s
+    ``info`` default — the same ``·`` glyph in the same dim fill as the routine
+    ``Interrupted`` control one branch away, for an outcome the live surface
+    paints ``✗`` danger. The row decision now comes from ``harness/rows.py``,
+    which is why the assertion is on the tier rather than on the words.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        session.publish("error", cause="runtime-retired", reason=REASON)
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        (block,) = _notice_blocks(app)
+        assert block._glyph == "✗"
+        assert block._token == "danger"
+
+
+@pytest.mark.asyncio
+async def test_the_pollers_interrupted_control_stays_quiet(tmp_path, monkeypatch) -> None:
+    """And the deliberate stop keeps the tier the design round signed off.
+
+    Its louder ``warning`` ink belongs to the LIVE row, which is a statement
+    about the turn the user just ended; a replayed receipt for the same stop is
+    not, and promoting it would put two weights on one fact.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        session.publish("interrupted", cause="user-stop", reason="the session was stopped")
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        (block,) = _notice_blocks(app)
+        assert block._glyph == "·"
+        assert block._token == "dim"
+
+
+@pytest.mark.asyncio
+async def test_the_tui_stop_route_records_the_deliberate_verdict(tmp_path, monkeypatch) -> None:
+    """BLOCKER-1 through the APP: bare ``/stop`` notes the stop before disposing.
+
+    ``Session.dispose()`` notes ``disposed`` unconditionally, so this call is
+    what stands between the user's own cancel and a published
+    ``kind=error, cause=disposed``. Asserted on the session the app actually
+    disposes, which is the route the unit guard and the e2e cell both missed.
+    """
+    session = DeliberateStopSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        assert app._session is session
+        await app._stop_local_session()
+        await pilot.pause()
+
+    assert session.deliberate_stops == 1, "the dispose route lost the user's verdict"
+    assert session.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_turns_live_cards_are_retired_as_cut_off(tmp_path, monkeypatch) -> None:
+    """D2 end to end through the app: the end event's verdict reaches the row.
+
+    ``TurnEnded`` is where the fact that this was an involuntary stop exists
+    (the classifier reports it as ``aborted=False, error=<notice>``, so nothing
+    downstream can infer it), and ``_finalize_turn`` is the only turn-death path
+    that owns the stranded cards. Without the flag carried across that seam the
+    ledger said ``⊘ interrupted`` under a ``✗ turn cut off`` notice — the two
+    words disagreeing about one death, on one screen.
+    """
+    from local_operator.tui.events import (
+        ToolExecutionStartEvent,
+        ToolStarted,
+        TurnEnded,
+        TurnStarted,
+    )
+    from local_operator.tui.widgets.editor import Editor
+
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(200):
+            if app._session is not None:
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "run the long job"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        app.post_message(TurnStarted())
+        await pilot.pause()
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="c-cut", tool_name="bash", args={"command": "sleep 60"}
+                )
+            )
+        )
+        await pilot.pause()
+        card = app._tool_cards["c-cut"]
+        assert "cut off" not in card._build_row(100).plain
+
+        app.post_message(TurnEnded(False, CUT_OFF, cut_off=True))
+        await pilot.pause()
+        await pilot.pause()
+
+        row = card._build_row(100).plain
+        assert "cut off" in row, row
+        assert "interrupted" not in row, row
