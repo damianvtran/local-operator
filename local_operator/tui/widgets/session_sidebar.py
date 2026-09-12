@@ -162,6 +162,21 @@ def sidebar_content_width(terminal_width: int) -> int:
 #: the other surfaces read that one and are not paying this cost.
 SIDEBAR_SPINNER_INTERVAL_S = 0.15
 
+
+def _strip_dangling_separator(title: str) -> str:
+    """Drop a ``·`` left stranded at the end of a truncated ``label · role``.
+
+    ``truncate_cells`` cuts on a cell boundary, so a sub row whose role does
+    not fit can land on the separator and render ``label ·…`` — which reads as
+    a rendering fault rather than as an ellipsis. Only the separator is
+    removed; the ellipsis stays, because the title genuinely is cut.
+    """
+    for suffix in ("·…", "· …"):
+        if title.endswith(suffix):
+            return title[: -len(suffix)].rstrip() + "…"
+    return title
+
+
 #: Section key (``_section_of``) to the name its header row carries. One
 #: mapping so `_display_rows` and `render` can never disagree about which
 #: sections exist.
@@ -304,10 +319,42 @@ class SessionSidebar(Widget, can_focus=True):
         if not self.entries:
             return 0
         tiers = {self._section_of(entry) for entry in self.entries}
-        # Per section: its heading and the blank beneath it, plus a blank
-        # above every heading after the first. The outer "Sessions" title is
-        # not counted — it is not drawn at all once any header is (`render`).
-        return len(tiers) * 2 + (len(tiers) - 1)
+        # Per section: its heading and the blank BENEATH it. There is no blank
+        # above a heading any more — that was a doubled separator, and at four
+        # sections it cost three lines of a list that has to fit in a terminal.
+        # Going two sections to four took chrome from 5 lines to 11 and flipped
+        # a 30-row terminal from "everything fits" to paged, which displaced
+        # the `f9 focus` hint for the footer's pager. The heading owns the
+        # space beneath it and its muted treatment is its own separation.
+        # Per section: its heading, the blank beneath it, and a blank above
+        # every heading after the first. The leading blank is load-bearing:
+        # without it a heading sits flush against the previous group's last
+        # ENTRY row (the section does not end in a blank — the blank belongs
+        # under the heading), and the two groups read as one. See the comment
+        # in `_display_rows` and the assertion it is defended by.
+        chrome = len(tiers) * 2 + (len(tiers) - 1)
+        # The `+N more pinned` note (`_display_rows`) is chrome too, and both
+        # sides have to charge it identically or the frame overruns its height.
+        # Sized against a window computed WITHOUT the note: adding the note can
+        # only shrink that window, which can only push more pinned rows out, so
+        # this never claims a note that `_display_rows` then declines to emit.
+        if 0 in tiers:
+            base = max(1, self.size.height - 1 - chrome)
+            window = self.entries[self._offset : self._offset + base]
+            if self._pinned_overflow(window):
+                chrome += 1
+        return chrome
+
+    def _pinned_overflow(self, window: Sequence[CatalogEntry]) -> int:
+        """How many pinned rows exist that ``window`` does not contain.
+
+        Pinned rows are NOT hoisted into the window — that keeps `page_size`,
+        `action_move` and `_entry_at` on one geometry — so at a short height a
+        pinned row can rank below the page. Without this the `★ Pinned` heading
+        silently claims to be the whole pinned set while showing part of it.
+        """
+        shown = {entry.id for entry in window}
+        return sum(1 for entry in self.entries if entry.id in self._pins and entry.id not in shown)
 
     @property
     def visible_entries(self) -> tuple[CatalogEntry, ...]:
@@ -316,20 +363,27 @@ class SessionSidebar(Widget, can_focus=True):
     def _special_mark(self, entry: CatalogEntry) -> tuple[str, str] | None:
         """``(glyph, ink)`` for a row whose mark is NOT its live state, else None.
 
-        Two rows do not own a state glyph. A pinned row draws ``★`` because
-        being pinned is the fact the section it sits in is about, and a
-        subagent row draws ``⌥`` because it carries no live state at all by
-        construction — the hidden population is never polled for one.
+        Only a SUBAGENT row qualifies: it carries no live state at all by
+        construction — the hidden population is never polled for one — so
+        ``⌥`` owning its mark column displaces nothing.
+
+        A pinned row does NOT qualify, and this is the correction the design
+        round forced. ``row_state_mark`` ranks by urgency because a person
+        blocked on a gate is the most important thing a list can say, and the
+        user pins the sessions they care about most: a ``★`` here made exactly
+        those sessions the only ones that could not report being blocked,
+        broken or finished. ``★`` is the DURABLE fact — it does not change
+        while the user looks at it — and the state glyph is the volatile one,
+        so the pin is what moves. It is painted in the cursor-prefix slot
+        (columns 0-1) by ``render`` instead.
 
         One helper, consulted by BOTH ``render`` and ``_advance_spinner``, so
         the full frame and the 150 ms mark-cell patch cannot disagree about who
         owns column 2. They did disagree in the first cut: a pinned BUSY row
         painted ``★`` on a full frame and then had a spinner frame patched over
         it on the very next tick, so the mark flickered between the two at
-        7 Hz.
+        7 Hz. With ``★`` out of that column the pinned row simply spins.
         """
-        if entry.id in self._pins:
-            return "★", "accent"
         if entry.subagent:
             return "⌥", "muted"
         return None
@@ -419,6 +473,21 @@ class SessionSidebar(Widget, can_focus=True):
                 rows.append(("blank", None))
                 section = current
             rows.append(("entry", entry))
+        # An honest heading: say how many pinned rows are not on this page
+        # rather than under-reporting the set. A CHROME row, never an entry —
+        # `entry=None` keeps it out of `self.entries` and makes `_entry_at`
+        # return `None` for it, so it is not a click target.
+        missing = self._pinned_overflow([entry for _kind, entry in rows if entry is not None])
+        if missing:
+            insert_at = next(
+                (
+                    index
+                    for index, (kind, entry) in enumerate(rows)
+                    if entry is not None and self._section_of(entry) != 0
+                ),
+                len(rows),
+            )
+            rows.insert(insert_at, ("note:pinned-overflow", None))
         return tuple(rows)
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
@@ -432,7 +501,16 @@ class SessionSidebar(Widget, can_focus=True):
         self._catalog_loading = False
         self.error = ""
         if not any(entry.id == self.cursor_id for entry in ordered):
-            self.cursor_id = self.current_id or (ordered[0].id if ordered else "")
+            # `current_id` is adopted only when it is a row in THIS list. The
+            # attached session is not necessarily a catalog row, and adopting
+            # it blind left `cursor_id` naming nothing: `_cursor_index` falls
+            # back to 0 so the caret RENDERS on row 0 while `cursor_id`
+            # disagrees, and `action_select`'s membership guard then swallows
+            # ENTER entirely. Reachable before the ⌥ layer by letting a row age
+            # out of the page; `ctrl+a` turns it into a routine keystroke that
+            # drops up to 40 rows at once.
+            adopted = self.current_id if any(e.id == self.current_id for e in ordered) else ""
+            self.cursor_id = adopted or (ordered[0].id if ordered else "")
         self._offset = min(self._offset, max(0, len(ordered) - self.page_size))
         # Re-resolve against the NEW order at the pointer's unchanged position:
         # a reorder under a resting pointer must relabel the row it is actually
@@ -617,8 +695,11 @@ class SessionSidebar(Widget, can_focus=True):
             if entry is None:
                 continue
             requested = entry.id == self._requested_id and entry.id != self.current_id
-            if self._special_mark(entry) is not None:
-                # Its mark column is not a spinner's to patch (`_special_mark`).
+            if entry.subagent:
+                # A sub row's mark column is `⌥`, not a spinner's to patch
+                # (`_special_mark`). A PINNED row is no longer skipped: its
+                # `★` lives in the cursor-prefix slot, so column 2 is free to
+                # animate and a pinned busy row spins like any other.
                 continue
             if (requested and self._requested_spinning()) or (
                 entry.row.live_state == "busy"
@@ -691,11 +772,23 @@ class SessionSidebar(Widget, can_focus=True):
         self.post_message(self.SubagentLayerToggled(self.show_subagents))
 
     def action_jump_to_subagents(self) -> None:
-        """Move the cursor to the first subagent row, revealing it."""
+        """Move the cursor to the first subagent row, revealing it.
+
+        With the layer hidden this SHOWS it and then jumps, rather than doing
+        nothing: asking to go somewhere is asking to see it, and a chord that
+        no-ops with no feedback is indistinguishable from a chord that is
+        broken. The rows arrive with the app's re-poll, so the jump itself
+        lands on the next frame; this call only moves the cursor if the rows
+        are already here.
+        """
         if not self.show_subagents:
-            return
+            self.show_subagents = True
+            self.refresh()
+            self.post_message(self.SubagentLayerToggled(True))
         target = next((entry for entry in self.entries if entry.subagent), None)
         if target is None:
+            # Genuinely nothing to jump to — either the store holds no subagent
+            # runs, or the re-poll above has not delivered them yet.
             return
         self.cursor_id = target.id
         self._reveal()
@@ -949,6 +1042,16 @@ class SessionSidebar(Widget, can_focus=True):
                     style=theme_mod.semantic_color("muted"),
                 )
                 continue
+            if kind == "note:pinned-overflow":
+                # Keeps the `★ Pinned` heading honest when a pinned row ranks
+                # below the page. Same muted treatment as a heading and no new
+                # palette entry; it is chrome, so it is never a click target.
+                missing = self._pinned_overflow([row for _k, row in rows if row is not None])
+                result.append(
+                    truncate_cells(f"+{missing} more pinned", width).ljust(width),
+                    style=theme_mod.semantic_color("muted"),
+                )
+                continue
             assert entry is not None
             current = entry.id == self.current_id
             cursor = self.has_focus and entry.id == self.cursor_id
@@ -987,13 +1090,24 @@ class SessionSidebar(Widget, can_focus=True):
             # column, so nothing reflows and the ramp is untouched. Requested
             # wins when a row is both, because "this is opening" is the fact
             # the user is waiting on.
-            line.append("» " if requested else "› " if cursor else "  ")
+            # The pin rides in the CURSOR-PREFIX slot, never the mark column:
+            # `row_state_mark` owns column 2 and its urgency ladder must not be
+            # displaced by a durable property (see `_special_mark`). The caret
+            # still wins the slot when a pinned row is also the cursor or the
+            # requested row — the `★ Pinned` header already carries the pinned
+            # fact, while the caret is the only thing that says "here" or
+            # "opening".
+            if requested or cursor:
+                line.append("» " if requested else "› ")
+            elif entry.id in self._pins:
+                line.append("★ ", style=theme_mod.semantic_color("accent"))
+            else:
+                line.append("  ")
             mark, ink = row_state_mark(entry.row, self._frame)
             special = self._special_mark(entry)
             if special is not None:
-                # Pinned and subagent rows own their mark column outright; see
-                # `_special_mark`. Checked FIRST so neither the requested
-                # spinner nor a completion glyph can displace it.
+                # A subagent row has no live state to displace; see
+                # `_special_mark`.
                 mark, ink = special
             elif requested and self._requested_spinning():
                 # Same ink a busy row's spinner uses (``row_state_mark``), so one
@@ -1029,6 +1143,14 @@ class SessionSidebar(Widget, can_focus=True):
             # to `row.name` when it has neither.
             name = entry.sub_title if entry.subagent else entry.row.name
             title = truncate_cells(name or "Untitled conversation", title_width)
+            if entry.subagent:
+                # `sub_title` is "label · role", and the role is the half that
+                # truncation eats first. When the cut lands on the separator
+                # the row ends "label ·…" — a dangling separator reads as a
+                # rendering fault rather than an ellipsis, so drop it. Which
+                # HALF survives truncation is a separate question and belongs
+                # to `sub_title` itself.
+                title = _strip_dangling_separator(title)
             line.append(title)
             line.pad_right(max(0, width - line.cell_len - len(age)))
             line.append(age, style=theme_mod.semantic_color("dim"))
@@ -1049,14 +1171,24 @@ class SessionSidebar(Widget, can_focus=True):
         hint = "esc return" if self.has_focus else "f9 focus · ctrl+b hide"
         if len(self.entries) > self.page_size:
             last = min(len(self.entries), self._offset + self.page_size)
-            hint = f"{self._offset + 1}–{last}/{len(self.entries)} · ctrl+b hide"
+            # The pager displaces `ctrl+b hide`, NOT `f9 focus`. `ctrl+b`
+            # hides a list the user is looking at and can be rediscovered from
+            # `/help`; `f9` is how they reach the list they are already
+            # reading, and it is the chord the two sidebar-scoped gestures
+            # (`ctrl+a`, `ctrl+o`) are reachable behind. Dropping it exactly
+            # when the list grew big enough to page — i.e. when navigating it
+            # matters most — was the wrong thing to lose. Also 3 cells
+            # cheaper, which keeps the worst case (`… · f9 focus · ⌥999+` at
+            # 27 cells) inside the 29-cell floor instead of cropping the
+            # counter. See docs/design/keymap.md and the D3b ruling.
+            hint = f"{self._offset + 1}–{last}/{len(self.entries)} · f9 focus"
         if self._subagent_total > 0:
             # Merged onto the EXISTING footer line, never a second one: a
             # second line would cost a session row at every terminal height,
             # permanently. The `999+` cap is what keeps the width
-            # deterministic — `1–38/152 · ctrl+b hide · ⌥438` is 29 cells
-            # against the 30-cell floor, and an unbounded count would run over
-            # it. `truncate_cells` crops rather than wraps, so the worst case
+            # deterministic — `1–38/152 · f9 focus · ⌥999+` is 27 cells against
+            # the 29-cell content width, and an unbounded count would run over
+            # it. `truncate_cells` crops rather than wraps, so an overflow
             # degrades to a clipped counter, not a broken frame.
             count = "999+" if self._subagent_total > 999 else str(self._subagent_total)
             hint = f"{hint} · ⌥{count}"

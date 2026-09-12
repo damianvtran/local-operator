@@ -12742,3 +12742,55 @@ async def test_a_settings_write_does_not_stomp_a_session_toggle(tmp_path, monkey
         app.on_settings_changed(SettingsChanged("tui.sidebar_position", "left"))
         await pilot.pause()
         assert sidebar.show_subagents is True, "an unrelated write stomped the session toggle"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_o_shows_the_layer_when_it_is_hidden() -> None:
+    """D6: asking to go somewhere is asking to see it.
+
+    `ctrl+o` used to return silently with the layer off, which is
+    indistinguishable from a broken chord. It now turns the layer on, announces
+    it so the app re-polls, and lands the cursor on the first subagent row.
+    """
+    import time as _time
+
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import CatalogEntry
+
+    now = _time.time()
+    rows = [
+        CatalogEntry(SessionRow("mine", now, "Mine", live_state="busy")),
+        CatalogEntry(
+            SessionRow("run1", now - 10, "untitled"), subagent=True, label="audit", agent="reviewer"
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app, rows)
+        sidebar.show_subagents = False
+        sidebar.cursor_id = "mine"
+        sidebar.focus()
+        for _ in range(20):
+            await pilot.pause()
+            if sidebar.has_focus:
+                break
+
+        # The toggle asks the APP to re-poll, and against this tmp config the
+        # real catalog is empty — it would replace the fixture rows mid-test.
+        # The re-poll is covered by its own test; what this one is about is the
+        # chord revealing the layer and moving the cursor.
+        repolled: list[str] = []
+
+        def note_refresh():
+            repolled.append("refresh")
+
+        app._refresh_sidebar = note_refresh  # type: ignore[method-assign]
+
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert sidebar.show_subagents is True, "ctrl+o did not reveal the hidden layer"
+        assert repolled, "revealing the layer must ask the app to re-poll the catalog"
+        assert sidebar.cursor_id == "run1", "the cursor did not land on the first subagent row"
