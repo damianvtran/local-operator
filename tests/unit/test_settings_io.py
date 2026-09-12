@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
