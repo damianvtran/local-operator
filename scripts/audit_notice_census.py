@@ -156,6 +156,18 @@ async def frame(
             and _painted_notice(_renderable_plain(getattr(block, "renderable", "")))
         ]
         print(f"on screen ({phase}): user rows that are notices = {len(painted)}")
+        # The SCREEN's virtual_size == size only says no window chrome scrolls;
+        # these frames are scrolled WINDOWS of the transcript, so the reading that
+        # actually describes what a pair shows is the view's own: its scroll
+        # offset, its viewport height, and its content height. Printed and not
+        # asserted, because the pair's members legitimately differ by the height
+        # of the rows that were removed.
+        print(
+            f"transcript window ({phase}): scroll_y={view.scroll_y} "
+            f"viewport={view.container_size.height} content={view.virtual_size.height} "
+            f"blocks={len(view.blocks())} screen={app.screen.size} "
+            f"screen_virtual={app.screen.virtual_size}"
+        )
         save_capture(app, out_path)
     await session.dispose()
 
