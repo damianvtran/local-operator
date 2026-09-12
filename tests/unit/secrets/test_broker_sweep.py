@@ -33,7 +33,12 @@ from local_operator.secrets import client
 from local_operator.secrets.keys import secrets_dir
 from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
 from local_operator.session.runtime.registry import pid_alive
-from tests.conftest import _SWEEP_ROOT_KEY, _secret_config_dirs, _stop_brokers_in
+from tests.conftest import (
+    _SWEEP_ROOT_KEY,
+    _secret_config_dirs,
+    _stop_brokers_in,
+    _sweep_session_leftovers,
+)
 
 
 def _start(base: Path) -> int:
@@ -87,6 +92,35 @@ def _deep_config_dir(tmp_path: Path) -> Path:
         deep
     ), "the construction failed: this config dir took the in-directory layout"
     return deep
+
+
+def _plant_socket(base: Path) -> Path:
+    """Put a plain file where ``base``'s broker socket would be.
+
+    For the tests whose subject is the net's CHEAP PRE-CHECK rather than a real
+    daemon: the guard is `socket_path(...).exists()`, and which layout
+    `socket_path` picks is a property of the machine's tmp depth (see
+    `_uses_the_fallback_socket`), so the file is planted at whatever
+    `socket_path` returns rather than at a path these tests guess. A plain file is
+    enough for the guard, and it keeps the test from depending on a daemon being
+    up.
+    """
+    path = socket_path(base)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    return path
+
+
+def _cleanup_planted_socket(base: Path) -> None:
+    """Remove what `_plant_socket` created, in whichever layout it used.
+
+    The fallback runtime directory is derived from the config dir's NAME and is
+    the sweep's to remove; taking it here as well is what stops a mis-targeted
+    plant from leaving a runtime dir behind on the developer's machine.
+    """
+    with suppress(Exception):
+        socket_path(base).unlink(missing_ok=True)
+        shutil.rmtree(_runtime_fallback_dir(secrets_dir(base)), ignore_errors=True)
 
 
 def _wait_gone(pid: int, timeout: float = 5.0) -> bool:
@@ -478,8 +512,32 @@ def test_a_broker_a_test_started_is_dead_once_that_test_has_torn_down(tmp_path: 
     in the ORDERING, so only a test that submits to the real ordering can catch a
     regression of it.
 
-    Fails against the pre-#985 conftest (candidate discovery at teardown only)
-    and passes with the call-phase reap; that A/B is in the PR for #958.
+    **What this test actually discriminates, corrected in round 1.** It fails
+    only when the call-phase work is absent ENTIRELY — the `_SWEEP_ROOT_KEY` stash
+    that the teardown sweep reads (the "recording") and the call-phase reap
+    together. Verified three ways against this head: with the stash and the
+    recording kept but the reap removed, it PASSES; with all three removed it
+    FAILS (`assert False / _wait_gone`). The stash alone is sufficient here,
+    because this inner test's config dir takes the ``$TMPDIR`` fallback socket
+    layout: its in-directory socket path is well past `MAX_SOCKET_PATH` (103
+    bytes, `secrets/protocol.py`) on every runner — measured 174 bytes here, 126
+    on a Linux runner by that path's arithmetic — so a fallback socket survives
+    ``tmp_path``'s reclaim and the recorded PATH is what lets the teardown sweep
+    still reach the daemon. The call-phase REAP is therefore not what this test
+    pins; it is an end-to-end guard that the reap survives that reclaim, not a
+    falsifier of the pre-#985 ordering on its own. No A/B against the pre-#985
+    tree is possible for it either: `3295042b0^` cannot even collect this file
+    (``ImportError: cannot import name '_SWEEP_ROOT_KEY'``, a symbol that
+    postdates it).
+
+    The two tests that DO discriminate the change are
+    `test_a_spawned_broker_names_itself_in_the_process_listing` and
+    `test_the_session_end_net_reaps_a_broker_started_after_the_per_test_reap`;
+    both fail on the PR's base for their stated reasons.
+
+    A change to the inner test's nesting depth could move this config dir back to
+    the in-directory layout and so change what this test proves — that is the
+    reason this layout fact is written down rather than left implicit.
 
     Asserted through `_wait_gone` rather than a bare `pid_alive` for the reason
     that helper documents, and it matters MORE here: the sweep waits for the
@@ -625,3 +683,117 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
     finally:
         _kill(config_root)
         _kill_pid(pid)
+
+
+def test_the_net_asks_the_protocol_only_about_a_candidate_that_has_a_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The net's cheap pre-check, pinned so the protocol round trip cannot creep back.
+
+    The candidate list at `pytest_sessionfinish` is almost entirely socket-less —
+    measured for `tests/unit/secrets` alone, 784 recorded roots from 261 tests —
+    and asking each one with a protocol round trip measured 199.4us against 7.4us
+    for the `socket_path(...).exists()` guard `_stop_brokers_in` already writes
+    twelve lines away. This pins the BEHAVIOUR rather than the timing: a candidate
+    with no socket on disk is never asked the expensive question.
+    """
+    with_socket = tmp_path / "has-socket"
+    without_socket = tmp_path / "no-socket"
+    with_socket.mkdir()
+    without_socket.mkdir()
+    _plant_socket(with_socket)
+    asked: list[Path | None] = []
+
+    def probe(base: Path | None = None) -> bool:
+        asked.append(base)
+        return False
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {with_socket, without_socket})
+    monkeypatch.setattr(client, "is_running", probe)
+    monkeypatch.setattr("tests.conftest._stop_brokers_in", lambda candidates: None)
+    try:
+        assert _sweep_session_leftovers(tmp_path) == 0
+    finally:
+        _cleanup_planted_socket(with_socket)
+        _cleanup_planted_socket(without_socket)
+    assert asked == [with_socket], (
+        f"the net asked the protocol about {asked!r}; only a candidate with a socket "
+        "on disk can be a broker, and `socket_path(...).exists()` is the cheap way "
+        "to know — the same guard `_stop_brokers_in` uses"
+    )
+
+
+def test_the_net_reports_only_the_brokers_it_actually_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported count is what was STOPPED, not what was considered.
+
+    `_stop_brokers_in` refuses three shapes and the third — `pid == os.getpid()`,
+    the in-process `broker` fixture's shape — leaves the broker running, so a
+    count taken from the liveness probe alone reports a broker as reclaimed while
+    it is still there. This drives the REAL refusal through the real
+    `_stop_brokers_in` rather than stubbing the stop, so the test fails if either
+    the refusal or the re-check after it goes away.
+    """
+    candidate = tmp_path / "config"
+    candidate.mkdir()
+    _plant_socket(candidate)
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    monkeypatch.setattr(client, "is_running", lambda base=None: True)
+    # The in-process broker shape: `broker_status` reports THIS process's pid, so
+    # the sweep refuses to signal it and the daemon is still answering afterwards.
+    monkeypatch.setattr(client, "broker_status", lambda base=None: {"pid": os.getpid()})
+    try:
+        assert client.is_running(candidate), "the planted socket was not seen as live"
+        assert _sweep_session_leftovers(tmp_path) == 0, (
+            "the net reported a broker as reclaimed that `_stop_brokers_in` refused "
+            "to stop; the count must be what was stopped, not what was considered"
+        )
+    finally:
+        _cleanup_planted_socket(candidate)
+
+
+def test_the_net_hands_a_version_skewed_broker_to_the_sweep_and_counts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version-skewed broker is stopped and reported, not silently dropped.
+
+    `is_running` re-raises `BrokerIncompatible` on purpose — a version-mismatched
+    broker IS listening, and answering False would launder "live but unusable"
+    into "unreachable" — so a net that suppresses that exception drops the skewed
+    candidate out of `live` entirely: not stopped, and invisible in the count, on
+    exactly the axis this net exists to make visible. It must instead be handed to
+    `_stop_brokers_in`, which can still stop it because `broker_status` synthesises
+    a pid from the version refusal.
+
+    The stopper is recorded rather than run: the real one waits on `is_running`,
+    which re-raises on every poll while a stand-in daemon is still answering, so
+    driving a live one through it would make this test race rather than assert.
+    """
+    candidate = tmp_path / "config"
+    candidate.mkdir()
+    _plant_socket(candidate)
+    state = {"up": True}
+    stopped: list[Path] = []
+
+    def probe(base: Path | None = None) -> bool:
+        if state["up"]:
+            raise client.BrokerIncompatible("the broker speaks protocol 0", pid=4242, protocol=0)
+        return False
+
+    def stop(candidates: list[Path]) -> None:
+        stopped.extend(candidates)
+        state["up"] = False  # a stop that worked takes the daemon away
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    monkeypatch.setattr(client, "is_running", probe)
+    monkeypatch.setattr("tests.conftest._stop_brokers_in", stop)
+    try:
+        assert _sweep_session_leftovers(tmp_path) == 1, (
+            "the net neither stopped nor reported a version-skewed broker: "
+            "`is_running` re-raises BrokerIncompatible so it is not laundered into "
+            "'unreachable', and the net must not swallow it back"
+        )
+    finally:
+        _cleanup_planted_socket(candidate)
+    assert stopped == [candidate], "the skewed candidate never reached the sweep"
