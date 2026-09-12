@@ -266,11 +266,39 @@ export interface SlashCommand {
 	arguments: "none" | "optional" | "required";
 }
 
+/** One offerable model, as `GET /api/models` ranks it.
+ *
+ * The array order IS the ranking — direct-connected providers first, newest
+ * version first, aggregators last — computed server-side by the same
+ * `rank_rows` the desktop `/model` picker uses. Anything here that re-sorts or
+ * regroups the array throws that away, which is the bug these fields were added
+ * alongside: the sheet grouped by provider and put ~445 Radient rows ahead of
+ * the first direct provider.
+ *
+ * The fields below `name` are additive; `selector`, `provider`, `model_id` and
+ * `name` keep the meanings they always had, so a stale cached bundle still
+ * renders against a current daemon. */
 export interface ModelEntry {
 	selector: string;
 	provider: string;
 	model_id: string;
+	/** The model's display name, falling back to its id. */
 	name: string;
+	/** The picker's resolved label — equal to `selector` when no name can be
+	    vouched for (always so for a reseller, whose listing names cannot say
+	    which route is answering). */
+	label?: string;
+	/** Whether the provider has a credential that can run this model now. */
+	connected?: boolean;
+	/** The provider RESELLS this model rather than serving it; the direct route
+	    for the same model ranks ahead of it. */
+	aggregated?: boolean;
+	/** A META-ROUTE whose price depends on the model it dispatches to. */
+	routed?: boolean;
+	context_window?: number;
+	/** Per-million-token prices. `-1` means unknown, `0` means free. */
+	input_price?: number;
+	output_price?: number;
 }
 
 export interface PastSession {

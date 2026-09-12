@@ -2785,97 +2785,139 @@ def _recent_directories(limit: int = 8) -> list[str]:
         return []
 
 
-def _list_models() -> list[dict[str, Any]]:
-    """The model sheet's rows: every model of every provider the owner can
-    actually call — a provider with no stored credential is clutter in a
-    picker. Credential detection consults BOTH stores, because the two
-    sanctioned flows write different ones: ``lop credential update`` writes
-    the legacy CredentialManager file, and ``/login`` writes the providers
-    AuthStore (auth.db) — a picker reading only the first would hide every
-    OAuth-logged-in provider, which on a current install is most of them.
-    Runs in a thread: catalogue reads, OAuth refresh, and cold live discovery
-    must never block the relay's event loop or its session event streams.
+def _provider_display_name(provider_id: str) -> str:
+    """The registry's human name for ``provider_id`` (the id when it has none).
 
-    Aggregators deliberately have no bundled models. Use the same bounded,
-    cached discovery/parser as the desktop picker for those providers; reading
-    only the static registry makes a fresh Radient login appear to own none.
-    Only persisted credentials authorize discovery here: a service manager's
-    unrelated environment must not silently add accounts to a remote picker.
+    The unavailable-catalogue message names providers the way the owner met
+    them in ``/login``, which is the registry's ``name`` — the id is an
+    implementation spelling and reads as a typo in an error the phone shows.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(provider_id)
+    return definition.name if definition is not None else provider_id
+
+
+def _list_models() -> list[dict[str, Any]]:
+    """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
+
+    THE SAME CATALOGUE AND THE SAME ORDER AS THE DESKTOP, by construction rather
+    than by convention. This used to walk ``model/registry.SupportedHostingProviders``
+    and emit rows in registry order, which broke in three measurable ways:
+
+    * ORDER. 962 rows went out grouped radient(445) > openai(12) > anthropic(18)
+      > openrouter(445) > …, so ~445 aggregated Radient rows rendered before the
+      first direct provider — roughly 45 phone screens of scrolling to reach
+      ``anthropic/``. The sheet looked like it only knew Radient and OpenRouter.
+      :func:`picker_rows` is the TUI's own ranking (direct-connected first,
+      newest version first, aggregators last), so the two surfaces cannot drift.
+    * COVERAGE. ``SupportedHostingProviders`` is the stale enumeration; the live
+      one is ``providers.registry.PROVIDER_REGISTRY``. A phone therefore could
+      not see ``alibaba-token-plan``, ``openai-device``, ``radient-key``,
+      ``xai-oauth`` or ``zai-oauth`` at all, even fully logged in to them.
+    * FRESHNESS. Non-aggregators were served from the SHIPPED registry, which
+      offers ids the provider has since withdrawn (11 dead OpenAI ids the TUI's
+      live catalogue does not list) and misses anything released after the last
+      release of this package.
+
+    Only PERSISTED credentials authorize a listing here — see
+    :meth:`ProviderController.persisted_providers`. A service manager's ambient
+    environment must never add an account to a picker reachable over a tunnel,
+    which is exactly the rung that separates that method from ``usable_providers``.
+
+    ``initial_catalogue()`` first, then the live refresh, mirroring the picker's
+    stale-then-update: the disk-cached listings make the sheet complete even if
+    the network answers slowly, and the live pass adds what shipped too late for
+    the registry. It asks for :data:`PICKER_TTL_S` rather than discovery's 24 h
+    default for the same reason the TUI does — opening the sheet is the one
+    moment a fresh list is worth a request — and the fetch runs off the relay's
+    event loop, which must never block on a provider round trip.
     """
     from contextlib import closing
 
+    from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
-    from local_operator.model.discovery import available_models
-    from local_operator.model.registry import SupportedHostingProviders, static_models
+    from local_operator.model.configure import _openai_use_max_context_window
     from local_operator.paths import config_dir
     from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.catalogue import picker_rows
+    from local_operator.providers.controller import PICKER_TTL_S, ProviderController
 
-    credential_manager = CredentialManager(config_dir=config_dir())
-    rows: list[dict[str, Any]] = []
-    unavailable: list[str] = []
-    persisted_keys = credential_manager.get_credentials()
+    directory = config_dir()
+    try:
+        settings = dict(ConfigManager(directory).get_config().values)
+    except Exception:  # noqa: BLE001 — an unreadable config must not empty the sheet
+        settings = {}
+    use_max_context = _openai_use_max_context_window(settings)
     with closing(AuthStore()) as store:
-        for provider in SupportedHostingProviders:
-            key = next(
-                (
-                    persisted_keys[name].get_secret_value()
-                    for name in provider.requiredCredentials
-                    if name in persisted_keys and persisted_keys[name].get_secret_value()
-                ),
-                None,
+        controller = ProviderController(store, CredentialManager(config_dir=directory))
+        admitted = controller.persisted_providers()
+        entries = controller.initial_catalogue()
+        statuses: dict[str, str] = {}
+        if admitted is None:
+            # The credential store could not be READ. Serving the cached
+            # catalogue is right — an empty sheet would claim the owner owns no
+            # models — but a live fetch is not, because "which accounts may I
+            # speak for" is the question that just failed to resolve.
+            pass
+        else:
+            # ``asyncio.run`` is safe here: ``api_models`` offloads this whole
+            # synchronous helper to a worker thread, so there is no running loop
+            # on it to clash with.
+            entries, statuses = asyncio.run(
+                controller.live_catalogue(ttl_s=PICKER_TTL_S, providers=admitted)
             )
-            # AuthStore resolves the registry's exact storage aliases. Prefix
-            # guessing could lend an unrelated plan's credentials to a host.
-            logins = store.list_credentials(provider=provider.id)
-            if not key and not logins:
-                continue
-            models = static_models(provider.id)
-            names = [(model_id, getattr(info, "name", "")) for model_id, info in models.items()]
-            if not models:
-                is_oauth = False
-                account_id = None
-                if not key:
-                    # Refresh a specific stored row without the inference
-                    # cascade's rotation, quota blocks, or sticky-account writes.
-                    # asyncio.run is safe here because api_models offloads this
-                    # whole synchronous helper to its worker thread.
-                    for login in reversed(logins):
-                        is_oauth = login.credential_type == "oauth"
-                        data = (
-                            asyncio.run(store.ensure_oauth_fresh(login.id))
-                            if is_oauth
-                            else login.data
-                        )
-                        if data:
-                            key = data.get("access" if is_oauth else "key")
-                            account_id = data.get("account_id") or data.get("org_id")
-                        if key:
-                            break
-                if not key:
-                    unavailable.append(provider.name)
-                    continue
-                discovered, status = available_models(
-                    provider.id, api_key=key, is_oauth=is_oauth, account_id=account_id
-                )
-                names = [(model.id, model.name) for model in discovered]
-                if not names and status != "empty":
-                    unavailable.append(provider.name)
-            rows.extend(
-                {
-                    "selector": f"{provider.id}/{model_id}",
-                    "provider": provider.id,
-                    "model_id": model_id,
-                    "name": name or model_id,
-                }
-                for model_id, name in names
-            )
-    if not rows and unavailable:
-        # A failed cold fetch is not an authoritative empty inventory. Keep the
-        # message credential-free while making a retry/re-login actionable.
-        raise RuntimeError(
-            f"Model catalogue unavailable for {', '.join(unavailable)}; retry or log in again"
+        rows, _hidden = picker_rows(
+            entries,
+            usable=admitted,
+            use_max_context=use_max_context,
         )
-    return rows
+    if not rows:
+        # A failed cold fetch is not an authoritative empty inventory — the same
+        # rule this endpoint has always had, restated against the controller's
+        # per-provider statuses. A provider counts as unavailable when it
+        # contributed NO rows and did not say ``empty``: ``empty`` is the
+        # provider itself answering "I list no models", which is a real answer,
+        # while ``static``/``stale``/``unauthenticated`` on an aggregator (which
+        # bundles nothing) means the listing never landed. Keep the message
+        # credential-free while making a retry/re-login actionable.
+        listed_providers = {entry.provider for entry in entries}
+        unavailable = sorted(
+            _provider_display_name(provider)
+            for provider, status in statuses.items()
+            if status != "empty" and provider not in listed_providers
+        )
+        if unavailable:
+            raise RuntimeError(
+                f"Model catalogue unavailable for {', '.join(unavailable)}; "
+                "retry or log in again"
+            )
+    return [
+        {
+            "selector": row.selector,
+            "provider": row.provider,
+            "model_id": row.model_id,
+            # ``name`` is pre-existing and keeps its meaning: a DISPLAY name for
+            # this model. ``label`` is the picker's resolved form, which is the
+            # selector itself whenever no name can be vouched for — for an
+            # aggregator that is always, because ``naming._unambiguous_name``
+            # refuses a reseller's listing name (the two shipped aggregators
+            # share 398 of ~400 names, so none of them can say which route is
+            # answering, and the route is what differs in price and quota).
+            # Letting that fall through would put the whole selector in the name
+            # slot and render it twice on one row, so it degrades to the id —
+            # exactly what the TUI paints for the same row.
+            "name": (row.label if row.label and row.label != row.selector else row.model_id),
+            "label": row.label,
+            "connected": row.connected,
+            "aggregated": row.aggregated,
+            "routed": row.routed,
+            "context_window": row.context_window,
+            "input_price": row.input_price,
+            "output_price": row.output_price,
+        }
+        for row in rows
+    ]
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate

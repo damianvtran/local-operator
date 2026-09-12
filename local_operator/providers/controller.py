@@ -20,7 +20,7 @@ import logging
 import random
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Protocol
 
 import httpx
 
@@ -42,6 +42,7 @@ from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
     ProviderDefinition,
     credential_provider_id,
+    env_key_name,
     get_provider_definition,
     list_login_providers,
     resolve_env_key,
@@ -306,6 +307,82 @@ class ProviderController:
             ):
                 usable.add(definition.id)
         return usable
+
+    def persisted_providers(self) -> set[str] | None:
+        """Every provider id backed by a STORED credential — or ``None``, unknowable.
+
+        :meth:`usable_providers` minus two rungs, and the difference is a
+        security boundary rather than a nicety. That method counts a key in the
+        ENVIRONMENT and an ``allows_missing_api_key`` local server as usable,
+        which is right for a local session: the stream-time cascade resolves
+        both, so a turn started that way runs. It is wrong for a REMOTE picker.
+        The mobile daemon is typically launched by a service manager whose
+        environment the phone's user never chose and cannot see, so an ambient
+        ``ANTHROPIC_API_KEY`` inherited from a shell profile would silently add
+        an account to a picker reachable over a tunnel — and a keyless local
+        server would advertise models against an endpoint that may not even be
+        running. Only what the owner deliberately persisted authorizes a listing
+        there.
+
+        BOTH persisted stores count, because the two sanctioned flows write
+        different ones: ``/login`` writes the AuthStore (auth.db) and ``lop
+        credential update`` writes the legacy ``CredentialManager`` file. A
+        reader consulting only the first hides every API-key provider the owner
+        configured by hand; only the second hides every OAuth login, which on a
+        current install is most of them. The legacy file is read WITHOUT
+        ``get_credential``, whose convenience fallback imports a matching
+        environment variable into the store on miss — that would smuggle the
+        ambient key back in through the door this method exists to shut.
+
+        Everything else is deliberately IDENTICAL to ``usable_providers``,
+        including the oauth-flavour suppression (an active ``radient`` OAuth
+        sign-in hides the legacy ``radient-key`` flavour, so one account is not
+        offered twice), the narrow ``sqlite3.ProgrammingError`` re-raise (a
+        connection crossing threads is a caller BUG and must not dress itself as
+        the unreadable-store degradation — see that method's note on D18), and
+        the ``None`` return for an environment failure, which callers must read
+        as "cannot tell", never as "none".
+        """
+        try:
+            stored_rows = self.auth_store.list_credentials(provider=None)
+            stored = {row.provider for row in stored_rows}
+            oauth_providers = {
+                row.provider for row in stored_rows if row.credential_type == "oauth"
+            }
+        except sqlite3.ProgrammingError:
+            raise
+        except (sqlite3.Error, OSError):
+            return None
+        legacy: set[str] = set()
+        manager = self.credential_manager
+        if manager is not None:
+            try:
+                legacy = {
+                    name
+                    for name, value in manager.get_credentials().items()
+                    if value and value.get_secret_value()
+                }
+            except OSError:
+                # An unreadable legacy file is not grounds to claim the whole
+                # credential picture is unknowable: auth.db was read fine, and
+                # degrading to ``None`` here would show EVERY provider rather
+                # than the ones we positively established.
+                legacy = set()
+        persisted: set[str] = set()
+        for definition in PROVIDER_REGISTRY:
+            storage = credential_provider_id(definition.id)
+            if definition.store_credentials_as and storage in oauth_providers:
+                continue
+            if storage in stored:
+                persisted.add(definition.id)
+                continue
+            # Alias-aware for the same reason ``resolve_env_key`` is: a login
+            # flavour declares no key name of its own, but the provider it
+            # stores under does, and that name is what the legacy file holds.
+            name = env_key_name(definition.id) or env_key_name(storage)
+            if name and name in legacy:
+                persisted.add(definition.id)
+        return persisted
 
     def usage_enabled_providers(self) -> list[str]:
         """Provider ids with a live quota endpoint, sorted.
@@ -1543,7 +1620,10 @@ class ProviderController:
         )
 
     async def live_catalogue(
-        self, *, ttl_s: float | None = None
+        self,
+        *,
+        ttl_s: float | None = None,
+        providers: Collection[str] | None = None,
     ) -> tuple[list[CatalogueEntry], dict[str, str]]:
         """The catalogue with each provider's LIVE listing layered over the registry.
 
@@ -1565,16 +1645,44 @@ class ProviderController:
         fetched concurrently via :func:`asyncio.gather` so overall latency bounds
         to the single slowest provider rather than the sum of all provider round
         trips.
+
+        ``providers`` narrows the registry to those ids and is how a caller that
+        has already decided which accounts it may speak for expresses that. The
+        mobile daemon is that caller: it admits only providers with a PERSISTED
+        credential, and a listing for anything else would be a network call on
+        behalf of an account its user never granted. ``None`` — the default and
+        every existing caller — keeps the whole-registry behaviour unchanged,
+        including the static rows an unconnected provider contributes so that
+        "what would I get if I logged in here" stays answerable in the TUI. An
+        empty collection is honoured literally: no provider is fetched and no
+        status is reported, which is the correct answer for an owner who has not
+        logged in to anything, not a reason to fall back to everything.
         """
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
         usable = self.usable_providers()
+        registry = (
+            PROVIDER_REGISTRY
+            if providers is None
+            else [defn for defn in PROVIDER_REGISTRY if defn.id in providers]
+        )
         oauth_context: dict[str, dict[str, int]] = {}
 
         async def _fetch_provider(
             definition: ProviderDefinition,
         ) -> tuple[ProviderDefinition, bool, list[DiscoveredModel], str]:
-            connected = usable is None or definition.id in usable
+            # An explicit ``providers`` set is the CALLER's own credential
+            # determination and outranks ``usable_providers`` for the ids in it.
+            # It has to: ``usable_providers`` has no legacy ``credentials.env``
+            # rung, so a provider configured with ``lop credential update`` came
+            # back unconnected here, listed ANONYMOUSLY, and the phone's picker
+            # then showed it empty — with a credential on disk the whole time.
+            # Narrowing without this makes the narrowing itself lose rows.
+            connected = (
+                definition.id in providers
+                if providers is not None
+                else (usable is None or definition.id in usable)
+            )
             api_key: str | None = None
             is_oauth = False
             account_id: str | None = None
@@ -1619,7 +1727,7 @@ class ProviderController:
                 connected = status in {"ok", "cached"}
             return definition, connected, models, status
 
-        results = await asyncio.gather(*[_fetch_provider(defn) for defn in PROVIDER_REGISTRY])
+        results = await asyncio.gather(*[_fetch_provider(defn) for defn in registry])
         listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
         for definition, connected, models, status in results:
             statuses[definition.id] = status

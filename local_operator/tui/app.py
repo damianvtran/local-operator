@@ -117,6 +117,7 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
+from local_operator.providers.catalogue import picker_rows
 from local_operator.session import naming
 from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
@@ -29536,29 +29537,18 @@ class OperatorApp(App[None]):
                 # store may name providers the owner's static catalogue did
                 # not (aggregators enumerate only live).
                 usable = runtime_usable | (usable or set())
-        rows = [
-            ModelRow(
-                provider=entry.provider,
-                model_id=entry.model_id,
-                label=entry.label,
-                context_window=(
-                    entry.default_context_window
-                    if entry.provider == "openai"
-                    and not use_max_context
-                    and entry.default_context_window
-                    else entry.context_window
-                ),
-                default_context_window=entry.default_context_window,
-                max_context_window=entry.max_context_window,
-                input_price=entry.input_price,
-                output_price=entry.output_price,
-                connected=entry.connected,
-                aggregated=entry.aggregated,
-                routed=entry.routed,
-            )
-            for entry in entries
-            if usable is None or entry.provider in usable or entry.selector == current
-        ]
+        # The catalogue-shaped part — the usable filter, the current-model
+        # exemption, OpenAI's window choice and the rank — is shared with the
+        # phone's model sheet, which must offer the same models in the same
+        # order and cannot import a textual widget to get it. Everything below
+        # this call is session-shaped and stays here: a daemon has no sticky
+        # serving spec and no runtime catalogue to merge.
+        rows, hidden = picker_rows(
+            entries,
+            usable=usable,
+            current=current,
+            use_max_context=use_max_context,
+        )
         active = _effective_spec(session)
         if active is not None and getattr(active, "default_context_window", None):
             # A session can be sticky to a different account than the generic

@@ -36,11 +36,15 @@ export function NewSessionScreen() {
 			});
 	}, []);
 
+	/* Order-PRESERVING, over the same string the server ranks on — see the long
+	   note in `components/model-sheet.tsx`. This list led with ~445 aggregated
+	   Radient rows for the same reason the sheet did, and `Array.filter` keeps
+	   the daemon's ranking intact so the direct route leads every query. */
 	const filtered = useMemo(() => {
 		const q = filter.trim().toLowerCase();
 		if (!q) return models;
 		return models.filter((m) =>
-			`${m.provider} ${m.name} ${m.model_id}`.toLowerCase().includes(q),
+			`${m.selector} ${m.name}`.toLowerCase().includes(q),
 		);
 	}, [models, filter]);
 
