@@ -106,16 +106,28 @@ export function TodosPanel({
 				/* Dimmed here rather than on the Disclosure's button — see HELD_DIM.
 				   This panel has nothing that must stay at full contrast while held,
 				   but it takes the dim the same way the roster does so the two held
-				   headers read as one state rather than two treatments. */
-				<span
+				   headers read as one state rather than two treatments.
+
+					  `min-w-0 truncate` for the same reason the roster's label carries
+						 it: held shut, this row also gains the `· answer first` hint, and
+						 the hint is `shrink-0`. The label must therefore be the span that
+					  yields, or the row wraps onto a second line and spends a row of a
+				   budget measured in rows. `truncate` needs a box to clip, which an
+					  inline span does not have — hence the flex line, and `relative`
+					   with it: flex blockifies these children, which drops them out of
+						  the inline paint phase that kept a header above an overlapping
+						 later sibling's background. See the roster's fuller note. */
+						<span
 					className={cn(
-						"text-body-sm text-ink-muted",
+						"relative flex min-w-0 items-baseline gap-1 text-body-sm text-ink-muted",
 						forceCollapsed && HELD_DIM,
 					)}
 				>
-					tasks{" "}
-					<span className="font-mono text-mono-sm text-ink-dim">
-						{done}/{items.length}
+					<span className="min-w-0 truncate">
+						tasks{" "}
+						<span className="font-mono text-mono-sm text-ink-dim">
+							{done}/{items.length}
+						</span>
 					</span>
 				</span>
 			}
