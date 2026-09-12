@@ -65,6 +65,8 @@ from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
+    EVENT_MUTE_CAPABILITY,
+    EVENT_MUTE_DROP_TYPES,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
     ClientLocality,
@@ -442,6 +444,13 @@ class _ClientConn:
     # frame. Daemon connections never set it; a v3 attach client that omitted
     # the flag keeps projection-only behaviour.
     wants_events: bool = False
+    #: An attach connection's raw event relay is MUTED: it asked (see
+    #: ``EVENT_MUTE_CAPABILITY``) to stop receiving delta-grade frames until it
+    #: unmutes. Per connection, not per session — the same owner serves each
+    #: viewer's own interest, so a parked viewer's mute never slows the one on
+    #: screen. Flipped by the ``event_mute``/``event_unmute`` ops (handled in
+    #: the control loop, which owns ``conn``) and read in ``_relay_on_loop``.
+    events_muted: bool = False
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
@@ -713,6 +722,10 @@ class RuntimeServer:
             # surface that is not there.
             capabilities=(
                 [DESKTOP_WATCH_CAPABILITY]
+                # Unconditional, unlike the handle-gated entries below: the
+                # mute is a property of the RELAY this server always runs, not
+                # of anything the handle implements.
+                + [EVENT_MUTE_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -2109,6 +2122,30 @@ class RuntimeServer:
                 # ``retire_if_pristine``: both are lifecycle ops that must not
                 # trigger the post-ack refresh (the exemption list below).
                 detail = await self._refresh_if_idle()
+            elif op in ("event_mute", "event_unmute"):
+                # Raw-event interest, per connection, for a viewer that stops
+                # painting this session while parked (see
+                # ``EVENT_MUTE_CAPABILITY``). Handled here rather than in
+                # ``_dispatch`` for the same reason ``watch_job`` is: it
+                # mutates this connection's own relay state and never touches
+                # the session, and the dispatcher deliberately has no ``conn``.
+                #
+                # Delta-grade frames ONLY, and the set is deliberately the
+                # same one the viewer's parked ``EventController`` discards
+                # app-side: muting anything a client still needs for state
+                # (turn boundaries, gates, notices) would change what a
+                # reveal can reconstruct, and the unmute path rebuilds live
+                # text from history plus the canonical seed either way.
+                # Idempotent: re-asserting the current state is how a
+                # reconnected parked viewer gets its mute back.
+                #
+                # Attach-only, like ``desktop_watch``: the relay this mutes is
+                # never sent to daemon connections, so a daemon sending it is
+                # a client bug and the error frame is the honest reply.
+                if conn.kind != "attach":
+                    raise ValueError("event muting requires an attach connection")
+                conn.events_muted = op == "event_mute"
+                detail = "delta-grade events muted" if conn.events_muted else "events resumed"
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -2897,10 +2934,18 @@ class RuntimeServer:
         """
         if self._closed.is_set():
             return
+        # A muted connection (``EVENT_MUTE_CAPABILITY``) is filtered PER EVENT,
+        # not dropped from the recipient snapshot: its interest is the delta
+        # grade only, and turn boundaries, gates, notices and so on must keep
+        # flowing or a parked viewer's state would silently rot while muted.
+        event_type = str(data.get("type") or "")
         recipients = [
             conn
             for conn in self._clients.values()
-            if conn.kind == "attach" and conn.wants_events and conn.events_ready
+            if conn.kind == "attach"
+            and conn.wants_events
+            and conn.events_ready
+            and not (conn.events_muted and event_type in EVENT_MUTE_DROP_TYPES)
         ]
         if not recipients:
             return

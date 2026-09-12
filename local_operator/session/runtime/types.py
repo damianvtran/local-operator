@@ -59,6 +59,55 @@ PROTOCOL_VERSION = 5
 DESKTOP_WATCH_CAPABILITY = "desktop-watch-v1"
 DESKTOP_WATCH_LEASE_S = 45.0
 
+#: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
+#: ops, which stop and resume DELTA-GRADE frames on an attach connection that
+#: already subscribed to the raw event relay (``"events": true``).
+#:
+#: The parking sidebar mints viewer connections it does not paint: every delta
+#: those viewers receive is materialised (socket read, JSON decode, event
+#: deserialization) and then discarded app-side, so the cheapest correct thing
+#: is for the owner not to send them at all while parked. Muting is strictly
+#: narrower than the app-side discard it replaces (the same delta-grade types;
+#: state-bearing events keep flowing), it is per CONNECTION, and it is
+#: reversible: the viewer unmutes on reveal and rebuilds from history plus the
+#: canonical live seed, exactly as the app-side drop already requires.
+#:
+#: Negotiated by capability string rather than a ``PROTOCOL_VERSION`` bump for
+#: the reason ``recall_steer`` documents: purely additive op, no frame shape
+#: changes, and an owner that does not know the op simply never sees it (the
+#: client gates the send on this string being present in the record).
+EVENT_MUTE_CAPABILITY = "event-mute-v1"
+
+#: Event types a MUTED attach connection stops receiving: the wire half of
+#: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
+#: ``EventController`` discards app-side (``tui/events.py`` assigns its
+#: ``_PARKED_DROP_TYPES`` from this constant, so the two cannot drift).
+#:
+#: MEMBERSHIP RULE, all three clauses required: the event carries a fragment of
+#: something in flight, the owner's ``live_events`` seed already accumulates it
+#: (so a reveal rebuilds the same viewport through ``restore_live_projection``),
+#: AND it is emitted UNTHROTTLED, once per token or chunk. The third clause is
+#: what keeps the set finite, and it is why ``tool_call_compose`` is
+#: DELIBERATELY EXCLUDED despite satisfying the first two: it carries partial
+#: argument bytes of an in-flight call, but the harness already rate-limits it
+#: to one per ``COMPOSE_NOTICE_INTERVAL_S`` (0.2 s), so it is not volume traffic
+#: and muting it would buy nothing while costing a compose preview on reveal.
+#: Do not "complete" this set by adding it.
+#:
+#: Also deliberately absent: ``message_start``/``message_end`` (row identity and
+#: the settled row the dedupe and card pairing key on), every turn/agent
+#: boundary, tool start/end, compaction, retry, model change, and every
+#: delivery notice — those change state a parked source is still expected to
+#: have right. These three ARE the volume: at 12 streaming sessions they were
+#: ~229 events/s of the traffic measured on the reporting machine.
+EVENT_MUTE_DROP_TYPES = frozenset(
+    {
+        "message_update",  # one per assistant token
+        "tool_execution_update",  # one per streamed tool-output chunk
+        "subagent_progress",  # one per child progress beat
+    }
+)
+
 #: Which side of the owner relationship a control connection speaks for.
 #: ``daemon`` (the default when the auth frame omits ``client``) may rebind
 #: the owner's conversation; ``attach`` is a follower terminal that may
