@@ -13,13 +13,40 @@
 //    to scroll — a 10-option ask measured 1426px against an 844px viewport.
 //
 // These are asserted against the REAL SessionScreen, so a reverted default or
-// a dropped cap fails here. happy-dom does no layout (every box is 0x0), so
-// the assertions are on the structural contract that produces the layout —
-// the roster's `aria-expanded`, and the presence of the cap + scroller classes
-// on the card's own elements — not on measured pixels, which this environment
-// cannot supply. The pixel evidence lives on the PR.
+// a dropped cap fails here.
+//
+// WHAT THIS LAYER CANNOT PROVE, and which layer does.
+//
+// happy-dom does no layout: every box is 0x0, so "the last option is visible",
+// "approve is 44px tall on arrival" and "one swipe reaches the foot" are all
+// unanswerable here. Round 1 learned this the expensive way — four of the seven
+// assertions were `className` echoes (`toContain("max-h-[60dvh]")`), which
+// compare a string in the test to the same string in the source and therefore
+// pass for a cap that is PRESENT BUT INEFFECTIVE. They passed for the U2
+// regression that shipped approve/deny 0px visible at 360x780, and for the U1
+// keyboard divergence, because a class name says nothing about what the class
+// resolves to.
+//
+// So the assertions below are of two kinds, both of which can actually fail:
+//
+//  * RESOLVED STYLE, not class name. happy-dom does resolve `var()` against an
+//    ancestor's custom property, so a cap written against the column's pinned
+//    height resolves to a px calc while one written in `dvh` does not. That is
+//    the U1/C1 property — the cap tracks the column rather than the dynamic
+//    viewport — and a revert to `60dvh` fails it.
+//  * CONTAINMENT, in both directions. The scroller must contain the option
+//    list, and must NOT contain the controls or the error line. The second half
+//    is U2/U3: a control inside the scroller can be scrolled out of reach, and
+//    a class echo cannot see the difference.
+//
+// The GEOMETRIC property — that a finger reaches the last option, and that
+// approve arrives at its full 44px — is proved one layer up, by
+// `scripts/mobile_reachability_check.py`, which drives the real bundle in
+// headless Chrome with real touch input and asserts those pixels. Do not read a
+// green run of this file as proof of reachability.
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { COLUMN_HEIGHT_VAR } from "./lib/column";
 import { SessionScreen } from "./screens/session-view";
 import type {
 	PendingRequest,
@@ -133,11 +160,42 @@ function askPending(optionCount: number): PendingRequest {
 	};
 }
 
-/** The card's own element: the accent-bordered block the render site mounts. */
+/** The card's own element. Selected by test id rather than `.border-accent`,
+    which composer.tsx (drag-over) and new-session.tsx (selection) also apply,
+    so the class would pick the wrong node the first time one of those states
+    renders beside a card (C5). */
 function cardRoot(): HTMLElement {
-	const el = document.querySelector<HTMLElement>(".border-accent");
+	const el = document.querySelector<HTMLElement>('[data-testid="pending-card"]');
 	if (!el) throw new Error("pending card not mounted");
 	return el;
+}
+
+/** The card's scrolling region — the one thing inside it that may scroll. */
+function cardScroller(): HTMLElement {
+	const el = cardRoot().querySelector<HTMLElement>(".lo-scroll");
+	if (!el) throw new Error("card has no scroller");
+	return el;
+}
+
+/** Pin the column the way the session view's visualViewport handler does, and
+    return what `el`'s cap actually RESOLVES to at that column height.
+
+    This is the U1/C1 property expressed as something that can fail. The column
+    is pinned to `visualViewport.height` in px while a `dvh` cap follows the
+    dynamic viewport, and a virtual keyboard shrinks the first and not the
+    second — so the two diverge exactly when the keyboard is open. A cap in
+    column units resolves against `--lo-vvh` and tightens with it; a `dvh` cap
+    resolves to a viewport unit and does not.
+
+    happy-dom lays nothing out, so the returned string is not a height. It is
+    the resolved `calc()`, which is the most this layer can see and is enough to
+    tell a column-relative cap from a viewport-relative one. The actual pixels
+    are asserted by `scripts/mobile_reachability_check.py`. */
+function resolvedCapWithColumnAt(el: HTMLElement, pinnedPx: number): string {
+	const column = cardRoot().closest<HTMLElement>(".h-dvh");
+	if (!column) throw new Error("card is not inside the session column");
+	column.style.setProperty(COLUMN_HEIGHT_VAR, `${pinnedPx}px`);
+	return getComputedStyle(el).maxHeight;
 }
 
 afterEach(() => {
@@ -176,10 +234,19 @@ describe("subagent roster default", () => {
 
 		// The expanded body is bounded and scrolls itself, so 22 rows cannot
 		// push the transcript out of the column the way they used to.
-		const scroller = firstRow.closest(".lo-scroll");
+		const scroller = firstRow.closest<HTMLElement>(".lo-scroll");
 		expect(scroller).not.toBeNull();
-		expect(scroller?.className).toContain("max-h-[40dvh]");
 		expect(scroller?.className).toContain("overflow-y-auto");
+
+		// The bound is measured against the COLUMN, not the dynamic viewport:
+		// pin the column the way the visualViewport handler does and the cap
+		// resolves against that number. A `40dvh` cap resolves to a viewport
+		// unit instead and fails here — which is the keyboard-open divergence.
+		const column = scroller?.closest<HTMLElement>(".h-dvh");
+		column?.style.setProperty(COLUMN_HEIGHT_VAR, "480px");
+		const cap = getComputedStyle(scroller as HTMLElement).maxHeight;
+		expect(cap).toContain("480px");
+		expect(cap).toContain("0.4");
 	});
 
 	it("keeps the roster collapsed when nothing is running", () => {
@@ -202,11 +269,20 @@ describe("ask card reachability", () => {
 		// Every option is mounted — nothing is dropped to make the card fit.
 		expect(screen.getByRole("button", { name: /option-10/ })).toBeTruthy();
 
-		// The card is bounded against the viewport rather than growing past it.
 		const card = cardRoot();
-		expect(card.className).toContain("max-h-[60dvh]");
-		// ...and it does not shrink to nothing when the transcript is long.
+		// It does not shrink to nothing when the transcript is long.
 		expect(card.className).toContain("shrink-0");
+
+		// The cap TRACKS THE COLUMN. With the column pinned to a keyboard-open
+		// 480px, the card's bound resolves against that 480 rather than against
+		// the untouched dynamic viewport. This is the assertion that fails for
+		// the `60dvh` cap of round 1: `dvh` does not shrink when a keyboard
+		// overlays the visual viewport, so the cap stayed at 468px inside a
+		// 480px column and put the controls under its clipped foot.
+		expect(resolvedCapWithColumnAt(card, 480)).toContain("480px");
+		// ...and it is a fraction of it, not the whole column: a card that may
+		// claim the entire column has no cap in any useful sense.
+		expect(resolvedCapWithColumnAt(card, 480)).toContain("0.6");
 
 		// The bound only helps if the overflow is scrollable: the last option
 		// must sit inside a scroller that the card owns. Without this the cap
@@ -214,12 +290,36 @@ describe("ask card reachability", () => {
 		const scroller = screen
 			.getByRole("button", { name: /option-10/ })
 			.closest(".lo-scroll");
-		expect(scroller).not.toBeNull();
+		expect(scroller).toBe(cardScroller());
 		expect(scroller?.className).toContain("overflow-y-auto");
-		expect(card.contains(scroller)).toBe(true);
 		// `min-h-0` is what lets the flex child shrink below its content; a
 		// flex child defaults to `min-height:auto` and would refuse to.
 		expect(scroller?.className).toContain("min-h-0");
+		// Arbitrary agent text cannot scroll the card sideways (C7).
+		expect(scroller?.className).toContain("overflow-x-hidden");
+	});
+
+	it("pins the card's meta row above the scroller so it keeps its identity", () => {
+		slot = {
+			projection: projection({ pending: askPending(10), pending_count: 2 }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		// D2: scrolled to the option being tapped, the kind label and the "1 of
+		// N" counter were both 0% visible — the card became an unlabelled list of
+		// buttons at the exact moment of the decision. The row is one fixed line,
+		// so pinning it costs no reachability.
+		const kind = screen.getByText(/^question/);
+		const counter = screen.getByText(/1 of 2/);
+		const scroller = cardScroller();
+		expect(scroller.contains(kind)).toBe(false);
+		expect(scroller.contains(counter)).toBe(false);
+		expect(cardRoot().contains(kind)).toBe(true);
+
+		// U4: the option total is stated rather than discovered, since the cap
+		// cut first-glance options from 6 to 3 at 390x844.
+		expect(screen.getByText(/10 options/)).toBeTruthy();
 	});
 
 	it("scrolls the question too, since a long question can outgrow the cap alone", () => {
@@ -228,9 +328,11 @@ describe("ask card reachability", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		// The question shares the scroller with the options rather than being
-		// pinned above it, or it would reintroduce the unreachable tail.
+		// pinned above it, or it would reintroduce the unreachable tail. This is
+		// the deliberate asymmetry with the meta row above: a title is unbounded
+		// prose, a kind label is one line.
 		const question = screen.getByText(pending.title);
-		expect(question.closest(".lo-scroll")).not.toBeNull();
+		expect(question.closest(".lo-scroll")).toBe(cardScroller());
 	});
 
 	it("bounds the approval variant, whose approve/deny pair overflowed the same way", () => {
@@ -253,14 +355,59 @@ describe("ask card reachability", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		const approve = screen.getByRole("button", { name: "approve" });
+		const deny = screen.getByRole("button", { name: "deny" });
 		const card = cardRoot();
-		expect(card.className).toContain("max-h-[60dvh]");
-		const scroller = approve.closest(".lo-scroll");
-		expect(scroller).not.toBeNull();
-		expect(card.contains(scroller)).toBe(true);
-		// The remember checkbox rides the same scroller as the buttons, so a
-		// long detail cannot strand it above the fold either.
-		expect(screen.getByRole("checkbox").closest(".lo-scroll")).toBe(scroller);
+		const scroller = cardScroller();
+
+		// The cap tracks the column, as above.
+		expect(resolvedCapWithColumnAt(cardRoot(), 480)).toContain("480px");
+
+		// U2/Q1, the regression round 1 shipped: the DECISION is outside the
+		// scroller. Inside it, an approval with a long detail arrived with
+		// approve showing 30 of 44px at 390x844 and 0 of 44px at 360x780 — the
+		// card's primary action below the fold on arrival, where the uncapped
+		// card before it had shown both buttons whole. A control that can be
+		// scrolled away is a control that can be missed.
+		expect(scroller.contains(approve)).toBe(false);
+		expect(scroller.contains(deny)).toBe(false);
+		expect(scroller.contains(screen.getByRole("checkbox"))).toBe(false);
+		expect(card.contains(approve)).toBe(true);
+		// The detail is what scrolls instead — the content, not the controls.
+		expect(screen.getByText(/A long command plus its consequences/).closest(".lo-scroll")).toBe(
+			scroller,
+		);
+		// The action row ends clear of the overlay scrollbar's paint band, which
+		// was drawn inside `deny` at gapToContentEdge 0 (D3).
+		expect(approve.parentElement?.parentElement?.className).toContain("pr-1.5");
+	});
+
+	it("pins the stale-tap error outside the scroller, where it cannot land below the fold", async () => {
+		const { sendCommand } = await import("./api");
+		vi.mocked(sendCommand).mockRejectedValueOnce(
+			new Error("that question moved on"),
+		);
+		slot = {
+			projection: projection({ pending: askPending(10), pending_count: 1 }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		fireEvent.click(screen.getByRole("button", { name: /option-10/ }));
+		const error = await screen.findByText(/That question moved on/);
+
+		// U3: the error used to be the scroller's last child, so it was appended
+		// ~26px BELOW where the user was standing — at the foot of the option
+		// list, because that is where they had just tapped. Every option greyed
+		// out and nothing explained why. Pinned, its position does not depend on
+		// the user's scroll offset at all.
+		expect(cardScroller().contains(error)).toBe(false);
+		expect(cardRoot().contains(error)).toBe(true);
+
+		// And the options must still read as inert while it shows, or a stale
+		// option sits live-looking under the message (D7).
+		expect(
+			screen.getByRole("button", { name: /option-01/ }).hasAttribute("disabled"),
+		).toBe(true);
 	});
 
 	it("bounds the free-text/secret variant so its input and send stay reachable", () => {
@@ -289,11 +436,99 @@ describe("ask card reachability", () => {
 			(b) => b.textContent === "send",
 		);
 		if (!send) throw new Error("card has no send button");
-		expect(card.className).toContain("max-h-[60dvh]");
-		expect(card.contains(send.closest(".lo-scroll"))).toBe(true);
-		// The masked input must be inside the same scroller as its button; a
-		// split would let one scroll away from the other.
-		const input = document.querySelector('input[type="password"]');
-		expect(input?.closest(".lo-scroll")).toBe(send.closest(".lo-scroll"));
+
+		// The cap tracks the column, which for THIS variant is the whole point:
+		// the keyboard is open exactly when a free-text answer is being typed,
+		// and `send` is the only way to submit one (there is no Enter-to-send
+		// path on this card). At a 300px keyboard on a 360x780 phone the old
+		// `60dvh` cap left it below the column's clipped foot (U1/C1).
+		expect(resolvedCapWithColumnAt(cardRoot(), 480)).toContain("480px");
+
+		// The input and its send button are pinned together OUTSIDE the
+		// scroller, so a long question cannot scroll either away.
+		const input = document.querySelector<HTMLElement>('input[type="password"]');
+		const scroller = cardScroller();
+		expect(scroller.contains(send)).toBe(false);
+		expect(scroller.contains(input as HTMLElement)).toBe(false);
+		// ...and they stay together, or one could move without the other.
+		expect(send.parentElement).toBe(input?.parentElement);
+		expect(send.parentElement?.parentElement?.className).toContain("pr-1.5");
+	});
+});
+
+describe("column budget while a request is pending", () => {
+	it("holds the panels collapsed so they cannot push the decision off the column", () => {
+		slot = {
+			projection: projection({
+				subagents: roster(),
+				todos: [{ name: "Todos", items: [{ text: "audit", status: "pending", reason: "" }] }],
+				pending: askPending(10),
+				pending_count: 1,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		// D1: the panels, the card and the composer are siblings in a column
+		// that is `overflow-hidden`, so what they claim together comes off the
+		// bottom and is CLIPPED rather than scrolled. Measured with both panels
+		// expanded beside an approval: approve/deny 120px below the fold at
+		// 390x844 with the card's own scroller already at its end, and at
+		// 360x780 the card's top at y=781 in a 780px viewport. Real touch drags
+		// recovered none of it. A question outranks a task list (branding §7),
+		// so while one is pending the panels are held shut.
+		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
+		const todosHeader = screen.getByRole("button", { name: /tasks/ });
+		expect(rosterHeader.getAttribute("aria-expanded")).toBe("false");
+		expect(todosHeader.getAttribute("aria-expanded")).toBe("false");
+
+		// Held shut means held: a tap must not open them either, or the user
+		// can still put the decision off screen in one gesture.
+		fireEvent.click(rosterHeader);
+		fireEvent.click(todosHeader);
+		expect(rosterHeader.getAttribute("aria-expanded")).toBe("false");
+		expect(todosHeader.getAttribute("aria-expanded")).toBe("false");
+		expect(screen.queryByRole("button", { name: /surface-audit-01/ })).toBeNull();
+
+		// The counts stay legible, so nothing is hidden — only held.
+		expect(screen.getByText("1/22 running")).toBeTruthy();
+	});
+
+	it("releases the panels once nothing is pending", () => {
+		slot = {
+			projection: projection({ subagents: roster(), pending: null }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
+		fireEvent.click(rosterHeader);
+		expect(rosterHeader.getAttribute("aria-expanded")).toBe("true");
+	});
+
+	it("surfaces a failing fan-out in the collapsed header", () => {
+		// U5: collapsing by default hid the status glyphs, and `1/22 running` is
+		// exactly what a healthy session shows — 3 failed agents rendered with
+		// no ✗ on screen and the word "failed" absent from the page entirely.
+		const withFailures = [
+			...roster().slice(0, 19),
+			row("surface-audit-19", "failed"),
+			row("surface-audit-20", "failed"),
+			row("surface-audit-21", "failed"),
+		];
+		slot = { projection: projection({ subagents: withFailures }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		expect(screen.getByText("1/22 running")).toBeTruthy();
+		const failed = screen.getByText(/3 failed/);
+		expect(failed).toBeTruthy();
+		// In the danger colour, or it reads as one more neutral count.
+		expect(failed.className).toContain("text-danger");
+	});
+
+	it("says nothing about failures when there are none", () => {
+		slot = { projection: projection({ subagents: roster() }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(screen.queryByText(/failed/)).toBeNull();
 	});
 });
