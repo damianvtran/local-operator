@@ -1152,11 +1152,23 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     ``check_zombie=False`` is for the engage loop's DISCOVERY path, which calls
     this on every pass of its dense 10 ms grid: the proof costs a `ps` fork
     (2.4-4.6 ms measured across runs on this host), which is more than the dead
-    time that grid exists to remove. There it may only ever cause a wait — the
-    loop's decision to attach or spawn still ends in a runtime that has to
-    acquire the lease, which always demands the proof — whereas at the three
-    user-facing call sites (the TUI's ``/resume``, ``lop exec --resume`` and the
-    phone's attach) the answer IS the decision, so they keep the default.
+    time that grid exists to remove. At the three user-facing call sites (the
+    TUI's ``/resume``, ``lop exec --resume`` and the phone's attach) the answer
+    IS the decision, so they keep the default.
+
+    Cheap mode is not merely a wait, and saying so would be wrong. It cannot
+    change ARBITRATION — the loop's decision to attach or spawn still ends in a
+    runtime that has to acquire the lease, and that path always demands the proof
+    — but its answer is also read by ``find_runtime_record`` to SELECT a record,
+    and the two errands that deliver nothing (``WarmErrand``, ``WakeErrand``)
+    treat reaching a live record as the completed errand. So on the one pass
+    where an owner published AND died between two dense polls, the cheap answer
+    can hand back a corpse's record and report that errand ready. The window is a
+    single dense pass (~10-25 ms) because any pass that sees a record ends the
+    grid, the next pass proves the owner dead, and a wake is retried rather than
+    lost (the schedule stays overdue until a runtime loads). It is also strictly
+    narrower than the behaviour before this branch, when such a record read as
+    live for the ~45 s until its heartbeat quieted.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None

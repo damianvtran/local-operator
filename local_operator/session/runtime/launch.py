@@ -595,11 +595,23 @@ async def engage_runtime(
         # than a pid signal 0 accepts: the owner lookup inside
         # ``find_runtime_record`` and ``_lease_holder``. Proving a corpse costs a
         # `ps` fork (2.4-4.6 ms measured across runs on this host) against the
-        # 23-30 µs budget published for one DENSE iteration, so the denses grid
-        # asks only the cheap question -- it already believes something is
-        # constructing, and being wrong about a corpse there costs waiting, never
-        # arbitration: only the spawned child's ``acquire_session_lease`` may
-        # take a claim, and that one always demands the proof.
+        # 23-30 µs budget published for one DENSE iteration, so the grid asks
+        # only the cheap question -- it already believes something is
+        # constructing, and neither cheap answer can change ARBITRATION: only the
+        # spawned child's ``acquire_session_lease`` may take a claim, and that one
+        # always demands the proof.
+        #
+        # They are not equally harmless, and the difference is worth keeping
+        # straight. A cheap ``_lease_holder`` can only make this loop wait. A
+        # cheap ``find_runtime_record`` can also hand back a corpse's RECORD, and
+        # the two errands that deliver nothing (``WarmErrand``, ``WakeErrand``)
+        # treat reaching a record as the completed errand -- so on the one pass
+        # where an owner published and died between two dense polls, that errand
+        # is reported ready against a corpse. One pass later the proof lands and
+        # the loop corrects itself; a wake is retried rather than lost, and the
+        # pre-branch behaviour read such a record as live for as long as its
+        # heartbeat stayed fresh (~45 s). Bounded, documented, and the reason the
+        # proof is spent on every coarser pass.
         #
         # Outside the dense grid the passes are at least 50 ms apart (the
         # open-ended backoff, up to 1 s), where a fork or two per pass is a
@@ -880,10 +892,12 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     past the grid the passes are 50 ms-1 s apart, where one or two forks is a
     fraction of a percent of a core, and there the proof is what recovers a
     corpse's session on that very pass. The 23-30 µs iteration figure above is
-    therefore restored for the tidy store it was measured on, and the two `ps`
-    forks a dense iteration may still pay are the two this paragraph names: the
-    scan overlap carved out just above, and nothing else. See the cadence note at
-    the top of the engage loop.
+    therefore restored for the tidy store it was measured on, and the `ps` fork a
+    dense iteration may still pay is the one this paragraph names above: the scan
+    overlap. The two corpse proofs are no longer among them — they are deferred to
+    every coarser pass, where the fork costs a fraction of a percent of a core and
+    is what recovers a corpse's session. See the cadence note at the top of the
+    engage loop.
 
     Where that lands is narrower than it first appears, because
     ``find_runtime_record`` returns BEFORE ``scan()`` when the session has no
