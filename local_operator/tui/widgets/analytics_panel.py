@@ -1695,8 +1695,10 @@ class AnalyticsScreen(ModalScreen[None]):
         # ``priority=True`` on the PAGINATION keys for the SAME reason, and it is
         # what makes them unanimated rather than merely ours: the container has
         # its own ``pageup``/``pagedown``/``home``/``end`` bindings
-        # (``ScrollView.BINDINGS``) handing the key to ``Widget.action_page_down``
-        # and friends, which call ``scroll_page_down()`` with the ``animate=True``
+        # (``ScrollableContainer.BINDINGS``, ``textual/containers.py:48-59`` —
+        # ``ScrollView`` extends it and defines none of its own) handing the key
+        # to ``Widget.action_page_down`` and friends, which call
+        # ``scroll_page_down()`` with the ``animate=True``
         # default. Measured on this screen at 120x45: one ``pagedown`` handled by
         # the container wrote 17-26 compositor frames of all 29 body rows (the
         # count moves with frame scheduling, the order of magnitude does not). So
