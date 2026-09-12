@@ -873,6 +873,12 @@ class AttachedSession:
         self._takeover_target: Any | None = None
         self._streaming = False
         self._generation = 0
+        #: Whether the app-side controller asked this viewer to PARK its delta
+        #: grade event traffic (see :meth:`set_event_mute`). Remembered rather
+        #: than only sent, because the mute is per CONNECTION: a reconnect
+        #: starts unmuted and only this flag can put the mute back.
+        self._event_mute_requested = False
+        self._event_mute_tasks: set[asyncio.Task[None]] = set()
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
         # Double-Esc subagent cancel: the synchronous protocol method issues
@@ -2499,6 +2505,19 @@ class AttachedSession:
             client.close()
             raise ConnectionError("viewer disposed while attaching")
         self._client = client
+        # Re-assert a parking mute across a reconnect. A fresh connection is
+        # unmuted, so without this a parked source that redialed would resume
+        # paying full delivery for frames its controller discards. Best-effort
+        # like the toggle itself: the app-side drop still applies underneath.
+        if self._event_mute_requested:
+            try:
+                # Bounded, because this runs on the DIAL path: a wedged owner
+                # must not hold the redial open for the full request timeout
+                # over an optimisation. A lost re-assert costs delivery (the
+                # app-side drop still applies), never correctness.
+                await asyncio.wait_for(client.set_event_muted(True), timeout=5.0)
+            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+                logger.debug("event mute re-assert failed", exc_info=True)
         if self._surface == "desktop":
             from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
 
@@ -5196,6 +5215,53 @@ class AttachedSession:
     @property
     def supports_completion_ack(self) -> bool:
         return bool(self._client and self._client.supports_completion_ack)
+
+    @property
+    def supports_event_mute(self) -> bool:
+        return bool(self._client and self._client.supports_event_mute)
+
+    def set_event_mute(self, muted: bool) -> None:
+        """Park/unpark the owner's delta-grade event relay (best-effort).
+
+        WHY THIS EXISTS. A parked source keeps its subscription so the
+        conversation stays warm, but every delta it receives is materialised
+        on this process's loop — socket read, JSON decode, event
+        deserialization — and then discarded by the parked controller. The
+        app-side drop is the semantic contract; the DELIVERY underneath it is
+        paid per parked viewer per frame, so the cheapest correct frame is the
+        one the owner never sends. This asks the owner to stop sending
+        delta-grade frames while parked — the same three types the parked
+        controller discards, nothing that carries state — and resumes them on
+        reveal, where the presentation rebuilds from history plus the canonical
+        live seed exactly as it already does after any parked gap.
+
+        SYNCHRONOUS ON PURPOSE (the park toggle's own shape): the send is
+        spawned rather than awaited, and a lost send is only a lost
+        optimisation because the app-side drop still applies. The REQUESTED
+        state is remembered, which is what a reconnect re-asserts — the mute
+        is per connection and a fresh socket starts unmuted. Call from the
+        app's loop, which is where parking happens; a viewer whose owner never
+        advertised the capability is a no-op (the pre-mute behaviour).
+        """
+        self._event_mute_requested = muted
+        client = self._client
+        if client is None or not client.supports_event_mute:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Never in the connect path's loop-less phases; a lost send is
+            # recoverable by the next park toggle or the next reconnect.
+            return
+        task = loop.create_task(self._send_event_mute(client, muted))
+        self._event_mute_tasks.add(task)
+        task.add_done_callback(self._event_mute_tasks.discard)
+
+    async def _send_event_mute(self, client: AttachClient, muted: bool) -> None:
+        try:
+            await client.set_event_muted(muted)
+        except Exception:  # noqa: BLE001 — a lost mute is a cost, never a defect
+            logger.debug("event mute send failed", exc_info=True)
 
     async def refresh_attention(self) -> dict[str, Any]:
         return dict(self.frontend_state.attention)
