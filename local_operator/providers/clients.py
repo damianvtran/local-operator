@@ -931,6 +931,53 @@ def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     return _gen()
 
 
+async def _iter_deepseek_sse_events(response: httpx.Response) -> AsyncIterator[str]:
+    """Dispatch complete SSE events, never physical lines or an EOF tail.
+
+    Native DeepSeek's DONE contract depends on the event's blank terminator.
+    Assemble multiline data and universal line endings here rather than changing
+    the permissive parser other compatibility providers already depend on. The
+    shared text decoder and stall watchdog still own UTF-8/chunk timing.
+    """
+    buffer = ""
+    data_lines: list[str] = []
+    skip_lf = False
+    first_text = True
+    async for chunk in _guarded_chunks(response):
+        if not chunk:
+            continue
+        if first_text:
+            chunk = chunk.removeprefix("\ufeff")
+            first_text = False
+        if skip_lf:
+            chunk = chunk.removeprefix("\n")
+            skip_lf = False
+        buffer += chunk
+        while match := re.search(r"\r\n|\r|\n", buffer):
+            line, buffer = buffer[: match.start()], buffer[match.end() :]
+            # A CR is itself a terminator. If its optional LF arrives in the
+            # next chunk, swallow that LF instead of inventing a blank event.
+            if match.group() == "\r" and not buffer:
+                skip_lf = True
+            if not line:
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines.clear()
+            elif line.startswith("data:"):
+                value = line[5:]
+                data_lines.append(value[1:] if value.startswith(" ") else value)
+            elif line == "data":
+                data_lines.append("")
+            # Comments, event/id/retry and unknown SSE fields are not JSON data.
+    # No EOF flush: even a complete-looking DONE without the blank event
+    # terminator is truncation and is rejected by the native stream consumer.
+
+
+def _reject_json_constant(value: str) -> Any:
+    """Python's optional NaN/Infinity extension is not valid provider JSON."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 async def _guarded_chunks(response: httpx.Response) -> AsyncIterator[str]:
     """``response.aiter_text()`` with a stall watchdog after the first chunk."""
     iterator = response.aiter_text().__aiter__()
@@ -1716,7 +1763,7 @@ def _deepseek_tool_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]
                     )
                 elif block.get("type") == "text":
                     texts.append(block.get("text", ""))
-            entry = {**entry, "content": "\\n".join(texts)}
+            entry = {**entry, "content": "\n".join(texts)}
         output.append(entry)
     flush()
     return output
@@ -2593,13 +2640,22 @@ class OpenAICompatClient:
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
-            async for data in _iter_sse_lines(response):
+            payloads = (
+                _iter_deepseek_sse_events(response)
+                if direct_deepseek
+                else _iter_sse_lines(response)
+            )
+            async for data in payloads:
                 if data == "[DONE]":
                     done_received = True
                     break
                 try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError as exc:
+                    chunk = (
+                        json.loads(data, parse_constant=_reject_json_constant)
+                        if direct_deepseek
+                        else json.loads(data)
+                    )
+                except ValueError as exc:
                     if direct_deepseek:
                         raise ProviderError(
                             502, "DeepSeek returned malformed SSE JSON", retryable=True
@@ -2661,6 +2717,28 @@ class OpenAICompatClient:
                     continue
                 choice = choices[0]
                 delta = choice.get("delta") or {}
+                if direct_deepseek:
+                    # A finish seals the completion. Usage-only trailers may
+                    # still arrive before DONE, but later executable tools (or
+                    # text/reasoning) must never enter the assembled turn.
+                    if finish_reason is not None:
+                        new_finish = choice.get("finish_reason")
+                        if any(
+                            delta.get(field)
+                            for field in (
+                                "content",
+                                "reasoning_content",
+                                "reasoning",
+                                "reasoning_details",
+                                "tool_calls",
+                                "refusal",
+                            )
+                        ) or (new_finish is not None and new_finish != finish_reason):
+                            raise ProviderError(
+                                502,
+                                "DeepSeek returned completion data after its finish reason",
+                                retryable=True,
+                            )
                 for reasoning_key in ("reasoning_content", "reasoning"):
                     fragment = delta.get(reasoning_key)
                     if isinstance(fragment, str) and fragment:

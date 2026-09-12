@@ -18,12 +18,16 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
     TextContent,
     ToolCall,
 )
-from local_operator.model import configure, discovery
+from local_operator.model import catalogue, configure, discovery
 from local_operator.model.registry import deepseek_models
+from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.clients import OpenAICompatClient
+from local_operator.providers.controller import ProviderController
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import credential_scope
 
@@ -300,6 +304,251 @@ async def test_cancellation_does_not_become_truncated_stream_failure():
         with pytest.raises(asyncio.CancelledError):
             async for event in client.stream(request(), "fixture"):
                 assert not isinstance(event, StreamEndEvent)
+
+
+@pytest.mark.parametrize(
+    "bad", [[{}], [None], [{"name": "missing id"}], [None, {"name": "missing id"}]]
+)
+def test_malformed_native_inventory_uses_stale_or_static(tmp_path, bad):
+    payload = {"data": [{"id": "deepseek-flash"}]}
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    ) as client:
+        first, _ = discovery.available_models(
+            "deepseek", api_key="fixture", client=client, cache_dir=tmp_path / "warm"
+        )
+        payload = {"data": bad}
+        warm, status = discovery.available_models(
+            "deepseek", api_key="fixture", client=client, cache_dir=tmp_path / "warm", ttl_s=-1
+        )
+        assert status == "stale"
+        assert [row.id for row in warm] == [row.id for row in first] == ["deepseek-flash"]
+        cold, status = discovery.available_models(
+            "deepseek", api_key="fixture", client=client, cache_dir=tmp_path / "cold"
+        )
+        assert status == "static"
+        assert {row.id for row in cold} == set(deepseek_models)
+
+
+def test_untrusted_historic_empty_cache_is_refetched_only_for_deepseek(tmp_path):
+    # Exact old capture reproduced from data:[null]: no raw provenance remains.
+    key = discovery._cache_key("deepseek")
+    catalogue.cached_listing(key, lambda: {"capture": 1, "models": []}, cache_dir=tmp_path)
+    calls = []
+
+    def serve(req):
+        calls.append(req.url.path)
+        return httpx.Response(200, json={"data": [{"id": "deepseek-flash"}]})
+
+    with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+        rows, status = discovery.available_models(
+            "deepseek", api_key="fixture", client=client, cache_dir=tmp_path
+        )
+    assert status == "ok"
+    assert [row.id for row in rows] == ["deepseek-flash"]
+    assert calls == ["/v1/models"]
+    stored = catalogue.peek_listing(key, cache_dir=tmp_path).payload
+    assert stored is not None
+    assert stored["capture"] == 2
+    # The same historical stamp remains valid for an untouched native route.
+    catalogue.cached_listing(
+        discovery._cache_key("mistral"),
+        lambda: {"capture": 1, "models": [{"id": "qa-mistral"}]},
+        cache_dir=tmp_path,
+    )
+    with httpx.Client(transport=httpx.MockTransport(serve)) as client:
+        other, status = discovery.available_models(
+            "mistral", api_key="fixture", client=client, cache_dir=tmp_path
+        )
+    assert status == "cached"
+    assert "qa-mistral" in {row.id for row in other}
+    assert calls == ["/v1/models"]
+
+
+@pytest.mark.asyncio
+async def test_native_sse_assembles_multiline_bom_crlf_and_split_utf8():
+    payload = (
+        "\ufeff: heartbeat\r\nevent: message\r\nid: 7\r\n"
+        'data: {"choices": [\r\n'
+        'data: {"index": 0, "delta": {"content": "café"}, "finish_reason": null}]}\r\n\r\n'
+        + sse(finish="stop")
+        + "data: [DONE]\r\n\r\n"
+    ).encode()
+
+    class SplitBytes(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            # Every possible byte boundary, including UTF-8 and CR/LF pairs.
+            for byte in payload:
+                yield bytes([byte])
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, stream=SplitBytes()))
+    ) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        events = [event async for event in client.stream(request(), "fixture")]
+    assert "".join(e.delta for e in events if isinstance(e, StreamTextDelta)) == "café"
+    assert isinstance(events[-1], StreamEndEvent)
+    assert events[-1].stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tail", ["data: [DONE]", "data: [DONE]\n", "data: [DONE]\r\n"])
+async def test_native_done_requires_blank_event_terminator(tail):
+    payload = sse({"content": "answer"}, "stop") + tail
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload))
+    ) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        with pytest.raises(ProviderError, match="before \\[DONE\\]"):
+            async for event in client.stream(request(), "fixture"):
+                assert not isinstance(event, StreamEndEvent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+async def test_native_sse_rejects_nonstandard_json_constants(constant):
+    payload = (
+        'data: {"unused": '
+        + constant
+        + ', "choices": []}\n\n'
+        + sse(finish="stop")
+        + "data: [DONE]\n\n"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload))
+    ) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        with pytest.raises(ProviderError) as caught:
+            async for event in client.stream(request(), "fixture"):
+                assert not isinstance(event, StreamEndEvent)
+        assert caught.value.retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delta,finish",
+    [
+        ({"content": "late text"}, None),
+        ({"reasoning_content": "late thought"}, None),
+        (
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "late",
+                        "type": "function",
+                        "function": {"name": "write", "arguments": "{}"},
+                    }
+                ]
+            },
+            "tool_calls",
+        ),
+        ({}, "length"),
+    ],
+)
+async def test_native_finish_seals_text_reasoning_and_executable_tools(delta, finish):
+    payload = sse({"content": "safe"}, "stop") + sse(delta, finish) + "data: [DONE]\n\n"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload))
+    ) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        with pytest.raises(ProviderError, match="after its finish reason") as caught:
+            async for event in client.stream(request(), "fixture"):
+                assert not isinstance(event, (StreamEndEvent, StreamToolCallDelta))
+                if isinstance(event, StreamTextDelta):
+                    assert event.delta == "safe"
+        assert caught.value.retryable
+
+
+@pytest.mark.asyncio
+async def test_native_finish_allows_usage_only_trailer():
+    payload = (
+        sse({"content": "safe"}, "stop")
+        + 'data: {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2}}\n\n'
+        + "data: [DONE]\n\n"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload))
+    ) as http:
+        client = OpenAICompatClient("https://api.deepseek.com/v1", http_client=http)
+        events = [event async for event in client.stream(request(), "fixture")]
+    assert isinstance(events[-1], StreamEndEvent)
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 10
+
+
+@pytest.mark.parametrize("state", ["fresh", "stale", "empty", "cold", "historic-invalid"])
+def test_first_frame_uses_authoritative_native_cache_without_fetching(monkeypatch, tmp_path, state):
+    cache_dir = tmp_path / "listing"
+    key = discovery._cache_key("deepseek")
+    if state == "historic-invalid":
+        catalogue.cached_listing(key, lambda: {"capture": 1, "models": []}, cache_dir=cache_dir)
+    elif state != "cold":
+        payload = {
+            "data": (
+                []
+                if state == "empty"
+                else [
+                    {"id": "deepseek-flash", "context_length": 200_000},
+                    {"id": "deepseek-v4-pro"},
+                ]
+            )
+        }
+        with httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+        ) as client:
+            discovery.available_models(
+                "deepseek", api_key="fixture", client=client, cache_dir=cache_dir
+            )
+        if state == "stale":
+            path = catalogue._cache_path(key, cache_dir)
+            raw = json.loads(path.read_text())
+            raw["fetched_at"] -= 2 * 86400
+            path.write_text(json.dumps(raw))
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("first frame must only peek at cache")
+
+    monkeypatch.setattr(discovery, "fetch_models", no_network)
+    rows, status = discovery.cached_available_models("deepseek", cache_dir=cache_dir)
+    expected = (
+        set(deepseek_models)
+        if state in {"cold", "historic-invalid"}
+        else set() if state == "empty" else {"deepseek-flash", "deepseek-v4-pro"}
+    )
+    assert {row.id for row in rows} == expected
+    assert status == ("static" if state in {"cold", "historic-invalid"} else "cached")
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("deepseek", {"type": "api_key", "key": "synthetic-firstframe-only"})
+    try:
+        controller = ProviderController(store)
+        entries = [
+            entry
+            for entry in controller.initial_catalogue(cache_dir=cache_dir)
+            if entry.provider == "deepseek"
+        ]
+        assert {entry.model_id for entry in entries} == expected
+        assert all(entry.connected and not entry.aggregated for entry in entries)
+        if state in {"fresh", "stale"}:
+            assert (
+                next(
+                    entry for entry in entries if entry.model_id == "deepseek-flash"
+                ).context_window
+                == 200_000
+            )
+    finally:
+        store.close()
+
+
+def test_native_tool_text_uses_real_newlines():
+    tool = Message(
+        role="tool",
+        tool_call_id="sample",
+        content=[TextContent(text="alpha"), TextContent(text="beta"), ImageContent(data="YWJj")],
+    )
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    body = client._build_body(request([tool]))
+    assert next(m for m in body["messages"] if m["role"] == "tool")["content"] == "alpha\nbeta"
 
 
 @pytest.mark.asyncio

@@ -264,6 +264,10 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: the only transports that quote a price at all.
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     "anthropic": 2,
+    # Version 1 could normalize malformed nonempty /models data to []. The
+    # original payload is gone, so it cannot safely authorize an empty native
+    # inventory. Only DeepSeek pays the refetch; other caches stay valid.
+    "deepseek": 2,
     "openai": 2,
     "openrouter": 6,
     "radient": 6,
@@ -718,13 +722,21 @@ def _entry_list(body: object, *keys: str) -> list[Mapping[str, object]] | None:
     dropped instead of failing the page, so one junk entry cannot hide a
     provider's entire catalogue.
     """
+    entries = _raw_entry_list(body, *keys)
+    return (
+        [entry for entry in entries if isinstance(entry, Mapping)] if entries is not None else None
+    )
+
+
+def _raw_entry_list(body: object, *keys: str) -> list[object] | None:
+    """Retain array provenance before row filtering can turn junk into []."""
     if isinstance(body, list):
-        return [entry for entry in body if isinstance(entry, Mapping)]
+        return body
     if isinstance(body, Mapping):
         for key in keys:
             value = body.get(key)
             if isinstance(value, list):
-                return [entry for entry in value if isinstance(entry, Mapping)]
+                return value
     return None
 
 
@@ -1148,8 +1160,14 @@ def _fetch_openai_compat(ctx: _FetchContext) -> list[DiscoveredModel] | None:
     # ``_is_meta_route`` is only valid for an aggregator: this same parser
     # serves every ``openai-compat`` provider, and on Ollama the listing is the
     # user's own filesystem (see R1).
-    rows = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
-    return [row for row in rows if row is not None]
+    parsed = (_row_from_openai_entry(entry, ctx.provider_id) for entry in entries)
+    rows = [row for row in parsed if row is not None]
+    # A native listing may remove models, but filtering [null] or [{}] must
+    # not authorize an empty inventory. Preserve the established envelope and
+    # partial-row tolerance: usable rows still count, only ALL-junk is outage.
+    if ctx.provider_id == "deepseek" and not rows and _raw_entry_list(body, "data", "models"):
+        return None
+    return rows
 
 
 def _anthropic_models_url(base_url: str) -> str:
@@ -1857,6 +1875,18 @@ def invalidate_listing(provider_id: str, *, cache_dir: Path | None = None) -> in
     return invalidate_documents(storage_id, cache_dir=cache_dir)
 
 
+def _listing_replaces_static(
+    provider_id: str, rows: list[DiscoveredModel] | None, *, account_scoped: bool = False
+) -> bool:
+    """One inventory policy for live, stale and first-frame cache reads.
+
+    Native DeepSeek publishes the complete set, including a genuine empty
+    inventory. Preserve other providers' established union/account semantics.
+    An unavailable or invalid payload never gets deletion authority.
+    """
+    return rows is not None and (provider_id == "deepseek" or (account_scoped and bool(rows)))
+
+
 def cached_available_models(
     provider_id: str,
     *,
@@ -1889,10 +1919,11 @@ def cached_available_models(
     listing = peek_listing(key, cache_dir=cache_dir)
     capture = listing_capture_version(storage_id)
     live_rows = _rows_from_payload(listing.payload, capture)
-    if not live_rows:
+    authoritative = _listing_replaces_static(storage_id, live_rows)
+    if live_rows is None or (not live_rows and not authoritative):
         return merge_models(rows, None), "static"
 
-    return merge_models(rows, live_rows, include_static_only=True), "cached"
+    return merge_models(rows, live_rows, include_static_only=not authoritative), "cached"
 
 
 def available_models(
@@ -2140,7 +2171,9 @@ def _available_models(
     # DeepSeek documents /models as its complete current inventory, not a partial
     # entitlement snapshot. Keep legacy aliases only for offline fallback/manual
     # selectors; unioning them here resurrects retired models after a good fetch.
-    authoritative_live = (account_scoped and bool(live_rows)) or provider_id == "deepseek"
+    authoritative_live = _listing_replaces_static(
+        provider_id, live_rows, account_scoped=account_scoped
+    )
     merged = merge_models(
         rows,
         live_rows,
