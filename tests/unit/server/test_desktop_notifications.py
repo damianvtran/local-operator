@@ -50,9 +50,18 @@ from local_operator.session.attention import AttentionStore
 from local_operator.tui.notify import BODIES
 
 
-def _publish(root: Path, session_id: str, anchor: str, kind: str = "complete") -> str:
+def _publish(
+    root: Path,
+    session_id: str,
+    anchor: str,
+    kind: str = "complete",
+    *,
+    baseline_seen: bool | None = None,
+) -> str:
     token = str(uuid.uuid4())
-    AttentionStore(root / "attention.db").publish(f"session/{session_id}", token, anchor, kind)
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", token, anchor, kind, baseline_seen=baseline_seen
+    )
     return token
 
 
@@ -184,6 +193,8 @@ async def test_a_published_completion_emits_one_notification_after_the_attention
     # The dedupe key is bound to the DURABLE token, not to this bridge's
     # sequence: `acquire()` resets the sequence after a detached interval, so a
     # seq-keyed client would re-toast the same completion on every reconnect.
+    # Literal `complete:` on this side, kind-relative on the error side: the
+    # prefix is the frame's own kind, never a hardcoded row-class label.
     assert payload["dedupe_key"] == f"complete:{sid}:{payload['completion_token']}"
     assert payload["completion_token"] == bridge.attention["completion_token"]
 
@@ -280,6 +291,10 @@ async def test_an_error_is_announced_with_the_house_sentence(tmp_path: Path) -> 
     assert payload["status"] == "Needs attention"
     assert payload["body"] == BODIES["error"]
     assert payload["body_is_snippet"] is False
+    # The dedupe prefix is the frame's own kind (round 1, n1), not a hardcoded
+    # `complete:` — paired with T-B1's literal, the two reachable notifiable
+    # kinds pin the property from both sides.
+    assert payload["dedupe_key"].startswith(f"error:{sid}:")
     assert "412 tests pass" not in str(payload)
 
 
@@ -537,6 +552,35 @@ async def test_a_compose_failure_costs_the_banner_not_the_attention_frame(
     _publish(tmp_path, sid, "result-2")
     await bridge.refresh_attention()
     assert len(bridge.of("notification")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_token_arriving_already_acknowledged_is_not_news(tmp_path: Path) -> None:
+    """T-B14. A token the bridge has NEVER seen can still arrive pre-read.
+
+    The resume-adoption path publishes with ``baseline_seen=True``
+    (``attention.py:243``), which also writes the receipts row at the
+    completion's own sequence: a brand-new token lands with ``unseen: false``.
+    Every OTHER guard clause passes here — the token is new and the kind
+    notifiable — so without the ``unseen`` clause adoption would announce a
+    completion the store already considers read, the T-B2 flood by another
+    route. Pinned as a test because deleting that clause left this whole suite
+    green (review round 1, m1).
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="Ran while the desktop was detached.")
+    bridge = await _baselined(tmp_path, sid)
+
+    token = _publish(tmp_path, sid, "result-1", baseline_seen=True)
+    state = await bridge.refresh_attention()
+
+    # The guard's premises, proven rather than assumed: only the `unseen`
+    # clause can be what held the banner back.
+    assert state["completion_token"] == token
+    assert state["unseen"] is False
+    assert bridge.kinds == ["attention"], "the state frame went out, the banner did not"
+    assert bridge.of("notification") == []
 
 
 @pytest.mark.asyncio

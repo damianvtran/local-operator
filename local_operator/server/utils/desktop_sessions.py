@@ -359,8 +359,11 @@ class DesktopSessionBridge:
                     # bridge's sequence: `acquire()` mints a new epoch and
                     # resets `sequence` to 0 after a detached interval, so a
                     # seq-keyed dedupe re-toasts the same completion on every
-                    # reconnect.
-                    "dedupe_key": f"complete:{self.session_id}:{token}",
+                    # reconnect. The prefix is the frame's own kind (round 1,
+                    # n1): a token has exactly one kind, so it costs nothing,
+                    # and a store or dedupe-map dump no longer reads as an
+                    # error banner mislabelled `complete:`.
+                    "dedupe_key": f"{composed.kind}:{self.session_id}:{token}",
                     "completion_token": token,
                     "session_name": composed.title if composed.title_is_session_name else None,
                     "focus_policy": "when_unfocused",
