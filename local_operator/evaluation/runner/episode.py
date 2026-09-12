@@ -2220,8 +2220,15 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
     return "\n".join(lines)
 
 
-def _rejection_detail(rejected: Any, redactions: RedactionSet | None = None) -> str:
+def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
     """The rejection artifact: why the reply was refused AND what it said.
+
+    ``redactions`` is REQUIRED rather than defaulted, exactly as in
+    ``_diagnostic``: this is the one artifact that publishes raw model output,
+    so the UNSAFE call -- publishing unscanned -- must not be the shorter one to
+    write. Every call site therefore has to state which of the two cases it is:
+    the episode's set, or an explicit ``None`` meaning "this rendering is
+    in-process only and never reaches evidence".
 
     Three parts in a fixed order a script can rely on: the harness's model-facing
     diagnostic, then the CLASS KEY and per-attempt STREAM SHAPE when the client
@@ -2249,7 +2256,7 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None = None) -> 
     sections = [rejected.diagnostic]
     class_key = getattr(rejected, "class_key", None)
     if isinstance(class_key, str) and class_key:
-        sections.append(f"class: {class_key}")
+        sections.append(f"class: {_header_value(class_key)}")
     shape = getattr(rejected, "stream_shape", None)
     if shape is not None:
         sections.append(
@@ -2257,7 +2264,7 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None = None) -> 
             f"content_deltas={shape.content_deltas} "
             f"reasoning_deltas={shape.reasoning_deltas} "
             f"tool_call_deltas={shape.tool_call_deltas} "
-            f"stop={shape.stop}"
+            f"stop={_header_value(shape.stop)}"
         )
     # ``evidence_reply`` is the boundary that may carry the reply into evidence;
     # ``reply`` is the history rendering and is the fallback for a client that
@@ -2270,6 +2277,22 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None = None) -> 
     rendered = rejected_reply_evidence(reply, redactions)
     sections.extend(["", "--- rejected reply ---", rendered])
     return "\n".join(sections)
+
+
+def _header_value(value: str) -> str:
+    """A value safe to place inside a one-line artifact header.
+
+    The stop marker and the class key are TEXT, and the artifact's reader relies
+    on a fixed section order: a marker carrying a newline would otherwise open a
+    line that reads like another header, and a control character could hide the
+    rest of the section behind a terminal's interpretation of it. Escaped rather
+    than truncated -- the builder's 64-character bound does not neutralise a
+    short injection -- and ``unicode_escape`` leaves an ordinary ASCII marker
+    byte-identical to what the provider sent, so ``stop=stop`` still reads as
+    the marker itself.
+    """
+
+    return value.encode("unicode_escape").decode("ascii")
 
 
 def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:

@@ -366,8 +366,25 @@ async def test_a_rejected_envelope_reaches_the_bundle_with_its_class(
         lambda raw, secret: raw.replace("fixture", "\\u0066ixture"),
         lambda raw, secret: raw.replace(secret, quote(secret, safe="")),
         lambda raw, secret: raw.replace(secret, base64.b64encode(secret.encode()).decode()),
+        # Escaping COMPOSES, so the scan has to decode more than one level. Both
+        # shapes below were reproduced by the round-1 review as surviving a
+        # single-level scan: the first carries an ESCAPED BACKSLASH before the
+        # escape (a canary inside a JSON string), the second escapes every
+        # character and then escapes the escapes again.
+        lambda raw, secret: raw.replace(secret, secret.replace("fixture", "\\\\u0066ixture")),
+        lambda raw, secret: raw.replace(
+            secret,
+            "".join(f"\\u{ord(character):04x}" for character in secret).replace("\\", "\\\\"),
+        ),
     ],
-    ids=["plain", "json-unicode-escape", "percent", "base64"],
+    ids=[
+        "plain",
+        "json-unicode-escape",
+        "percent",
+        "base64",
+        "json-escaped-twice",
+        "per-character-double-escape",
+    ],
 )
 def test_a_reply_carrying_a_canary_is_withheld_whole_from_evidence(transform: Any) -> None:
     """Evidence publishes the reply ONLY through an escape-aware scan.
@@ -425,6 +442,32 @@ def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
     # The history rendering is NOT what evidence shows: the placeholder belongs
     # to the correction, and pasting it here would read as "the model said this".
     assert REJECTED_PUBLIC_REPLY not in detail
+
+
+def test_a_marker_that_imitates_a_header_cannot_open_another_section() -> None:
+    """Provider-owned text goes into the header ESCAPED, never raw.
+
+    The artifact promises a fixed section order that a script can read, and the
+    stop marker is the one part of that header the harness does not author. A
+    marker carrying a newline would otherwise write a line that reads like
+    another header (or hide the rest of the section), so non-printables are
+    escaped rather than truncated -- a 64-character bound does not neutralise a
+    short injection.
+    """
+
+    rejected = DecisionRejected(
+        "Your previous reply was rejected: refused",
+        reply="{}",
+        class_key="malformed-json",
+        stream_shape=StreamShape(content_deltas=1, stop="stop\nclass: extra-action-key"),
+    )
+
+    detail = _rejection_detail(rejected, None)
+
+    assert [line for line in detail.splitlines() if line.startswith("class: ")] == [
+        "class: malformed-json"
+    ]
+    assert "stop\\nclass: extra-action-key" in detail
 
 
 def test_reserved_key_scan_preserves_legacy_rejection_replay() -> None:

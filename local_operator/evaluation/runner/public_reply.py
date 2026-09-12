@@ -87,6 +87,21 @@ REJECTED_REPLY_WITHHELD = (
 #: understood well-formed JSON would be blind on the shapes it exists for.
 _JSON_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
+#: An escaped backslash, i.e. one level of JSON escaping applied to a backslash
+#: that is itself the start of an escape. Removing it is what makes escapes
+#: COMPOSE: a canary that was escaped and then carried inside a JSON string
+#: arrives as ``\\\\u0066``, and only a scan that drops a backslash level (and
+#: then decodes the escape underneath) sees the canary. Lookahead-bound so a
+#: trailing ``\\`` at the end of a truncated reply is left alone.
+_DOUBLE_BACKSLASH = re.compile(r"\\\\(?=.)")
+
+#: How many levels :func:`_escape_chain` decodes before giving up. One level is
+#: the F1 shape; two cover an escaped canary inside a JSON string; three is one
+#: more than any observed reply needs. Bounded because every level costs a pass
+#: over the reply, and a reply made of backslashes would otherwise make the scan
+#: quadratic.
+_MAX_ESCAPE_LEVELS = 3
+
 #: What the reply-channel function tells the model it is for. Kept beside the
 #: envelope it describes so the two cannot drift, and deliberately short: it
 #: rides in the request's cache prefix on every call of every episode.
@@ -299,39 +314,129 @@ def rejected_reply_evidence(reply: str | None, redactions: RedactionSet | None) 
 def _reply_is_clear(reply: str, redactions: RedactionSet) -> bool:
     """Whether every rendering of a reply is free of the episode's canaries.
 
-    Four renderings, cheapest first, because the canary can be hidden in each
-    of them and the reply is untrusted bytes:
-
-    * the raw text (the plaintext, base64 and hex canaries ``assert_clear``
-      checks directly);
-    * percent escapes, decoded;
-    * ``\\uXXXX`` escapes, decoded -- the F1 shape, which is a legal JSON
-      spelling of any character and would otherwise walk straight past a
-      substring test;
-    * the DECODED JSON value when the reply happens to parse, which hands
-      ``assert_clear`` the structure rather than the text (it walks mappings
-      and lists, so a canary nested in an action is seen).
-
-    A decoding failure is not a failure to scan: the raw and escaped
-    renderings are always checked, which is what makes this safe on the
+    Fails closed: the answer is a yes only after every rendering below has been
+    scanned, and a reply that cannot be DECODED is not a failure to scan -- the
+    text renderings are always checked, which is what makes this safe on the
     truncated replies that are the common case here.
     """
 
-    unquoted = unquote(reply)
-    unescaped = _JSON_UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), reply)
-    renderings: list[Any] = [reply, unquoted, unescaped, unquote(unescaped)]
-    try:
-        renderings.append(json.loads(reply))
-    except (ValueError, RecursionError):
-        # Truncated or malformed is the EXPECTED case for a rejected reply, and
-        # the raw/escaped renderings above still cover it.
-        pass
-    for rendering in renderings:
+    for rendering in _reply_renderings(reply):
         try:
             redactions.assert_clear(rendering)
         except ValueError:
             return False
     return True
+
+
+def _reply_renderings(reply: str) -> list[Any]:
+    """Every rendering of a rejected reply that a canary could be hiding in.
+
+    The reply reaches evidence as WIRE bytes and has already been refused, so it
+    can be anything: malformed, truncated, a well-formed envelope whose notes
+    were never validated, or a reply that is itself JSON carrying JSON. Each of
+    those hides a canary behind a different decoding:
+
+    * the raw text, where ``assert_clear`` catches its own plaintext, base64,
+      percent and hex variants;
+    * the text under one or more levels of decoding -- percent escapes, JSON
+      ``\\uXXXX`` escapes, and the removal of an escaped backslash. The escape
+      case is the F1 shape: a legal JSON spelling of any character, invisible to
+      a substring test. Successive levels are needed because escaping composes --
+      an escaped string carried as a JSON string arrives with ``\\\\u0066``,
+      where the canary only appears once a backslash level AND the escape have
+      both been decoded;
+    * the DECODED JSON value when the reply parses, which hands ``assert_clear``
+      the structure rather than the text (it walks mappings and lists, so a
+      canary nested in an action is seen), and the same decodings applied to
+      every string INSIDE that value, which is where an inner JSON document's
+      own escapes live.
+
+    Decoding stops at :data:`_MAX_ESCAPE_LEVELS`. Nesting deeper than that is
+    NOT covered, and this is the sole barrier on the path that publishes raw
+    model output, so the limit is stated rather than implied: a canary escaped
+    more than three times over -- a shape no observed reply has produced, and
+    one that would have to be constructed deliberately -- would be published.
+    """
+
+    renderings: list[Any] = []
+    texts = [reply]
+    try:
+        value = json.loads(reply)
+    except (ValueError, RecursionError):
+        # Truncated or malformed is the EXPECTED case for a rejected reply; the
+        # text renderings below cover it.
+        value = None
+    if value is not None:
+        renderings.append(value)
+        texts.extend(_string_leaves(value))
+    for text in texts:
+        renderings.extend(_escape_chain(text))
+    return renderings
+
+
+def _escape_chain(text: str, *, levels: int = _MAX_ESCAPE_LEVELS) -> list[str]:
+    """``text`` and every decoding of it up to ``levels`` levels deep.
+
+    Breadth-first over three decoders per level, so combinations are covered
+    rather than one branch of them: a reply can be percent-escaped inside a
+    JSON escape, and each decoder composes with the others. Bounded because
+    each level costs a full pass and a reply built from backslashes would make
+    an unbounded walk quadratic; the frontier also shrinks naturally, as every
+    decoder only ever removes characters or leaves the text alone.
+    """
+
+    chain = [text]
+    seen = {text}
+    frontier = [text]
+    for _ in range(levels):
+        next_frontier: list[str] = []
+        for current in frontier:
+            for decode in _ESCAPE_DECODERS:
+                decoded = decode(current)
+                if decoded == current or decoded in seen:
+                    continue
+                seen.add(decoded)
+                chain.append(decoded)
+                next_frontier.append(decoded)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return chain
+
+
+def _decode_unicode_escape(match: re.Match[str]) -> str:
+    return chr(int(match.group(1), 16))
+
+
+def _collapse_backslash_escape(match: re.Match[str]) -> str:
+    return match.group(0)[1:]
+
+
+def _string_leaves(value: Any) -> list[str]:
+    """Every string a decoded JSON value carries, keys included."""
+
+    leaves: list[str] = []
+    if isinstance(value, str):
+        leaves.append(value)
+    elif isinstance(value, Mapping):
+        for key, nested in value.items():
+            leaves.append(str(key))
+            leaves.extend(_string_leaves(nested))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            leaves.extend(_string_leaves(nested))
+    return leaves
+
+
+#: One decode of one level of escaping. Applied breadth-first by
+#: :func:`_escape_chain`, in this order, because the three compose: a payload can
+#: percent-escape inside a JSON escape, and an escaped string carried as a JSON
+#: string needs a backslash level removed before its escapes mean anything.
+_ESCAPE_DECODERS = (
+    lambda text: _JSON_UNICODE_ESCAPE.sub(_decode_unicode_escape, text),
+    unquote,
+    lambda text: _DOUBLE_BACKSLASH.sub(_collapse_backslash_escape, text),
+)
 
 
 def redact_public_reply(payload: str, redactions: RedactionSet) -> str:
