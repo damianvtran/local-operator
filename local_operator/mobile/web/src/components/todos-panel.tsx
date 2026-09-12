@@ -16,6 +16,7 @@
  * pre-phase flat list, matching the TUI's `_IMPLICIT_PHASE` rule.
  */
 import { cn } from "../lib/cn";
+import { PANEL_FRACTION, columnCap } from "../lib/column";
 import type { TodoItem, TodoPhase } from "../types";
 import { Disclosure } from "./ui/disclosure";
 
@@ -72,9 +73,13 @@ function TodoRow({ t }: { t: TodoItem }) {
 export function TodosPanel({
 	todos,
 	embedded = false,
+	forceCollapsed = false,
 }: {
 	todos: TodoPhase[];
 	embedded?: boolean;
+	/** Held shut while something needs a decision — see the session view's
+	    panel-budget comment (D1). A task list does not outrank a question. */
+	forceCollapsed?: boolean;
 }) {
 	const items = todos.flatMap((p) => p.items);
 	const done = items.filter((t) => CLOSED.has(t.status)).length;
@@ -89,7 +94,14 @@ export function TodosPanel({
 			   screen. The header's count is the at-a-glance signal; tap to work
 			   the list. */
 			defaultOpen={false}
-			className={cn("border-t border-hairline", embedded ? "pt-1" : "px-4")}
+			forceClosed={forceCollapsed}
+			className={cn(
+				"border-t border-hairline",
+				/* `min-h-0` so this panel can give space back to the column rather
+				   than pushing a sibling past its clipped foot (D1). */
+				"min-h-0",
+				embedded ? "pt-1" : "px-4",
+			)}
 			header={
 				<span className="text-body-sm text-ink-muted">
 					tasks{" "}
@@ -99,9 +111,15 @@ export function TodosPanel({
 				</span>
 			}
 		>
-			{/* Capped to ~40% of the viewport and scrolls internally: a long
-			   list can never crowd out the messages, even fully expanded. */}
-			<div className="lo-scroll flex max-h-[40dvh] flex-col gap-1 overflow-y-auto pb-2">
+			{/* Capped to a fraction of the COLUMN and scrolls internally: a long
+			   list can never crowd out the messages, even fully expanded. Column
+			   units rather than `dvh` — see `lib/column.ts`; the two diverge while
+			   the keyboard is open, and a cap that does not tighten with the column
+			   is not a cap. */}
+			<div
+				style={columnCap(PANEL_FRACTION)}
+				className="lo-scroll flex flex-col gap-1 overflow-y-auto pb-2"
+			>
 				{headerless
 					? todos[0].items.map((t, i) => (
 							/* pl-5 aligns items with the panel gutter, same as

@@ -16,17 +16,37 @@
  * column's foot is clipped with no way to scroll to it. An uncapped card
  * therefore did not merely look bad — a 10-option ask measured 1426px against
  * an 844px viewport, so the last four options and the composer were off screen
- * and unreachable by any gesture. Two guards, the same idiom the todos panel
- * and the sheet use: the card is capped at ~60% of the viewport, and its BODY
- * is a `lo-scroll` scroller, so a long question and a long option list are
- * reached by scrolling inside the card while the composer stays put and the
- * transcript keeps the rest of the column.
+ * and unreachable by any gesture.
  *
- * 60dvh rather than the panels' 40dvh because a question awaiting an answer
- * outranks a task list (branding §7), and rather than a fixed pixel height
- * because the bound has to hold on every phone, not on the one it was measured
- * on. The cap applies to every variant — options, free-text/secret, and the
- * approval's approve/deny pair — because all three overflow the same column.
+ * THREE regions, and which region a thing lives in is the whole contract:
+ *
+ *   meta row   shrink-0, pinned ABOVE the scroller
+ *   body       min-h-0 flex-1 `lo-scroll` — title, detail, options
+ *   controls   shrink-0, pinned BELOW the scroller — and the error line
+ *
+ * The split is what review round 1 bought. Putting the whole body in one
+ * scroller (the first shape of this fix) capped the card correctly and then
+ * let the DECISION scroll out of reach: an approval with a long detail arrived
+ * with `approve` showing 30 of its 44px at 390x844 and 0 of 44px — invisible —
+ * at 360x780, where the uncapped card before it had shown both buttons whole
+ * (U2/Q1). The stale-tap error landed ~26px below the fold for the same reason,
+ * so a refused tap greyed every option out and explained nothing (U3). Content
+ * may scroll; the control that answers the card may not. A long option list can
+ * still cost one gesture to reach its foot — that is inherent to a list longer
+ * than the card — but the thing the user must press never does.
+ *
+ * The title stays INSIDE the scroller with the detail, deliberately: on a phone
+ * a paragraph-length question can outgrow the cap on its own, and pinning it
+ * would rebuild the same unreachable tail the cap exists to prevent. Only the
+ * one-line meta row is pinned, which cannot outgrow anything and is what keeps
+ * the card legible as a decision at the moment of the decision (D2).
+ *
+ * The cap is a fraction of the COLUMN, not of the dynamic viewport — see
+ * `lib/column.ts` for why those are different numbers the moment a keyboard
+ * opens, and for the 360x780 measurement where a `60dvh` card put `send` under
+ * the column's clipped foot (C1/U1). It applies to every variant — options,
+ * free-text/secret, and the approval's approve/deny pair — because all three
+ * overflow the same column.
  *
  * Transient card state (`busy`/`error`/`remember`/free-text draft) lives in
  * component-local `useState`, so it MUST NOT survive from one question to the
@@ -40,9 +60,10 @@
  * this component, because a component cannot key itself; that is why there is
  * no per-field remount key here.
  */
-import { useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { sendCommand } from "../api";
 import { cn } from "../lib/cn";
+import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import type { PendingRequest } from "../types";
 
 /** Turn a raw command error into copy a phone user can act on. The daemon and
@@ -89,6 +110,36 @@ export function PendingCard({
 	const [freeText, setFreeText] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
+
+	/* Whether the body has content below the fold, which drives the bottom fade
+	   (U4). Derived by measurement rather than from the content, because whether
+	   the card overflows depends on the cap, the keyboard and the option count at
+	   once — a 3-option ask does not overflow and must not wear the cue. Measured
+	   on scroll, on resize (the keyboard changes the cap), and on content change
+	   via ResizeObserver, since none of those fire the others. */
+	const scrollerRef = useRef<HTMLDivElement>(null);
+	const [moreBelow, setMoreBelow] = useState(false);
+	const syncOverflow = useCallback(() => {
+		const el = scrollerRef.current;
+		if (!el) return;
+		/* 4px of slack: sub-pixel layout leaves a fraction of a pixel at the true
+		   bottom, which would otherwise keep the fade painted on a fully-read
+		   card and teach the user to distrust it. */
+		setMoreBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 4);
+	}, []);
+	useLayoutEffect(syncOverflow);
+	useEffect(() => {
+		const el = scrollerRef.current;
+		if (!el || typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(syncOverflow);
+		ro.observe(el);
+		for (const child of Array.from(el.children)) ro.observe(child);
+		window.addEventListener("resize", syncOverflow);
+		return () => {
+			ro.disconnect();
+			window.removeEventListener("resize", syncOverflow);
+		};
+	}, [syncOverflow]);
 
 	const answer = async (fn: () => Promise<unknown>) => {
 		if (busy) return;
@@ -141,50 +192,142 @@ export function PendingCard({
 	   error line sits under buttons that still look live (D7). */
 	const inert = busy || error !== "";
 
+	const optionCount = pending.kind === "approval" ? 0 : pending.options.length;
+
 	return (
 		/* `shrink-0` keeps the card at its content height (up to the cap) rather
 		   than letting the column squeeze it toward nothing when the transcript is
-		   long; `max-h-[60dvh]` is what stops it taking the whole column. The
-		   padding stays on this element so the scrollbar rides the card's inner
-		   edge instead of overlapping the accent border. */
-		<div className="border-accent bg-accent-wash mx-2 flex max-h-[60dvh] shrink-0 flex-col rounded-md border p-2.5">
-			{/* The scroller is the whole card body, question included: on a phone a
-			   paragraph-length question can outgrow the cap on its own, so pinning
-			   it above the scroller would reintroduce the same unreachable tail it
-			   is meant to prevent. `min-h-0` is required — a flex child defaults to
-			   `min-height: auto` and would refuse to shrink below its content,
-			   which is precisely how the card grew past the viewport. */}
-			<div className="lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-			<div className="flex flex-col gap-0.5">
-				<span className="flex items-center justify-between text-meta text-accent">
-					<span>
-						{pending.kind === "approval"
-							? "approval needed"
-							: pending.secret
-								? "secret requested"
-								: "question"}
-					</span>
-					{multiQuestion ? (
-						<span className="font-mono text-mono-sm text-ink-dim">
-							Question {pending.question_index + 1} of{" "}
-							{pending.question_total}
-						</span>
-					) : count > 1 ? (
-						<span className="font-mono text-mono-sm text-ink-dim">
-							1 of {count}
-						</span>
+		   long; the cap is what stops it taking the whole column. The padding
+		   stays on this element so the scrollbar rides the card's inner edge
+		   instead of overlapping the accent border.
+
+		   `data-testid` rather than the accent border class as the test handle:
+		   `border-accent` is also applied by the composer on drag-over and by the
+		   new-session screen on selection, so a class selector picks the wrong
+		   node the first time one of those states renders alongside a card (C5). */
+		<div
+			data-testid="pending-card"
+			style={columnCap(PENDING_CARD_FRACTION)}
+			className="border-accent bg-accent-wash mx-2 flex shrink-0 flex-col rounded-md border p-2.5"
+		>
+			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
+			    anything — so pinning it costs no reachability while keeping the
+			    card legible as a decision at the moment of the decision. Scrolled
+			    to the option the user means to tap, 0% of the kind label and 0% of
+			    the counter were still on screen; a card that says nothing about
+			    what is being asked is a bare list of buttons.
+
+			    The option total rides here too (U4): the cap trades first-glance
+			    information (6 visible options of 10 became 3 at 390x844) for a
+			    bounded card, and stating the count is the one affordance that
+			    costs no vertical space at all. */}
+			<span className="flex shrink-0 items-center justify-between text-meta text-accent">
+				<span>
+					{pending.kind === "approval"
+						? "approval needed"
+						: pending.secret
+							? "secret requested"
+							: "question"}
+					{optionCount > 0 ? (
+						<span className="text-ink-dim"> · {optionCount} options</span>
 					) : null}
 				</span>
-				<span className="text-body font-medium">{pending.title}</span>
-				{pending.detail ? (
-					<p className="text-body-sm text-ink-muted whitespace-pre-wrap">
-						{pending.detail}
-					</p>
+				{multiQuestion ? (
+					<span className="font-mono text-mono-sm text-ink-dim">
+						Question {pending.question_index + 1} of{" "}
+						{pending.question_total}
+					</span>
+				) : count > 1 ? (
+					<span className="font-mono text-mono-sm text-ink-dim">
+						1 of {count}
+					</span>
+				) : null}
+			</span>
+
+			{/* SCROLLING content: the title, the detail, and the option list.
+			    The title rides inside rather than pinned beside the meta row on
+			    purpose — on a phone a paragraph-length question outgrows the cap
+			    by itself, and pinning it would rebuild the unreachable tail the
+			    cap exists to prevent. `min-h-0` is required: a flex child defaults
+			    to `min-height: auto` and would refuse to shrink below its content,
+			    which is precisely how the card grew past the viewport.
+
+			    `overflow-x-hidden` + `break-words` are the backstop the
+			    transcript's scroller documents for the same reason (C7): option
+			    labels and descriptions are arbitrary agent-supplied strings, and
+			    one long unbroken token would otherwise scroll the card sideways. */}
+			<div
+				ref={scrollerRef}
+				onScroll={syncOverflow}
+				className={cn(
+					"lo-scroll mt-1 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden break-words",
+					/* The one static cue that the card scrolls (U4). The overlay
+					   scrollbar has zero layout width and paints nothing at rest,
+					   so before this the only hint was a half-clipped row — absent
+					   entirely on the approval card, where the clipped thing is a
+					   button. A bottom fade steals no row and reads at arm's
+					   length; it is removed the moment the foot is reached so a
+					   fully-read card does not look truncated. */
+					moreBelow && "lo-fade-b",
+				)}
+			>
+				<div className="flex flex-col gap-0.5">
+					<span className="text-body font-medium">{pending.title}</span>
+					{pending.detail ? (
+						<p className="text-body-sm text-ink-muted whitespace-pre-wrap">
+							{pending.detail}
+						</p>
+					) : null}
+				</div>
+
+				{optionCount > 0 ? (
+					<div className="flex flex-col gap-2">
+						{pending.options.map((opt) => (
+							<button
+								key={opt.label}
+								type="button"
+								disabled={inert}
+								onClick={() => answerAsk(opt.label)}
+								/* Accent-tinted left edge + elevated fill so an option
+								   reads as a tap target, not a static label or a text
+								   field (D2). Disabled dims (D3/D4) — including while an
+								   error is shown, so a stale option stops reading as
+								   live under the message (D7). */
+								className={cn(
+									"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 border-control border-l-accent bg-elevated px-3 py-2 text-left active:bg-accent-wash disabled:opacity-50",
+								)}
+							>
+								<span className="text-body-sm font-medium text-ink">
+									{opt.label}
+								</span>
+								{opt.description ? (
+									<span className="text-body-sm text-ink-muted">
+										{opt.description}
+									</span>
+								) : null}
+							</button>
+						))}
+					</div>
 				) : null}
 			</div>
 
+			{/* PINNED controls (U2/Q1) and the error line (U3), `shrink-0` and
+			    OUTSIDE the scroller. The option list above may cost a gesture to
+			    reach its foot — inherent to a list longer than the card — but the
+			    control that answers the card may not. Inside the scroller, an
+			    approval with a long detail arrived with `approve` showing 30 of
+			    44px at 390x844 and 0 of 44px at 360x780, and the stale-tap error
+			    landed ~26px below the fold because it is appended below wherever
+			    the user is standing.
+
+			    `pr-1.5` keeps the rows clear of the overlay scrollbar's paint band
+			    (D3): the thumb has no layout width, so it painted over the right
+			    edge of `deny` and `send` at `gapToContentEdge = 0`. Only the
+			    control rows carry it — over prose the overlay behaviour is the
+			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
+			    would cost 4px of line length on every card at 360px. */}
 			{pending.kind === "approval" ? (
-				<>
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
 					<label className="flex min-h-11 items-center gap-2 text-body-sm text-ink-muted select-none">
 						<input
 							type="checkbox"
@@ -212,37 +355,9 @@ export function PendingCard({
 							{busy ? "…" : "deny"}
 						</button>
 					</div>
-				</>
-			) : pending.options.length > 0 ? (
-				<div className="flex flex-col gap-2">
-					{pending.options.map((opt) => (
-						<button
-							key={opt.label}
-							type="button"
-							disabled={inert}
-							onClick={() => answerAsk(opt.label)}
-							/* Accent-tinted left edge + elevated fill so an option
-							   reads as a tap target, not a static label or a text
-							   field (D2). Disabled dims (D3/D4) — including while an
-							   error is shown, so a stale option stops reading as
-							   live under the message (D7). */
-							className={cn(
-								"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 border-control border-l-accent bg-elevated px-3 py-2 text-left active:bg-accent-wash disabled:opacity-50",
-							)}
-						>
-							<span className="text-body-sm font-medium text-ink">
-								{opt.label}
-							</span>
-							{opt.description ? (
-								<span className="text-body-sm text-ink-muted">
-									{opt.description}
-								</span>
-							) : null}
-						</button>
-					))}
 				</div>
-			) : (
-				<div className="flex flex-col gap-1">
+			) : optionCount === 0 ? (
+				<div className="mt-2 flex shrink-0 flex-col gap-1 pr-1.5">
 					<div className="flex gap-2">
 						<input
 							/* No per-field remount key needed: the whole card is keyed
@@ -277,10 +392,11 @@ export function PendingCard({
 						</p>
 					) : null}
 				</div>
-			)}
+			) : null}
 
-			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
-			</div>
+			{error ? (
+				<p className="mt-1 shrink-0 pr-1.5 text-body-sm text-danger">{error}</p>
+			) : null}
 		</div>
 	);
 }

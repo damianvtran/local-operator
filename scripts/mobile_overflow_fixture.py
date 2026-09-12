@@ -14,6 +14,15 @@ Three sessions, each one shaped to isolate one surface:
   remember), which overflows identically.
 * ``ask-free`` — the free-text/secret variant, to prove the cap does not strand
   the input or its send button.
+* ``stacked`` / ``stacked-approval`` — todos panel AND subagent roster AND a
+  pending request in ONE column. This is the screen the operator actually has,
+  and the one the per-panel caps could not bound: each region was individually
+  capped while their SUM overran the column, which is `overflow-hidden`, so the
+  decision controls were clipped rather than scrolled (D1).
+* ``stale`` — an ask whose answers are refused as moved-on, so the error line's
+  position can be measured on arrival rather than inferred (U3).
+* ``failures`` — a fan-out with failed agents, for the collapsed header's
+  failure count (U5).
 
 No runtime scanner and no registrant sockets (``dial_registrants=False``), so
 this never touches the operator's live daemon or their sessions. HOME and
@@ -35,6 +44,8 @@ from local_operator.mobile.types import (
     SessionProjection,
     SessionRecord,
     SubagentRow,
+    TodoItem,
+    TodoPhase,
     TranscriptEntry,
 )
 
@@ -247,6 +258,109 @@ def _free_text_projection() -> SessionProjection:
     return projection
 
 
+def _stacked_projection(session_id: str, approval: bool) -> SessionProjection:
+    """Todos + roster + a pending request in one column (D1).
+
+    The panels are what make this distinct from the plain ask/approval
+    scenarios: each region carries its own cap, but caps do not compose — two
+    panels at 40% plus a card at 60% demand 140% of a column that cannot
+    scroll, so whatever lands past the foot is CLIPPED. Measured before the
+    fix: approve/deny 120px below the fold at 390x844 with the card's own
+    scroller already at its end, and at 360x780 the card's top at y=781 in a
+    780px viewport.
+    """
+    projection = SessionProjection(
+        session_id=session_id,
+        pid=900005 if approval else 900006,
+        kind="tui",
+        conversation_name="Stacked panels",
+        streaming=True,
+        activity="coordinating remediation",
+        activity_started_s=612,
+        transcript=[
+            TranscriptEntry(
+                id=f"s-{i}",
+                kind="user" if i % 2 == 0 else "assistant",
+                text="The conversation the panels and the card compete with.",
+            )
+            for i in range(6)
+        ],
+        version=5,
+    )
+    projection.subagents = _roster_projection().subagents
+    projection.todos = [
+        TodoPhase(
+            name="Remediation",
+            items=[
+                TodoItem(text=f"Land finding {i:02d} and re-measure it", status="pending")
+                for i in range(1, 13)
+            ],
+        )
+    ]
+    if approval:
+        projection.pending = PendingRequest(
+            request_id="req-stacked-approval",
+            kind="approval",
+            title="bash",
+            detail=APPROVAL_DETAIL,
+        )
+    else:
+        projection.pending = PendingRequest(
+            request_id="req-stacked-ask",
+            kind="ask",
+            title=LONG_QUESTION,
+            options=[
+                AskOptionWire(label=f"option-{i + 1:02d}", description=text)
+                for i, text in enumerate(OPTION_DESCRIPTIONS)
+            ],
+        )
+    projection.pending_count = 1
+    return projection
+
+
+def _failures_projection() -> SessionProjection:
+    """A fan-out with failures (U5).
+
+    Collapsing the roster by default is right, but it took the status glyphs
+    off screen with it — and `1/22 running` is exactly what a healthy session
+    shows, so three failed agents were indistinguishable from none.
+    """
+    projection = _roster_projection()
+    projection.session_id = "failures"
+    projection.pid = 900007
+    projection.conversation_name = "Failing fan-out"
+    for rowobj in projection.subagents[1:4]:
+        rowobj.status = "failed"
+        rowobj.error_text = "surface probe exited 1"
+    return projection
+
+
+def _stale_projection() -> SessionProjection:
+    """An ask whose answers the daemon refuses as moved-on (U3).
+
+    `control_port=1` means every answer fails, which is what this scenario
+    wants: the point is WHERE the resulting error line renders, and before the
+    fix it was appended as the scroller's last child — i.e. ~26px below
+    wherever the user was standing, which is the foot of the option list,
+    because that is where they had just tapped.
+    """
+    projection = _ask_projection()
+    projection.session_id = "stale"
+    projection.pid = 900008
+    projection.conversation_name = "Stale tap"
+    projection.pending = PendingRequest(
+        request_id="req-stale",
+        kind="ask",
+        title=LONG_QUESTION,
+        options=[
+            AskOptionWire(label=f"option-{i + 1:02d}", description=text)
+            for i, text in enumerate(OPTION_DESCRIPTIONS)
+        ],
+    )
+    projection.pending_count = 1
+    return projection
+
+
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4187
     daemon = MobileDaemon(port=port, password=PASSWORD, dial_registrants=False)
@@ -255,6 +369,10 @@ async def main() -> None:
         _ask_projection(),
         _approval_projection(),
         _free_text_projection(),
+        _stacked_projection("stacked", approval=False),
+        _stacked_projection("stacked-approval", approval=True),
+        _failures_projection(),
+        _stale_projection(),
     ):
         record = SessionRecord(
             pid=projection.pid,
