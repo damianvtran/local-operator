@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 from lop_osworld_v2_adapter.observation import (
     NATIVE_SCREEN,
+    NO_FRAME_MESSAGE,
+    SCREENSHOT_CAUSE_KEY,
     ObservationBuilder,
+    ObservationCauseError,
     ObservationError,
     write_png_rgb,
 )
@@ -95,8 +98,52 @@ def test_a_missing_screenshot_raises(tmp_path: Path) -> None:
     builder = ObservationBuilder(tmp_path)
     raw = _raw()
     raw["screenshot"] = None
-    with pytest.raises(ObservationError):
+    with pytest.raises(ObservationError) as raised:
         builder.build(raw, task_id="t", episode_id="e", sequence=0)
+    # Degrades to exactly the pre-cause text, and invents nothing: with no
+    # provider cause there is no exception cause either.
+    assert str(raised.value) == NO_FRAME_MESSAGE
+    assert raised.value.__cause__ is None
+
+
+def test_a_provider_cause_rides_as_the_error_cause_not_the_message(tmp_path: Path) -> None:
+    """The provider's account must not rewrite the harness's own vocabulary.
+
+    ``NO_FRAME_MESSAGE`` is journalled as ``observation-phase-retry`` and is what
+    a bundle reader greps for, so a provider cause travels as the error's
+    ``__cause__`` -- which the worker bounds and canary-checks as
+    ``RpcErrorDetail.causes`` -- and never as the message.
+    """
+
+    builder = ObservationBuilder(tmp_path)
+    raw = _raw()
+    raw["screenshot"] = None
+    raw[SCREENSHOT_CAUSE_KEY] = (
+        "screenshot unavailable: upstream_failures=3 kinds=status,status,status"
+    )
+    with pytest.raises(ObservationError) as raised:
+        builder.build(raw, task_id="t", episode_id="e", sequence=0)
+    assert str(raised.value) == NO_FRAME_MESSAGE
+    assert isinstance(raised.value.__cause__, ObservationCauseError)
+    assert "upstream_failures=3" in str(raised.value.__cause__)
+
+
+def test_a_stray_cause_does_not_change_observation_identity(tmp_path: Path) -> None:
+    """Capacity facts stay out of ``observation_content_id``.
+
+    The cause rides the RAW dict and is dropped at the builder, so an
+    observation built beside a provider cause is content-identical to the same
+    frame built without one -- which is the invariant
+    ``docs/benchmarks/osworld_2/README.md`` states for environment facts.
+    """
+
+    builder = ObservationBuilder(tmp_path)
+    plain = builder.build(_raw(shade=5), task_id="t", episode_id="e", sequence=0)
+    with_cause = _raw(shade=5)
+    with_cause[SCREENSHOT_CAUSE_KEY] = "screenshot unavailable: elapsed_ms=15012"
+    caused = builder.build(with_cause, task_id="t", episode_id="e", sequence=0)
+    assert caused.observation_id == plain.observation_id
+    assert SCREENSHOT_CAUSE_KEY not in (caused.metadata or {})
 
 
 def test_a_resized_guest_frame_raises(tmp_path: Path) -> None:

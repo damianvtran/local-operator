@@ -1202,13 +1202,22 @@ class EpisodeRunner:
         true because it describes this event, not the episode's fate: an
         exhausted final attempt propagates and is recorded separately by the
         fatal-error path.
+
+        The worker's stderr tail rides here as well as on the fatal path, and
+        deliberately: this artifact is written BEFORE the backoff, so it is the
+        first thing a reader sees and the only one that survives if the session
+        dies while waiting. On the two canary episodes it would have carried
+        upstream's own "Failed to get screenshot. Status code: %d" lines at
+        the moment the outage started instead of after it had already cost the
+        run.
         """
 
-        detail = self._publish(
+        text = (
             f"observation-phase failure, attempt {attempt} of {attempts}: "
-            f"{_diagnostic(error, self._redactions)}".encode("utf-8"),
-            media_type="text/plain",
+            f"{_diagnostic(error, self._redactions)}"
+            + _adapter_stderr_section(self._adapter_stderr(), self._redactions)
         )
+        detail = self._publish(text.encode("utf-8"), media_type="text/plain")
         self._append(
             "error",
             ErrorPayload(
@@ -1444,6 +1453,35 @@ class EpisodeRunner:
         # guard requires the terminal kind to agree with the stop reason.
         return await self._close_out(score, failure_kind=failure_kind, cancelled=False)
 
+    def _adapter_stderr(self) -> bytes:
+        """The adapter worker's retained stderr tail, for a failure artifact.
+
+        The supervisor already drains the worker's stderr into a bounded tail on
+        every launch (``MAX_DIAGNOSTIC_TAIL``) and nothing read it, so upstream's
+        own explanation for a failed capture reached the parent and was thrown
+        away. Reading it needs no adapter change and no new protocol field: the
+        bytes are already here.
+
+        Empty for a session that never launched, and for a launcher whose handle
+        has no tail (the in-process test seams), so an artifact written without
+        one is byte-identical to what it was before this existed.
+
+        ``settled()`` rather than ``bytes()``: the drainer that fills the tail
+        runs in another thread, and a failure path can be reached milliseconds
+        after the worker wrote -- a scripted episode entirely so -- where a bare
+        snapshot misses the lines that explain the failure. The wait is bounded
+        (``STDERR_SETTLE_QUIET_S``/``STDERR_SETTLE_TIMEOUT_S``) because it runs
+        while sealing a failed episode. A launch seam whose own tail object
+        offers only ``bytes()`` still works: a failure path must never raise,
+        so the narrower surface degrades to the snapshot.
+        """
+
+        tail = getattr(self._supervisor, "stderr_tail", None)
+        if tail is None:
+            return b""
+        settled = getattr(tail, "settled", None)
+        return settled() if settled is not None else tail.bytes()
+
     async def _finalize_failure(self, error: BaseException) -> EpisodeOutcome:
         """Finalize unscored after a mid-episode failure.
 
@@ -1485,6 +1523,11 @@ class EpisodeRunner:
         # chars, and ``publish_artifact`` independently scans every byte
         # against the episode's RedactionSet.
         #
+        # The worker's stderr tail is appended too (``_adapter_stderr``): it is
+        # the adapter's own account, upstream's words included, and it is the
+        # one source that could explain the two canary crashes whose only
+        # recorded fact was a fixed string.
+        #
         # That parent scan is NOT a backstop for a secret the harness itself
         # truncated, and must not be read as one. ``assert_clear`` is a
         # SUBSTRING check, so a value already cut by ``_diagnostic``'s 500-char
@@ -1492,11 +1535,16 @@ class EpisodeRunner:
         # and the scan returns clean on the surviving prefix. The defence that
         # actually closes that case is ordering: the worker scans the UNBOUNDED
         # string before truncating (``worker._redacted``), so a straddled
-        # secret is withheld whole before it ever reaches this side.
+        # secret is withheld whole before it ever reaches this side -- and the
+        # tail section applies the same order for the same reason.
         detail: Any = None
         try:
             detail = self._publish(
-                _failure_detail(error, self._redactions).encode("utf-8"),
+                _failure_detail(
+                    error,
+                    self._redactions,
+                    adapter_stderr=self._adapter_stderr(),
+                ).encode("utf-8"),
                 media_type="text/plain",
             )
         except (_EvidenceFailure, OSError):
@@ -2169,7 +2217,12 @@ def _incomplete_receipt(plan: CleanupPlan, action_id: str) -> CleanupReceipt:
     )
 
 
-def _failure_detail(error: BaseException, redactions: RedactionSet | None = None) -> str:
+def _failure_detail(
+    error: BaseException,
+    redactions: RedactionSet | None = None,
+    *,
+    adapter_stderr: bytes = b"",
+) -> str:
     """The fatal-error artifact: the diagnostic, plus the adapter's own cause.
 
     ``_diagnostic`` is also the ``outcome.diagnostic`` field and is bounded at
@@ -2180,6 +2233,12 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
     So the artifact carries both: the same first line a reader sees in the
     outcome, then the full structured detail when the failure crossed the
     adapter boundary carrying one.
+
+    ``adapter_stderr`` is the worker's own stderr tail (see
+    ``EpisodeRunner._adapter_stderr``). It is appended as a THIRD section and
+    only when it has content, so a launcher that has no tail -- every
+    in-process test seam, and any adapter process whose stderr stayed empty --
+    produces byte-identical text to what this function produced before.
 
     The adapter-supplied fields below were bounded and canary-checked on the
     WORKER side before they crossed (``worker._error_detail``). The SUMMARY
@@ -2192,9 +2251,12 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
     """
 
     summary = _diagnostic(error, redactions)
+    section = _adapter_stderr_section(adapter_stderr, redactions)
     detail = getattr(error, "detail", None)
     if detail is None or not hasattr(detail, "render"):
-        return summary
+        # No structured boundary detail: the summary is the whole artifact, and
+        # it stays byte-identical to what it was before a tail existed.
+        return summary + section
     lines = [
         summary,
         "",
@@ -2209,7 +2271,56 @@ def _failure_detail(error: BaseException, redactions: RedactionSet | None = None
         lines.append(f"cause[{index}]: {cause.exception_type}: {cause.message}")
     for frame in detail.frames:
         lines.append(f"  at {frame.file}:{frame.line} in {frame.function}")
-    return "\n".join(lines)
+    # ``section`` carries its own leading blank line, so the artifact ends on
+    # the tail when there is one and is unchanged when there is not.
+    return "\n".join(lines) + section
+
+
+#: How much of the adapter worker's retained stderr a failure artifact carries.
+#:
+#: The supervisor already keeps a bounded 64 KiB tail (``MAX_DIAGNOSTIC_TAIL``),
+#: so this is a second, tighter bound on what a bundle should embed: the LAST
+#: lines are the ones that name the failure, and an artifact that is mostly
+#: library chatter costs a reader more than it tells them.
+MAX_STDERR_TAIL_CHARS = 4096
+
+
+def _adapter_stderr_section(adapter_stderr: bytes, redactions: RedactionSet | None) -> str:
+    """Render the worker's stderr tail for a failure artifact, or nothing.
+
+    WHY THE HARNESS AND NOT THE ADAPTER. The supervisor drains the worker's
+    stderr into a bounded tail on every launch and NOTHING read it. Upstream's
+    own explanation for a failed capture -- "Failed to get screenshot. Status
+    code: %d", the exception that was raised, a library traceback -- therefore
+    arrived in the parent and was discarded, and a bundle could name only a
+    fixed string for a failure that cost two canary episodes $1.08 and $2.24.
+    Recovering it needs no adapter contract change, and putting it here rather
+    than on the adapter wire keeps it out of a size-bounded protocol field.
+
+    ORDER IS THE SECURITY PROPERTY, exactly as in ``_diagnostic`` and
+    ``worker._redacted``: the FULL decoded tail is scanned BEFORE the bound is
+    applied. ``assert_clear`` is a substring check, so bounding first would
+    sever a canary straddling the cut and the surviving prefix would be
+    published clean -- and ``publish_artifact``, applying the same substring
+    semantics to the bytes it receives, would agree. A tail that trips the scan
+    is withheld WHOLE rather than masked, because a partial still narrows the
+    secret for whoever holds the bundle.
+
+    The tail is third-party text and cannot be structured, so unlike the
+    adapter's bounded cause it is exactly the case that scan exists for.
+    """
+
+    if not adapter_stderr:
+        return ""
+    text = adapter_stderr.decode("utf-8", errors="replace")
+    if not text.strip():
+        return ""
+    if redactions is not None:
+        try:
+            redactions.assert_clear(text)
+        except ValueError:
+            return "\n\n--- adapter stderr tail ---\n" + WITHHELD
+    return "\n\n--- adapter stderr tail ---\n" + text[-MAX_STDERR_TAIL_CHARS:]
 
 
 def _rejection_detail(rejected: Any) -> str:
