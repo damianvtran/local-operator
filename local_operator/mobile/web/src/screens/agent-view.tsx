@@ -267,7 +267,6 @@ function ConversationTail({
 						sessionId={sessionId}
 						subagents={projection.subagents}
 						parentJobId={detail.job_id}
-						collapsible
 						embedded
 						label="child agents"
 					/>
