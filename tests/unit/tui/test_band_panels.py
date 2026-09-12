@@ -20,6 +20,7 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.naming import ConversationName
@@ -1207,7 +1208,28 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
 
             def without_inset(self: Any) -> None:
                 original(self)
-                self.query_one("#band").remove_class("has-slot")
+                # Same guard the real `_sync_band_inset` carries, and for the
+                # same reason: this runs on every band refresh INCLUDING the
+                # ones during boot, before `#band` is composed. The production
+                # method swallows that (`except Exception: return`, "never
+                # raises"), so a wrapper that queries unguarded raises
+                # `NoMatches` out of a path the app treats as normal — which
+                # surfaces as a boot-timing flake here rather than as a defect
+                # in the app. Measured on a loaded host: the unguarded shape
+                # fails intermittently with `NoMatches` on a screen still
+                # classed `boot boot-card`.
+                #
+                # NARROWER than the production method's bare `except
+                # Exception`, deliberately. There the breadth is the point (a
+                # status surface must not be able to take the app down); here
+                # the only expected failure is the not-yet-composed query, and
+                # a test double that swallowed anything else would hide the
+                # defect it exists to expose.
+                try:
+                    band = self.query_one("#band")
+                except NoMatches:  # not composed yet (early boot)
+                    return
+                band.remove_class("has-slot")
 
             app._sync_band_inset = without_inset.__get__(app)  # type: ignore[method-assign]
         async with app.run_test(size=(100, height)) as pilot:
