@@ -902,6 +902,25 @@ class PendingGateState(BaseModel):
     secret: bool = False
     question_index: int = 0
     question_total: int = 1
+    #: The conversation's name, for a surface that renders this card as a
+    #: NOTIFICATION rather than in the session it belongs to. A desktop banner
+    #: saying only "Waiting for approval" cannot be triaged: with several
+    #: sessions open the user cannot tell which run is being held hostage
+    #: without opening each one (design round 1, D3).
+    #:
+    #: EMPTY when ``display.notification_session_name`` is off, and the
+    #: emptiness is decided in the BACKEND for the same reason every other
+    #: notification fact is: only the backend can read that setting, and a
+    #: renderer re-deriving the privacy rule is a renderer that can get it
+    #: wrong in a signed binary the user updates on their own schedule.
+    #:
+    #: ADDITIVE AND DEFAULTED, in both skew directions. An old viewer reading a
+    #: new payload ignores a key it does not know; a new viewer reading an old
+    #: payload gets ``""`` and falls back to the anonymous card it already
+    #: renders. Gates deliberately keep travelling on THIS path rather than
+    #: gaining a ``notification`` frame of their own — a second channel for a
+    #: card the app already receives is how one question becomes two banners.
+    session_name: str = ""
 
 
 class _FrozenSequence(tuple[Any, ...]):

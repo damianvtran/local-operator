@@ -52,6 +52,11 @@ class RecordingNotifier:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.labels: list[str] = []
+        #: The composed body each call carried, in order. The app now resolves
+        #: this through ``notifications.compose`` before delegating, so a test
+        #: can assert on the TEXT a surface would show without standing up a
+        #: terminal — which is the half ``test_compose.py`` cannot see.
+        self.bodies: list[str] = []
         #: Mirrors the real notifier's focus gate, which is what makes the
         #: DELIVERY-vs-derivation distinction observable here: a suppressed
         #: toast must return False so the app leaves its edge armed.
@@ -64,18 +69,21 @@ class RecordingNotifier:
         self.focused = focused
         self.calls.append(("focus", focused))
 
-    def notify_turn_complete(self, *, running_children: int) -> bool:
+    def notify_turn_complete(self, *, running_children: int, body: str = "") -> bool:
         self.calls.append(("complete", running_children))
+        self.bodies.append(body)
         return running_children == 0 and not self.focused
 
-    def notify_waiting(self, kind: str) -> bool:
+    def notify_waiting(self, kind: str, *, body: str = "") -> bool:
         if self.focused:
             return False
         self.calls.append((kind, None))
+        self.bodies.append(body)
         return True
 
-    def notify_error(self) -> bool:
+    def notify_error(self, *, body: str = "") -> bool:
         self.calls.append(("error", None))
+        self.bodies.append(body)
         return not self.focused
 
     @property
@@ -886,3 +894,205 @@ async def test_a_deferral_armed_without_a_turn_boundary_starts_empty() -> None:
         app.on_subagent_ended(SubagentEnded(job_id="j2", label="b", status="completed"))
         await pilot.pause()
     assert notifier.calls[before:] == []  # `j1` still running: correctly silent
+
+
+# -- composed bodies ---------------------------------------------------------
+#
+# The banner a user gets for the session they are IN used to say less than the
+# one the background observer sent for a session they were NOT in: `send`
+# carried `BODIES[kind]` while the observer path already carried a transcript
+# snippet. That asymmetry is backwards, and closing it is the "every surface
+# agrees" half of this feature. The tests below drive the real app so the
+# composition is exercised where it actually runs — through `_notify`, off a
+# session whose transcript is on disk.
+
+
+class TranscriptSession(JobsSession):
+    """A fake session whose id resolves to a real session directory.
+
+    The composer reads the session's own files, so a fake with no transcript
+    on disk exercises only the degraded path. What makes the assertions below
+    about COMPOSITION rather than about the fallback is that the app can
+    RESOLVE the directory — and it resolves it the way production does, as
+    ``config_dir() / "sessions" / session_id``, which is why these tests
+    redirect the config dir and write the transcript at that exact path rather
+    than handing the session a directory of their own.
+
+    Deliberately NOT a ``transcript`` attribute. That exists on the concrete
+    owner ``Session`` and not on ``AttachedSession``, so a fake carrying one
+    would let a viewer-path regression pass here (see
+    ``test_viewer_protocol.py``); the id is on both.
+    """
+
+    def __init__(self, session_id: str = "sess", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+
+def _session_dir(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, session_id: str = "sess") -> Any:
+    """Redirect the config dir and return the path the app will resolve.
+
+    ``config_dir()`` reads ``LOCAL_OPERATOR_CONFIG_DIR`` on every call, so
+    pointing it at ``tmp_path`` is what keeps these tests off the operator's
+    real session store while still exercising the production resolution.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    return tmp_path / "sessions" / session_id
+
+
+def _write_transcript(directory: Any, assistant: str) -> None:
+    """One user turn and one assistant reply, in the shape `resume.py` reads."""
+    import json
+
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "id": "user-1",
+            "ts": 1.0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "go"}]},
+        },
+        {
+            "id": "assistant-1",
+            "ts": 2.0,
+            "type": "message",
+            "payload": {
+                "kind": "message",
+                "role": "assistant",
+                "content": [{"text": assistant}],
+            },
+        },
+    ]
+    (directory / "transcript.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turns_body_is_the_last_assistant_line(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-N1. The banner says what happened, not that something happened.
+
+    "Task complete" is true of every completion ever, so it distinguishes
+    nothing when several sessions finish while the user is away. The last
+    assistant line is the one fact that says WHICH result landed.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    directory = _session_dir(tmp_path, monkeypatch)
+    _write_transcript(directory, "Rebuilt the search index in 4.1s.")
+    session = TranscriptSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(app, TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+
+    assert notifier.kinds == ["complete"]
+    assert notifier.bodies == ["Rebuilt the search index in 4.1s."]
+
+
+@pytest.mark.asyncio
+async def test_the_privacy_flag_keeps_both_the_name_and_the_snippet_off(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-N2. One flag over two facts, asserted on the app's real path.
+
+    `test_compose.py` pins the rule on the pure function; this pins that the
+    app reaches it, because a `_notify` that composed with its own arguments
+    (or skipped the composer for a kind) would leak exactly what the setting
+    exists to hide while the composer's own tests stayed green.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
+    directory = _session_dir(tmp_path, monkeypatch)
+    _write_transcript(directory, "Merged the acquisition memo.")
+    session = TranscriptSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(app, TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+
+    from local_operator.tui.notify import BODIES
+
+    assert notifier.bodies == [BODIES["complete"]]
+    assert "acquisition" not in "".join(notifier.bodies)
+
+
+@pytest.mark.asyncio
+async def test_an_errored_turns_body_is_the_house_sentence(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-N3. A failure must not be described by whatever it last said.
+
+    The last thing a failing turn said is routinely a success sentence, and on
+    a lock screen it sits beside "Needs attention" with nothing to check it
+    against (review round 1, M1).
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    directory = _session_dir(tmp_path, monkeypatch)
+    _write_transcript(directory, "All 412 tests pass.")
+    session = TranscriptSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(app, TurnEnded(aborted=False, error="provider refused"))
+        await pilot.pause()
+
+    from local_operator.tui.notify import BODIES
+
+    assert notifier.kinds == ["error"]
+    assert notifier.bodies == [BODIES["error"]]
+    assert "412" not in "".join(notifier.bodies)
+
+
+@pytest.mark.asyncio
+async def test_the_in_band_osc_leg_never_carries_model_written_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-N4. BLOCKER-CLASS: model text may reach argv, never an escape sequence.
+
+    The cmux leg and the `notify-send` leg pass the composed body as an ARGV
+    element, where the escaping belongs to the OS. The in-band leg writes an
+    OSC string straight to the terminal, and ESC/BEL inside one close the
+    sequence early and leave the remainder executing as terminal commands.
+
+    `sanitize_text` strips both bytes, so this is defence in depth rather than
+    the only guard — but "model text never reaches an OSC string" is an
+    invariant worth holding structurally instead of resting on one regex, and
+    the regex is exactly the kind of thing a later refactor relaxes. This test
+    drives the REAL notifier (the recorder above cannot see a wire) with a
+    bare OSC 9 terminal and no cmux surface, which is the only configuration
+    where the in-band leg is the one that fires.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    from local_operator.tui.notify import BODIES, Notifier
+
+    writes: list[str] = []
+    # No `CMUX_SURFACE_ID`: this suite runs inside cmux, whose surface would
+    # otherwise capture the delivery and leave the sink empty — a green run
+    # proving nothing about the wire.
+    notifier = Notifier(
+        writes.append,
+        env={"GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/Contents/Resources"},
+        platform="darwin",
+    )
+    notifier.set_focused(False)
+    notifier.set_label("Index work")
+
+    snippet = "Rebuilt the search index in 4.1s."
+    assert notifier.send("complete", body=snippet) is True
+
+    wire = "".join(writes)
+    assert BODIES["complete"] in wire, "the OSC leg must keep the house sentence"
+    assert snippet not in wire, "model-written text reached an in-band escape"
+    # The title is still the session's name, so this is not passing because
+    # nothing was written at all.
+    assert "Index work" in wire

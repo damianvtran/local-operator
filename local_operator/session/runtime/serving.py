@@ -2299,7 +2299,6 @@ class ServingSessionHandle(SessionHandle):
         try:
             from local_operator.tui.notify import (
                 APP_NAME,
-                BODIES,
                 CONTEXTS,
                 detached_notify,
                 sanitize_text,
@@ -2330,22 +2329,17 @@ class ServingSessionHandle(SessionHandle):
             # render as the bare word "question" with no hint it was a
             # question rather than an approval.
             #
-            # NOT `f"{title}: {detail}"`. A tool's `describe_approval` already
-            # leads with its own action word (`_describe_path_approval` emits
-            # "write: /path"), and the title IS the tool name, so prefixing
-            # rendered every approval toast as "write: write: /path" — on the
-            # release's headline surface, every time (round 4, Q3).
-            subject = (detail or "").strip()
-            if not subject:
-                # No description at all: the tool name alone ("write") says
-                # less than the shared vocabulary below, so leave it empty and
-                # let BODIES answer.
-                subject = ""
-            elif title and not subject.lower().startswith(title.lower()):
-                subject = f"{title}: {subject}".strip().rstrip(":").strip()
+            # Composed by `notifications.compose.gate_body` rather than inline,
+            # so this leg and every other gate surface cannot drift: the rule it
+            # carries (never `f"{title}: {detail}"`, because a tool's
+            # `describe_approval` already leads with its own action word and the
+            # title IS the tool name — round 4, Q3) is one that was fixed here
+            # once and would have to be re-fixed in each new surface otherwise.
+            from local_operator.notifications import gate_body
+
             detached_notify(
                 name,
-                subject or BODIES.get(kind, ""),
+                gate_body(kind, title, detail),
                 session_id=self._session_id_for_resume(),
                 subtitle=CONTEXTS.get(kind, ""),
             )
@@ -2393,9 +2387,45 @@ class ServingSessionHandle(SessionHandle):
             # into the queue, so both surfaces can never disagree about which
             # card is current.
             front = self._projection.pending
-            store.mutate(pending_gate=front.to_json() if front is not None else None)
+            payload = front.to_json() if front is not None else None
+            if payload is not None:
+                # The card gains the session's name so a DESKTOP banner for it
+                # can be triaged: "Waiting for approval" with three sessions
+                # open names none of them (design round 1, D3). Stamped here
+                # rather than inside `PendingRequest` because the name is a
+                # property of the SESSION, not of the question, and because the
+                # privacy gate belongs on the publication boundary where every
+                # other notification fact is decided.
+                payload["session_name"] = self._notifiable_session_name()
+            store.mutate(pending_gate=payload)
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
+
+    def _notifiable_session_name(self) -> str:
+        """This conversation's name, or ``""`` when banners may not carry it.
+
+        One helper for both gate-publication sites, because the privacy rule
+        must not be able to hold on one and not the other — that asymmetry is
+        exactly the defect ``notify.py``'s own flag documentation records
+        (review round 1, M2: a flag that governed only some banners made its
+        settings copy false).
+
+        Sanitised on the way out for the same reason every other name-bearing
+        path sanitises: it is model-written and reaches argv and an AppleScript
+        literal on the surfaces that render it.
+        """
+        try:
+            from local_operator.tui.notify import (
+                sanitize_text,
+                session_names_in_notifications,
+            )
+
+            if not session_names_in_notifications():
+                return ""
+            return sanitize_text(getattr(self._session, "conversation_name", "") or "")
+        except Exception:  # noqa: BLE001 — a name is chrome; the gate is not
+            logger.debug("could not resolve the gate's session name", exc_info=True)
+            return ""
 
     async def fork_snapshot(self, message: str) -> dict[str, Any]:
         """Snapshot THIS authenticated owner, never a client-supplied path/id."""
