@@ -179,6 +179,13 @@ LABEL_SERVE = "{brand} [serve] port={port}"
 #: so a row here can be matched against the socket directory on disk without
 #: disclosing the path it came from.
 #:
+#: ORDER MATTERS HERE, because the readers this exists for truncate. `ps` with
+#: stdout not a tty falls back to an 80-column screen width on Linux and cuts the
+#: row (measured on CI: `... -m local_operator.secrets.brok` at exactly 80). The
+#: identity is therefore at the FRONT, so a cut row still says "secret broker"
+#: and still names its store; only the module, which a reader can infer, is lost.
+#: A reader that needs the whole line uses `ps -ww` or `/proc/<pid>/cmdline`.
+#:
 #: This label exists because of issue #958: every pre-#954 CI teardown listed a
 #: bare, unexplained `Local Operator` child. `_spawn_broker` launches
 #: `[sys.executable, "-m", ...]`, and once a parent has been through
