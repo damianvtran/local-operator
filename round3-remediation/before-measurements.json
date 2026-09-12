@@ -1,0 +1,44 @@
+{
+  "390x844": {
+    "countText": "\u00b7 12 failed",
+    "countLineBoxes": 1,
+    "countBoxH": 14,
+    "headerH": 44,
+    "naiveScrollWidthOverflow": false,
+    "naive": {
+      "scrollW": 366,
+      "clientW": 366
+    },
+    "countColor": "rgb(239, 128, 120)",
+    "countOpacity": "1",
+    "elementFromPointAtCount": "\u00b7 12 failed"
+  },
+  "360x780": {
+    "countText": "\u00b7 12 failed",
+    "countLineBoxes": 2,
+    "countBoxH": 33.5,
+    "headerH": 44,
+    "naiveScrollWidthOverflow": false,
+    "naive": {
+      "scrollW": 336,
+      "clientW": 336
+    },
+    "countColor": "rgb(239, 128, 120)",
+    "countOpacity": "1",
+    "elementFromPointAtCount": "subagents 1/22 running \u00b7 12 failed"
+  },
+  "320x568": {
+    "countText": "\u00b7 12 failed",
+    "countLineBoxes": 2,
+    "countBoxH": 33.5,
+    "headerH": 44,
+    "naiveScrollWidthOverflow": false,
+    "naive": {
+      "scrollW": 296,
+      "clientW": 296
+    },
+    "countColor": "rgb(239, 128, 120)",
+    "countOpacity": "1",
+    "elementFromPointAtCount": "approval needed"
+  }
+}
