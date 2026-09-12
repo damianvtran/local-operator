@@ -9,6 +9,7 @@ import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
+  ackInFlight,
   noticeForRejectedDecision,
   noticeForUnreachableWorker,
   originPromptView,
@@ -200,13 +201,11 @@ const NOTICE_HOLD_MS = 1500;
 // as a LAYOUT HINT.
 //
 // It records the PIN rather than a boolean derived from /health (design D3-1).
-// A boolean could only ever name two of the three measured states, so a browser
-// in the third — the wedged-but-paired worker this PR exists for — opened at
-// whichever of the two the boolean happened to collapse to and then grew the
-// difference: measured 86px → 378.8px, a 167.8px reflow in the state whose copy
-// sends the user to "Check again". The pin is written by show(), i.e. for the
-// card that was actually rendered, so a repeated open reproduces the height
-// already on screen.
+// A boolean could only name two states, so a browser in any third one opened at
+// whichever of the two the boolean collapsed to and then grew the difference.
+// The pin is written by show(), i.e. for the card that was actually rendered,
+// so a repeated open reproduces the height already on screen — for the states
+// it is worth betting on (see PIN_BY_STATE).
 //
 // It is a hint and nothing else: it never gates behaviour, and render() paints
 // whatever /health actually reports. A stale or absent pin costs one resize,
@@ -228,42 +227,52 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 //   connected card      207.2px  ->  86px
 //   pairing form        340.2px  -> 219px
-//   unresponsive card   523.3px  -> 402px
 //
-// The unresponsive pin moved 254 -> 402 when that card gained its one-click
-// "Reload the extension" action and the manual fallback became its own
-// paragraph. SOLVED, not derived: the card's own chrome is a constant 121px
-// over the pin, measured by sweeping the pin across 86/219/254/300/350/380/
-// 398/400/402/410 in a real headless Chrome at 300x600 dpr=2 and reading the
-// card back (86->207, 219->340, 254->375, 402->523). Re-measure the same way
-// if this card's copy or controls change; an eyeballed pin IS the 167.8px
-// reflow this block exists to prevent.
+// Measured by sweeping the pin in a real headless Chrome at 300x600 dpr=2 and
+// reading the card back; the `card = pin + 121` invariant is what makes the
+// sweep a solve rather than a guess. Re-measure the same way if either card's
+// copy or controls change: an eyeballed pin IS the reflow this block exists to
+// prevent (on this build, reverting the unresponsive pin alone measured a
+// 148.27px jump before that state stopped being pinned at all).
 //
-// A state with no entry keeps the last hint. That is deliberate: only these
-// three were measured in a real render, and a pin for the rest would be a pixel
-// guess no frame backs — while an unmeasured state costs exactly the one
-// resize a browser with no hint at all gets. Re-measure all three together when
-// any of them moves: a stale pin IS the resize this whole block exists to
-// prevent (popup.css carries the same numbers).
+// ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
+// A pin is a BET that the next open repeats this state. `connected` and
+// `pairing` are durable properties of the browser — a paired browser is still
+// paired next time, an unpaired one still unpaired — so the bet pays.
+// `unresponsive` is transient BY CONSTRUCTION: the card exists to be acted on,
+// and its copy tells the user to reload and open it again, so the next open is
+// precisely the one most likely to be a DIFFERENT card. Pinning it optimised
+// the reopen nobody makes (0.27px) and taxed the recovery open everybody makes
+// — measured 315.84px of collapse against base's 167.84px, i.e. it nearly
+// doubled the worst visible reflow on the path this feature creates.
 //
-// The `connected` figure is the card with an EMPTY driven-URL trough. The same
-// state is taller once a URL is in it — a settled 257.3px (and 292.1px for the
-// long-URL variant) against this table's 211.2px, +47.3px / +82.1px of reopen
-// growth. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and it
-// was measured identical across the pre-PR base and both remediation heads: the
-// hint records the height the browser last SETTLED on, so a card whose text
-// changes between opens pays one resize either way, and a per-state constant
-// cannot express a height that depends on the URL. Do not add one here; the
-// provenance lives in PR #996's D3-1 note. Re-measuring `connected` with a URL
-// present will therefore read ~257px and is not a contradiction of this table.
+// Leaving it unpinned means the wedged open keeps whatever the browser's
+// durable pin is and grows into the tall card once, while the recovery open —
+// the one the card's own copy asks for — lands on a pin that is already right.
+// An unmeasured state keeping the last hint is the same rule the two pinned
+// states rely on, not a special case for this one.
+//
+// THE `connected` FIGURE IS THE CARD WITH AN EMPTY DRIVEN-URL TROUGH (PR #996,
+// finding D3-1, kept across this branch's rebase because it still holds). The
+// same state is taller once a URL is in it — a settled 257.3px, and 292.1px for
+// the long-URL variant, against an empty-trough card. That residual is a KNOWN,
+// RECORDED DEFERRAL, not an oversight, and #996 measured it identical across
+// the pre-PR base and both of its remediation heads: the hint records the
+// height the browser last SETTLED on, so a card whose text changes between
+// opens pays one resize either way, and a per-state constant cannot express a
+// height that depends on the URL. Do not add one here; the provenance is #996's
+// D3-1 note. Re-measuring `connected` with a URL present will therefore read
+// ~257px and is not a contradiction of this table.
+//
+// #996 quoted its own empty-trough figure as 211.2px; this table carries the
+// re-measured 207.2px for the same card, so the ~4px is a measurement
+// correction on this branch, not a second card.
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
-const PIN_UNRESPONSIVE = "402px";
-const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
   pairing: PIN_PAIRING,
-  unresponsive: PIN_UNRESPONSIVE,
 };
 
 /** The pinned height this browser last settled on, or null for "no hint". */
@@ -517,6 +526,22 @@ async function renderOnce(): Promise<void> {
     setOriginBusy(false);
     renderQueueControls(queue, selected);
     show("origin");
+    // The wedged-worker banner, from the SAME signal #unresponsive renders
+    // from. This card returns before that branch is ever reached, so without it
+    // the popup shows a live Allow/Deny against a worker that cannot apply
+    // either, with the neutral tone and no route to the remedy — measured as a
+    // loop: optimistic ack, honest notice, identical prompt, indefinitely
+    // (U1/Q5/D3). Read from /health rather than from `connState`, because a
+    // dead worker's last `connState` write reads "connected" forever.
+    const wedged = health?.extension_unresponsive === true;
+    const wedge = document.getElementById("origin-wedge");
+    // Guarded like `origin-again` above: a role="status" region rewritten on
+    // every render re-announces the same sentence to a screen reader (D10).
+    if (wedge) wedge.classList.toggle("hidden", !wedged);
+    // Tell the truth with the status rule too. show() has just set the origin
+    // card's neutral hairline; a card whose decision cannot land is a state the
+    // user must recover from, which is what danger is reserved for here.
+    if (wedged) document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
     // The prompt is an alertdialog demanding a decision, so give the keyboard
     // a landing point on the first meaningful control. Deliberately NOT Allow:
     // a focused primary on a consent dialog invites an accidental Space/Enter
@@ -542,11 +567,11 @@ async function renderOnce(): Promise<void> {
   // /health is the authority on whether this browser is paired, and the two
   // cards below are what decide which pin show() records for the next open.
   // Nothing is mirrored from /health here: the previous revision derived a
-  // BOOLEAN from `paired || extension_unresponsive` and the wedge state — which
-  // renders the honest card below, not the pairing form — is precisely the one
-  // the boolean could not express, so every reopen of it started at the
-  // connected card's height and grew 167.8px into this card (design D3-1,
-  // measured 86px → 378.8px). show() records the pin per card instead.
+  // BOOLEAN from `paired || extension_unresponsive`, which could not express
+  // the wedge state — it renders the honest card below, not the pairing form —
+  // so every reopen of it started at the wrong height and grew into this card
+  // (design D3-1). show() records the pin per card instead, for the durable
+  // states only.
   // The worker is wedgeable in a way the socket does not show: attached, paired,
   // and answering nothing. Say so instead of painting the green "Connected."
   // card over a browser the agent cannot drive — that card is exactly what the
@@ -777,19 +802,64 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
-document.getElementById("retry-unresponsive")?.addEventListener("click", () => void render());
-// The one-click remedy for a wedged worker, and it lives ONLY on the
-// `unresponsive` card — which renderOnce() paints from the daemon's
-// `extension_unresponsive`, never from the worker's own `connState` (a dead
-// worker's last write reads "connected" forever). So a healthy worker is never
-// offered a reload: the button is in a section that is `hidden` unless the
-// daemon itself reports the extension is not answering.
+
+// "Check again" has to LOOK like it checked. Re-entering render() re-probes
+// /health, but when the answer is unchanged the DOM is byte-identical — a
+// MutationObserver over the whole body recorded ZERO mutations for 2.5s after
+// the click, and HEALTH_TIMEOUT_MS is 3000, so a user could click, wait three
+// seconds and see nothing at all. That is the dead-click perception this PR
+// exists to remove, reappearing on the recovery card itself (UX U4).
+//
+// So the click owns the button for the length of the probe (disabled +
+// "Checking…", with aria-busy for AT), and the outcome is stated even when the
+// outcome is "no change" — the one case the DOM cannot express on its own.
+const RECHECK_SETTLE_MS = 400;
+async function recheckUnresponsive(): Promise<void> {
+  const button = document.getElementById("retry-unresponsive") as HTMLButtonElement | null;
+  const outcome = document.getElementById("unresponsive-outcome");
+  if (!button) {
+    await render();
+    return;
+  }
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Checking…";
+  button.setAttribute("aria-busy", "true");
+  outcome?.classList.add("hidden");
+  try {
+    await render();
+    // A minimum visible duration, because the honest failure here is a probe
+    // that answers in 8ms: without it the in-flight state exists for less than
+    // a frame and the user sees the same nothing they reported.
+    await new Promise((resolve) => setTimeout(resolve, RECHECK_SETTLE_MS));
+  } finally {
+    button.disabled = false;
+    button.textContent = label ?? "Check again";
+    button.removeAttribute("aria-busy");
+    // If render() moved us off this card the check succeeded and the new card
+    // IS the outcome; saying "still not answering" under it would contradict
+    // the screen. Only an unchanged verdict needs words.
+    const stillWedged = !document.getElementById("unresponsive")?.classList.contains("hidden");
+    if (outcome && stillWedged) {
+      outcome.textContent = `Still not answering (checked ${new Date().toLocaleTimeString()}).`;
+      outcome.classList.remove("hidden");
+    }
+  }
+}
+document.getElementById("retry-unresponsive")?.addEventListener("click", () => void recheckUnresponsive());
+
+// The one-click remedy for a wedged worker. Both of its surfaces are painted
+// from the daemon's `extension_unresponsive` and never from the worker's own
+// `connState` (a dead worker's last write reads "connected" forever), so a
+// healthy worker is never offered a reload: on the `unresponsive` card the
+// button sits in a section that stays `hidden`, and on the origin card the
+// banner carrying it is unhidden only by the same signal.
 //
 // chrome.runtime.reload() is allowed from an extension page and needs no
 // permission. It tears down this very extension, so THE POPUP CLOSES as a side
 // effect — there is no post-reload state to render here, which is why the card
-// tells the user what to check next instead of promising a result.
-document.getElementById("reload-extension")?.addEventListener("click", () => {
+// warns the user up front that it will vanish and tells them to reopen (D6).
+function reloadExtension(): void {
   try {
     chrome.runtime.reload();
   } catch (error) {
@@ -798,7 +868,11 @@ document.getElementById("reload-extension")?.addEventListener("click", () => {
     // is about to be gone if the call did work.
     console.warn("extension reload failed", error);
   }
-});
+}
+document.getElementById("reload-extension")?.addEventListener("click", reloadExtension);
+// Same remedy, reached from the consent card's inline banner (U1/Q5/D3). One
+// handler for both so the two surfaces cannot drift apart.
+document.getElementById("origin-wedge-reload")?.addEventListener("click", reloadExtension);
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {
@@ -817,11 +891,31 @@ document.getElementById("connected-all-sites-off")?.addEventListener("click", ()
 document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
 document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
 
-// Lock the three consent buttons the moment one is clicked: the session-storage
+// The controls a DECISION owns, and the only ones a decision may re-enable.
+//
+// Previous/Next are deliberately NOT here. Their enabled state is DERIVED from
+// queue length by renderQueueControls (`disabled = queue.length < 2`), and a
+// decision that empties the queue down to one entry runs its cleanup AFTER the
+// trailing render() — so re-enabling them here overwrote the renderer's answer
+// and put two inert stops back on a single-request prompt, which is the U4
+// defect the base branch fixed (review F2, reproduced A/B: base `true true`,
+// this head `false false` with one entry left). Ownership of queue navigation
+// stays with the renderer; a decision only ever owns its own three controls.
+const DECISION_CONTROLS = ["origin-scope", "origin-allow", "origin-deny"] as const;
+
+// Lock the consent controls the moment one is clicked: the session-storage
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
+//
+// `busy` disables queue navigation too — while a decision is in flight, moving
+// to another entry would rewrite the module state the in-flight click is
+// judged against. Re-enabling is the asymmetric half: it is scoped to the
+// decision's own controls, per DECISION_CONTROLS above.
 function setOriginBusy(busy: boolean): void {
-  for (const id of ["origin-scope", "origin-allow", "origin-deny", "origin-previous", "origin-next"]) {
+  const ids = busy
+    ? [...DECISION_CONTROLS, "origin-previous", "origin-next"]
+    : [...DECISION_CONTROLS];
+  for (const id of ids) {
     const control = document.getElementById(id) as HTMLButtonElement | HTMLSelectElement | null;
     if (control) control.disabled = busy;
   }
@@ -927,8 +1021,12 @@ async function moveQueue(delta: -1 | 1): Promise<void> {
   await render();
 }
 
-function showOriginAck(decision: OriginDecision): void {
-  const ack = ackForDecision(decision, shownBroadScope);
+/** @param confirmed whether the WORKER has answered. Until it has, the ack
+ * reports receipt only (UX U2): the success tone, the check and the granted
+ * trough are the three things a user reads as "this landed", and none of them
+ * may appear over a decision whose fate the popup does not yet know. */
+function showOriginAck(decision: OriginDecision, confirmed: boolean): void {
+  const ack = confirmed ? ackForDecision(decision, shownBroadScope) : ackInFlight(decision);
   const title = document.getElementById("origin-ack-title");
   const sub = document.getElementById("origin-ack-sub");
   if (title) title.textContent = ack.title;
@@ -936,9 +1034,14 @@ function showOriginAck(decision: OriginDecision): void {
   // Print the value that was granted, in the prompt's own monospace trough.
   // The prompt pane is gone by now, so "this domain" would have no referent on
   // screen — and the broader the grant, the vaguer that reading gets (D2).
+  // Only once CONFIRMED: this trough is the element that means "this is what
+  // you granted", so printing it while the round-trip is outstanding claims
+  // the grant the title is careful not to claim.
   const granted = document.getElementById("origin-ack-granted");
   if (granted) {
-    const value = grantedValueFor(decision, shownBroadScope, shownBroadKey, shownPromptOrigin);
+    const value = confirmed
+      ? grantedValueFor(decision, shownBroadScope, shownBroadKey, shownPromptOrigin)
+      : undefined;
     granted.textContent = value ?? "";
     granted.classList.toggle("hidden", !value);
   }
@@ -992,7 +1095,12 @@ async function decideOnce(decision: OriginDecision): Promise<void> {
     // holds the ack through stale echoes; render() takes over to Connected
     // once the echo clears.
     decidedOrigin = { origin, decision, entryId: promptId, decidedAt: Date.now() };
-    showOriginAck(decision);
+    // RECEIPT, not outcome. The latch above suppresses the prompt's echo, so
+    // every render during the round-trip keeps whatever is painted here — which
+    // is why this may not be the success card: against a mute worker it sat
+    // there for 4.9s claiming a grant that was never applied (UX U2). The
+    // confirmed ack is painted below, once the worker has actually answered.
+    showOriginAck(decision, false);
     // The worker round-trip is BOUNDED and its failure is contained, because a
     // wedged worker turns this click into the user's "I clicked and nothing
     // happened": `setOriginBusy(true)` above disabled Allow/Deny, and before
@@ -1006,6 +1114,14 @@ async function decideOnce(decision: OriginDecision): Promise<void> {
     // race. The loser is not cancellable, which is harmless: an answer arriving
     // late resolves a promise nobody reads, and render() below re-reads the
     // real state from storage and /health either way.
+    //
+    // A SECOND click after the bound fires is also safe, and that is a property
+    // of the worker rather than of this popup: `decideAccess` (approval-store)
+    // resolves by `entryId`, so the re-send finds no live entry and returns
+    // `applied: false` \u2014 the user sees a notice, never a double grant, and the
+    // `once` grant is keyed requester+origin so it cannot be spent twice
+    // either (review F3). Not guarded here on purpose: blocking the retry would
+    // cost a user whose FIRST send was genuinely lost their only way to retry.
     let response: { applied?: boolean } | undefined;
     let reachedWorker = true;
     try {
@@ -1063,6 +1179,14 @@ async function decideOnce(decision: OriginDecision): Promise<void> {
         // CURRENT prompt with live buttons.
         await new Promise((resolve) => setTimeout(resolve, NOTICE_HOLD_MS));
       }
+    } else {
+      // CONFIRMED: the worker applied it. Only now may the success tone, the
+      // check and the granted trough appear — the in-flight ack above is
+      // deliberately none of those, so this is the single transition from
+      // "received" to "done" (UX U2). The latch is left in place: the queue
+      // write and /health both still echo this generation, and render()'s ack
+      // branch keeps this card up until the echo clears.
+      showOriginAck(decision, true);
     }
   }
   // A successful decision removes this generation; FIFO becomes current. A
@@ -1080,6 +1204,16 @@ function showOriginNotice(title: string, sub: string): void {
   if (titleEl) titleEl.textContent = title;
   if (subEl) subEl.textContent = sub;
   document.getElementById("origin-ack-check")?.classList.add("hidden");
+  // The granted trough must go with the check. It is filled by a CONFIRMED
+  // ack, and this card is shown when a decision could not be applied — so
+  // leaving it up printed the origin directly under "may not have been
+  // applied", i.e. the one element that reads as "this is what you granted"
+  // surviving onto the card that says nothing may have been granted (UX U3).
+  const granted = document.getElementById("origin-ack-granted");
+  if (granted) {
+    granted.textContent = "";
+    granted.classList.add("hidden");
+  }
   show("origin-ack");
   document.getElementById("card")?.style.setProperty("--tone", "var(--hairline-strong)");
 }

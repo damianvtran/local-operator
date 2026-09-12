@@ -170,11 +170,17 @@
              (design D2-2). -->
         <section id="unresponsive" class="state hidden">
           <h1 class="title">Extension stopped answering.</h1>
+          <!-- "this popup closes while it restarts, so open it again to check"
+               is the forewarning the primary action needs (D6): clicking a
+               button and having the window vanish with no confirmation is
+               indistinguishable from the dead-click symptom this card exists to
+               cure, and the likely next move is another toolbar click — the
+               very loop being fixed. -->
           <p class="sub">
-            This browser is paired, but the Local Operator extension has stopped responding, so
-            the agent can't drive it. Reloading the extension usually clears it — pairing is
-            kept, so there is no new code to enter, but open tab handles, snapshot refs and
-            pending site decisions are lost, so re-open and re-snapshot afterwards.
+            This browser is paired, but the extension has stopped responding, so the agent can't
+            drive it. Reloading usually clears it — this popup closes while it restarts, so open
+            it again to check. Pairing is kept; open tab handles, snapshot refs and pending site
+            decisions are lost.
           </p>
           <!-- Primary = the one-click remedy, because the manual instruction
                below is four steps through a page this popup cannot even link to
@@ -187,6 +193,12 @@
             <button id="reload-extension" class="btn primary block">Reload the extension</button>
             <button id="retry-unresponsive" class="btn block">Check again</button>
           </div>
+          <!-- The verdict of a "Check again" that changed nothing. Without it
+               an unchanged answer is invisible: the card is byte-identical, so
+               a probe that genuinely ran looks exactly like a dead click (U4).
+               role="status" so AT hears the result rather than only seeing it;
+               popup.ts writes it only when the card did not change. -->
+          <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
           <!-- The FALLBACK, and it is not a softer restatement of the button: a
                reload demonstrably did NOT clear the stale worker on 2026-09-11
                20:23 (the bridge log took no /extension dial for a whole session
@@ -199,9 +211,8 @@
                fallback and cost the card 164px of height it has no room for at
                600px (measured). -->
           <p class="sub">
-            Still not answering? Toggle the extension OFF then ON in
-            <code>chrome://extensions</code> — that clears a stale registration a reload can't,
-            at the same cost.
+            Still stuck? Toggle it OFF then ON in <code>chrome://extensions</code> — that clears
+            a stale registration a reload can't, at the same cost.
           </p>
         </section>
 
@@ -247,6 +258,31 @@
                URL/host value, so a long host reads as an intact string and a
                mid-token break reads as "this is a URL", not a typo (D11). -->
           <h1 class="title" id="origin-title">Let the agent use this site?</h1>
+          <!-- THE REMEDY, INLINE, when the worker is wedged while a decision is
+               queued — the exact shape of the reported incident (the operator's
+               dead clicks happened while the agent was driving), and the one
+               state where #unresponsive is unreachable: renderOnce() paints
+               this card and returns before that branch (reviewer/UX U1, QA Q5,
+               design D3, three independent streams).
+
+               Inline rather than reordering the branches. The pending decision
+               is what the user opened the popup for, and hiding it behind the
+               wedge card would answer "the remedy is unreachable" by making the
+               request unreachable instead. So the prompt stays answerable and
+               the card stops pretending the answer will land: popup.ts sets the
+               danger tone and unhides this banner from the SAME
+               `extension_unresponsive` signal #unresponsive uses, so there is
+               one source of truth for "the worker is not answering" and no
+               chance of offering a reload to a healthy worker.
+
+               The manual chrome://extensions fallback is deliberately NOT
+               repeated here: this is a banner on a consent card, not the
+               recovery card, and #unresponsive carries the full remedy once the
+               queue drains. -->
+          <p class="wedge hidden" id="origin-wedge" role="status">
+            The extension has stopped answering, so this can't be applied right now.
+            <button type="button" class="linkish" id="origin-wedge-reload">Reload the extension</button>
+          </p>
           <p class="sub" id="origin-body">
             The agent wants to open a page on this site with your current login. It can only use
             sites you allow, and you can take this back any time in Settings.

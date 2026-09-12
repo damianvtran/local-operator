@@ -439,7 +439,21 @@ async function connect(): Promise<void> {
     // dial deadline reaps it, and the console says which one it was.
     let frame: DaemonMessage;
     try {
-      frame = JSON.parse(String(message.data)) as DaemonMessage;
+      const parsed: unknown = JSON.parse(String(message.data));
+      // PARSING IS ONLY HALF THE GUARD. `null`, `2`, `"x"`, `true` and `[]` are
+      // all VALID JSON, so they clear `JSON.parse` and then reach the `"method"
+      // in frame` test below — and `in` throws `TypeError` on any non-object.
+      // That is the same uncaught-throw-in-an-event-handler this whole block
+      // exists to remove, reached by the same class of input (a truncated or
+      // garbled daemon write) that motivated the parse guard, so the shape
+      // check has to live inside the same guard rather than trusting the cast.
+      // Arrays are rejected too: `"method" in []` is legal but an array is not
+      // a frame, and letting one through would hand `dispatch` a bad request.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        console.warn("dropped an unparseable frame from the daemon", parsed);
+        return;
+      }
+      frame = parsed as DaemonMessage;
     } catch (error) {
       console.warn("dropped an unparseable frame from the daemon", error);
       return;
