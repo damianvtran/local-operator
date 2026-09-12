@@ -1843,13 +1843,19 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
 
 @pytest.mark.asyncio
 async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
-    """Queued canonical updates repaint once, from the newest complete state."""
+    """Coalesce the snapshot COPY too, not only the eventual repaint."""
     from local_operator.session.frontend_state import FrontendSessionState
 
     class StatefulSession(FakeSession):
         def __init__(self) -> None:
             super().__init__()
-            self.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+            self._state = FrontendSessionState(session_id="sess", epoch="owner")
+            self.reads = 0
+
+        @property
+        def frontend_state(self) -> FrontendSessionState:
+            self.reads += 1
+            return self._state.model_copy()
 
     session = StatefulSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1868,19 +1874,18 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
         app.call_later = schedule
         app._apply_frontend_state = apply
 
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "first"}
-        )
+        session.reads = 0
+        session._state = session._state.model_copy(update={"conversation_title": "first"})
         app._on_frontend_update(object())
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "latest"}
-        )
+        session._state = session._state.model_copy(update={"conversation_title": "latest"})
         app._on_frontend_update(object())
 
+        assert session.reads == 0
         assert len(scheduled) == 1
         callback, args = scheduled[0]
         callback(*args)
         assert [state.conversation_title for state in applied] == ["latest"]
+        assert session.reads == 1
 
 
 @pytest.mark.asyncio
