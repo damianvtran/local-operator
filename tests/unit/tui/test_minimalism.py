@@ -40,6 +40,12 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
     turning a ledger of one-line traces into a double-spaced list. The pin
     makes the worst case a clipped cell for one frame instead.
 
+    The card's pin is ``1 + padding-bottom``, not a bare ``1``: Textual sizes a
+    fixed-height widget INCLUDING its padding, so the default's one pad row
+    below the summary has to be counted into the height or the summary clips
+    instead of gaining air. Both numbers are asserted together because that is
+    the pairing that breaks — either alone is a defect.
+
     The band is TWO rows for one row of content: its top padding row is the gap
     that separates it from the input line above, and because the band and the
     input panel share one fill, a padded row is indistinguishable from a gap.
@@ -63,7 +69,8 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
         re.MULTILINE,
     )
     band_block = re.search(r"^#status-band\s*\{([^}]*)\}", text, re.MULTILINE)
-    assert tool_block is not None and "height: 1;" in tool_block.group(1)
+    assert tool_block is not None and "height: 2;" in tool_block.group(1)
+    assert "padding: 0 0 1 0;" in tool_block.group(1)
     assert expanded is not None and "height: auto;" in expanded.group(1)
     assert band_block is not None and "height: 2;" in band_block.group(1)
     # One row of that height is the gap; the band itself still renders one row.
@@ -100,6 +107,14 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
     a `ToolCard` selector would stack on top of it and put two blank rows
     between every pair of actions — the "too much spacing" complaint, moved
     from above the group to inside it.
+
+    PADDING on an action row is a different thing and is allowed: it is
+    INTERIOR to the widget, painted in the card's own fill, so it cannot open a
+    row of ground between blocks and cannot stack with ``.gap-above``. The
+    margin ban is what stays absolute. What the padding rules are still held to
+    is VERTICAL-ONLY with zero left/right — the one-cell left inset is drawn by
+    the row builder (``ToolCard.ROW_INDENT``) so it can yield at narrow widths,
+    and a sheet-side horizontal pad would silently double it.
     """
     text = TCSS.read_text()
     gap = re.search(r"^\.gap-above\s*\{([^}]*)\}", text, re.MULTILINE)
@@ -108,11 +123,15 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
     # No other rule anywhere in the sheet declares a vertical margin.
     margins = re.findall(r"margin(?:-top|-bottom)?\s*:[^;]*;", text)
     assert margins == ["margin-top: 1;"], margins
-    # And no ToolCard rule declares spacing of ANY kind, margin or padding:
-    # the card's own 1-cell inner padding is drawn by the row builder, not by
-    # the sheet, precisely so it cannot become a vertical row.
+    # No ToolCard rule declares a MARGIN, and every padding it does declare is
+    # vertical-only: the card's horizontal inset is drawn by the row builder,
+    # not by the sheet, precisely so it cannot drift from the value the builder
+    # sheds at narrow widths.
     for block in re.findall(r"^(?:ToolCard|WakeBlock)[^{]*\{([^}]*)\}", text, re.MULTILINE):
-        assert not re.search(r"\b(margin|padding)\s*:", block), block
+        assert not re.search(r"\bmargin\s*:", block), block
+        for pad in re.findall(r"\bpadding\s*:([^;]*);", block):
+            top, right, bottom, left = pad.split()
+            assert right == left == "0", pad
 
 
 def test_tool_card_renders_a_single_row() -> None:

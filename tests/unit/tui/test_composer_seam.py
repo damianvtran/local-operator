@@ -106,8 +106,50 @@ def _blank_rows_above(app: OperatorApp, selector: str) -> int:
 
 
 def _seam(app: OperatorApp) -> int:
-    """Ground rows between the conversation and the composer panel."""
-    return _blank_rows_above(app, "#input-shell")
+    """GROUND rows between the conversation and the composer panel.
+
+    Counts fills, not blank rows, and the difference is the whole contract.
+    Every action row now carries a pad row below its summary (the ``ToolCard``
+    rule in the sheet), so with a card last the frame above the composer holds
+    TWO blank rows with different owners — the upper one is the card's own pad
+    in ``$lo-surface``, the lower is the transcript's single ground row:
+
+        ...   fill=$lo-surface owner=grep            <- the card's OWN bottom pad
+        ...   fill=$lo-bg      owner=TranscriptView  <- the dock's one ground row
+
+    Counting blanks here reported 2 and read as the seam having grown, which it
+    has not: what the dock guarantees is one row of GROUND, and this module's
+    docstring already says a blank row proves nothing about whose surface it
+    is. ``test_comfortable_rows_still_leaves_exactly_one_ground_row`` reached
+    the same conclusion by hand for the opt-in density; this puts it in the
+    helper so every seam assertion gets it.
+
+    Ownership rather than colour is what separates them, and that is forced:
+    the row is NOT always ``$lo-bg``. The other half of this module's rule is
+    that a docked panel's separator is the dock's own ``$lo-surface`` (see the
+    module docstring), so a helper keyed on the screen's ground colour reports
+    zero for every banded case. What holds in both is that the seam row belongs
+    to no BLOCK — it is the transcript container's padding — while a pad row
+    belongs to the block that painted it.
+
+    Still a real assertion rather than a weakened one: the walk stops at the
+    first row that is inside a block, so a fix that lost the row entirely, or
+    that let a card's own fill reach the composer, still returns 0.
+    """
+    frame = _frame(app)
+    owned = [
+        block.region
+        for block in app.query_one(TranscriptView).children
+        if block.display and block.region
+    ]
+    index = app.query_one("#input-shell").region.y - 1
+    count = 0
+    while index >= 0 and not frame[index].strip():
+        if any(region.y <= index < region.bottom for region in owned):
+            break
+        count += 1
+        index -= 1
+    return count
 
 
 def _fill_at(app: OperatorApp, y: int, x: int) -> str:
@@ -405,6 +447,121 @@ ACTION_ROWS: dict[str, Any] = {
         "ship the release note", {"pid": 7, "conversation_name": "peer-a"}
     ),
 }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+@pytest.mark.parametrize("kind", sorted(ACTION_ROWS))
+async def test_the_default_density_pads_one_row_BELOW_every_action_row(
+    kind: str, size: tuple[int, int]
+) -> None:
+    """The default's own promise, with ``.comfortable-rows`` OFF.
+
+    Reported as "there's essentially no padding between lines": at ``height: 1``
+    the summary's ink filled its slab edge to edge and a run of actions read as
+    one jammed stack. The pad row is measured on the FRAME and by FILL, because
+    the two ways of buying this row look identical in a height number and not at
+    all alike on screen — a wider ``.gap-above`` would leave the extra row in
+    the transcript's ground, where it separates the cards further instead of
+    giving each one air.
+
+    BELOW, specifically. A top-only pad leaves the card's fill terminating on
+    the inked line with the summary against the bottom edge of its own slab,
+    which is the shape PR 870 removed from ``.comfortable-rows`` after it was
+    reported from the field; asserting the side is what stops it coming back
+    here.
+    """
+    app, _session = _app()
+    async with app.run_test(size=size) as pilot:
+        app.query_one(Editor).cursor_blink = False
+        await _settle(pilot)
+        assert not app.screen.has_class(COMFORTABLE_ROWS_CLASS), "this is the DEFAULT density"
+        block = ACTION_ROWS[kind]()
+        app._append_block(UserBlock("what happened"))
+        app._append_block(block)
+        await _settle(pilot, 4)
+
+        assert block.region.height == 2, (block.region, _frame(app)[-8:])
+        summary, pad = block.region.y, block.region.y + 1
+        frame = _frame(app)
+        assert frame[summary].strip(), frame[summary : pad + 1]
+        assert not frame[pad].strip(), frame[summary : pad + 1]
+
+        # The pad row is the widget's OWN fill, which is what makes it air
+        # inside the slab rather than the slab ending early.
+        own = _fill_at(app, summary, 2)
+        assert _fill_at(app, pad, 2) == own, frame[summary : pad + 1]
+        assert own != _fill_at(app, block.region.bottom, 2), "the fill must end with the widget"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_the_default_density_keeps_one_row_of_ground_between_actions(
+    size: tuple[int, int],
+) -> None:
+    """Two actions stay two targets at the default density too.
+
+    The pad row is interior to a card, so a run of them could in principle fuse
+    into one unbroken ``$lo-surface`` slab if the adaptive gap were ever
+    suppressed to pay for the new row. ``.comfortable-rows`` has this test
+    already; the default needs its own because it is now the density almost
+    every session actually renders.
+    """
+    app, _session = _app()
+    async with app.run_test(size=size) as pilot:
+        app.query_one(Editor).cursor_blink = False
+        await _settle(pilot)
+        app._append_block(UserBlock("run the suite"))
+        for n in range(5):
+            app._append_block(_card(f"bash{n}"))
+        await _settle(pilot, 4)
+
+        transcript = app.query_one(TranscriptView)
+        visible = [
+            c
+            for c in app.query(ToolCard)
+            if c.region.y >= transcript.region.y and c.region.bottom <= transcript.region.bottom
+        ]
+        assert len(visible) >= 2, "need two cards on screen to measure the gap between them"
+
+        for upper, lower in zip(visible, visible[1:]):
+            # Ink pitch 3: summary, the card's own pad, one row of ground.
+            assert lower.region.y - upper.region.y == 3, (upper.region, lower.region)
+            gap = list(range(upper.region.bottom, lower.region.y))
+            assert gap, (upper.region, lower.region, "cards are fused with no row between them")
+            own = _fill_at(app, upper.region.y, 2)
+            for y in gap:
+                assert _fill_at(app, y, 2) != own, (y, "the gap is the card's fill, not ground")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", SIZES)
+async def test_comfortable_rows_stay_strictly_airier_than_the_default(
+    size: tuple[int, int],
+) -> None:
+    """The setting keeps meaning something once the default is no longer flush.
+
+    ``display.comfortable_rows`` is OFF by default and buys the row ABOVE the
+    summary that the default does not. If a density change ever levelled the
+    two, the setting would still appear in ``/settings`` and do nothing when
+    toggled, which is worse than not offering it.
+    """
+    heights: dict[bool, int] = {}
+    for comfortable in (False, True):
+        app, _session = _app()
+        async with app.run_test(size=size) as pilot:
+            app.query_one(Editor).cursor_blink = False
+            if comfortable:
+                app.screen.add_class(COMFORTABLE_ROWS_CLASS)
+            await _settle(pilot)
+            app._append_block(UserBlock("what happened"))
+            card = _card("grep")
+            app._append_block(card)
+            await _settle(pilot, 4)
+            heights[comfortable] = card.region.height
+
+    assert heights[True] > heights[False], heights
+    assert (heights[False], heights[True]) == (2, 3), heights
 
 
 @pytest.mark.asyncio

@@ -165,6 +165,10 @@
     ],
     "tui_lag_shot.py": [
       "default"
+    ],
+    "ledger_density_shot.py": [
+      "default",
+      "comfortable"
     ]
   },
   "pages": {
