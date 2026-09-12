@@ -17,6 +17,11 @@ something a reader must interpret, and an unreadable file already degrades to
 "no pins", so a version field would buy a migration path for a format that has
 nowhere to go.
 
+UNPINNING THE LAST PIN LEAVES THE FILE HOLDING ``[]``, deliberately: an empty
+array is this module's resting state and reads back identically to an absent
+file, so there is no second write path to keep correct beside the one atomic
+replace.
+
 MULTI-PROCESS: LAST WRITER WINS, accepted. Two ``lop`` sessions pinning at the
 same instant means the second write is what the file holds; no precedent in this
 codebase takes a cross-process lock for a small index, and the same-directory
@@ -30,6 +35,8 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+
+from local_operator.session.catalog import session_directory_name
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +72,22 @@ def read_pins(config_dir: Path) -> list[str]:
     if not isinstance(raw, list):
         return []
     sessions = directory / "sessions"
-    return [item for item in raw if isinstance(item, str) and item and (sessions / item).is_dir()]
+    return [
+        item
+        for item in raw
+        # A pin is a session id: ONE bare directory name. Checked before the
+        # store-prune below, because the prune joins the id onto `sessions/`
+        # and `Path.__truediv__` does not keep it there — `sessions / "/tmp"`
+        # IS `/tmp`, and `../agents` climbs out of the store. Nothing renders
+        # from a bogus entry today (`load_catalog` hydrates none of them), so
+        # this is defence in depth: the same rule `session_directory_name`
+        # states for discovery metadata, reused rather than re-spelled, so a
+        # file this app wrote cannot redirect a read outside `sessions/`.
+        if isinstance(item, str)
+        and item == Path(item).name
+        and session_directory_name(item)
+        and (sessions / item).is_dir()
+    ]
 
 
 def toggle_pin(config_dir: Path, session_id: str) -> bool:
