@@ -108,7 +108,13 @@ async def main() -> None:
     #: Land the viewport here (content-space) before the final capture. Passed
     #: explicitly for an after-frame, so the pair shows the SAME place in the
     #: conversation: the offset is read off the before run's own report.
-    content_offset = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    content_offset = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
+    #: …or land on a ROW, which is the better pairing for a frame whose subject
+    #: is GONE on the after side: a numeric offset belongs to the content that
+    #: used to be there, so after a removal it points at different rows. An
+    #: anchor row exists in both trees, which makes the two frames a comparison
+    #: of the same window rather than of the same number.
+    anchor_text = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
     if source.resolve() == Path.home() / ".local-operator":
         raise SystemExit("refusing to read the live config dir; pass a copy")
 
@@ -164,6 +170,20 @@ async def main() -> None:
             print(f"after page-back {page}: user rows={users} notice rows={notices}")
         if page_backs:
             view = app.query_one(TranscriptView)
+            blocks = list(view.blocks())
+            if content_offset is None and anchor_text:
+                anchor = next(
+                    (
+                        block
+                        for block in blocks
+                        if anchor_text in _renderable_plain(getattr(block, "renderable", ""))
+                    ),
+                    None,
+                )
+                if anchor is None:
+                    raise SystemExit(f"anchor row not mounted: {anchor_text!r}")
+                content_offset = _block_content_offset(view, anchor)
+                print(f"anchor {anchor_text!r} at content offset {content_offset}")
             if content_offset is None:
                 # No offset asked for: land on the first notice row this frame
                 # paints, which is the subject of the pair, and REPORT the
@@ -171,7 +191,7 @@ async def main() -> None:
                 notice = next(
                     (
                         block
-                        for block in view.blocks()
+                        for block in blocks
                         if isinstance(block, UserBlock)
                         and _is_measured_notice(_renderable_plain(getattr(block, "renderable", "")))
                     ),
@@ -179,6 +199,12 @@ async def main() -> None:
                 )
                 if notice is not None:
                     content_offset = _block_content_offset(view, notice)
+                    # PRINT the row above it too: that row survives the fix, so
+                    # it is the anchor an after-frame can actually be landed on.
+                    index = blocks.index(notice)
+                    for neighbour in blocks[max(0, index - 2) : index]:
+                        text = _renderable_plain(getattr(neighbour, "renderable", ""))
+                        print(f"row above: {text.splitlines()[0][:70] if text else text!r}")
             if content_offset is not None:
                 # Twice, with a settle between: a page mount that lands during
                 # the first pump re-anchors the viewport to keep the reader's
