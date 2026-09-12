@@ -454,6 +454,7 @@ _BOUNDED_JOB_FIELDS = {
     "latest_details": "one progress payload, replaced not appended",
     "usage": "folded by _fold_job_usage_in_place",
     "attempt_aliases": "one id per collapsed resume attempt",
+    "cut_off_cause": "one cause token from the cut-off vocabulary",
 }
 
 #: Row fields bounded by THIS module, each of which the frame guard must
@@ -650,7 +651,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     read_token = str(uuid.uuid4())
     attention_store.publish("session/s1", read_token, "old-result", "complete")
     attention_store.acknowledge("session/s1", read_token)
-    attention = attention_store.publish("session/s1", str(uuid.uuid4()), "new-result", "complete")
+    attention = attention_store.publish(
+        "session/s1",
+        str(uuid.uuid4()),
+        "new-result",
+        "error",
+        reason="R" * 5_000,
+        cause="runtime-killed",
+    )
     assert set(attention) == {
         "conversation_id",
         "completion_token",
@@ -658,7 +666,16 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "kind",
         "unseen",
         "revision",
+        "reason",
+        "cause",
     }
+    # Published at the store's own cap: the field is one string per
+    # conversation, and the ceiling this fixture exists to police is why it is
+    # capped rather than passed through.
+    from local_operator.session.attention import REASON_WIRE_CHARS
+
+    assert len(attention["reason"]) == REASON_WIRE_CHARS
+    assert attention["cause"] == "runtime-killed"
     assert attention["unseen"] and attention["revision"] == [2, 1]
 
     # Every collection field, filled past anything a real session reaches.

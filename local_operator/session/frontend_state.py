@@ -162,7 +162,35 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: 25. Per-row text is the right place to take it from — it is already shared,
 #: already floored at a legible preview, and 128 chars spread across a roster
 #: is invisible, whereas an over-limit frame cannot be sent at all.
-JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
+#:
+#: Reduced again, 119,872 → 119,360, by the UNION of the two per-frame consumers
+#: that arrived either side of a rebase: this branch's attention payload
+#: (``reason`` at :data:`local_operator.session.attention.REASON_WIRE_CHARS`
+#: plus ``cause``, 714 B on every frame) and upstream's ``live_tool_started_at``
+#: (8 concurrently executing calls × 52 B = 416 B). Each fits alone on its own
+#: base — upstream's tree had 147 B of headroom, this branch's 83 B — and the
+#: pair does not, which is what put the ``ran all year`` worst case 416 bytes
+#: over the line. The same shelf pays, for the same reasons: the budget is
+#: elastic, shared, and floored at a legible preview, so 512 chars spread across
+#: a 200-row roster is 3 characters off each row's 599 — invisible — where an
+#: over-limit frame cannot be sent at all.
+#:
+#: Mind the GRANULARITY, because it is why this is a round 512 rather than the
+#: 416 the union overshot by: a row's share is ``BUDGET // len(jobs)``, so a
+#: reduction lands on whole characters per row and no value buys exactly 416.
+#: At the guard's 200 rows, 512 chars moves the share 599 → 596, and three
+#: fields × 3 chars × 200 rows is 1,800 bytes off the frame's FIXED content —
+#: past the overshoot by a margin rather than flush against it, which is the
+#: distinction the 13-byte precedent above did not make. Measure the guard, not
+#: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
+#: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
+#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: the catalogue grown from its 50-row floor to 54). The number that matters is
+#: the one the overshoot was about — whether the FLOOR fits: with the catalogue
+#: held at its floor the frame now has 1,384 B of line where it had 416 B too
+#: little. It is not slack: it bought two fields, and the next per-frame field is
+#: paid for out of here too.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_360
 JOB_TEXT_FLOOR_CHARS = 200
 
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
@@ -1275,8 +1303,8 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
-    """Omit the launch-reconciliation keys from a row that has no launch.
+def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Omit the per-row keys that are EMPTY from a row that has neither fact.
 
     An absent fact must not buy wire bytes. These two keys are empty on every
     bash job and on every child that was never resumed, and at roster scale the
@@ -1290,6 +1318,13 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
     reading neither key takes the same degrade path as one attached to a runtime
     that predates the fields. So this is a pure byte saving, not a semantic one.
 
+    ``cut_off_cause`` joins them for the same reason, measured the same way:
+    it is empty on every row that was not restored from a roster record, and one
+    key's worth of JSON on each of 200 rows was enough to push the same class
+    guard 4 KB over the line on its own. Its non-empty value is a single token
+    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
+    tens of bytes on the handful of rows that carry it.
+
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
@@ -1298,6 +1333,8 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_message_id", None)
     if not job.get("launch_prompts"):
         job.pop("launch_prompts", None)
+    if not job.get("cut_off_cause"):
+        job.pop("cut_off_cause", None)
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1343,6 +1380,12 @@ class JobState(BaseModel):
     latest_details: dict[str, Any] | str | None = None
     error_text: str = ""
     result_text: str = ""
+    #: Why a restored row reads ``interrupted`` — added with the cut-off
+    #: taxonomy (design §4, D3) so the subagent panel can say what stopped the
+    #: child rather than only that it stopped. Additive with a ``""`` default,
+    #: so an older runtime's row validates and the panel's existing spellings
+    #: stay valid; the value is a token from ``incidents.CUT_OFF_CAUSES``.
+    cut_off_cause: str = ""
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
@@ -1519,6 +1562,15 @@ class JobState(BaseModel):
             output_tail=str(getattr(job, "output_tail", "") or ""),
             output_seq=int(getattr(job, "output_seq", 0) or 0),
             restored=bool(getattr(job, "restored", False)),
+            # Carried, not re-derived here: the resolver that sets it
+            # (``session/restored_rows.py``) is the one place that knows whether
+            # a restored row's outcome came from a record, from the child's own
+            # journal, or from nothing at all. Dropping it on the way to the
+            # wire is what left the dock unable to say WHY a restored child
+            # stopped — and, for a child whose record reads ``completed``, was
+            # how the whole resolved row disappeared within a second of the
+            # session opening (UX review round 1, U2).
+            cut_off_cause=str(getattr(job, "cut_off_cause", "") or ""),
         )
 
 
@@ -1631,6 +1683,14 @@ class FrontendSessionState(BaseModel):
     #: value — treat as aborted. Additive; extra="allow" keeps older readers
     #: tolerant. One value per user prompt, not per compaction continuation.
     last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+    #: The rendered reason for a cut-off last turn, mirrored beside
+    #: ``last_turn_outcome`` for the same reason that field exists: a viewer
+    #: that dropped mid-turn rebinds after the real end is gone from
+    #: ``live_events``, and without this it can only synthesise the CLASS
+    #: placeholder ``"turn failed"`` (or blame the user for a cancel they never
+    #: made). Additive; ``""`` is the old-runtime value and means "no reason
+    #: was recorded", which is exactly what it is.
+    last_turn_cut_off: str = ""
     activity_started_at: float | None = None
     #: Which kind of work the working line is naming, and when that kind began.
     #:
@@ -1968,7 +2028,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_launch_fields_in_place(job)
+                    _drop_absent_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -3194,7 +3254,7 @@ class FrontendStateStore:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_launch_fields_in_place(summary)
+                _drop_absent_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -3431,6 +3491,7 @@ class FrontendStateStore:
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
+            last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
                 current.activity_started_at
                 if bool(getattr(session, "is_streaming", False))
@@ -3741,6 +3802,9 @@ class FrontendStateStore:
                 activity_started_at=None,
                 active_duration_s=duration,
                 last_turn_outcome=outcome,
+                # Empty for every non-cut-off end, which is what clears a
+                # previous turn's reason as the new outcome lands.
+                last_turn_cut_off=str(getattr(event, "cut_off", "") or ""),
             )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
@@ -4220,6 +4284,20 @@ def _last_turn_outcome_from(session: Any, current: str) -> str:
         return current if current in ("completed", "aborted", "error") else ""
     raw = str(getattr(session, "_last_turn_outcome", "") or "")
     return raw if raw in ("completed", "aborted", "error") else ""
+
+
+def _last_turn_cut_off_from(session: Any, current: str) -> str:
+    """The session's published cut-off reason, or the store's, or ``""``.
+
+    The twin of :func:`_last_turn_outcome_from`, and needed for the same reason:
+    ``refresh_from_session`` copies the session's fields over the store, and a
+    reduced test double (or an older runtime) without the attribute would
+    otherwise wipe a reason ``observe_event`` had just written — leaving a
+    rebinding viewer to synthesise a cause it could have named.
+    """
+    if not hasattr(session, "_last_turn_cut_off"):
+        return current
+    return str(getattr(session, "_last_turn_cut_off", "") or "")
 
 
 def _label(spec: Any) -> str:

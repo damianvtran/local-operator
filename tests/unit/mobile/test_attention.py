@@ -251,3 +251,45 @@ def test_relay_only_cap_and_unknown_old_owner_never_claim_complete() -> None:
 def test_legacy_metadata_mtime_is_not_a_completion(tmp_path: Path) -> None:
     daemon = MobileDaemon(port=0, password="isolated-test")
     assert not daemon.table._is_unseen("no-outcome", SimpleNamespace(mtime=1e30), None)
+
+
+@pytest.mark.parametrize(
+    "kind,reason,expected_text,expected_severity",
+    [
+        (
+            "error",
+            "the runtime was terminated while this turn was running",
+            "Stopped with an error — the runtime was terminated while this turn was running",
+            "error",
+        ),
+        ("error", "", "Stopped with an error", "error"),
+        ("interrupted", "the session was stopped by the user", "Interrupted", "info"),
+    ],
+)
+def test_the_phone_notice_carries_the_tier_the_row_deserves(
+    kind: str, reason: str, expected_text: str, expected_severity: str
+) -> None:
+    """D4: the phone flattened a cut-off into the routine receipt tier.
+
+    ``NoticeRow`` picks its glyph and ink from ``details.severity``, and the
+    frame carried an empty ``details`` — so a cut-off rendered as the same dim
+    ``·`` as ``Interrupted``, indistinguishable from a routine receipt, while
+    the TUI painted the same event in danger ink. The tier is derived in
+    ``harness/rows.py`` (both surfaces) rather than at each serialization site.
+    """
+    projection = SessionProjection(
+        session_id="sev-session",
+        pid=0,
+        attention={
+            "conversation_id": "session/sev-session",
+            "completion_token": str(uuid.uuid4()),
+            "anchor_id": "completion-t",
+            "kind": kind,
+            "reason": reason,
+            "unseen": True,
+            "revision": [1, 0],
+        },
+    )
+    row = _projection_frame(projection)["transcript"][-1]
+    assert row["text"] == expected_text
+    assert row["details"] == {"severity": expected_severity}

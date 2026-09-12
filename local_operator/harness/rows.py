@@ -455,6 +455,34 @@ def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSever
     return text, severity
 
 
+def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]:
+    """A RETURNED-TO turn's outcome row: its sentence and the ink it deserves.
+
+    The row a session paints when you come back to it, as opposed to the one it
+    paints while you are watching it die. Both surfaces have one
+    (``tui/app.py``'s attention poller and the mobile daemon's projection
+    frame), and they must agree on the words AND on the tier — the daemon's
+    frame is a dict that a phone renders from, so a tier decided in a renderer
+    is a tier the other renderer does not have.
+
+    THE TIER IS ``error`` FOR A FAILURE, and this is the whole point of the
+    helper. The poller's error branch passed no kind at all, so a cut-off — an
+    alarm while you watch it die — came back as a dim ``·`` whisper, in the ink
+    of the routine ``Interrupted`` receipt beside it (design review round 1,
+    D1; UX U4). ``interrupted`` stays ``info``: that row is a receipt for the
+    user's own act, and the live surface's louder ``warning`` for it is a
+    turn-scoped statement this replay is not making.
+
+    ``reason`` is optional because a pre-taxonomy record carries none, and an
+    empty one must read exactly as it always has rather than leaving a dangling
+    em-dash.
+    """
+    if kind == "error":
+        text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
+        return text, "error"
+    return "Interrupted", "info"
+
+
 def assistant_stop_notice(
     *,
     text: str,

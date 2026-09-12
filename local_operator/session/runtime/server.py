@@ -2379,6 +2379,17 @@ class RuntimeServer:
         )
         return await self._retire_for("stale-build", to=newer.label())
 
+    def _retire_detail(self, to: str) -> str:
+        """``" (old → new)"`` for a retirement reason, when both stamps exist.
+
+        The build pair is what makes the reason actionable later: "the runtime
+        retired" says nothing about which build it left for.
+        """
+        boot = getattr(self, "_boot_build", None)
+        if boot is None or not to:
+            return ""
+        return f" ({boot.label()} → {to})"
+
     async def _retire_for(self, reason_label: str, *, to: str = "") -> str:
         """Retire this runtime iff it is idle, announcing ``reason_label``.
 
@@ -2408,14 +2419,28 @@ class RuntimeServer:
         if not callable(request_stop):
             return "kept: this runtime cannot stop itself gracefully"
         await self.announce_retiring(reason_label, to=to)
-        # The one await between decision and stop; re-ask, as
-        # ``_retire_if_pristine`` does after its broadcast.
-        try:
-            reason = str(may_refresh() or "")
-        except Exception as exc:  # noqa: BLE001
-            return f"kept: idle probe failed ({exc})"
-        if reason:
-            return f"kept: {reason} (arrived while retiring was announced)"
+        # The ONE await between decision and stop, so the final check is a LATCH
+        # and not another sample: a ``prompt`` admitted in this gap would open a
+        # turn that ``request_stop`` then aborts one await later. ``begin_retire``
+        # commits the runtime in the same synchronous step that checks it, so
+        # from here the admissions refuse and the retirement is clean by
+        # construction (design §5.1). The cut-off CAUSE is always
+        # ``runtime-retired``: ``reason_label`` names the trigger for the log and
+        # the wire announcement, while the cause is the vocabulary token a
+        # restored session renders.
+        begin_retire = getattr(h, "begin_retire", None)
+        if callable(begin_retire):
+            if not begin_retire("runtime-retired", self._retire_detail(to)):
+                return "kept: work arrived while retiring was announced"
+        else:
+            # A reduced/older handle without the latch keeps today's re-check
+            # rather than retiring unguarded.
+            try:
+                reason = str(may_refresh() or "")
+            except Exception as exc:  # noqa: BLE001
+                return f"kept: idle probe failed ({exc})"
+            if reason:
+                return f"kept: {reason} (arrived while retiring was announced)"
         logger.info("session runtime: retiring (%s)", reason_label)
         result = request_stop()
         if inspect.isawaitable(result):

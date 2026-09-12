@@ -180,8 +180,14 @@ async def test_rebind_to_a_newer_generation_ends_the_suspect_not_the_successor(
 
 
 @pytest.mark.asyncio
-async def test_recovery_going_cold_emits_one_aborted_end(tmp_path, monkeypatch) -> None:
-    """Test 18: recovery goes cold → one aborted end (unchanged)."""
+async def test_recovery_going_cold_emits_one_cut_off_end(tmp_path, monkeypatch) -> None:
+    """Test 18: recovery goes cold → one CUT-OFF end (exactly once).
+
+    The exactly-once property is what this test owns and it is unchanged. The
+    KIND changed deliberately: a confirmed owner death is the case the cut-off
+    taxonomy exists for, and it used to be published as a bare abort — the same
+    shape a user's own ``/stop`` produces.
+    """
     remote = _facade(tmp_path, monkeypatch, can_go_cold=True)
     received: list[Any] = []
     remote.subscribe(received.append)
@@ -190,7 +196,9 @@ async def test_recovery_going_cold_emits_one_aborted_end(tmp_path, monkeypatch) 
     remote._go_cold()
 
     ends = [event for event in received if isinstance(event, AgentEndEvent)]
-    assert len(ends) == 1 and ends[0].aborted is True and ends[0].error is None
+    assert len(ends) == 1
+    assert ends[0].aborted is False
+    assert ends[0].cut_off_cause == "owner-lost"
     assert remote.is_streaming is False
 
 
@@ -307,7 +315,15 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
         "a dead runtime on the terminal surface left the turn spinning: "
         f"ends={ends} attempts={len(takeover_attempts)}"
     )
-    assert ends[0].aborted is True and ends[0].error is None
+    # The VERDICT, which is now a named cut-off rather than the bare abort a
+    # user's Esc produces: this arm is the one the watched TUI session takes
+    # (``_can_go_cold`` is False for every viewer built through ``connect()``),
+    # and reporting a runtime death as the user's own cancel was the reported
+    # bug (QA round 1, Q-1 / UX U1). The deliberately-not-taken desktop exit
+    # below is what this test has always been about.
+    assert ends[0].aborted is False
+    assert ends[0].cut_off_cause == "owner-lost"
+    assert "cut off" in str(ends[0].error)
     assert remote.is_streaming is False
     assert remote._suspect_generation is None
     # The legacy contract is preserved: the loop keeps CHASING a successor

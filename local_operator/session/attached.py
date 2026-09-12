@@ -66,6 +66,7 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     RETIRING_REASON,
     STOPPED_REASON,
@@ -100,6 +101,7 @@ from local_operator.session.protocol import (
     RuntimeLocality,
     unanswered_tail_call_ids,
 )
+from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
@@ -485,45 +487,6 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
     return cls.model_validate(data)
-
-
-def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
-    """Roster rows as they must appear with NO runtime alive.
-
-    The persisted roster records what each job's state WAS when it was
-    written. With no runtime there is by definition nothing running, so a row
-    restored verbatim paints a spinner for a child that cannot be working and
-    the band counts it as live activity (UX review round 1, U1). That is worse
-    than the empty panel this change replaces: an empty panel is obviously
-    incomplete, while phantom activity is confidently wrong, and it invites a
-    cancel that finds nothing. Non-terminal rows are common on disk — a
-    session whose terminal was closed mid-run persists them by design.
-
-    The rule is the one ``AsyncJobManager.restore`` already applies on the
-    owner path, reproduced here because the cold viewer never builds a
-    manager:
-
-    * a ``running`` row that was PARKED (``queued``) never started, so it has
-      no transcript to show or resume and is DROPPED — an ``interrupted`` row
-      would invite a resume that finds nothing;
-    * any other non-terminal row becomes ``interrupted``, the restore-only
-      status that means "was cut off mid-run"; live readers already treat it
-      as terminal, and it is what lets the panel offer to resume the child.
-
-    Anything already terminal is untouched: ``completed``/``failed``/
-    ``cancelled`` are facts the last runtime settled and this process must not
-    relitigate.
-    """
-    rows: list[Any] = []
-    for job in jobs:
-        status = str(getattr(job, "status", "") or "")
-        if status == "running":
-            if bool(getattr(job, "queued", False)):
-                continue
-            rows.append(job.model_copy(update={"status": "interrupted", "restored": True}))
-            continue
-        rows.append(job.model_copy(update={"restored": True}))
-    return rows
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -1352,7 +1315,14 @@ class AttachedSession:
             or {}
         )
         changes: dict[str, Any] = {
-            "jobs": _restored_job_rows(self._durable_roster(state, payload=payload))
+            # The RECORDS go in with the rows: a record's ``outcome`` settles a
+            # child the row's persisted status cannot, and its ``session_dir``
+            # is the only route to the child's own transcript when the record
+            # does not settle it. Without them every non-terminal row came back
+            # as a blanket ``interrupted``" (design §4, D3).
+            "jobs": resolve_restored_rows(
+                self._durable_roster(state, payload=payload), records=roster_records(payload)
+            )
         }
         if isinstance(payload.get("accounting"), list):
             try:
@@ -4192,8 +4162,14 @@ class AttachedSession:
         owner: a killed owner factually aborted the turn, a stopped one ended
         the whole session under it, and a viewer going cold has no runtime
         left to hear from. Marked through the normal event path so no
-        card/banner or attach vocabulary appears — the transcript reads as an
-        ordinary aborted turn, which is what it is.
+        card/banner or attach vocabulary appears.
+
+        ``aborted``/``error`` are the CALLER's verdict, and the cut-off work
+        makes that explicit rather than leaving the default to speak for every
+        case: a deliberate stop or a kill keeps ``aborted=True, error=None``
+        (the shape a user's Esc produces), while a confirmed owner death passes
+        ``aborted=False, error=<cut-off notice>`` so the app paints a named
+        failure instead of a cancel it cannot explain.
 
         ``direct`` bypasses the sync buffer and hands the end straight to the
         subscribed handlers (dropping it when there are none). The go-cold
@@ -4224,6 +4200,23 @@ class AttachedSession:
         if not self._streaming and not force:
             return
         end = AgentEndEvent(aborted=aborted, generation=0, error=error)
+        if error:
+            # The cause rides WITH the sentence, so a consumer that only has the
+            # event (the phone's projection, a log line, a test) can classify it
+            # without re-parsing operator-facing prose. ``cause_from_reason``
+            # inverts ``format_cut_off_notice``'s own rendering, which is what
+            # keeps the two from drifting into a vocabulary nobody can read.
+            from local_operator.incidents import cause_from_reason
+
+            # NO ``or "owner-lost"`` FALLBACK. `cause_from_reason` is the
+            # inverse of `format_cut_off_notice`, so an empty answer means the
+            # event's error is NOT a cut-off sentence — and stamping the token
+            # anyway mislabelled every other error as an owner loss. The one
+            # concrete case is `_settle_suspect_turn`'s `"turn failed"`
+            # placeholder for a provider error, which then carried
+            # `cut_off_cause="owner-lost"` on a row that was never cut off
+            # (review round 1, MINOR-3).
+            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error)})
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -4264,12 +4257,14 @@ class AttachedSession:
           from ``last_turn_outcome`` (additive; ``""`` from an old runtime
           keeps today's aborted synthesis).
 
-        The ``error`` case synthesises the placeholder ``"turn failed"``.
-        ``last_turn_outcome`` is a four-value enum that deliberately carries
-        no message — transporting the owner's error text would mean a second,
-        unbounded field on every snapshot — so that string is a CLASS marker,
-        never the owner's actual diagnostic, and nothing downstream should
-        read it as authoritative (review round 1, MINOR-2).
+        The ``error`` case synthesises ``last_turn_cut_off`` when the owner
+        published one — the harness-authored reason sentence for a cut-off — and
+        falls back to the placeholder ``"turn failed"`` otherwise. The
+        placeholder is a CLASS marker, never the owner's actual diagnostic
+        (review round 1, MINOR-2); the cut-off reason is different in kind: it
+        is a short, bounded, harness-authored sentence, so carrying it on the
+        snapshot costs one line and buys the viewer a real cause instead of
+        a shrug.
         """
         suspect = self._suspect_generation
         self._suspect_generation = None
@@ -4281,16 +4276,18 @@ class AttachedSession:
             self._same_live_turn = True
             return
         outcome = ""
+        cut_off = ""
         store = self._frontend_store
         if store is not None:
             outcome = str(getattr(store.state, "last_turn_outcome", "") or "")
+            cut_off = str(getattr(store.state, "last_turn_cut_off", "") or "")
         # ``force`` because ``_apply_frontend_facades`` already cleared
         # ``_streaming`` when the snapshot says the turn ended, and the
         # usual early-return would swallow the synthesised end.
         self._end_turn_locally(
             direct=True,
             aborted=outcome in ("aborted", ""),
-            error="turn failed" if outcome == "error" else None,
+            error=(cut_off or "turn failed") if outcome == "error" else None,
             force=True,
         )
         # A successor turn may already be live (generation moved). The
@@ -4411,8 +4408,29 @@ class AttachedSession:
             # is the honest repair, and ``_settle_suspect_turn`` decides on
             # rebind exactly as it does after a transient drop.
         else:
+            # OWNER DEATH, and the end must say so. Synthesising the bare
+            # abort (``aborted=True, error=None``) is the exact shape a user's
+            # Esc produces, so a runtime that died mid-turn painted the same
+            # "interrupted" the operator's own cancel does — the bug this
+            # change exists to fix, and the reason this branch names a cause
+            # rather than leaving a class marker.
+            #
+            # Reached for a runtime this viewer can no longer hear. A deliberate
+            # stop returns above and ``refresh=True`` never ends a turn, but the
+            # give-up arm below ALSO arrives here for a live-but-silent owner (a
+            # record is present and its pid is alive, and nothing answers), so
+            # the sentence it paints says what the viewer can verify rather than
+            # asserting a death it cannot establish (review round 1, MINOR-3).
+            # What it must never do is paint an error over a healthy session
+            # that merely dropped a socket: that case rebinds inside
+            # ``COLD_FALLBACK_S`` and never reaches this branch — the autorefresh
+            # design's invariant, kept.
             try:
-                self._end_turn_locally(direct=True)
+                self._end_turn_locally(
+                    direct=True,
+                    aborted=False,
+                    error=format_cut_off_notice("owner-lost"),
+                )
             except Exception:  # noqa: BLE001 — a viewer notice must not break teardown
                 logger.debug("ending the in-flight turn on go-cold failed", exc_info=True)
             # Belt for the case ``_end_turn_locally`` early-returns on
@@ -4564,6 +4582,23 @@ class AttachedSession:
         # fired for a no-record viewer too, marking a dead runtime as merely
         # unresponsive (QA round 1 Q849-1, review round 1 R3).
         record_seen = False
+
+        def paced(seconds: float) -> float:
+            """``seconds``, shortened so the loop wakes AT the cold deadline.
+
+            The deadline is checked at the top of a pass, so a pass that slept
+            ``delay`` past it reported the cut-off one sleep late: measured at
+            9.4 s against ``COLD_FALLBACK_S`` of 8.0 on the watched SIGKILL,
+            with this cap in place 8.01 s. (Both figures run from the KILL; the
+            loop's deadline starts when it notices the drop, so the residual
+            hundredth is the notification lag, not the pacing.) The sleep is
+            otherwise untouched: once the deadline is behind us the original
+            pacing returns, because a bound that yielded a zero sleep would turn
+            the chase into a hot loop against the registry.
+            """
+            remaining = cold_deadline - time.monotonic()
+            return min(seconds, remaining) if remaining > 0 else seconds
+
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
@@ -4589,17 +4624,32 @@ class AttachedSession:
                     # to clear it. That is strictly worse than the false
                     # "interrupted" this PR removes — review round 1,
                     # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
-                    # after this long with no runtime, an in-flight turn is
-                    # honestly aborted. ``_end_turn_locally`` clears
-                    # ``_suspect_generation``, so this fires at most once and
-                    # the retry loop continues underneath it.
+                    # after this long with no runtime the turn is CUT OFF, and it
+                    # says so with a named cause rather than with the bare abort a
+                    # user's Esc produces. ``_end_turn_locally`` clears
+                    # ``_suspect_generation``, so this fires at most once and the
+                    # retry loop continues underneath it.
+                    #
+                    # THIS IS THE ARM THE OPERATOR'S REPORT LANDS ON, which is why
+                    # it needs the verdict as much as ``_go_cold`` does. The
+                    # owner-death branch there carries it, but it is reachable only
+                    # when ``_can_go_cold`` holds — and that is False for every
+                    # viewer built through ``connect()``, which is what the TUI
+                    # builds. Measured on this head: a SIGKILLed runtime painted
+                    # ``interrupted ⊘`` with no notice, no reason and durable state
+                    # still ``kind=None`` at t≈98 s, byte-identical to the user's
+                    # own cancel (QA round 1, Q-1; UX U1).
                     if self._suspect_generation is not None:
                         logger.info(
                             "no runtime for %s after %.0fs; ending the in-flight turn",
                             self._session_id,
                             COLD_FALLBACK_S,
                         )
-                        self._end_turn_locally(direct=True)
+                        self._end_turn_locally(
+                            direct=True,
+                            aborted=False,
+                            error=format_cut_off_notice("owner-lost"),
+                        )
                     # ...and AFTER that verdict, the loop itself must reach one.
                     # Ending the turn left ``_recovering`` set, and the only
                     # other exits are the cold branch above (unreachable here)
@@ -4732,7 +4782,7 @@ class AttachedSession:
                         # rule — a pass that did not bind leaves no trace of
                         # the runtime it tried.
                         self._discard_rejected_client()
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(paced(delay))
                         # ``_RECOVERY_DIAL_CAP_S``, not the 0.5 this loop shared
                         # with ``_bind_under_lock``: the ``continue`` below
                         # skips the sleep at the bottom of the loop, so this is
@@ -4822,10 +4872,21 @@ class AttachedSession:
                     else:
                         callback = self._takeover_callback
                         if callback is not None:
-                            # Takeover means the owner is gone: the turn did
-                            # abort. Synthesise before the app disposes this
-                            # facade, or the working line never learns.
-                            self._end_turn_locally(direct=True)
+                            # Takeover means the owner is gone and the turn did
+                            # NOT complete, so the synthesised end names that
+                            # rather than carrying the bare abort a user's Esc
+                            # produces. The same shape this loop's cold arm passes,
+                            # so the two ways of losing an owner cannot disagree
+                            # about what losing one looks like; a DELIBERATE stop
+                            # never reaches here, because the stop check returns
+                            # earlier in the pass. Synthesise before the app
+                            # disposes this facade, or the working line never
+                            # learns.
+                            self._end_turn_locally(
+                                direct=True,
+                                aborted=False,
+                                error=format_cut_off_notice("owner-lost"),
+                            )
                             result = callback(local)
                             if inspect.isawaitable(result):
                                 await result
@@ -4836,7 +4897,7 @@ class AttachedSession:
                         # disconnect can happen; if it did not, avoid leaking
                         # the writer lease we just won.
                         await local.dispose()
-                await asyncio.sleep(delay)
+                await asyncio.sleep(paced(delay))
                 delay = min(delay * 1.7, 0.5)
         finally:
             self._recovering = False

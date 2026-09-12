@@ -1224,6 +1224,18 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     aborted: bool = False
     error: str | None = None
     generation: int = 0
+    #: Why the turn was CUT OFF by something other than a deliberate stop, when
+    #: that is what happened. ``cut_off_cause`` is the machine token
+    #: (``incidents.CUT_OFF_CAUSES``); ``cut_off`` is its rendered operator
+    #: sentence, carried so a viewer can name the cause without re-deriving it
+    #: from the vocabulary. Both default to ``""``, which is also what an OLD
+    #: runtime produces — and ``AgentEvent`` is ``extra="allow"``, so an old
+    #: viewer that has never heard of these fields keeps them as extras and
+    #: never fails validation. That is the whole backwards-compatibility story
+    #: here: no ``PROTOCOL_VERSION`` bump is needed for an additive field on a
+    #: frame old readers already accept.
+    cut_off: str = ""
+    cut_off_cause: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.

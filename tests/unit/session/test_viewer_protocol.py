@@ -303,6 +303,11 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "has_pending_fork",
         "journal_credential_change",
         "measure_preloaded_context",
+        # A viewer never owns a session to dispose, so it has no deliberate
+        # stop to record: a viewer's `/stop` goes over the socket, where the
+        # OWNER records the verdict. `_stop_local_session` returns before
+        # this is reached for a viewer at all, and the read is getattr-probed.
+        "note_deliberate_stop",
         "preflight_usage",
         "refresh_frontend_usage",
         "routing_settings",
