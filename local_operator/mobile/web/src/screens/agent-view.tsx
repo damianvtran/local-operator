@@ -462,9 +462,13 @@ interface LazyTranscript {
 	/** A fetch is in flight and nothing has landed yet: the body shows its
 	 * loading affordance instead of a blank window (U2). */
 	loading: boolean;
-	/** The (single, for a settled child) fetch failed: the body must surface an
-	 * error + retry under whatever rows exist, rather than a silent blank (U1).
-	 * Mutually exclusive with ``unavailable``, so the newest fetch decides. */
+	/** The newest fetch failed for a reason a retry could clear. Recorded for
+	 * both kinds of child because it is a fact about the LAST fetch; what the
+	 * body paints depends on whether a poll can recover it — a SETTLED child
+	 * has no poll, so its single dropped fetch must surface an error + retry
+	 * rather than a silent blank (U1), while a running child's drop stays quiet
+	 * over the rows already on screen (see ``transientCard``). Mutually
+	 * exclusive with ``unavailable``, so the newest fetch decides. */
 	failed: boolean;
 	/** The route answered 404: this child has no readable transcript (the daemon
 	 * could not resolve its session dir). Terminal, not a link drop — a retry
@@ -473,6 +477,11 @@ interface LazyTranscript {
 	unavailable: boolean;
 	/** Imperative re-pull for the retry affordance. */
 	retry: () => void;
+	/** Whether the addressed child is still running, i.e. whether the 1.5 s poll
+	 * will pull again. Exposed rather than re-derived by the caller so the
+	 * body's recovery rule and the poll itself cannot disagree about which
+	 * children own a poll: they read the same value the interval is built from. */
+	running: boolean;
 }
 
 function useLazySubagentTranscript(
@@ -533,9 +542,12 @@ function useLazySubagentTranscript(
 			} catch (err) {
 				/* An aborted request is a teardown/replacement, not a failure:
 				   the successor pull owns the state. A real drop for a RUNNING
-				   child self-heals on the next poll tick, so it only reflects as
-				   loading; for a SETTLED child there is no poll, so the single
-				   dropped fetch is terminal and must surface a retry (U1). */
+				   child self-heals on the next poll tick, so it is recorded here
+				   but must not be painted over that child's live rows; for a
+				   SETTLED child there is no poll, so the single dropped fetch is
+				   terminal and must surface a retry (U1). The flag describes the
+				   LAST fetch for both; ``transientCard`` owns the rendering side
+				   of that distinction. */
 				if (!alive || (err instanceof DOMException && err.name === "AbortError")) return;
 				setLoading(false);
 				/* A 404 is the daemon saying this child has no transcript to serve
@@ -579,9 +591,16 @@ function useLazySubagentTranscript(
 		setAttempt((n) => n + 1);
 	};
 	if (inlined) {
-		return { entries: detail.transcript, loading: false, failed: false, unavailable: false, retry };
+		return {
+			entries: detail.transcript,
+			loading: false,
+			failed: false,
+			unavailable: false,
+			running,
+			retry,
+		};
 	}
-	return { entries: fetched, loading, failed, unavailable, retry };
+	return { entries: fetched, loading, failed, unavailable, running, retry };
 }
 
 /** The body shown when the child's own transcript is not on screen, whether
@@ -612,8 +631,11 @@ function TranscriptFetchError({
 				{/* The live region is the TEXT, not the card: wrapping the card put
 				   the button inside an alert with an empty accessible name (D4),
 				   which announces a control as part of the message. The same shape
-				   ``AgentUnavailable`` uses. */}
-				<div role="alert">
+				   ``AgentUnavailable`` uses. ``gap-2`` because the wrapper took the
+				   pair spacing over from the card's own ``flex … gap-2``: without it
+				   title and body sit flush at 0 px where this app's equivalent pair
+				   (``AgentUnavailable`` → ``InlineState``) is 8 px (D6). */}
+				<div role="alert" className="flex flex-col gap-2">
 					<p className="text-body-sm font-medium text-ink">No transcript for this agent.</p>
 					<p className="text-meta text-ink-dim">
 						Its conversation steps couldn't be read, so only the result and activity below
@@ -631,7 +653,10 @@ function TranscriptFetchError({
 	}
 	return (
 		<div className="flex flex-col items-start gap-2 py-4">
-			<div role="alert">
+			{/* Same live-region shape and pair gap as the terminal branch above (D4,
+			   D6) — the two cards are one component so a design pass edits one place,
+			   and both must read with the same title/body rhythm. */}
+			<div role="alert" className="flex flex-col gap-2">
 				<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
 				<p className="text-meta text-ink-dim">
 					{connected
@@ -667,7 +692,8 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const { entries: transcript, loading, failed, unavailable, retry } = useLazySubagentTranscript(
+	const { entries: transcript, loading, failed, unavailable, running, retry } =
+		useLazySubagentTranscript(
 		sessionId,
 		jobId,
 		detail,
@@ -683,7 +709,7 @@ export function AgentConversation({
 	const entries = useMemo(() => agentConversationEntries(detailForRender), [detailForRender]);
 	// The transcript body owns three off-happy-path states when the child's own
 	// transcript is not on screen: a fetch in flight (loading affordance, not a
-	// blank window — U2), a settled child whose one fetch failed (visible error +
+	// blank window — U2), a child whose newest fetch failed (visible error +
 	// retry so it is recoverable in place, never a silent blank — U1), or
 	// genuinely empty. The header/outcome above stay put; only the BODY reflects
 	// these.
@@ -696,6 +722,18 @@ export function AgentConversation({
 	// made the terminal card and the Retry card unreachable for exactly that
 	// shape (D1/Q1, Q2), so ``emptyContent`` is now only for a body with nothing
 	// in it at all and the rows get the state underneath them.
+	const hasRows = entries.length > 0;
+	// A dropped poll on a RUNNING child whose rows are already on screen must NOT
+	// paint the transient card: that child's own 1.5 s poll is its recovery path
+	// (see the hook's catch block), so the drop self-heals on the next tick while
+	// the card would contradict rows that are still live — and on a flaky link
+	// flash an error once per drop over a transcript the user can read. It stays
+	// quiet until a tick lands. Two shapes keep the card, and neither has a poll
+	// to recover it: a SETTLED child's single fetch (U1), and a running child with
+	// nothing on screen yet, where the card is the only signal anything failed.
+	// The terminal 404 card is deliberately not gated: a 404 is a verdict about
+	// the child, not a transient fact about the link (D3).
+	const transientCard = failed && !(running && hasRows);
 	const fetchState = unavailable ? (
 		<TranscriptFetchError
 			connected={connected}
@@ -703,7 +741,7 @@ export function AgentConversation({
 			parentPath={parentPath}
 			onRetry={retry}
 		/>
-	) : failed ? (
+	) : transientCard ? (
 		<TranscriptFetchError
 			connected={connected}
 			unavailable={false}
@@ -715,7 +753,6 @@ export function AgentConversation({
 			<TranscriptLoading connected={connected} />
 		</div>
 	) : null;
-	const hasRows = entries.length > 0;
 	return (
 		<>
 			<AgentHeader
