@@ -342,11 +342,17 @@ def test_the_lock_is_what_keeps_the_shared_memo_from_crossing_stores(tmp_path: P
     public entry point this way measured 0/80 wrong with the lock REMOVED, a
     test that cannot fail. With ``_search_shared``'s lock in place each call is
     atomic over that memo and every answer is about its own store; with the lock
-    removed, each thread intermittently answers with the other store's ids.
+    removed, each thread intermittently answers about the other store — which in
+    this fixture means an EMPTY answer, not the other store's ids: the query is
+    store-specific ("the aaa keyword …"), so the other corpus contains nothing
+    that matches it. The failure is still the failure (the answer came from a
+    corpus this search does not own), but the symptom is "found nothing", and
+    saying "answered with the other store's ids" would be wrong here (round 2,
+    R6).
 
-    Verified both ways: this passes with the lock, and fails with it removed
-    (``with _SHARED_LOCK:`` replaced by a bare block) — 1 failed, cross-store
-    answers named in the assertion.
+    Verified both ways: this passes with the lock (5 consecutive runs) and fails
+    with it removed (``with _SHARED_LOCK:`` replaced by a bare block) — 1 failed,
+    ``cross-store answers: ['aaa answered [] (other store: bbb)', …]``.
     """
     import time
 
