@@ -8,6 +8,7 @@ text path as interactive sessions; private reasoning is never an input here.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping, get_args
 from urllib.parse import unquote
 
@@ -37,7 +38,7 @@ _MAX_EXTRA_KEY_CHARS = 40
 _MAX_EXTRA_KEYS_SHOWN = 5
 
 
-def _is_quotable_key(key: str) -> bool:
+def is_quotable_key(key: str) -> bool:
     """Whether an unexpected key may be named back to the model verbatim.
 
     Conservative by construction: the key must be short, and must render to
@@ -53,6 +54,38 @@ def _is_quotable_key(key: str) -> bool:
 
 
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
+
+#: Longest slice of a rejected reply that may be replayed into the model's
+#: history or published as evidence. The reply has to be there -- the model
+#: must see WHAT it said to fix it, and a reader must see it to diagnose the
+#: class -- but a runaway reply (a provider's max-token wall of prose) must not
+#: cost the whole window on the retry or the whole bundle on the artifact.
+#:
+#: One bound for both boundaries, declared here rather than beside the client
+#: because ``episode.py`` applies it while publishing the artifact and must not
+#: import the provider-backed client to reach it.
+MAX_REJECTED_REPLY_CHARS = 4_000
+
+#: Appended to a reply cut by :data:`MAX_REJECTED_REPLY_CHARS`.
+REJECTED_REPLY_TRUNCATED = "\n[... reply truncated]"
+
+#: Published in place of a rejected reply whose text cannot be cleared for
+#: evidence. Whole-or-nothing: a reply is either published in full (bounded) or
+#: replaced by this marker, never published in part, because a partial rendering
+#: is exactly what makes a canary stop matching the alarm that exists to catch
+#: it.
+REJECTED_REPLY_WITHHELD = (
+    "(rejected reply withheld: it carried text the episode's redaction set forbids in evidence)"
+)
+
+#: JSON's own escape for a non-ASCII or escaping-sensitive character. Decoded
+#: before a redaction scan for the same reason percent escapes are: the model's
+#: reply reaches evidence as WIRE bytes, and a canary spelt ``\\u0068unter2``
+#: matches no substring check on the raw text. Deliberately a plain pass over
+#: the string rather than a JSON parse: the interesting replies are exactly the
+#: ones that do not parse (that is why they were rejected), so a scan that only
+#: understood well-formed JSON would be blind on the shapes it exists for.
+_JSON_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 #: What the reply-channel function tells the model it is for. Kept beside the
 #: envelope it describes so the two cannot drift, and deliberately short: it
@@ -73,10 +106,13 @@ def is_public_reply(value: Any) -> bool:
 def looks_like_public_reply(payload: str) -> bool:
     """Whether a REJECTED reply appears to attempt the reserved envelope.
 
-    Used only to withhold unvalidated output from corrective history and
-    rejection evidence; acceptance is unaffected and stays with the strict
-    decoder. A literal substring test is bypassed by legal JSON Unicode escapes
-    (``public_\\u006fbservations``), and full decoding fails on truncated
+    Used only to withhold unvalidated output from CORRECTIVE HISTORY; acceptance
+    is unaffected and stays with the strict decoder. The rejection ARTIFACT is a
+    separate boundary with its own escape-aware scan (see
+    :func:`rejected_reply_evidence`) -- withholding the reply from the bundle as
+    well made the rejection classes unreadable, and the two boundaries have
+    different jobs. A literal substring test is bypassed by legal JSON Unicode
+    escapes (``public_\\u006fbservations``), and full decoding fails on truncated
     framing — exactly the combination that leaked an encoded known note before
     review round 1 (F1). So scan the raw string-literal SPANS for reserved
     keys: fully decodable names are compared after unescaping, and any
@@ -185,7 +221,7 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
                 # Quoting whole-or-nothing removes both: nothing is ever
                 # reshaped on the way out, so a redaction canary still matches
                 # and the rendered length is bounded by the charset itself.
-                safe = [key for key in extra if _is_quotable_key(key)]
+                safe = [key for key in extra if is_quotable_key(key)]
                 summary = ", ".join(repr(key) for key in safe[:_MAX_EXTRA_KEYS_SHOWN])
                 withheld = len(extra) - len(safe[:_MAX_EXTRA_KEYS_SHOWN])
                 if withheld and summary:
@@ -222,6 +258,80 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
     if not isinstance(batch, dict) or set(batch) != {"actions"}:
         raise ValueError("model reply action_batch requires exactly an actions array")
     return value
+
+
+def rejected_reply_evidence(reply: str | None, redactions: RedactionSet | None) -> str:
+    """A rejected reply as evidence may publish it: scanned, then bounded.
+
+    The model's own words about a refused turn are the one thing that makes a
+    rejection class diagnosable after the fact, and they were the thing the
+    bundle threw away: 273 of the MiniMax campaign's 280 rejection artifacts
+    replaced the reply with the placeholder (counted 2026-09-12). The reply is
+    therefore published here, on a boundary of its own.
+
+    ORDER IS THE SECURITY PROPERTY, exactly as in ``_diagnostic``: every
+    rendering is scanned BEFORE the bound is applied. ``RedactionSet`` is a
+    substring check, so a reply cut first and scanned afterwards returns clean
+    over a canary that was severed by the cut -- and ``publish_artifact``'s own
+    scan then agrees for the same reason, sealing the fragment into the bundle.
+
+    Fails closed and WHOLE: any hit replaces the entire reply with
+    :data:`REJECTED_REPLY_WITHHELD` rather than masking the matching span. A
+    partial masking still narrows a secret and, worse, leaves a rendering whose
+    length depends on the secret's own alphabet. The reply was refused anyway --
+    nothing executable is lost -- and the artifact still carries the class key
+    and the diagnostic, so a withheld reply is still a readable rejection.
+
+    ``redactions`` is required-not-defaulted at the call site for the reason
+    ``_diagnostic`` gives: the UNSAFE call must not be the shorter one to write.
+    An explicit ``None`` states that this rendering never reaches evidence.
+    """
+
+    if not reply:
+        return ""
+    if redactions is not None and not _reply_is_clear(reply, redactions):
+        return REJECTED_REPLY_WITHHELD
+    if len(reply) > MAX_REJECTED_REPLY_CHARS:
+        return reply[:MAX_REJECTED_REPLY_CHARS] + REJECTED_REPLY_TRUNCATED
+    return reply
+
+
+def _reply_is_clear(reply: str, redactions: RedactionSet) -> bool:
+    """Whether every rendering of a reply is free of the episode's canaries.
+
+    Four renderings, cheapest first, because the canary can be hidden in each
+    of them and the reply is untrusted bytes:
+
+    * the raw text (the plaintext, base64 and hex canaries ``assert_clear``
+      checks directly);
+    * percent escapes, decoded;
+    * ``\\uXXXX`` escapes, decoded -- the F1 shape, which is a legal JSON
+      spelling of any character and would otherwise walk straight past a
+      substring test;
+    * the DECODED JSON value when the reply happens to parse, which hands
+      ``assert_clear`` the structure rather than the text (it walks mappings
+      and lists, so a canary nested in an action is seen).
+
+    A decoding failure is not a failure to scan: the raw and escaped
+    renderings are always checked, which is what makes this safe on the
+    truncated replies that are the common case here.
+    """
+
+    unquoted = unquote(reply)
+    unescaped = _JSON_UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), reply)
+    renderings: list[Any] = [reply, unquoted, unescaped, unquote(unescaped)]
+    try:
+        renderings.append(json.loads(reply))
+    except (ValueError, RecursionError):
+        # Truncated or malformed is the EXPECTED case for a rejected reply, and
+        # the raw/escaped renderings above still cover it.
+        pass
+    for rendering in renderings:
+        try:
+            redactions.assert_clear(rendering)
+        except ValueError:
+            return False
+    return True
 
 
 def redact_public_reply(payload: str, redactions: RedactionSet) -> str:

@@ -241,10 +241,10 @@ def test_an_unused_channel_is_distinguishable_from_an_empty_one() -> None:
         # text) and is now reported as the silence it is, while on the channel
         # it means the model DID select the channel and sent empty arguments --
         # a malformed call, not an absent reply. Requiring one diagnostic to
-        # cover both would force the silent case back to "not valid JSON",
-        # which is the misdiagnosis that spends an episode's retry bound
-        # re-prompting a model to fix JSON it never wrote. The silent case is
-        # covered directly by ``test_a_silent_reply_is_a_correctable_rejection``
+        # cover both would force the silent case back to reporting a JSON
+        # complaint, which is the misdiagnosis that spends an episode's retry
+        # bound re-prompting a model to fix JSON it never wrote. The silent case
+        # is covered directly by ``test_a_silent_reply_is_a_correctable_rejection``
         # and the channel case by
         # ``test_an_empty_channel_call_is_rejected_like_an_empty_prose_body``.
     ],
@@ -672,4 +672,9 @@ async def test_an_empty_channel_call_is_rejected_like_an_empty_prose_body() -> N
 
     message = str(info.value)
     assert "no tool call and no text" not in message
-    assert "not valid JSON" in message
+    # The reply is reported as what it is: a reply that did not come through as
+    # one JSON object, bucketed as that class. The wording moved when the
+    # model-facing text became a shape hint instead of the decoder's prose; the
+    # distinction this test draws -- malformed, NOT silent -- is unchanged.
+    assert "not one complete JSON object" in message
+    assert info.value.class_key == "malformed-json"
