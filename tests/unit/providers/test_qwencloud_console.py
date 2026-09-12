@@ -379,6 +379,38 @@ def test_a_ticket_at_the_limit_is_still_accepted(store: AuthStore) -> None:
     assert record["length"] == QWENCLOUD_TICKET_MAX_LENGTH
 
 
+def test_a_locked_store_is_reported_rather_than_crashing(store: AuthStore) -> None:
+    """`set` dumped a raw traceback while `status` and `rm` handled the same
+    locked store cleanly (QA D6). The traceback leaked absolute local paths.
+    """
+
+    class LockedStore:
+        db_path = store.db_path
+
+        def upsert_credential(self, provider: str, data: dict[str, Any]) -> None:
+            raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(TicketStoreError) as excinfo:
+        store_ticket(LockedStore(), FAKE_TICKET)
+    assert "OperationalError" in str(excinfo.value)
+    assert FAKE_TICKET not in str(excinfo.value)
+
+
+def test_a_caller_bug_still_propagates_from_the_write_path(store: AuthStore) -> None:
+    """Clause ORDER is load-bearing: ProgrammingError subclasses Error, so a
+    bare `except sqlite3.Error` would dress a caller bug as a degraded store.
+    """
+
+    class WrongThreadStore:
+        db_path = store.db_path
+
+        def upsert_credential(self, provider: str, data: dict[str, Any]) -> None:
+            raise sqlite3.ProgrammingError("SQLite objects created in a thread...")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        store_ticket(WrongThreadStore(), FAKE_TICKET)
+
+
 def test_read_ticket_record_never_returns_the_value(store: AuthStore) -> None:
     store_ticket(store, FAKE_TICKET)
     record = read_ticket_record(store)
