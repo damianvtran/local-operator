@@ -876,6 +876,14 @@ class AttachedSession:
         # the app can warn instead of leaving the user to press Enter on a
         # composer whose text is still queued (a silent double-send).
         self._recall_resolution: Callable[[str], None] | None = None
+        # The recall seam's sibling, for the OTHER way a queued steer can fail:
+        # the bind itself. `steer_message` is fire-and-forget, so a refused bind
+        # used to surface only as "Task exception was never retrieved" in the
+        # log while the transcript kept a row promising a delivery that never
+        # came (`still queued — sends with that next message`). Called with the
+        # message id so the app can lift the steer back into the composer and
+        # say what happened (QA round 2, Q-1).
+        self._steer_failure: Callable[[str], None] | None = None
         #: Held ONLY to keep a strong reference — asyncio does not, and a
         #: garbage-collected task would drop the refusal the app is waiting
         #: for. Deliberately not awaited or cancelled in `dispose`, matching
@@ -4668,10 +4676,19 @@ class AttachedSession:
         # (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``), so
         # the released caller re-dials the very same record through
         # ``_ensure_bound`` and a released prompt is served or reports its
-        # failure. A successor that IS coming is still caught — the loop
-        # reattaches the moment a record it can use appears, and the give-up's
-        # own rebind catches a slower one — and the early release cannot
-        # double-bind or double-spawn because ``engage_runtime``
+        # failure. A successor that IS coming is still caught — by the
+        # give-up's own REBIND, not by this loop, and that distinction is
+        # measured rather than rhetorical (review round 2, MINOR-2). The
+        # deadline is tested at the top of a pass and ``paced()`` parks the
+        # loop AT it, so a successor that publishes inside the final sleep is
+        # never dialled from here: with the bound monkeypatched to 0.5 s and a
+        # record appearing at t+0.49 s, the loop released at 0.506 s having
+        # dialled that record ZERO times. What catches it is the released
+        # caller's next action, which re-enters through ``_ensure_bound``
+        # against the very same record. An earlier draft of this comment
+        # claimed the loop itself reattached "the moment a record it can use
+        # appears", which the boundary case falsifies. The early release
+        # cannot double-bind or double-spawn because ``engage_runtime``
         # short-circuits on a discoverable record and otherwise waits rather
         # than spawning while a live pid holds the lease.
 
@@ -5902,14 +5919,64 @@ class AttachedSession:
         asyncio.create_task(self._send_steer_when_ready(message))
 
     async def _send_steer_when_ready(self, message: Message) -> None:
-        """Retain a queued steer across silent reattach/takeover."""
-        await self._await_owner_ready()
+        """Retain a queued steer across silent reattach/takeover.
+
+        THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
+        other caller of ``_await_owner_ready`` runs inside a worker whose
+        exception the app catches and turns into a notice and a composer
+        restore; this one is spawned by ``steer_message`` and never awaited, so
+        a refused bind died as an unretrieved task exception while its row went
+        on promising the ride-along. That is the shape QA round 2 (Q-1)
+        measured on the released-cold path: the give-up wakes this waiter into a
+        bind against the same unreachable record, the bind raises, and the
+        user's already-accepted message is silently gone — falsifying both the
+        row and U3's "nothing is lost".
+
+        So the failure is RETRIEVED here and reported through
+        ``_steer_failure``, whose app-side handler lifts the steer's rows and
+        hands the text back (``OperatorApp._on_steer_undeliverable``). The
+        message must never be dropped on the floor: it is text the app already
+        echoed as sent, and a steered message has no other owner to fail it.
+
+        A DISPOSED facade is the one silent return, here and above: the app
+        that would paint the warning is gone with it.
+        """
+        try:
+            await self._await_owner_ready()
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            # `ConnectionError` is the documented failure of `_ensure_bound`
+            # (an unreachable owner, an engage that produced no runtime, the
+            # stopped-session refusal), and it is the only class the path is
+            # known to raise. Caught broadly anyway, for the reason
+            # `_resolve_recall` gives about the same seam: an unknown raise
+            # would otherwise become the very unretrieved-exception bug this
+            # block exists to remove.
+            if self._disposed:
+                return
+            logger.info(
+                "steer %s could not be delivered for %s: %s",
+                message.id,
+                self._session_id,
+                error,
+            )
+            resolver = self._steer_failure
+            if resolver is not None:
+                resolver(str(message.id))
+            return
         target = self._takeover_target
         if target is not None:
             target.steer_message(message)
             return
         client = self._client
         if client is None or not client.connected:
+            # Same fact as the raise above, reached through the other door: the
+            # bind returned but left nothing that can carry the message. The
+            # row must stop promising for it too, or this is the silent drop
+            # again with a different stack.
+            if not self._disposed:
+                resolver = self._steer_failure
+                if resolver is not None:
+                    resolver(str(message.id))
             return
         command = ContinuationCommand(
             command_id=message.id,
@@ -5983,6 +6050,16 @@ class AttachedSession:
             resolver = self._recall_resolution
             if resolver is not None:
                 resolver(command_id)
+
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Install the app's handler for a steer whose bind was refused.
+
+        Called with the undelivered message's id. The steer twin of
+        :meth:`set_recall_resolution` and armed the same way, on adoption,
+        because the failure arrives asynchronously on a task the app never
+        awaits — there is no synchronous press to install a resolver in.
+        """
+        self._steer_failure = resolver
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """Install the app's handler for a recall the owner did NOT honour.

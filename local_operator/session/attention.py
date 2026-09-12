@@ -190,6 +190,7 @@ def bootstrap_transcript(
     store: AttentionStore | None = None,
     *,
     witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Import a conversation's durable outcome; NEVER fatal to the caller.
 
@@ -214,9 +215,18 @@ def bootstrap_transcript(
     ``witnessed_cut_off`` is passed straight through; see
     :func:`_import_transcript_outcome` for the one caller that uses it and why
     the record it writes is provisional.
+
+    ``reaped_owner`` is the record a caller's OWN reap has already deleted from
+    the run directory; see :func:`_classify_orphaned_run` for why the evidence
+    has to be handed in rather than re-read.
     """
     try:
-        return _import_transcript_outcome(transcript, store, witnessed_cut_off=witnessed_cut_off)
+        return _import_transcript_outcome(
+            transcript,
+            store,
+            witnessed_cut_off=witnessed_cut_off,
+            reaped_owner=reaped_owner,
+        )
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
         # `getattr` so the handler cannot itself raise on a transcript that
         # never grew a `.directory` (a stub, a partially constructed instance)
@@ -344,7 +354,9 @@ def _record_detail(record: Any) -> str:
     return f" ({', '.join(parts)})" if parts else ""
 
 
-def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
+def _classify_orphaned_run(
+    directory: Path, *, reaped_owner: Any | None = None
+) -> tuple[str, str, str]:
     """``(kind, cause, reason)`` for a started run whose owner is gone.
 
     The taxonomy's default flips here: "no evidence" used to mean
@@ -358,6 +370,20 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
       study's shape, and the one that used to read as a user cancel;
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
+
+    ``reaped_owner`` IS THAT SECOND RUNG'S EVIDENCE WHEN SOMEBODY ALREADY TOOK
+    IT. ``registry.scan`` deletes a stale record as it reports it, so a caller
+    whose own sweep is what proved the pid dead — the mobile daemon's discovery
+    loop — destroys the evidence before classifying and landed every one of
+    those deaths on the no-evidence arm, i.e. "the cause could not be
+    determined" for the exact shape that HAD a determined cause (review round 2,
+    MINOR-1; the designer's D6 measured the same sentence at the same moment on
+    the phone). The record the caller is holding is passed in and preferred to a
+    fresh read, which by then finds nothing. Only the DEAD rung uses it: the
+    deliberate-stop marker above is still read from disk, and the caller's
+    live-owner gate (:func:`_run_record_evidence` inside
+    :func:`_import_transcript_outcome`) has already run, so a successor that
+    published while the record was being reaped still wins.
 
     THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
     the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
@@ -383,6 +409,8 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
             render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
         )
     _, dead = _run_record_evidence(directory)
+    if dead is None:
+        dead = reaped_owner
     if dead is not None:
         return (
             "error",
@@ -397,6 +425,7 @@ def _import_transcript_outcome(
     store: AttentionStore | None = None,
     *,
     witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
 
@@ -431,7 +460,7 @@ def _import_transcript_outcome(
     # Imported here rather than at module scope for the same reason
     # ``_classify_orphaned_run`` does it: a broken ``incidents`` import must not
     # stop a session from booting (see the guard around the bootstrap call).
-    from local_operator.incidents import is_cut_off_cause
+    from local_operator.incidents import is_cut_off_cause, is_deliberate_cause
 
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
     started = transcript.latest_custom("attention_started")
@@ -459,16 +488,28 @@ def _import_transcript_outcome(
             # anchor and kind, so the worst case is a row that corrects itself
             # (review round 1, MINOR-2).
             cause, reason = witnessed_cut_off
+            # KIND FROM THE CAUSE, not hardcoded, which is what makes the
+            # witnessed writer agree with the two other writers that read this
+            # vocabulary (`daemon._projection_frame`'s fill and the narration
+            # guard below both route through `is_deliberate_cause`). The cause is
+            # always our own — the viewer that watched the turn end supplies it —
+            # so a deliberate one here must land `interrupted` and an involuntary
+            # one `error`; writing `error` for whatever arrived would have been
+            # the single place the taxonomy's deliberate half was not consulted
+            # (review round 2, NIT-2).
+            kind = "interrupted" if is_deliberate_cause(cause) else "error"
             store.publish(
                 identity,
                 token,
                 provisional_anchor(token),
-                "error",
+                kind,
                 reason=reason,
                 cause=cause,
             )
-            return "error", cause, reason, str(token)
-        kind, cause, reason = _classify_orphaned_run(transcript.directory)
+            return kind, cause, reason, str(token)
+        kind, cause, reason = _classify_orphaned_run(
+            transcript.directory, reaped_owner=reaped_owner
+        )
         store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
         return kind, cause, reason, str(token)
     if isinstance(saved, dict) and saved.get("conversation_id") == identity:

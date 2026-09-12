@@ -1059,3 +1059,89 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
         "the bind retry ceiling moved; a longer cap here only adds latency to "
         "a bind a caller is waiting on"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_undeliverable_steer_is_reported_instead_of_dying_in_a_task(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 2, Q-1: the ONE fire-and-forget writer nobody could report for.
+
+    The give-up releases every waiter parked on ``_runtime_ready``. A prompt has
+    a worker whose exception the app turns into a notice and a composer restore;
+    a steer is spawned by ``steer_message`` and never awaited, so a released
+    steer's refused bind existed only as "Task exception was never retrieved" in
+    the log while its row went on promising a ride-along that never came. Both
+    halves are asserted here: the report reaches the seam, and the task itself
+    does not raise into the loop (which no caller would ever observe).
+    """
+    reports: list[str] = []
+
+    async def refusing_bind(*, foreground: bool = True) -> None:
+        raise ConnectionError("owner socket unreachable: [Errno 61] Connect call failed")
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._streaming = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", refusing_bind)
+
+    # (a) with NO resolver installed — the shape that used to be a log line only.
+    # The task must still end quietly: a raise here IS the unretrieved-exception
+    # bug, and nothing in production awaits this task to notice it.
+    unarmed = Message(role="user", content=[TextContent(text="first")])
+    before = asyncio.all_tasks()
+    remote.steer_message(unarmed)
+    spawned = asyncio.all_tasks() - before
+    assert len(spawned) == 1, f"expected one spawned steer task, got {spawned}"
+    await next(iter(spawned))
+
+    # (b) armed — the app is told which message it has to give back.
+    remote.set_steer_failure(reports.append)
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "the steer's failure never reached the app"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_bind_left_no_client_is_reported_too(tmp_path, monkeypatch) -> None:
+    """The other door into the same silent drop.
+
+    ``_ensure_bound`` can return having bound nothing (a disposed facade, a
+    race it declines to enter) and the old code returned WITHOUT sending and
+    without saying so — the row kept its promise either way. The two doors now
+    report the same fact through the same seam.
+    """
+    reports: list[str] = []
+
+    async def no_bind(*, foreground: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", no_bind)
+    remote._client = None
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="still there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "a bind that left no client was reported as delivered"

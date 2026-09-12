@@ -874,6 +874,135 @@ def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
     assert "1.2.3@abcdef0" in reason
 
 
+def test_a_reaped_death_is_classified_from_the_record_the_scan_deleted(
+    tmp_path: Path,
+) -> None:
+    """MINOR-1: the daemon's own sweep deletes the evidence it then classifies.
+
+    ``registry.scan`` UNLINKS a stale record as it reports it, so the mobile
+    daemon's discovery loop — whose classification re-reads the run directory —
+    found nothing and landed every discovered death on the no-evidence arm: "the
+    cause could not be determined" for the one shape where the daemon had just
+    proved the pid dead. Passing the record the caller is already holding is the
+    fix, and the CONTROL below is what that bug looked like (same death, same
+    moment, record not handed in).
+
+    The live-owner gate is deliberately not under test here: it runs before the
+    classification and is pinned by the tests above.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.runtime import registry
+    from local_operator.session.transcript import Transcript
+
+    fixed_id, control_id = "reaped1", "reaped2"
+    _seed_started(tmp_path, fixed_id)
+    _seed_started(tmp_path, control_id)
+    dead_pid = 2**22 + 11
+    _write_record(tmp_path, fixed_id, dead_pid)
+    _write_record(tmp_path, control_id, dead_pid + 1)
+
+    scanned = registry.scan(tmp_path)
+    by_session = {record.session_id: record for record, _state in scanned}
+    assert {state for _record, state in scanned} == {"stale"}
+    for pid in (dead_pid, dead_pid + 1):
+        assert not (
+            tmp_path / "run" / "mobile" / f"{pid}.json"
+        ).exists(), "the premise: the scan is what deletes the record"
+
+    fixed = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / fixed_id),
+        AttentionStore(tmp_path / "fixed.db"),
+        reaped_owner=by_session[fixed_id],
+    )
+    assert fixed is not None
+    assert (fixed[0], fixed[1]) == ("error", "runtime-killed"), fixed
+    assert f"pid {dead_pid}" in fixed[2], fixed[2]
+
+    # CONTROL, and it is the bug rather than a second property: with the record
+    # gone and nothing handed in, the same death reads as unexplained.
+    before = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / control_id),
+        AttentionStore(tmp_path / "before.db"),
+    )
+    assert before is not None
+    assert (before[0], before[1]) == ("error", ""), before
+
+
+@pytest.mark.asyncio
+async def test_a_witnessed_deliberate_stop_is_written_as_an_interruption(
+    tmp_path: Path,
+) -> None:
+    """NIT-2: the witnessed writer consults the taxonomy's deliberate half.
+
+    It wrote ``error`` for whatever cause the viewer passed while the daemon's
+    frame fill and the narration guard both route through
+    ``is_deliberate_cause``. Nothing in production reached it — every current
+    caller passes ``owner-lost`` or a cut-off sentence — so this is the
+    asymmetry being closed rather than a live defect, and the pair below pins
+    BOTH halves: an involuntary cause stays an error, a deliberate one becomes
+    the interruption its own vocabulary names.
+    """
+    import subprocess
+
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for index, (cause, expected) in enumerate(
+            (("owner-lost", "error"), ("user-stop", "interrupted"))
+        ):
+            session_id = f"witness{index}"
+            transcript = Transcript(tmp_path / "sessions" / session_id)
+            token = str(uuid.uuid4())
+            await transcript.append_custom(
+                "attention_started", {"conversation_id": f"session/{session_id}", "token": token}
+            )
+            run = tmp_path / RUN_DIRNAME
+            run.mkdir(parents=True, exist_ok=True)
+            (run / f"{owner.pid}.json").write_text(
+                json.dumps(
+                    SessionRecord(
+                        pid=owner.pid,
+                        kind="tui",
+                        session_id=session_id,
+                        conversation_name=session_id,
+                        cwd=str(transcript.directory),
+                        model_label="m",
+                        control_port=1,
+                        control_key="k",
+                        protocol=5,
+                        capabilities=["tui_state_v1"],
+                    ).to_json()
+                ),
+                encoding="utf-8",
+            )
+            store = AttentionStore(tmp_path / f"witness{index}.db")
+            published = bootstrap_transcript(
+                transcript,
+                store,
+                witnessed_cut_off=(cause, render_cut_off_reason(cause)),
+            )
+            assert published is not None
+            assert published[0] == expected, published
+            assert store.state(f"session/{session_id}")["kind"] == expected
+            # ...and the live owner still supersedes it, whichever kind it was.
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text="done")])
+            )
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)
+
+
 def test_a_recorded_stop_marker_keeps_an_interruption(tmp_path: Path) -> None:
     """Design test 4: positive evidence of a deliberate act, honoured after death."""
     from local_operator.session.attention import bootstrap_transcript
