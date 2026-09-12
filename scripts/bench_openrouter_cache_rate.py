@@ -40,17 +40,37 @@ turns) estimates well under $1; the hard ceiling is ``--budget`` (default
 $5.00), checked after every turn against the provider's OWN reported cost, and
 the run aborts the moment the estimate would cross it.
 
-THE GUARD'S WORST CASE (``--compact-at``): the cache-quality guard retires a
-host after two consecutive warm-but-uncached turns, and the most dangerous
-place for that heuristic is a COMPACTION — a cold-by-design provider call
-immediately followed by a first turn on a rebuilt prefix that is also cold, for
-the honest reason that the prefix is new. Two adjacent cold events, two strikes,
-and a host that caches at 99.6% is retired for the rest of the conversation with
-no removal path. Unit tests cover the logic, but only the live bench can show
-that the sequence a real session actually produces does not retire its host, so
-``--compact-at N`` performs a real compaction at turn N (a ``purpose=
-"compaction"`` call, then a rebuilt prefix) and FAILS the lane if the host
-serving the remainder ends up retired.
+THE COMPACTION BOUNDARY (``--compact-at``): the cache-quality guard retires a
+host after two consecutive warm-but-uncached turns, and a COMPACTION is the
+awkward place for that heuristic — a cold-by-design provider call next to a
+rebuilt prefix the host has never been given. ``--compact-at N`` performs a real
+compaction at turn N (a ``purpose="compaction"`` call, then a rebuilt prefix)
+and FAILS the lane if a host serving the remainder was retired without being
+backed by ``PROVIDER_STRIKES_TO_RETIRE`` cold turns of its own.
+
+BE PRECISE ABOUT WHAT THIS PROVES, because the obvious reading is wrong (QA
+round 2, Q1). It is a SMOKE assertion that the fixed sequence runs clean end to
+end — no unbacked retirement, caching resumed — and NOT a regression test for
+the ``purpose == "turn"`` gate. The reason is arithmetic: the large synthetic
+prefix lives in ``system_blocks``, and a compaction request replaces those with
+``COMPACTION_SYSTEM`` plus a flattened short history, so its call carries
+~170-180 prompt tokens against ``PROVIDER_STRIKE_MIN_PROMPT_TOKENS = 8192``.
+That floor is checked BEFORE any strike is recorded and on every revision of
+this code, so the compaction returns early regardless — this check cannot
+distinguish the fixed head from the unfixed one. QA demonstrated it by
+relabelling the bench's compaction as ``purpose="turn"``, which is exactly what
+deleting the gate would do: identical outcome at 171 tokens, divergent at 74k.
+
+So the gate's regression coverage is the UNIT SUITE (14 tests under
+``tests/unit/model/test_configure.py -k "compaction or retire or strike or
+purpose"``, each mutation-verified to fail when its guard is removed). What the
+live check is genuinely worth is the post-boundary retirement PATTERN, which
+unit tests cannot observe because it depends on how real upstreams behave: it
+holds the observed sequence to "a retirement must be backed by at least two
+cold turns of that host's own". Giving ``--compact-at`` a large-prompt mode
+(putting the transcript in ``messages`` so the compaction crosses 8192) would
+make it cover the gate for real — deliberately not done here, since the shipped
+behaviour is correct and only this claim needed fixing.
 
 Examples:
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --dry-run
@@ -59,7 +79,7 @@ Examples:
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --live \
         --runs 3 --output evidence.jsonl   # alternates arm order per run
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --live --arm on \
-        --turns 8 --compact-at 4          # the guard's worst case, end to end
+        --turns 8 --compact-at 4          # compaction-boundary smoke check
 """
 
 from __future__ import annotations
@@ -449,6 +469,12 @@ async def _run_lane(
                 # a fresh write-once prefix rather than the turn's cached one.
                 # That shape is exactly why it cannot cache, and why scoring it
                 # as cache evidence retired hosts that cache fine.
+                #
+                # It also makes the call SHORT here (~170-180 tokens), because
+                # this bench's bulk lives in `system_blocks` and those are what
+                # a compaction replaces. Short enough to sit under the strike
+                # floor, which is why this lane cannot exercise the purpose gate
+                # — see the module docstring (QA round 2, Q1).
                 request = ChatRequest(
                     model=spec,
                     system_blocks=[COMPACTION_SYSTEM],
@@ -583,16 +609,23 @@ async def _run_lane(
 
 
 def _compaction_guard_verdict(result: ArmResult, compact_at: int) -> str | None:
-    """The guard's worst case, asserted on real turns: can a compaction retire a
-    host on evidence the compaction itself manufactured?
+    """Hold a live compaction boundary to the retirement pattern it must show.
 
-    The failure this catches is not hypothetical. A compaction is a cold-by-
-    design call and the first turn on the rebuilt prefix is cold for the honest
-    reason that the prefix is NEW; two adjacent cold events used to be two
-    strikes, and a host measured at 99.6% same-host cache share was retired for
-    the rest of the conversation with no removal path (review round 1,
-    blocker-2). Unit tests pin the logic, but only a live run shows that the
-    sequence a real session produces stays clean.
+    SCOPE, stated first because the name invites a stronger reading (QA round 2,
+    Q1): this is a SMOKE assertion that the sequence runs clean, not a
+    regression test for the ``purpose == "turn"`` gate. The compaction call this
+    bench sends carries ~170-180 prompt tokens — the synthetic prefix lives in
+    ``system_blocks``, which a compaction replaces — and
+    ``PROVIDER_STRIKE_MIN_PROMPT_TOKENS = 8192`` is checked before any strike is
+    recorded, on every revision of this code. So the call short-circuits either
+    way and this function cannot tell a fixed head from an unfixed one. The
+    gate's regression coverage is the unit suite (14 tests, mutation-verified);
+    see the module docstring for the measurement.
+
+    What it IS worth is the post-boundary retirement pattern, which unit tests
+    cannot observe because it depends on how real upstreams behave: across live
+    lanes, a retirement must be earned by that host's own cold turns rather than
+    by the boundary itself.
 
     What this does NOT assert is that no host is ever retired after a
     compaction. That would be a stricter claim than the fix makes, and it would
@@ -604,7 +637,12 @@ def _compaction_guard_verdict(result: ArmResult, compact_at: int) -> str | None:
     1. every post-boundary retirement is backed by at least
        ``PROVIDER_STRIKES_TO_RETIRE`` cold TURNS served by that host after the
        boundary — the compaction call cannot be one of them, and neither can a
-       single unavoidable cold turn on the rebuilt prefix; and
+       lone cold turn on the rebuilt prefix. (That turn is not reliably cold
+       either way: its prefix is the system blocks the host still holds plus the
+       new summary, so above a ~1-2k system prefix it clears the
+       ``max(1024, 2%)`` floor and CLEARS the record instead — review round 2,
+       NIT-1. Observed live both ways, 99.8% in one lane and 0.0% in others.);
+       and
     2. the boundary CLEARED whatever was retired before it, since those
        retirements were recorded against a prefix that no longer exists.
     """
@@ -630,8 +668,8 @@ def _compaction_guard_verdict(result: ArmResult, compact_at: int) -> str | None:
                 f"compaction guard: {host} was retired after the turn-{compact_at} "
                 f"compaction on only {len(backing)} cold turn(s) of its own "
                 f"({SessionStreamFn.PROVIDER_STRIKES_TO_RETIRE} required) — the "
-                "compaction and the first turn on a rebuilt prefix are cold by "
-                "design and must not count as cache evidence"
+                "compaction call is not cache evidence, and one cold turn on a "
+                "rebuilt prefix is not enough to convict a host"
             )
     before = [t for t in result.turns if t.turn < compact_at]
     if before and before[-1].retired and after[0].retired:
@@ -836,9 +874,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="N",
         help='Send a real purpose="compaction" call at turn N and REPLACE the '
-        "transcript with its summary, then keep going. This is the cache-quality "
-        "guard's worst case (two adjacent cold-by-design events), and the lane "
-        "FAILS if the host serving the turns after the boundary ends up retired.",
+        "transcript with its summary, then keep going. A smoke check on the "
+        "compaction boundary: the lane FAILS if a host serving the turns after "
+        "it was retired without two cold turns of its own. It does NOT cover the "
+        "purpose gate (its call is below the strike floor) \u2014 see the module "
+        "docstring.",
     )
     parser.add_argument("--budget", type=float, default=5.0, help="Hard USD ceiling.")
     parser.add_argument("--seed", default=uuid.uuid4().hex[:8])
