@@ -227,13 +227,24 @@ def _session_dir(config_dir: Path, session_id: str) -> Path:
     return config_dir / "sessions" / session_id
 
 
-def _lease_holder(config_dir: Path, session_id: str) -> int | None:
+def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
     """Pid currently holding the transcript lease, if it is alive.
 
     Read directly rather than through ``acquire_session_lease``: this is a
     PROBE, and acquiring in order to find out would take the very lease the
     runtime needs. Uses the lease's own claim reader so both agree on the
     format.
+
+    ``check_zombie=False`` is for the engage loop's dense regime. That probe
+    costs a ``ps`` fork (2.4-3.9 ms measured across runs on an M-series box,
+    against the
+    23-30 µs budget published for one poll iteration at ``_poll_delay``), so
+    spending it on every 10 ms pass would nearly double the dense period and
+    eat the dead time the dense grid exists to remove. The loop therefore asks
+    for the cheap answer while a construction is KNOWN to be in flight and for
+    the proof once that belief has expired — see the call site. A wrong "live"
+    there costs waiting, never arbitration: a zombie's claim is still only ever
+    taken over by the acquisition path, which always requires the proof.
     """
     from local_operator.session_lease import LEASE_NAME, _pid_state, _read_claim
 
@@ -243,7 +254,7 @@ def _lease_holder(config_dir: Path, session_id: str) -> int | None:
     _generation, pid = _read_claim(path)
     if pid is None:
         return None
-    return pid if _pid_state(pid) == "live" else None
+    return pid if _pid_state(pid, check_zombie=check_zombie) == "live" else None
 
 
 def _spawn_runtime(
@@ -602,7 +613,30 @@ async def engage_runtime(
 
         holder: int | None = None
         if not spawned or spawns < _MAX_SPAWNS:
-            holder = await asyncio.to_thread(_lease_holder, config_dir, session_id)
+            # Whether the PROOF that a holder is a corpse is due on this pass.
+            #
+            # The dense regime polls every 10 ms while a construction is KNOWN
+            # to be in flight, against a published budget of 23-30 µs for one
+            # iteration (see ``_poll_delay``); the zombie probe is a `ps` fork
+            # measured at 2.4-3.9 ms on this class of host, so asking for it
+            # here would nearly double the dense period and add that same ~3 ms
+            # to the attach dead time the dense grid exists to remove.
+            #
+            # So the cheap probe answers first and the proof is spent once the
+            # fast belief has expired. A claim that is STILL held with no
+            # record after a construction's own window is not a construction in
+            # flight: it is a wedged holder or a corpse (`_CONSTRUCTING_WINDOW_S`
+            # is 2.5x a full cold construction, measured). Past that point the
+            # grid is the open-ended backoff at 50 ms - 1 s, where one fork per
+            # pass is a bounded fraction of a core, and a corpse's session
+            # recovers a couple of seconds later instead of never.
+            probe_dead_holder = (
+                constructing_since is not None
+                and time.monotonic() - constructing_since > _CONSTRUCTING_WINDOW_S
+            )
+            holder = await asyncio.to_thread(
+                _lease_holder, config_dir, session_id, check_zombie=probe_dead_holder
+            )
             if holder is not None:
                 # STARTING: a contender holds the transcript but has not
                 # published yet. Spawning here would create a doomed candidate,
@@ -821,6 +855,19 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     threatens it.** ``scan()`` forks ``ps`` for any record whose heartbeat is
     older than ``HEARTBEAT_INTERVAL_S * 1.5``, and such a record is not reaped,
     so it pays that fork on every scan (review round 1, MINOR-1).
+
+    **The other `ps` fork on this path is now deferred rather than paid.** The
+    lease probe inside a dense iteration is ``_lease_holder``, and proving a
+    holder is a corpse (rather than merely a pid signal 0 accepts) costs that
+    same fork — measured at 2.4-3.9 ms here, against the 23-30 µs budget above.
+    Asking for it every pass would have nearly doubled the dense period and
+    added the fork straight onto the dead time this grid exists to remove, so
+    the loop asks for the cheap answer while a construction is KNOWN to be in
+    flight and only for the proof once ``_CONSTRUCTING_WINDOW_S`` has lapsed
+    (see the call site and ``session_lease._pid_state``). So the 23-30 µs
+    iteration figure above still holds, and it was measured with the dense regime
+    fork-free; a corpse's claim pays for that by stalling its own recovery a few
+    seconds instead, which is the trade the window is for.
 
     Where that lands is narrower than it first appears, because
     ``find_runtime_record`` returns BEFORE ``scan()`` when the session has no

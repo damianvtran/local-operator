@@ -325,6 +325,12 @@ async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
     which is the phone's first message to such a session never starting a
     runtime. With the owner proven dead the loop spawns, and that candidate's
     real ``acquire_session_lease`` takes the claim over.
+
+    The recovery is not instant by design: the proof is deferred until the loop
+    has believed "constructing" for longer than ``_CONSTRUCTING_WINDOW_S`` (see
+    the fork-free dense test below), so a corpse's session comes back a couple
+    of seconds late rather than never. The 15 s cap is well clear of that and
+    still fails on the unfixed code, which waits out the whole 30 s.
     """
     from tests.unreaped import unreaped_child
 
@@ -356,6 +362,59 @@ async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
     assert fleet.winners == 1, "the zombie's claim was never taken over"
     assert fleet.losers == 0, "the corpse was read as a live contender"
     assert fleet.deferred == [True]
+
+
+@pytest.mark.asyncio
+async def test_the_dense_starting_window_pays_no_zombie_probe(tmp_path: Path, monkeypatch) -> None:
+    """The proof is DEFERRED so the densest cadence stays fork-free (MAJOR-1).
+
+    A claim that is held while no record exists is read as a construction in
+    flight, and the loop then polls every 10 ms against a published budget of
+    23-30 µs per iteration (``_poll_delay``). Proving that the holder is a
+    corpse — rather than a pid signal 0 merely accepts — costs a `ps` fork
+    measured at 2.4-3.0 ms on this class of host: nearly double the dense
+    period, paid straight out of the dead time the dense grid exists to remove.
+    So the loop asks for the cheap answer while that belief is fresh and spends
+    the proof only once ``_CONSTRUCTING_WINDOW_S`` has lapsed. This pins it: a
+    live holder that never publishes must produce ZERO zombie probes while the
+    loop is inside the window.
+
+    The deferral is a LATENCY trade and never a safety one — only
+    ``session_lease`` may move a claim, and it always demands the proof — so the
+    test above shows the other end: a corpse's claim IS taken over once the
+    window lapses.
+    """
+    from local_operator import session_lease
+
+    probes: list[int] = []
+    real_probe = session_lease.is_zombie
+    monkeypatch.setattr(
+        session_lease,
+        "is_zombie",
+        lambda pid: (probes.append(pid), real_probe(pid))[1],
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # A LIVE holder that never publishes: the loop's STARTING branch. The
+    # deadline is shorter than the window on purpose, so every pass under test
+    # is a dense one.
+    holder = acquire_session_lease(session_dir)
+    try:
+        with pytest.raises(TimeoutError):
+            await engage_runtime(
+                SESSION_ID,
+                str(tmp_path),
+                WarmErrand(),
+                config_dir=tmp_path,
+                deadline_s=1.0,
+            )
+    finally:
+        holder.release()
+
+    assert probes == [], "the dense regime forked a zombie probe on a pass"
+    assert _CONSTRUCTING_WINDOW_S > 1.0, "this test's deadline must sit inside the window"
 
 
 @pytest.mark.asyncio
@@ -994,7 +1053,14 @@ async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
         "local_operator.mobile.attach_client.find_runtime_record",
         lambda config_dir, session_id: (record, os.getpid()),
     )
-    monkeypatch.setattr(launch_module, "_lease_holder", lambda config_dir, session_id: os.getpid())
+    monkeypatch.setattr(
+        launch_module,
+        "_lease_holder",
+        # Mirrors the real signature, including the probe-mode keyword the loop
+        # passes: a double that accepted fewer arguments than the function under
+        # test would fail the moment the loop's call shape changed.
+        lambda config_dir, session_id, **_probe: os.getpid(),
+    )
 
     dials = 0
 

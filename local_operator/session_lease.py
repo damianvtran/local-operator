@@ -42,7 +42,7 @@ class SessionLeaseHeldError(RuntimeError):
         self.pid = pid
 
 
-def _pid_state(pid: int) -> Literal["live", "dead", "uncertain"]:
+def _pid_state(pid: int, *, check_zombie: bool = True) -> Literal["live", "dead", "uncertain"]:
     """Probe only what the platform can prove; uncertainty never permits theft.
 
     **An exited-but-unreaped process is DEAD here, not live.** Signal 0
@@ -56,11 +56,18 @@ def _pid_state(pid: int) -> Literal["live", "dead", "uncertain"]:
     "already open in pid N", where N is the corpse) and no mechanism will
     recover. :func:`local_operator.procstate.is_zombie` documents the incident.
 
-    The zombie probe is spent only after the cheap probe has already said
-    "live", so the two common answers — a live owner, and a pid that is simply
-    gone — stay fork-free. The remaining case costs one ``ps`` fork on macOS
-    (~3.9 ms) per call, which is why this function is called on acquisition and
-    on the engage loop's lease probe rather than once per session per pass.
+    **The zombie probe is not free, so the caller decides how often it is
+    worth spending.** Signal 0 costs ~1 µs and settles two of the three
+    answers (a live owner, a pid that is simply gone); the proof costs a `ps`
+    fork (2.4-3.9 ms measured across runs on this host) and is therefore spent
+    only after the cheap probe has already said "live". ``check_zombie=False``
+    skips it,
+    which is what the engage loop passes while it is polling every 10 ms
+    against a claim it believes is mid-construction (`launch._lease_holder`).
+    That choice is a LATENCY trade, never a safety one: the verdict it produces
+    can be "live" for a corpse only where the caller has already decided to
+    wait, and every acquisition still requires the proof before it may take a
+    claim.
     """
     if pid <= 0:
         return "uncertain"
@@ -89,6 +96,10 @@ def _pid_state(pid: int) -> Literal["live", "dead", "uncertain"]:
         return "live"
     except OSError:
         return "uncertain"
+    if not check_zombie:
+        # The caller is on a dense poll cadence and has already accepted that
+        # it will wait; see the docstring. A zombie reads as live here.
+        return "live"
     return "dead" if is_zombie(pid) else "live"
 
 
