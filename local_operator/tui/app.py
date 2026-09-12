@@ -26312,11 +26312,19 @@ class OperatorApp(App[None]):
             # widowed the qualifier (U8). Two words bought the room back: `boot `
             # (5 cells; the command the user just typed already says what kind of
             # default this is) and `used by` (4, so the qualifier is
-            # `(new sessions)` — the same noun PERSIST_HINT prints). The row now
-            # fits every shipped direct label INCLUDING the longest rung the
-            # shared vocabulary can carry (110 at `claude-opus-5` with `minimal`).
-            # What it cannot fit is a selector long enough to spend the whole
-            # budget by itself — see NEW-3 in the round-3 comment:
+            # `(new sessions)` — the same noun PERSIST_HINT prints).
+            #
+            # The worst row is measured, not estimated, and it is EXACT rather
+            # than comfortable (review round 3, MINOR-1): over the ids
+            # `model.registry` can select, `anthropic/claude-opus-4-5-20251101`
+            # with `medium` is 110 (the budget, to the cell) and
+            # `anthropic/claude-3-5-sonnet-latest` is 108. The longest word the
+            # shared vocabulary carries belongs to a model no shipped ladder
+            # gives it to (`claude-opus-5` is `low…max`, 100 here), so the pair
+            # does not arise; the budget is what the longest REACHABLE row costs.
+            #
+            # What no copy of this receipt can fit is a selector long enough to
+            # spend the whole budget by itself — see NEW-3 in the round-3 comment:
             # `openrouter/deepseek/deepseek-chat-v3.1-terminus` is 47 cells of
             # model id against a 110-cell row that also carries a 28-cell path.
             notice(
@@ -26331,15 +26339,17 @@ class OperatorApp(App[None]):
                 # user just created, where the stored level silently differs from
                 # the one they were running.
                 #
-                # `reasoning effort:` rather than `model_effort` (U9): every
-                # other row in this feature opens with the user-facing name of
-                # the dial, and `model_effort` is the config KEY — the spelling a
-                # user only meets on the settings page's detail line. "to the
-                # nearest rung" rather than "to this model's nearest rung": the
-                # model is on the band one row above, and the 2 shorter words are
-                # what keep the row inside the 70-cell budget for the longest
-                # level words the vocabulary can carry (U9's own suggested
-                # wording measures 71 for a 7-cell rung).
+                # `reasoning effort:` rather than `model_effort` (U9): this row is
+                # about the LEVEL the boot will run, not about the key the file now
+                # holds — that half is the receipt's job one row above, where
+                # `model_effort <value>` names what was written. Every other row in
+                # this feature that speaks about a level opens with the dial's name
+                # (`/effort` set/auto/already, `/model saved`), and this is a row of
+                # that kind. "to the nearest rung" rather than "to this model's
+                # nearest rung": the model is on the band one row above, and the 2
+                # shorter words are what keep the row inside the 70-cell budget for
+                # the longest level words the vocabulary can carry (U9's own
+                # suggested wording measures 71 for a 7-cell rung).
                 notice(
                     f"reasoning effort: {saved_effort} "
                     f"({requested_effort} clamps to the nearest rung)",
