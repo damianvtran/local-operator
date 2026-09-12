@@ -1406,9 +1406,12 @@ class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     #: column exists to refuse. Consumers withhold the clock instead.
     #:
     #: Epoch rather than monotonic on purpose: this value crosses a process
-    #: boundary (``live_events`` is serialized onto the attach wire and into
-    #: checkpoints), and a monotonic reading is not comparable across
-    #: processes. Readers convert the AGE once and then tick on their own
+    #: boundary (``live_events`` is serialized onto the attach wire), and a
+    #: monotonic reading is not comparable across processes. It does NOT cross
+    #: the durable boundary: ``FrontendSessionState.checkpoint()`` strips the
+    #: folded map, so a resumed session never sees a stamp and withholds, which
+    #: is why absence above is described as a real answer rather than an
+    #: oversight. Readers convert the AGE once and then tick on their own
     #: monotonic clock, so a later system-clock adjustment cannot move a
     #: counter that is already running.
     started_at_epoch: float | None = None

@@ -63,6 +63,7 @@ from local_operator.tui.widgets.tool_card import (
     ROW_INDENT,
     ROW_INDENT_MIN_WIDTH,
     RUNNING_NOTICE,
+    START_UNKNOWN,
     TERSE_NO_OUTPUT_NOTICE,
     ToolCard,
     _category_element,
@@ -2512,6 +2513,42 @@ def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
     other.restore(state="running")
     other.begin_running("bash", {"command": "sleep 30"}, None)
     assert other.started_at is None
+
+
+def test_an_unknown_start_mounts_clockless_where_none_still_means_begins_now() -> None:
+    """QA round 1, Q1: the constructor had one word for two different cases.
+
+    ``None`` on ``started_at`` means "this call begins now", and that is right
+    for the ordinary mount — the row appears with the event that started the
+    call, so the two instants coincide. It is WRONG for the adopted mount: a
+    start event that reaches a view with no row for its call (a re-delivered
+    live seed, a rebuilt transcript) is mounting a row for work already in
+    flight, and stamping the arrival instant there prints an age about the
+    VIEWER — measured at `0s` on the mount and `3s`/`5s` end to end for a call
+    that was by then ~13s old.
+
+    So the second case gets its own value. ``START_UNKNOWN`` withholds the
+    clock, which is the same reading ``restore`` and ``begin_running`` already
+    give a missing epoch, and leaves the ordinary path exactly as it was —
+    asserted together, because a fix that withheld both would have broken every
+    native row to fix one seam.
+    """
+    now = [1_500.0]
+    unknown = ToolCard(
+        "u", "bash", {"command": "sleep 30"}, clock=lambda: now[0], started_at=START_UNKNOWN
+    )
+    assert unknown.started_at is None
+    assert unknown._elapsed() is None
+    assert not unknown._build_row(80).plain.rstrip().endswith("s")
+    # Not even after time passes and the clock is asked again: this row can
+    # never date itself, because it never learned when the call began.
+    now[0] += 5.0
+    assert unknown._elapsed() is None
+    assert not unknown._build_row(80).plain.rstrip().endswith("s")
+
+    ordinary = ToolCard("n", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
+    assert ordinary.started_at == 1_505.0, "the ordinary mount still takes the mount instant"
+    assert ordinary._build_row(80).plain.rstrip().endswith("0s")
 
 
 def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:

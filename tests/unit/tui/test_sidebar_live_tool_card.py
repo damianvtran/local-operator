@@ -62,7 +62,7 @@ from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, ToolCard
-from local_operator.tui.events import TurnStarted
+from local_operator.tui.events import ToolStarted, TurnStarted
 from tests.e2e.harness import (
     ScriptedStream,
     assistant_message,
@@ -737,6 +737,76 @@ async def test_a_replayed_running_row_arms_from_the_sessions_start_epoch() -> No
         # ORDER of magnitude: a zero taken when the row was painted.
         elapsed = card._elapsed()
         assert elapsed is not None and aged <= elapsed < aged + 30, elapsed
+
+
+@pytest.mark.asyncio
+async def test_a_start_event_with_no_row_and_no_epoch_mounts_clockless() -> None:
+    """QA round 1, Q1: the mount arm stamped the VIEWER's arrival as the call's start.
+
+    A ``tool_execution_start`` that reaches a view with NO row for its call —
+    the owner's live seed re-delivered to a rebuilt transcript — mounts a fresh
+    card. When the producer stamped the call the row wears that instant (the
+    sibling test above). When nobody did — a legacy producer, a facade whose
+    fold carries nothing for the call — the arm handed ``started_at=None`` to a
+    constructor where ``None`` means "this call begins now", so the row printed
+    an age counted from the moment the viewer arrived: ``0s`` on the mount, and
+    ``3s``/``5s`` end to end for a call that was by then ~13s old. That is the
+    same fabricated zero the PR exists to remove, and it also defeated D6,
+    because ``_current_activity`` then saw a batch of fully dateable cards.
+
+    Driven through the app's own handler rather than the constructor so the
+    seam under test is the real one: this is the path QA measured.
+    """
+    app = OperatorApp(lambda: _factory(_Epochs()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_for_adoption(app, pilot)
+        await pilot.pause()
+
+        app.post_message(TurnStarted())
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="call-legacy",
+                    tool_name=PARKING_TOOL,
+                    args={"job_id": "7a73c97ffc54"},
+                    started_at_epoch=None,
+                )
+            )
+        )
+        await pilot.pause()
+
+        card = app._tool_cards["call-legacy"]
+        assert card._state == "running"
+        assert card.started_at is None, "nobody knows when this call began"
+        assert card._elapsed() is None
+        from local_operator.tui.widgets.tool_card import RUNNING_LABEL
+
+        assert [text for text, _style in card._status_runs()] == [
+            RUNNING_LABEL
+        ], "an undateable mount must withhold the clock, not print the viewer's age"
+
+        # D6 rides the same rule: the band may not date a batch holding a card
+        # it cannot date. It cannot here because the card honestly has no epoch
+        # rather than an invented one, which is what `clock=False` reports.
+        assert app._current_activity()[2] is False
+
+        # The ordinary path is untouched: the SAME call re-delivered with the
+        # producer's stamp dates itself, so the fix withholds exactly the
+        # unknown case rather than every mount.
+        app.post_message(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id="call-dated",
+                    tool_name=PARKING_TOOL,
+                    args={"job_id": "7a73c97ffc54"},
+                    started_at_epoch=time.time() - 27.0,
+                )
+            )
+        )
+        await pilot.pause()
+        dated = app._tool_cards["call-dated"]
+        elapsed = dated._elapsed()
+        assert elapsed is not None and 27.0 <= elapsed < 57.0, elapsed
 
 
 @pytest.mark.asyncio

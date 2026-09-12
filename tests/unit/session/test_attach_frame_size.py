@@ -728,12 +728,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         ],
         "wakes": [],
         # AT the bound rather than past it, unlike the fields above, because
-        # this one's bound is a real ceiling rather than a clip: the map holds
-        # one entry per call executing AT ONCE, and calls beyond that wait for a
-        # slot (`max_parallel_tools`, 8 by default — `harness/types.py`). So the
-        # largest value a producer can publish is this, and the one knob that
-        # could raise it is a config value this fixture cannot guess at. Ids are
-        # the width a provider actually issues rather than `call-0`.
+        # this one's bound is a real ceiling for the DEFAULT configuration
+        # rather than a clip: the map holds one entry per call executing AT
+        # ONCE, and calls beyond that wait for a slot. That ceiling is
+        # `Guardrails.max_parallel_tools`, whose field is `ge=1` with no upper
+        # bound (`harness/types.py`), so a host that raises it publishes
+        # proportionally more (~43 B per entry, so even 1,000 concurrent calls
+        # is ~43 KB of the line's 1 MiB). 8 is the default a producer actually
+        # runs with and the fixture is deliberately conservative about id
+        # width, so this populates the shipped ceiling rather than a hard
+        # maximum — say "the default" rather than "the largest possible" when
+        # describing it. Ids are the width a provider actually issues rather
+        # than `call-0`.
         "live_tool_started_at": {f"call_{index:024d}": 1_756_000_000.123456 for index in range(8)},
         "mcp_servers": [
             McpServerState(name=f"server-{index}", status="connected") for index in range(200)

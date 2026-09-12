@@ -3586,12 +3586,21 @@ class FrontendStateStore:
         cannot answer that one because there is no call behind it.
 
         The rule is the phone projection's (``mobile/projection.py``
-        ``_derive_activity``) because both surfaces draw the same row and a
-        second rule would be a second answer. It is deliberately narrow: a
-        phase RESTARTS the zero only when it begins a kind of work, never when
-        it merely relabels one — the composed batch is the case that shows the
-        difference, since it announces a call per fragment and all of them
-        belong to one dictation.
+        ``_derive_activity``) for the PHASES it names, because both surfaces
+        draw the same row and a second rule would be a second answer. It is
+        deliberately narrow: a phase RESTARTS the zero only when it begins a
+        kind of work, never when it merely relabels one — the composed batch
+        is the case that shows the difference, since it announces a call per
+        fragment and all of them belong to one dictation.
+
+        It is one rule in two PLACES, not one shared implementation, and the
+        ``tool_execution_end`` arm below is where they part: the fold restarts
+        only when the batch has no siblings left (D9 — a narrowed label must
+        not report a shed sibling's age), while the phone projection restarts
+        unconditionally. The divergence is deliberate and is the TUI's D9
+        reading; it is recorded here rather than left for someone to find by
+        diffing the two files, and a change to either side has to be checked
+        against the other.
 
         The ``running`` phase is folded so the end rule can tell a batch that
         still has siblings from one that has just lost its last call. Its

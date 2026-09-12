@@ -939,6 +939,27 @@ def _row_text() -> Text:
     return Text(no_wrap=True, overflow="ellipsis")
 
 
+class _UnknownStart:
+    """Sentinel type for :data:`START_UNKNOWN`; never instantiated twice."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - a debugging aid only
+        return "START_UNKNOWN"
+
+
+#: Passed as :class:`ToolCard`'s ``started_at`` when the card is being mounted
+#: for a call that is ALREADY in flight and no epoch for it exists anywhere —
+#: a legacy producer re-delivered to a rebuilt transcript, or a facade whose
+#: fold carries nothing for the call. It exists because ``None`` already means
+#: something else on that parameter ("this call begins now", true for a card
+#: built by the event that starts it), and the two must not be conflated: the
+#: first mounts CLOCKLESS, the second legitimately takes the mount instant as
+#: zero. Any other consumer that can only say "unknown" must use this rather
+#: than ``clock()``, which would print the viewer's arrival as the call's age.
+START_UNKNOWN = _UnknownStart()
+
+
 class ToolCard(ExpandableActionBlock):
     """A tool execution: ONE row, on a state-tinted elevation step.
 
@@ -972,7 +993,7 @@ class ToolCard(ExpandableActionBlock):
         intent: str | None = None,
         user_run: bool = False,
         clock: Callable[[], float] = time.monotonic,
-        started_at: float | None = None,
+        started_at: float | None | _UnknownStart = None,
     ) -> None:
         super().__init__()
         #: Injected so elapsed time is testable without sleeping, exactly as
@@ -1076,11 +1097,23 @@ class ToolCard(ExpandableActionBlock):
         #: adopt paths use (:meth:`restore`, :meth:`begin_running`), and it is
         #: deliberately one rule in three places rather than a constructor that
         #: quietly disagreed with them about what "running" means.
-        self._started: float | None = (
-            monotonic_from_epoch(started_at, clock=self._clock)
-            if started_at is not None
-            else self._clock()
-        )
+        #:
+        #: That leaves the case where the call began earlier AND no epoch
+        #: exists, which neither ``None`` ("begins now") nor a float can
+        #: express — hence :data:`START_UNKNOWN` and the withheld clock above.
+        if isinstance(started_at, _UnknownStart):
+            # The third answer, and the one the two-valued signature could not
+            # say: this row is mounted for a call ALREADY in flight and nobody
+            # recorded when it began. `None` here would mean "the call begins
+            # now", which is a lie for this row — the age it would print is the
+            # viewer's arrival wearing the call's name — and a real epoch is
+            # simply absent. So the row mounts CLOCKLESS, the same withheld
+            # reading `restore` and `begin_running` take for a missing epoch.
+            self._started = None
+        elif started_at is not None:
+            self._started = monotonic_from_epoch(started_at, clock=self._clock)
+        else:
+            self._started = self._clock()
         self._expanded = False
         #: A host that knows the user ran this call TO SEE its output (the
         #: composer's bang-mode) asks the card to open the moment it settles,
@@ -1511,9 +1544,12 @@ class ToolCard(ExpandableActionBlock):
         no clock the row simply stops animating between events, which is the
         right degradation for a timer whose entire job is cosmetic.
 
-        A REPLAYED live card (``restore(state="running")``) gets none: it has
-        no start time to count from and nothing streams into it, so every
-        tick would repaint an unchanged row. See :attr:`_started`.
+        A live card with NO start time to count from gets none — a replayed
+        row with no epoch, a mount for a call already in flight whose start
+        nobody stamped — because every tick would repaint a duration the row
+        cannot know. A ``restore(state="running")`` that IS given the call's
+        epoch does arm the timer: the guard is ``_started``, not the path that
+        set it. See :attr:`_started`.
         """
         if self._started is None or not self._navigation_visible:
             return
