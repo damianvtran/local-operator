@@ -62,10 +62,26 @@ def is_zombie(pid: int) -> bool:
 
     Deliberately NOT ``psutil``: this module is stdlib-only by contract and
     ``/proc`` does not exist on macOS, so on POSIX the fallback is a ``ps``
-    fork — measured at 3.9 ms against ~1 µs for signal-0. Callers therefore
-    spend it only where the answer changes what they do: ``session_lease``
-    after signal-0 has already said "live", ``registry.scan`` on a record
-    whose heartbeat has already gone quiet. Never once per healthy session.
+    fork — measured at 2.4-3.9 ms across runs on an M-series box, against
+    ~1 µs for signal-0. Callers therefore spend it only where the answer changes
+    what they do. Concretely, these are the places that may pay it:
+
+    - ``session_lease._pid_state`` — every acquisition and reaper decision, and
+      the legacy ``.session.pid``-only branch, all of which require a holder to
+      be *proven* dead before they move its claim.
+    - ``resume.live_runtime_pid`` — after signal 0 has already said "exists",
+      because that answer decides whether an interface refuses to open a
+      session at all.
+    - ``registry.pid_alive(check_zombie=True)`` — ``registry.scan`` spends it on
+      a record whose heartbeat has already gone quiet, so a healthy session's
+      row stays fork-free.
+
+    Two places deliberately do NOT, and both are latency trades rather than
+    safety ones: ``registry.pid_alive``'s default, which keeps ``scan``
+    fork-free for healthy records, and ``launch._lease_holder``'s dense-window
+    call, where the engage loop polls every 10 ms and the fork would cost more
+    than the wait it is trying to shorten. Neither can take a claim — only
+    ``session_lease`` does that, and it always asks.
     """
     if pid <= 0:
         return False
