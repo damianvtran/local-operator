@@ -24416,6 +24416,10 @@ class OperatorApp(App[None]):
             # knows it was deliberate, and the page must not contradict the
             # dock row it was opened from (design round 2, D5).
             paused=str(getattr(node, "status", "")) == "paused",
+            # ...and a CUT-OFF reads as ``interrupted`` in the roster, so the
+            # cause is what tells the page which of the two words is right
+            # (design round 2, D8). Read off the job for the same reason.
+            cut_off=bool(getattr(job, "cut_off_cause", "")),
             queued=bool(getattr(job, "queued", False)),
             elapsed=job_elapsed(job) if job is not None else "0s",
             # The settled outcome, for the one fact the page's own fields

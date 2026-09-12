@@ -635,6 +635,117 @@ async def test_a_cut_off_the_dying_runtime_could_not_journal_is_narrated_on_rest
         await session.dispose()
 
 
+# -- the malformed marker (review round 2, Q3) --------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cause", "handed_on"),
+    [
+        ("runtime-killed", True),  # control: a real cut-off token
+        ("not-a-real-cause", False),  # the QA repro
+        ("", False),  # a provider error carries no harness cause
+        ("user-stop", False),  # the DELIBERATE token, mismatched onto `error`
+    ],
+)
+async def test_only_a_vocabulary_cause_is_handed_on_for_narration(
+    tmp_path: Path, cause: str, handed_on: bool
+) -> None:
+    """Q3: the restore seam's guard is MEMBERSHIP, not `cause` truthiness.
+
+    The guard used to be `kind == "error" and cause`, so a marker carrying any
+    string at all was narrated into the model's history — the QA round-2 repro
+    seeded `cause='not-a-real-cause'`, which produced one `[session incident]`
+    card and imported itself as the durable outcome. Every in-tree
+    `note_cut_off` caller passes a vocabulary token, so the reachable case is a
+    corrupted marker; the reason this is NOT deferred is that the vocabulary is
+    the only thing that lets a reader say what the token means, and a reader
+    that cannot say it must not narrate it to the model as though it could.
+
+    The durable outcome is imported in EVERY case — that is the half a
+    membership test must not break. What varies is only whether this boot hands
+    the tuple on for a model-facing incident, so the operator's surfaces keep
+    reading the recorded truth even for a token this build cannot render.
+    """
+    from local_operator.session.attention import (
+        ATTENTION_CUSTOM_TYPE,
+        AttentionStore,
+        bootstrap_transcript,
+    )
+
+    directory = tmp_path / "sessions" / "malformed"
+    directory.mkdir(parents=True)
+    token = str(uuid.uuid4())
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        "attention_started",
+        {"conversation_id": conversation_identity(directory), "token": token},
+    )
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="half a reply")])
+    )
+    await transcript.append_custom(
+        ATTENTION_CUSTOM_TYPE,
+        {
+            "conversation_id": conversation_identity(directory),
+            "token": token,
+            "anchor": "completion-1",
+            "kind": "error",
+            "cause": cause,
+            "reason": "something went wrong while this turn was running",
+        },
+    )
+
+    store = AttentionStore(tmp_path / "attention.db")
+    restored = bootstrap_transcript(transcript, store)
+
+    if handed_on:
+        assert restored is not None, "a real cut-off was not handed on for narration"
+        assert restored[1] == cause
+    else:
+        assert restored is None, f"a marker with cause={cause!r} was narrated as a cut-off"
+    # Imported either way: the surfaces read the recorded outcome, and the model
+    # card is the only thing the vocabulary withholds.
+    state = store.state(conversation_identity(directory))
+    assert state["kind"] == "error", state
+    assert state["cause"] == cause, state
+    assert state["reason"] == "something went wrong while this turn was running", state
+
+
+# -- the narration is memoised (review round 2, NIT-1) ------------------------
+
+
+def test_the_restored_cut_off_is_narrated_once_and_stops_rescanning() -> None:
+    """NIT-1: `_restored_cut_off` is CLEARED once narrated, not re-scanned.
+
+    ``refresh_attention`` runs on every 1 Hz attention tick and calls this, and
+    ``_journal_cut_off_once`` dedupes by scanning the whole transcript for the
+    token — measured at 0.71 ms on a 20k-entry transcript, paid forever for a
+    tuple that can only ever describe the one run this boot repaired.
+
+    Built with ``object.__new__`` because the method touches two attributes; a
+    constructed Session would drag a runtime into a unit assertion about a scan
+    count (the idiom the suite already uses for narrow methods).
+    """
+    from local_operator.session.session import Session
+
+    session = object.__new__(Session)
+    session._restored_cut_off = ("error", "runtime-killed", "a reason", "tok-1")
+    calls: list[tuple[str, str, str]] = []
+
+    async def spy(token: str, reason: str, cause: str) -> None:
+        calls.append((token, reason, cause))
+
+    session._journal_cut_off_once = spy  # type: ignore[method-assign]
+    asyncio.run(session._journal_restored_cut_off())
+    # The tick that follows, and the one after that.
+    asyncio.run(session._journal_restored_cut_off())
+    asyncio.run(session._journal_restored_cut_off())
+
+    assert calls == [("tok-1", "a reason", "runtime-killed")], calls
+    assert session._restored_cut_off is None, "the tuple survives and keeps rescanning"
+
+
 # -- the OWNER path's restore (review round 1, UX U2) ------------------------
 
 

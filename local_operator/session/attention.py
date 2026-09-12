@@ -363,10 +363,18 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
     ``cause_from_reason(reason)`` — the inverse every reader relies on —
     agreeing with the reason instead of naming a mechanism nobody observed.
     """
-    from local_operator.incidents import CUT_OFF_UNKNOWN, render_cut_off_reason
+    from local_operator.incidents import (
+        CUT_OFF_UNKNOWN,
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+    )
 
     if _stopped_marker(directory):
-        return "interrupted", "user-stop", render_cut_off_reason("user-stop")
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
+        )
     _, dead = _run_record_evidence(directory)
     if dead is not None:
         return (
@@ -402,6 +410,11 @@ def _import_transcript_outcome(
     """
     store = store or AttentionStore()
     identity = conversation_identity(transcript.directory)
+    # Imported here rather than at module scope for the same reason
+    # ``_classify_orphaned_run`` does it: a broken ``incidents`` import must not
+    # stop a session from booting (see the guard around the bootstrap call).
+    from local_operator.incidents import CUT_OFF_CAUSES, DELIBERATE_CUT_OFF_CAUSE
+
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
     started = transcript.latest_custom("attention_started")
     if (
@@ -438,7 +451,7 @@ def _import_transcript_outcome(
                 reason=reason,
                 cause=cause,
             )
-            if kind == "error" and cause:
+            if kind == "error" and cause in CUT_OFF_CAUSES and cause != DELIBERATE_CUT_OFF_CAUSE:
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
                 # `_journal_cut_off_once` is refused by `journal_incident`'s
                 # `_disposed` guard — the dispose rung sets that flag before
@@ -450,13 +463,28 @@ def _import_transcript_outcome(
                 # `[session incident]` rather than a model re-guessing what its
                 # last half-delivered request did.
                 #
-                # A `cause` is required rather than merely expected, and the
-                # `kind` is read rather than re-derived: only a cut-off carries
-                # a token from `CUT_OFF_CAUSES` (`_publish_attention_outcome`
-                # stores `cause=""` for a provider error and `user-stop` for a
-                # recorded stop), and narrating a provider error or a user's own
-                # `/stop` as a cut-off incident would be the taxonomy's own
-                # misclassification committed by the reader meant to repair it.
+                # MEMBERSHIP, not the presence of a cause (review round 2, Q3).
+                # The guard used to be `cause` truthiness, which narrates a
+                # marker carrying ANY string into the model's history — measured
+                # on a hand-written marker with `cause='not-a-real-cause'`: one
+                # `session_incident` card, and the malformed token imported as
+                # the durable outcome. So the vocabulary decides, and the
+                # deliberate token is excluded on top of it because the reader
+                # meant to repair the taxonomy must not itself commit its
+                # misclassification by narrating a user's own `/stop` as a
+                # cut-off. `kind` is still READ rather than re-derived: the dying
+                # runtime's marker is replayed verbatim.
+                #
+                # The cost is stated rather than hidden: a NEWER runtime's cause
+                # token is not narrated to the model by this build, because this
+                # build cannot say what it means. The durable outcome is still
+                # imported above — kind, cause and reason as recorded — so every
+                # surface reads the truth; only the `[session incident]` card,
+                # which is the model-facing form of a cause this build can
+                # render, is withheld. Reachability today is a corrupted marker
+                # (every in-tree `note_cut_off` caller passes a vocabulary token),
+                # which is why this is a claim-vs-code correction and not a live
+                # operator bug.
                 return kind, cause, reason, str(saved["token"])
         return None
     if store.state(identity)["completion_token"]:

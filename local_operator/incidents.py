@@ -260,8 +260,16 @@ _HINTS: dict[str, str] = {
 #: and ``owner-lost`` the viewer-side verdict that the runtime it was bound to
 #: stopped answering. ``user-stop`` is the one DELIBERATE cause, and it is what
 #: keeps a user's own cancel from being reported as an error.
+#: The ONE deliberate cause in :data:`CUT_OFF_CAUSES`. Exported so the readers
+#: that have to tell a recorded stop apart from a cut-off do not re-spell the
+#: token: the restore seam's journaling guard and the durable-outcome writer are
+#: both answering that question, and a hard-coded copy on either side is one
+#: rename away from silently admitting a user's own ``/stop`` into the cut-off
+#: vocabulary.
+DELIBERATE_CUT_OFF_CAUSE = "user-stop"
+
 CUT_OFF_CAUSES: dict[str, str] = {
-    "user-stop": "the session was stopped by the user",
+    DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     "runtime-killed": (
