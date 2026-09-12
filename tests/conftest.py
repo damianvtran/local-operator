@@ -557,14 +557,18 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
             continue
     if not live:
         return 0
-    _stop_brokers_in(live)
-    # What was actually STOPPED, never what was merely considered.
-    # `_stop_brokers_in` is free to decline a candidate it is then handed — most
-    # notably its third refusal, `pid == os.getpid()`, the in-process broker shape
-    # that once took the xdist worker down with it — and `len(live)` would then
-    # report a broker as reclaimed while it is still running. Re-asking the same
-    # cheap question after the stop is what makes the number match the message.
-    return sum(1 for candidate in live if not _broker_is_still_up(candidate))
+    # Count what the stop path CONFIRMED gone, never what was merely considered.
+    # The confirmation has to come from inside `_stop_brokers_in`: it is the only
+    # place that knows which candidates it signalled and whether the daemon stopped
+    # answering inside the bound, and by the time it returns it has removed every
+    # candidate's fallback runtime dir. On the layout a real candidate takes that
+    # directory IS the socket's parent — a pytest ``tmp_path``'s in-directory socket
+    # path is ~145 bytes against the 103-byte ``sun_path`` limit, so the fallback is
+    # the common case — and a re-probe here would then answer "not running" for the
+    # "no socket file" reason and report a broker that is still alive, including one
+    # the sweep DECLINED to signal (`pid <= 0`, `pid == os.getpid()`). Neither shape
+    # is in the returned set.
+    return len(_stop_brokers_in(live))
 
 
 def _broker_is_still_up(candidate: Path) -> bool:
@@ -686,8 +690,16 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     _stop_brokers_in(candidates)
 
 
-def _stop_brokers_in(candidates: list[Path]) -> None:
+def _stop_brokers_in(candidates: list[Path]) -> set[Path]:
     """SIGTERM the broker in each candidate config dir, then drop its runtime dir.
+
+    Returns the candidates whose broker was SIGNALLED and CONFIRMED gone — the
+    daemon stopped answering inside the wait bound. Deliberately decided here rather
+    than re-probed by the caller: the runtime-dir removal at the end deletes the
+    fallback socket of every candidate it was handed, INCLUDING the ones it refused
+    to signal, so after this returns a probe cannot tell a reaped broker from a
+    declined one on the layout real candidates take. A declined candidate and an
+    unconfirmable stop are both absent from the set, and neither is assumed dead.
 
     A function rather than an in-fixture loop so the behaviour is reachable from
     a test: `test_broker_sweep.py` drives it against a REAL broker, and against a
@@ -706,7 +718,7 @@ def _stop_brokers_in(candidates: list[Path]) -> None:
     rather than one per entry point.
     """
     if not _broker_daemon_is_available():
-        return
+        return set()  # no daemon to stop, so nothing was confirmed gone
 
     # Imported here rather than at module scope: this conftest is loaded for
     # every test session, and the secrets client drags in fcntl/socket
@@ -714,6 +726,11 @@ def _stop_brokers_in(candidates: list[Path]) -> None:
     from local_operator.secrets import client
     from local_operator.secrets.keys import secrets_dir
     from local_operator.secrets.protocol import _runtime_fallback_dir, socket_path
+
+    # Candidates whose broker stopped answering inside the wait bound, i.e. the
+    # only ones a caller may report as reclaimed. Populated BEFORE the runtime dirs
+    # are removed, because that removal destroys the evidence.
+    stopped: set[Path] = set()
 
     for candidate in candidates:
         # Only ask candidates that actually have a socket. A broker is a
@@ -766,10 +783,20 @@ def _stop_brokers_in(candidates: list[Path]) -> None:
         # version-skewed broker could fail an unrelated passing test. The helper
         # answers the same question with any failure to answer read as STILL UP,
         # which keeps this loop bounded by its deadline and keeps the broker's
-        # fate honest: nothing here assumes the daemon died, and the session-end
-        # net re-asks the same question before it counts a candidate as reclaimed.
+        # fate honest: nothing here assumes the daemon died, and the set returned
+        # below is what the session-end net reports.
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and _broker_is_still_up(candidate):
+        while True:
+            if not _broker_is_still_up(candidate):
+                # The probe that ends the wait IS the evidence, and it is taken
+                # before the runtime-dir removal below takes the socket with it.
+                stopped.add(candidate)
+                break
+            if time.monotonic() >= deadline:
+                # Give up unconfirmed: the daemon never stopped answering, so
+                # nothing is claimed about it. Not an error — cleanup never fails
+                # a test, and the net reports only what it can observe.
+                break
             time.sleep(0.05)
 
     # The fallback runtime dir is derived from the SECRETS dir and is created
@@ -777,12 +804,15 @@ def _stop_brokers_in(candidates: list[Path]) -> None:
     # tmp_path is routinely ~145 bytes against a 103-byte limit, so here that is
     # the common case rather than the exotic one. It is created even for a
     # config dir whose store was never initialised, hence the unconditional
-    # removal. AFTER the broker is stopped, since the socket lives inside it.
+    # removal. AFTER the broker is stopped, since the socket lives inside it —
+    # which is also why the confirmed-stopped set above is built first.
     for candidate in candidates:
         # `Exception`, not `OSError`, for the reason above: a test may have
         # replaced the path machinery this line depends on.
         with suppress(Exception):
             shutil.rmtree(_runtime_fallback_dir(secrets_dir(candidate)), ignore_errors=True)
+
+    return stopped
 
 
 def _secret_config_dirs(request: pytest.FixtureRequest, home: Path) -> list[Path]:

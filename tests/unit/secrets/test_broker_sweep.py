@@ -710,7 +710,9 @@ def test_the_net_asks_the_protocol_only_about_a_candidate_that_has_a_socket(
 
     monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {with_socket, without_socket})
     monkeypatch.setattr(client, "is_running", probe)
-    monkeypatch.setattr("tests.conftest._stop_brokers_in", lambda candidates: None)
+    monkeypatch.setattr(
+        "tests.conftest._stop_brokers_in", lambda candidates: set()
+    )  # the contract under test is its return: the candidates it stopped
     try:
         assert _sweep_session_leftovers(tmp_path) == 0
     finally:
@@ -729,25 +731,45 @@ def test_the_net_reports_only_the_brokers_it_actually_stopped(
     """The reported count is what was STOPPED, not what was considered.
 
     `_stop_brokers_in` refuses three shapes and the third — `pid == os.getpid()`,
-    the in-process `broker` fixture's shape — leaves the broker running, so a
-    count taken from the liveness probe alone reports a broker as reclaimed while
-    it is still there. This drives the REAL refusal through the real
-    `_stop_brokers_in` rather than stubbing the stop, so the test fails if either
-    the refusal or the re-check after it goes away.
+    the in-process `broker` fixture's shape — leaves the broker running, so a count
+    derived from the liveness probe alone reports a broker as reclaimed while it is
+    still there. This drives the REAL refusal through the real `_stop_brokers_in`
+    rather than stubbing the stop, so the test fails if either the refusal or the
+    count's source goes away.
+
+    **The candidate is a DEEP config dir on purpose** (`_deep_config_dir` asserts the
+    `$TMPDIR` fallback layout was chosen, which is the layout a real pytest
+    candidate takes — its in-directory socket path is ~145 bytes against the
+    103-byte limit). That matters because the sweep's runtime-dir removal is
+    unconditional and on this layout it deletes the socket of a broker it DECLINED
+    to signal, so a count taken from a probe afterwards is blind: no socket, read as
+    "reaped". The probe below therefore models what `is_running` actually does on
+    that layout — it answers False once the socket file is gone — instead of
+    returning a constant, because a constant answers the same way whether or not the
+    socket was destroyed and so cannot observe this defect at all.
     """
-    candidate = tmp_path / "config"
-    candidate.mkdir()
+    candidate = _deep_config_dir(tmp_path)
     _plant_socket(candidate)
+    # `is_running` answers by connecting to `socket_path(candidate)`, and on this
+    # layout that path stops existing when the runtime dir is removed — including for
+    # a candidate the sweep only declined.
+    monkeypatch.setattr(client, "is_running", lambda base=None: socket_path(candidate).exists())
     monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
-    monkeypatch.setattr(client, "is_running", lambda base=None: True)
     # The in-process broker shape: `broker_status` reports THIS process's pid, so
-    # the sweep refuses to signal it and the daemon is still answering afterwards.
+    # the sweep refuses to signal it and the daemon is still alive afterwards.
     monkeypatch.setattr(client, "broker_status", lambda base=None: {"pid": os.getpid()})
     try:
         assert client.is_running(candidate), "the planted socket was not seen as live"
         assert _sweep_session_leftovers(tmp_path) == 0, (
             "the net reported a broker as reclaimed that `_stop_brokers_in` refused "
             "to stop; the count must be what was stopped, not what was considered"
+        )
+        # The trap was genuinely live, so the assertion above is not vacuous: the
+        # sweep removed the socket's parent, which is exactly what a probe taken
+        # afterwards cannot see past.
+        assert not _runtime_fallback_dir(secrets_dir(candidate)).exists(), (
+            "the sweep did not remove the fallback runtime dir, so this test never "
+            "exercised the removal that blinds a later probe"
         )
     finally:
         _cleanup_planted_socket(candidate)
@@ -781,9 +803,10 @@ def test_the_net_hands_a_version_skewed_broker_to_the_sweep_and_counts_it(
             raise client.BrokerIncompatible("the broker speaks protocol 0", pid=4242, protocol=0)
         return False
 
-    def stop(candidates: list[Path]) -> None:
+    def stop(candidates: list[Path]) -> set[Path]:
         stopped.extend(candidates)
         state["up"] = False  # a stop that worked takes the daemon away
+        return set(candidates)  # ...and that is what the net counts
 
     monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
     monkeypatch.setattr(client, "is_running", probe)
@@ -821,6 +844,15 @@ def test_the_sweep_survives_a_skewed_probe_and_never_assumes_the_broker_died(
     sweep must not raise, and the count must be 0 rather than a broker assumed
     dead. Only the probe and `broker_status` are patched. The test costs the wait
     loop's own bound (~5s), which is the behaviour under test.
+
+    **Baseline note, so the obvious A/B is not misread (R2-2).** Against `512d5c0f8`
+    — the head this fix is on — it fails with `BrokerIncompatible` escaping the
+    reap, which IS the defect. Against `dc725c88a`, the head the other tests are
+    A/B'd against, it fails on a DIFFERENT assertion, `the wait loop returned after
+    0.00s`: at that tree R1-3's `suppress(Exception)` drops the skewed candidate
+    before it ever reaches the stop loop, so nothing is signalled and the escape
+    cannot happen. Both are failures for a stated reason, but only `512d5c0f8`
+    isolates this one — do not read the `dc725c88a` result as an unrelated error.
     """
     candidate = tmp_path / "config"
     candidate.mkdir()
