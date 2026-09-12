@@ -664,15 +664,16 @@ SETTINGS: tuple[Setting, ...] = (
         # An ENUM member rather than `empty_unsets` so the page shows `auto`
         # beside the real rungs as a peer to pick between.
         default="",
-        # 61 cells — the same ~76-cell footer budget as `hosting` above, and it
-        # has to hold the row's own meaning AND the resting state (design round
-        # 1, D4+D5). The clamp sentence the first cut carried is gone: at 61
-        # cells it cannot sit beside the fact that the row ships UNSET, and the
-        # resting cell renders that emptiness as `—`, so the one member a user
-        # cannot READ off the page was the one left unexplained. The clamp is
-        # documented where it happens instead — README, and the `/model default`
-        # receipt names the instance when a rung is dropped.
-        help="Effort for new conversations. Unset: the model's own default.",
+        # 57 cells, and that is the point (design round 1, D4+D5; round 2, D10):
+        # it has to hold the row's own meaning AND the resting state inside the
+        # 74-cell detail budget at 80 columns, which the off-default line spends
+        # as `<help> · default: —`. The first cut sat EXACTLY on 74 with zero
+        # headroom, so one more word anywhere would shed the whole sentence in the
+        # state a user reads it in. `the model's default` rather than `the
+        # model's own default` recovers 4 cells; the clamp sentence the original
+        # cut carried is documented in the README and named where it happens, on
+        # the `/model default` receipt.
+        help="Effort for new conversations. Unset: the model's default.",
         choices=_effort_choices(),
     ),
     # -- providers ----------------------------------------------------------

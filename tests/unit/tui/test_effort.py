@@ -16,11 +16,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from rich.cells import cell_len
 from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.model.configure import build_model_spec
-from local_operator.tui.app import OperatorApp
+from local_operator.paths import DEFAULT_CONFIG_DIRNAME
+from local_operator.tui.app import EFFORT_SET_RECEIPT, OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import (
@@ -30,6 +32,12 @@ from tests.unit.tui.test_app_pilot import (
     _factory,
     _FakeDef,
 )
+
+#: What a DEFAULT install's receipt prints for the file it wrote: the config
+#: lives at `~/.local-operator/config.yml` unless LOCAL_OPERATOR_CONFIG_DIR says
+#: otherwise. Receipt budgets are measured against THIS label rather than the
+#: shorter `~/config/config.yml` a redirected test home produces (U8).
+DEFAULT_CONFIG_LABEL = f"~/{DEFAULT_CONFIG_DIRNAME}/config.yml"
 
 
 class EffortSession(FakeSession):
@@ -238,9 +246,12 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
     receipt = [n for n in notices if "reasoning effort" in n]
     assert receipt, notices
     # Names the old level and the new one, and how long the choice lasts: it is
-    # session-scoped by design and nothing else on screen would say so.
+    # session-scoped by design and nothing else on screen would say so. The scope
+    # word is `(session)`, one word shorter than the siblings' `(this session)`
+    # because this receipt's two rung words are both variable and this one has to
+    # hold every pair at 80 columns (round-2 D9).
     assert "high" in receipt[-1] and "low" in receipt[-1]
-    assert "this session" in receipt[-1]
+    assert "(session)" in receipt[-1]
 
 
 @pytest.mark.asyncio
@@ -552,10 +563,67 @@ async def test_the_effort_set_receipt_holds_one_row_at_eighty_columns() -> None:
         await _submit(pilot, app, "/effort high")
         await _submit(pilot, app, "/effort xhigh")
         receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
-    assert (
-        receipt == "reasoning effort: high → xhigh (this session); /model default keeps it"
-    ), receipt
-    assert len(receipt) <= 70, receipt
+    assert receipt == EFFORT_SET_RECEIPT.format(current="high", wanted="xhigh"), receipt
+    assert cell_len(receipt) <= 70, receipt
+
+
+def test_the_set_receipt_fits_every_ordered_pair_the_ladders_can_form() -> None:
+    """NEW-2 / D9 / Q1: the budget is a property of the RECEIPT, not of the pair
+    round 1 happened to measure.
+
+    The row's size is a function of two rung words and both vary. Pinning
+    `high → xhigh` (exactly 70) is what let `medium → xhigh` (71) and
+    `medium → minimal` (73) ship wrapping at 80 columns: `/effort medium` on the
+    DEFAULT model is an ordinary command, and `minimal` is reachable through a
+    provider's own ladder (the shared vocabulary carries it and discovery admits
+    any member of that vocabulary). So this walks every ordered pair the shipped
+    ladders can form plus the longest word in the vocabulary, in both directions,
+    and holds each to the real budget: `width - 10` cells, 70 at 80 columns,
+    measured with ``cell_len`` (the string carries an arrow and an em dash, so a
+    character count is not a cell count).
+
+    The template is built here rather than driven through the app because the
+    property is about the copy's SHAPE: a rung no table offers today still has to
+    fit, and no widget decides that.
+    """
+    from local_operator.model.effort import EFFORT_ORDER, default_effort, supported_efforts
+
+    ladders: list[tuple[str, ...]] = []
+    for model_id in (
+        "claude-opus-5",
+        "claude-opus-4-6",
+        "claude-opus-4-5-20251101",
+        "gpt-5.4",
+        "gpt-6-astra",
+        "o3",
+        "gpt-4.1",
+    ):
+        level = default_effort(model_id)
+        ladder = tuple(supported_efforts(model_id))
+        ladders.append(ladder if not level or level in ladder else (*ladder, level))
+    pairs = [
+        (first, second)
+        for ladder in ladders
+        for first in ladder
+        for second in ladder
+        if first != second
+    ]
+    assert pairs, "the shipped ladders must offer at least one transition"
+    # The longest words the vocabulary can carry, in both directions: the
+    # receipt's two rung words are independent of each other.
+    longest = max(EFFORT_ORDER, key=cell_len)
+    pairs.extend([(longest, "medium"), ("medium", longest)])
+
+    def rendered(first: str, second: str) -> str:
+        # The SHIPPED string, not a copy of it: the receipt lives in a module
+        # constant precisely so this measures what the app prints.
+        return EFFORT_SET_RECEIPT.format(current=first, wanted=second)
+
+    worst = max(pairs, key=lambda pair: cell_len(rendered(*pair)))
+    assert cell_len(rendered(*worst)) <= 70, rendered(*worst)
+    # The pair the round-2 gates measured: one ordinary `/effort medium` on the
+    # shipped default model, pinned as text as well as by width.
+    assert cell_len(rendered("medium", "xhigh")) <= 70, rendered("medium", "xhigh")
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +808,7 @@ async def test_model_default_saves_the_level_alongside_the_model(tmp_path, monke
     assert written["model_effort"] == "low", written
     # The receipt names the third key, in the registry's own vocabulary
     # (`auto` for the empty value), so a user can see what was made durable.
-    assert any("model_effort low (used by new sessions)" in n for n in notices), notices
+    assert any("model_effort low (new sessions)" in n for n in notices), notices
 
 
 @pytest.mark.asyncio
@@ -760,7 +828,7 @@ async def test_model_default_with_no_chosen_level_saves_no_opinion(tmp_path, mon
         notices = _notices(app)
     written = _written(tmp_path)
     assert written["model_effort"] == "", written
-    assert any("model_effort auto (used by new sessions)" in n for n in notices), notices
+    assert any("model_effort auto (new sessions)" in n for n in notices), notices
 
 
 @pytest.mark.asyncio
@@ -1005,20 +1073,28 @@ async def test_the_default_receipt_names_a_clamped_rung(tmp_path, monkeypatch) -
         await _boot(pilot, app)
         await _submit(pilot, app, "/model default anthropic/claude-opus-4-6")
         notices = _notices(app)
-    saved = [n for n in notices if n.startswith("boot default: ")]
+    saved = [n for n in notices if n.startswith("default: ")]
     assert len(saved) == 1, notices
-    assert "model_effort high (used by new sessions)" in saved[0], saved[0]
-    # The 110-cell budget is measured with the SHORT home-relative path the
-    # receipt prints in practice (`~/config/config.yml`), so the test's absolute
-    # temp path is normalised the same way before measuring.
-    normalised = saved[0].replace(str(tmp_path / "config.yml"), "~/config/config.yml")
+    assert "model_effort high (new sessions)" in saved[0], saved[0]
+    # The 110-cell budget is measured against the path a DEFAULT install
+    # renders, not against the shorter placeholder a temp-dir test happens to
+    # produce (U8): `_home_relative` prints `~/.local-operator/config.yml` (28
+    # cells) for a user who never set LOCAL_OPERATOR_CONFIG_DIR, which is 9 cells
+    # more than `~/config/config.yml` — the difference between this row fitting
+    # at 120 columns and widowing `(for new sessions)`.
+    normalised = saved[0].replace(str(tmp_path / "config.yml"), DEFAULT_CONFIG_LABEL)
+    assert DEFAULT_CONFIG_LABEL == "~/.local-operator/config.yml", DEFAULT_CONFIG_LABEL
     # Measured WITHOUT the access suffix: that clause (` · anthropic logged in`)
     # rides only when there is an access note to give, and it pushed this row
     # over the 120-column budget before this PR too — D3's finding is about the
     # receipt proper, which is the form the designer measured.
-    assert len(normalised.split(" · ")[0]) <= 110, normalised
+    assert cell_len(normalised.split(" · ")[0]) <= 110, normalised
+    # ...and for the LONGEST rung the vocabulary can carry, not just the one this
+    # command stored: `minimal` is two cells longer than `xhigh`.
+    worst = normalised.replace("model_effort high", "model_effort minimal")
+    assert cell_len(worst.split(" · ")[0]) <= 110, worst
     assert any(
-        n == "model_effort high (xhigh clamps to this model's nearest rung)" for n in notices
+        n == "reasoning effort: high (xhigh clamps to the nearest rung)" for n in notices
     ), notices
 
 
@@ -1078,3 +1154,52 @@ async def test_the_already_set_receipt_fits_for_the_longest_level_name() -> None
         receipt == "reasoning effort: already minimal — /effort auto restores the default"
     ), receipt
     assert len(receipt) <= 70, receipt
+
+
+@pytest.mark.asyncio
+async def test_model_saved_in_the_readiness_window_does_not_strand_the_override(
+    tmp_path, monkeypatch
+) -> None:
+    """NEW-1, the residual of B2: the dispatch has an early return of its OWN.
+
+    `_cmd_model_saved` arms the override and re-dispatches through
+    `_run_slash_command`, and that dispatcher refuses BEFORE `_cmd_model` is
+    entered when the source is not ready (`/model` is not in
+    `_SAVED_LOCAL_COMMANDS`). Nothing in `_cmd_model` runs on that path, so
+    neither its entry clear nor its guard clears can fire — and the stranded
+    handoff marker then EATS the next entry's clear, which is how a later,
+    unrelated `/model` switch lands on the stored level. The window is reachable:
+    `_cmd_model_saved` also has a caller that does not readiness-check first
+    (the `local_setup` login continuation), and a cold-bind/mid-retry source can
+    be un-ready at this instant.
+
+    The pair is cleared in `_cmd_model_saved` itself for exactly this path, so
+    the invariant is "an armed override cannot outlive the dispatch it was armed
+    for" rather than "it cannot outlive the dispatch that ENTERED `_cmd_model`".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: anthropic\n  model_name: claude-opus-5\n"
+        "  model_effort: none\n"
+    )
+    app = OperatorApp(
+        lambda: _factory(EffortSession()), provider_controller=EffortProviderController()
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/effort high")
+        # The window: the source is un-ready at the instant of the re-dispatch.
+        monkeypatch.setattr(app, "_source_commands_ready", lambda *args, **kwargs: False)
+        app._cmd_model_saved(app._notice)
+        await pilot.pause()
+        stranded = (app._pending_effort_override, app._effort_override_handoff)
+        monkeypatch.delattr(app, "_source_commands_ready")
+        # The unrelated switch the stranded override used to land on.
+        await _submit(pilot, app, "/model openai/gpt-5.1")
+        level = _level(app)
+        band = _band(app)
+    assert stranded == ((False, None), False), stranded
+    # `gpt-5.1` seeds no level, so the correct answer is `auto` — not the `none`
+    # the stranded override would have clamped onto its ladder.
+    assert level is None, band
+    assert "▴ auto" in band
