@@ -63,7 +63,6 @@ from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui.app import OperatorApp, ToolCard
 from local_operator.tui.events import TurnStarted
-from local_operator.tui.widgets.tool_card import format_duration
 from tests.e2e.harness import (
     ScriptedStream,
     assistant_message,
@@ -731,8 +730,13 @@ async def test_a_replayed_running_row_arms_from_the_sessions_start_epoch() -> No
         card = _paint_one(app, "call-clock", session)
         assert card._state == "running"
         assert card._started is not None
-        assert card._elapsed() == pytest.approx(aged, abs=1.0)
-        assert format_duration(round(card._elapsed() or 0.0)) == format_duration(int(aged))
+        # A RANGE, not the string `27s`: the reading grows between the fixture's
+        # instant and this line, so an exact number asserts that the machine is
+        # fast rather than that the seed is right — this assertion's first CI run
+        # returned `28s` on correct code. The failure worth catching is the wrong
+        # ORDER of magnitude: a zero taken when the row was painted.
+        elapsed = card._elapsed()
+        assert elapsed is not None and aged <= elapsed < aged + 30, elapsed
 
 
 @pytest.mark.asyncio
@@ -783,9 +787,10 @@ async def test_a_switch_away_and_back_resumes_a_live_tools_true_age() -> None:
         card = app._tool_cards["call-live"]
         assert card._state == "running"
         assert card._started is not None, "the session knows when this call began"
-        assert card._elapsed() == pytest.approx(aged, abs=1.0), (
-            f"the row reads {card._elapsed()} for a call {aged}s old: it counted "
-            "from the switch instead of from the call's own start"
+        elapsed = card._elapsed()
+        assert elapsed is not None and aged <= elapsed < aged + 30, (
+            f"the row reads {elapsed} for a call {aged}s old: it counted from "
+            "the switch instead of from the call's own start"
         )
 
         # (2) The owner's seed arrives and re-delivers the still-in-flight start
@@ -802,9 +807,10 @@ async def test_a_switch_away_and_back_resumes_a_live_tools_true_age() -> None:
         )
         await pilot.pause()
         await pilot.pause()
-        assert card._elapsed() == pytest.approx(
-            aged, abs=1.0
-        ), "re-entry reset the row: begin_running must seed from the same epoch"
+        elapsed = card._elapsed()
+        assert elapsed is not None and aged <= elapsed < aged + 30, (
+            f"re-entry reset the row to {elapsed}: begin_running must seed from " "the same epoch"
+        )
         assert len(app._tool_cards) == 1
 
         # The band reads the same anchor, which is the second clock in the
@@ -812,7 +818,9 @@ async def test_a_switch_away_and_back_resumes_a_live_tools_true_age() -> None:
         app._refresh_working_activity()
         line = app._working_block
         assert line is not None
-        assert line._clock_text() == format_duration(int(aged)), line._clock_text()
+        shown = line._clock_text()
+        assert shown.endswith("s") and shown[:-1].isdigit(), shown
+        assert aged <= float(shown[:-1]) < aged + 30, shown
 
         # And the receipt stays the CALL's, not the viewer's. A card that can
         # date itself keeps its own reading (`mark_done`), and the executor's
@@ -834,9 +842,10 @@ async def test_a_switch_away_and_back_resumes_a_live_tools_true_age() -> None:
         await pilot.pause()
         await pilot.pause()
         assert card._state == "success"
-        assert card._duration == pytest.approx(aged, abs=1.0), (
-            f"the receipt reads {card._duration} for a call {aged}s old — the "
-            "settle fell back to the switch instant"
+        duration = card._duration
+        assert duration is not None and aged <= duration < aged + 30, (
+            f"the receipt reads {duration} for a call {aged}s old — the settle "
+            "fell back to the switch instant"
         )
 
 
