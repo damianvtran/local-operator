@@ -21,6 +21,7 @@ from textual.geometry import Size
 from textual.widgets import Static
 
 from local_operator.model.configure import build_model_spec
+from local_operator.model.effort import EFFORT_ORDER, default_effort, supported_efforts
 from local_operator.paths import DEFAULT_CONFIG_DIRNAME
 from local_operator.tui.app import EFFORT_SET_RECEIPT, OperatorApp
 from local_operator.tui.widgets.editor import Editor
@@ -586,8 +587,6 @@ def test_the_set_receipt_fits_every_ordered_pair_the_ladders_can_form() -> None:
     property is about the copy's SHAPE: a rung no table offers today still has to
     fit, and no widget decides that.
     """
-    from local_operator.model.effort import EFFORT_ORDER, default_effort, supported_efforts
-
     ladders: list[tuple[str, ...]] = []
     for model_id in (
         "claude-opus-5",
