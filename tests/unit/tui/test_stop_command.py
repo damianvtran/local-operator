@@ -1231,7 +1231,7 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
         app._resume_factory = fake_find  # type: ignore[assignment]
 
         with pytest.raises(RuntimeError):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert app._session is None, "the viewer really is unbound"
         assert app._adopted_session_id == "sess", "the only lever the user has must survive"
