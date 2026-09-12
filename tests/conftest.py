@@ -515,9 +515,10 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
     agent's worktree. Without a basetemp there is nothing safe to scope to and
     the net does nothing at all.
 
-    Returns the number of config dirs that still had a LIVE broker, which is the
+    Returns the number of candidates this net actually STOPPED, which is the
     count worth reporting: candidates that were already clean are the expected
-    case and say nothing.
+    case and say nothing, and a candidate the sweep declined to stop was never
+    reclaimed.
     """
     if not _broker_daemon_is_available():
         return 0
@@ -526,20 +527,60 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
         return 0
     try:
         from local_operator.secrets import client
+        from local_operator.secrets.protocol import socket_path
     except Exception:  # noqa: BLE001 — a net that cannot load is simply absent
         return 0
 
-    # `is_running` is the cheap question and the same one `_stop_brokers_in`
-    # asks; counting first is what makes the reported number "reclaimed" rather
-    # than merely "considered".
-    live = []
+    # The `socket_path(...).exists()` guard first, exactly as `_stop_brokers_in`
+    # writes it twelve lines of code below: this candidate list is almost
+    # entirely socket-less — measured at `pytest_sessionfinish` for
+    # `tests/unit/secrets` alone, 784 recorded roots from 261 tests — and the
+    # guard costs 7.4us against 199.4us for the protocol round trip (27x). Same
+    # question, so the same cheap route to answering it.
+    live: list[Path] = []
     for candidate in candidates:
-        with suppress(Exception):
+        try:
+            if not socket_path(candidate).exists():
+                continue
             if client.is_running(candidate):
                 live.append(candidate)
-    if live:
-        _stop_brokers_in(live)
-    return len(live)
+        except client.BrokerIncompatible:
+            # A version-skewed daemon is LIVE and refusing, which `is_running`
+            # re-raises rather than laundering into "unreachable". Swallowing it
+            # here would hide exactly the leak this net exists to report AND skip
+            # the one stop route that works on a skewed broker: `_stop_brokers_in`
+            # asks `broker_status`, which synthesises a pid from the version
+            # refusal precisely so a daemon that answers nothing else can still be
+            # stopped. So it is a candidate like any other.
+            live.append(candidate)
+        except Exception:  # noqa: BLE001 — cleanup never fails a test
+            continue
+    if not live:
+        return 0
+    _stop_brokers_in(live)
+    # What was actually STOPPED, never what was merely considered.
+    # `_stop_brokers_in` is free to decline a candidate it is then handed — most
+    # notably its third refusal, `pid == os.getpid()`, the in-process broker shape
+    # that once took the xdist worker down with it — and `len(live)` would then
+    # report a broker as reclaimed while it is still running. Re-asking the same
+    # cheap question after the stop is what makes the number match the message.
+    return sum(1 for candidate in live if not _broker_is_still_up(candidate))
+
+
+def _broker_is_still_up(candidate: Path) -> bool:
+    """Did the net's stop attempt leave ``candidate``'s broker answering?
+
+    Conservative in the only direction that is honest: any failure to get an
+    answer counts as STILL UP, so the net never claims a reclaim it could not
+    observe. `is_running` deliberately re-raises `BrokerIncompatible`, and a
+    skewed daemon that survived the stop is not a reclaim either.
+    """
+    from local_operator.secrets import client
+
+    try:
+        return client.is_running(candidate)
+    except Exception:  # noqa: BLE001 — an unanswerable question is not a reclaim
+        return True
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
