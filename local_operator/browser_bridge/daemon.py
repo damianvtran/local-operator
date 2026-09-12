@@ -1462,15 +1462,39 @@ class BridgeService:
             finally:
                 self._tab_locks.pop(tab_key, None)
         if not self._admission_only(tab_key):
-            async with lock:
-                response = await self._dispatch_locked(request)
-            # Per-tab keys used to be near-singleton; with every opened tab minting
-            # a token the map would now grow for the daemon's lifetime. Evict the
-            # key once its tab is closed and nothing is waiting on the lock —
-            # unlocked-and-unwaited means a later command for the same (now dead)
-            # handle can safely mint a fresh Lock.
-            if request.method == "close" and not lock.locked():
-                self._tab_locks.pop(tab_key, None)
+            # The per-TAB (and `__access__`) arm, counted the SAME way as the
+            # admission-only arm below: the count spans key-capture → release, so
+            # `_release_key` can tell "nobody holds it" from "nobody holds it
+            # yet, someone is queued".
+            #
+            # Why the count is required HERE and not merely tidy: per-tab keys
+            # used to be near-singleton, but with every opened tab minting a
+            # token the map would grow for the daemon's lifetime, so a `close`
+            # evicts the key once its tab is gone. The eviction used to test
+            # `lock.locked()` alone, which is False the instant `release()` hands
+            # the lock to its FIRST WAITER — so a `close` answering while another
+            # command was already queued on that tab dropped the key out from
+            # under the waiter. The waiter then ran under a Lock object the map no
+            # longer contained while the next request for the same tab minted a
+            # SECOND one and interleaved with it, losing the per-tab mutual
+            # exclusion that IS the reason this key shape holds its lock for the
+            # whole command (review R4-1, the same defect round 3 fixed for the
+            # admission-only arm and left behind here).
+            #
+            # The `finally` is what keeps a CANCELLED `close` from leaking its
+            # count: a leaked count pins the key forever, which is the unbounded
+            # growth the eviction exists to prevent. Only `close` releases the
+            # key; every other method returns the count to zero without evicting,
+            # because a per-tab key is deliberately retained between commands.
+            self._key_callers[tab_key] = self._key_callers.get(tab_key, 0) + 1
+            try:
+                async with lock:
+                    response = await self._dispatch_locked(request)
+            finally:
+                if request.method == "close":
+                    self._release_key(tab_key, lock)
+                else:
+                    self._uncount_key(tab_key)
             return response
         # ADMISSION ONLY (`_admission_only`'s docstring): register the pending
         # future and get the frame onto the wire under the key, then release it
@@ -1612,7 +1636,24 @@ class BridgeService:
             # renders "no browser is attached" for an open, wedged browser: the
             # same misdirection the fence arm above answers, on the other path
             # into it (review R3-4).
-            if self._wire_loss(wire) == "severed":
+            loss = self._wire_loss(wire)
+            if loss == "replaced":
+                # The same sibling case one step further out (review R4-3): a
+                # REPLACEMENT handshake fails every pending future too
+                # (`forget_link_state`), and it does so IMMEDIATELY rather than at
+                # a deadline — so on the path a worker re-dial actually takes,
+                # this arm, not the send-timeout fence above, is the one that
+                # answers. Without the test the code alone rendered "no browser is
+                # attached… ask the user to open their browser" for a browser that
+                # is open and already reconnected; `phase` is what routes it to the
+                # honest copy (design D3-3).
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_DISCONNECTED,
+                    f"{request.method} was not delivered: the extension replaced its connection",
+                    {"phase": "replaced"},
+                )
+            if loss == "severed":
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1710,8 +1751,22 @@ class BridgeService:
             )
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
             # Same sibling case as the send arm: a severed link makes this a
-            # wedged browser, not an absent one (review R3-4).
-            if self._wire_loss(wire) == "severed":
+            # wedged browser, not an absent one (review R3-4) — and a REPLACED
+            # one makes it an open browser that needs no user action at all
+            # (review R4-3). The replacement arrives as a failed future, so this
+            # arm is the one a real re-dial reaches; the two timeout fences above
+            # cover only the narrower case where the replacement lands inside a
+            # timeout window.
+            loss = self._wire_loss(wire)
+            if loss == "replaced":
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_DISCONNECTED,
+                    f"{request.method} was delivered on a connection the extension "
+                    "has since replaced",
+                    {"phase": "replaced"},
+                )
+            if loss == "severed":
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1729,21 +1784,57 @@ class BridgeService:
         clears it, so a LATER request may re-use an id an earlier one had. A
         cleanup that popped the id unconditionally would then strand that
         unrelated caller's future: its answer would find no waiter and hang
-        until its own timeout (audit A4's identity requirement). The
-        awaiting-origin record goes with it, because both describe one
-        request's lifetime.
+        until its own timeout (audit A4's identity requirement).
+
+        The awaiting-origin record is dropped only under the SAME identity proof,
+        because the two halves are removed for one reason and by one owner, and
+        the identity of the future is what proves the ownership. Popping the
+        marker by id alone re-opened the very window the future's guard exists
+        to close (review R4-2): `_drop_unproven_link` clears BOTH maps and then
+        parks up to `LINK_CLOSE_TIMEOUT_S` in its bounded `websocket.close()` on
+        a wedged peer, so a worker can genuinely re-dial, re-pair and file a NEW
+        request — passing the busy guard, because that guard reads the map the
+        teardown just emptied — while this older task is still unwinding. The
+        extension then announces a real human approval for that new request, and
+        an unguarded pop here deleted its marker, so the request lost its
+        deadline extension and failed at its BASE timeout while the user was
+        still looking at the prompt. Guarding only the future left exactly that
+        loss, with `NEW_FUTURE_PRESERVED: true, NEW_APPROVAL_MARKER_PRESERVED:
+        false` as the signature.
+
+        Correct on every path, because the only caller that may legitimately
+        clear another request's marker is the teardown itself, and it clears the
+        whole map. A request whose own future the teardown removed therefore
+        finds no identity match and touches nothing — which is what it must do,
+        since by then the marker belongs to whoever holds that id now.
         """
         if self.link.pending.get(request_id) is future:
             del self.link.pending[request_id]
-        self.link.awaiting_origin.pop(request_id, None)
+            self.link.awaiting_origin.pop(request_id, None)
+
+    def _uncount_key(self, tab_key: str) -> None:
+        """Return one caller's registration on a key, WITHOUT deciding eviction.
+
+        The counting half of `_release_key`, split out for the callers that must
+        bring the count back to zero but must NOT evict: a per-TAB key is
+        deliberately retained between commands (evicting it between them is what
+        let two sessions interleave into one tab's CDP session), so only a
+        `close` ever reaches the eviction decision below.
+        """
+        remaining = self._key_callers.get(tab_key, 0) - 1
+        if remaining > 0:
+            self._key_callers[tab_key] = remaining
+        else:
+            self._key_callers.pop(tab_key, None)
 
     def _release_key(self, tab_key: str, lock: asyncio.Lock) -> None:
-        """Drop one admission-only caller's hold on a key, evicting it if idle.
+        """Drop one caller's hold on a key, evicting it if the key is idle.
 
         A per-OWNER key is minted per session-resource, so without eviction
         `_tab_locks` grows for the daemon's lifetime — the same unbounded-growth
         defect round-3 M1 fixed for the `__await__` keys, which is why the
-        eviction exists at all even though the lock held no navigation.
+        eviction exists at all even though the lock held no navigation. The
+        per-TAB arm reaches here from `close` for the same reason.
 
         Eviction is safe only when ALL THREE hold: no caller is queued on the
         key, nobody holds it, and the map still holds THIS Lock object (an
@@ -1756,9 +1847,10 @@ class BridgeService:
         ALREADY waiting on. That waiter then ran under a Lock object the map no
         longer contained, while the next request for the key minted a second
         one and interleaved with it — mutual exclusion lost for one owner's
-        commands (audit A4). `_key_callers` counts every caller from the moment
-        it captures the key to the moment it releases, so "idle" here really
-        means idle.
+        commands (audit A4), and for one TAB's CDP session on the per-tab arm
+        (review R4-1). `_key_callers` counts every caller from the moment it
+        captures the key to the moment it releases, so "idle" here really means
+        idle.
 
         Residual, benign and deliberate (unchanged from the scoping change): two
         commands of ONE owner can still be admitted concurrently in the window
@@ -1766,11 +1858,7 @@ class BridgeService:
         the extension's per-proof lane re-serializes on arrival, so the worst
         case stays "two frames admitted in an unspecified order".
         """
-        remaining = self._key_callers.get(tab_key, 0) - 1
-        if remaining > 0:
-            self._key_callers[tab_key] = remaining
-        else:
-            self._key_callers.pop(tab_key, None)
+        self._uncount_key(tab_key)
         if (
             not self._key_callers.get(tab_key)
             and self._tab_locks.get(tab_key) is lock

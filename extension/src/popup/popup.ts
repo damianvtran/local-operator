@@ -221,6 +221,17 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // resize a browser with no hint at all gets. Re-measure all three together when
 // any of them moves: a stale pin IS the resize this whole block exists to
 // prevent (popup.css carries the same numbers).
+//
+// The `connected` figure is the card with an EMPTY driven-URL trough. The same
+// state is taller once a URL is in it — a settled 257.3px (and 292.1px for the
+// long-URL variant) against this table's 211.2px, +47.3px / +82.1px of reopen
+// growth. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and it
+// was measured identical across the pre-PR base and both remediation heads: the
+// hint records the height the browser last SETTLED on, so a card whose text
+// changes between opens pays one resize either way, and a per-state constant
+// cannot express a height that depends on the URL. Do not add one here; the
+// provenance lives in PR #996's D3-1 note. Re-measuring `connected` with a URL
+// present will therefore read ~257px and is not a contradiction of this table.
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
 const PIN_UNRESPONSIVE = "254px";

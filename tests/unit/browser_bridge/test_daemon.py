@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import create_app, pairing_status
-from local_operator.browser_bridge.protocol import PROTO_VERSION
+from local_operator.browser_bridge.protocol import PROTO_VERSION, Response
 
 EXTENSION_ID = "a" * 32
 ORIGIN = f"chrome-extension://{EXTENSION_ID}"
@@ -831,3 +831,112 @@ async def test_a_cancelled_tab_command_leaves_no_pending_future(tmp_path: Path) 
     assert (
         request.id not in service.link.pending
     ), "a cancelled tab command left its future registered"
+
+
+@pytest.mark.asyncio
+async def test_a_tab_close_does_not_evict_a_key_a_command_is_queued_on(tmp_path: Path) -> None:
+    """R4-1 (major): the per-tab `close` eviction had the defect R3-3 fixed elsewhere.
+
+    The admission-only arm was moved onto the per-key caller count, and the
+    sibling `close` arm was left testing `lock.locked()` alone — which is False
+    the instant `release()` hands the per-tab lock to its FIRST WAITER. A `close`
+    answering while another command for that same tab was already queued
+    therefore evicted the key under the waiter, the waiter ran under a Lock
+    object the map no longer held, and the next request for that tab minted a
+    SECOND one and interleaved with it:
+
+        {"key_evicted_while_B_was_queued": true, "B_still_in_flight": true,
+         "C_admitted_concurrently": true, "C_lock_is_a_SECOND_object": true,
+         "MUTUAL_EXCLUSION_LOST_FOR_TAB": true, "wire_order": ["A", "B", "C"]}
+
+    Two commands interleaving into one tab's CDP session is the reason the
+    per-tab key holds its lock for the whole command rather than releasing it
+    after admission, so losing it here costs more than it did on the
+    admission-only arm (where the extension's per-proof lane re-serializes on
+    arrival). Reachable whenever a session closes a tab another session is still
+    reading.
+
+    `Lock._waiters` is how this row observes that C is queued rather than merely
+    unscheduled — the state that makes the eviction unsafe.
+    """
+
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request
+
+    service = BridgeService(root=tmp_path)
+    wire = _FakeWire()
+    service.link.websocket = wire  # type: ignore[assignment]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    closing = Request(id="r-close", method="close", params={"tab": "bridge:s-1"})
+    key = service.lock_key_for(closing)
+    held_lock = service._tab_locks.setdefault(key, asyncio.Lock())
+    wire.release = asyncio.Event()
+
+    close_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(closing))
+    await _write_frames(wire, 1)
+
+    queued = Request(id="r-queued-read", method="read", params={"tab": "bridge:s-1"})
+    queued_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(queued))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if getattr(held_lock, "_waiters", None):
+            break
+    assert getattr(held_lock, "_waiters", None), "precondition: the queued caller is on the lock"
+
+    # Let the `close`'s write land and answer it, so it leaves the `async with` —
+    # which is where the eviction used to run, with the waiter woken by
+    # `release()` but not yet holding.
+    wire.release.set()
+    service.link.pending[closing.id].set_result(Response(id=closing.id, ok=True, result={}))
+    with suppress(Exception):
+        await asyncio.wait_for(close_task, timeout=2.0)
+
+    assert (
+        service._tab_locks.get(key) is held_lock
+    ), "a `close` evicted the key a command was already queued on"
+
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if queued.id in service.link.pending:
+            break
+    assert queued.id in service.link.pending, "the queued command never took the key"
+
+    # ...and the next request for that tab is queued behind it, not interleaved
+    # with it under a freshly minted Lock.
+    later = Request(id="r-later-read", method="read", params={"tab": "bridge:s-1"})
+    later_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(later))
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert later.id not in service.link.pending, "a second command interleaved into one tab"
+    assert len(wire.sent) == 2, f"only two frames should have reached the wire: {wire.sent}"
+
+    for task in (queued_task, later_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    # The positive control the row would otherwise lose: an UNDISPUTED `close`
+    # still evicts the key. Without it, deleting the eviction outright would leave
+    # this row green while the unbounded map growth the eviction exists to stop
+    # came back.
+    fresh = BridgeService(root=tmp_path)
+
+    class _Answering:
+        async def send_json(self, payload: Any, *, wire: Any = None) -> None:
+            request = Request.model_validate(payload)
+            future = fresh.link.pending.get(request.id)
+            if future and not future.done():
+                future.set_result(Response(id=request.id, ok=True, result={}))
+
+        async def close(self, code: int | None = None) -> None:
+            return None
+
+    fresh.link.websocket = _Answering()  # type: ignore[assignment]
+    fresh.link.paired = True
+    fresh.link.last_frame_at = time.monotonic()
+    undisputed = Request(id="r-undisputed-close", method="close", params={"tab": "bridge:z:1"})
+    await fresh._dispatch_serialized(undisputed)
+    assert fresh._tab_locks == {}, "an undisputed `close` left its key behind"
+    assert fresh._key_callers == {}, "the caller counter leaked"
