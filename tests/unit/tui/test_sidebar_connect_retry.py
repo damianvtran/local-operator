@@ -47,6 +47,7 @@ from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.session_navigation import OwnerWentCold, SurfaceNotReady
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: The shipped schedule, captured at import BEFORE any test patches it for
@@ -1028,38 +1029,58 @@ async def test_guidance_answers_wait_or_act_in_every_disconnected_state(monkeypa
     async with app.run_test(size=(100, 30)) as pilot:
         source = await _current_source(app, pilot, session)
         source.display_only = True
-        notices: list[str] = []
-        monkeypatch.setattr(app, "_notice", lambda text, kind="info": notices.append(text))
+
+        def composer_notice() -> str:
+            """The text of the row a refused Enter is speaking through.
+
+            The composer's refusal OWNS its row now — one block per state,
+            restated in place and retired when the state ends (UX U1) — so this
+            reads the block it holds rather than the last block in the view:
+            the slash-command refusal below appends its own row AFTER it, and a
+            restated row is not the newest one on screen. `latest_notice` is the
+            probe for that second path.
+            """
+            notice = app._composer_refusal_notice
+            assert notice is not None and notice.is_attached, "the refused Enter said nothing"
+            return notice.text()
+
+        def latest_notice() -> str:
+            """The text of the LAST notice in the transcript."""
+            views = list(app.query(TranscriptView))
+            blocks = [b for b in views[0].blocks() if isinstance(b, NoticeBlock)]
+            assert blocks, "nothing was said at all"
+            return blocks[-1].text()
 
         # Mid-retry: the app is working and the user need not act.
         source.connect_attempts = 2
         source.connection_error = ""
         app.composer_submission_refused()
-        assert "Reconnecting" in notices[-1]
-        assert "Select this session again" not in notices[-1]
+        assert "Reconnecting" in composer_notice()
+        assert "Select this session again" not in composer_notice()
         # The SLASH-COMMAND refusal carries the same three-state guidance. It is
         # a second caller of `_unavailable_hint` with eight call sites of its
         # own, and it reads the hint through a different guard — so the composer
         # assertions above do not cover it, and the inverted-guidance bug was
         # fixed here separately.
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert "Reconnecting" in notices[-1]
-        assert "Select this session again" not in notices[-1]
+        assert "Reconnecting" in latest_notice()
+        assert "Select this session again" not in latest_notice()
 
         # Exhausted: the app has stopped, and reselecting is the right advice.
         source.connection_error = "the runtime is not responding"
         app.composer_submission_refused()
-        assert "Select this session again to retry." in notices[-1]
+        assert "Select this session again to retry." in composer_notice()
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert "Select this session again to retry." in notices[-1]
+        assert "Select this session again to retry." in latest_notice()
 
-        # Never-attempted: nothing to say beyond the refusal itself.
+        # NEVER-ATTEMPTED: the composer's row is RESTATED, not stacked, so the
+        # second refusal leaves one row where it had one before (UX U1).
         source.connect_attempts = 0
         source.connection_error = ""
         app.composer_submission_refused()
-        assert notices[-1] == "Send unavailable until connected."
+        assert composer_notice() == "Send unavailable until connected."
         assert app._allow_source_command() is False, "a cold source must refuse the command"
-        assert notices[-1] == "Commands unavailable until connected."
+        assert latest_notice() == "Commands unavailable until connected."
 
 
 def test_the_derivation_refuses_a_backoff_it_cannot_solve(monkeypatch):
@@ -1192,3 +1213,40 @@ async def test_the_connect_prepares_with_refresh_so_no_frame_return_is_unreachab
         # And a bound, cold-free connect with no frame still settles as connected.
         assert source.display_only is False
         assert session.is_cold is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_stops_speaking_once_the_connect_lands(monkeypatch):
+    """UX U1's other half: the refusal row ends when the state it describes does.
+
+    `Send unavailable until connected.` is present-progressive about a state the
+    app owns, so it may not survive the connect that ended it — a durable row
+    would have the transcript say "until connected" directly above a session that
+    IS connected, and it accumulated one row per refused Enter while the wait
+    lasted. Retired on the COMPLETED connect only (same condition as the budget
+    refill): an attempt that returned early proved nothing about the owner.
+    """
+    session = UnreachableRemote("blipping", heals_after=3)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        _instant_backoff(monkeypatch)
+
+        app._start_sidebar_connection(source)
+        # Mid-connect, the state the composer refuses to send in.
+        assert source.display_only is True
+        app.composer_submission_refused()
+        app.composer_submission_refused()
+        assert app._composer_refusal_notice is not None, "the refusal said nothing"
+        assert app._composer_refusal_notice.is_attached
+
+        await _drain_retries(app, source)
+
+        assert source.connect_attempts == 0, "the connect did not land"
+        assert app._composer_refusal_notice is None, "the refusal outlived the connect"
+        views = list(app.query(TranscriptView))
+        rows = [b for b in views[0].blocks() if isinstance(b, NoticeBlock)]
+        assert [b.text() for b in rows if b.text().startswith("Send unavailable")] == []

@@ -25,12 +25,14 @@ the real budget is asserted as a RELATIONSHIP in
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.text import Text
 
 from local_operator.session.attached import (
     COLD_FALLBACK_S,
@@ -42,6 +44,7 @@ from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.session_navigation import UNREACHABLE_OWNER_MESSAGE
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -97,15 +100,69 @@ def _notices(app: OperatorApp) -> list[str]:
     return [block._text for block in views[0].blocks() if isinstance(block, NoticeBlock)]
 
 
+def _rendered_text(app: OperatorApp) -> str:
+    """Every notice row the view paints, as one whitespace-normalised string."""
+    return " ".join(" ".join(_rendered_notice_rows(app)).split())
+
+
+def _rendered_notice_rows(app: OperatorApp) -> list[str]:
+    """What the notices actually PAINT, one entry per rendered row.
+
+    Distinct from `_notices`, which reads the authored string: these rows are
+    the block's own `_build` output, so a claim that a row is gone is a claim
+    about the surface rather than about a list the app happens to hold. The two
+    disagree exactly when a block is still ATTACHED — which is the defect class
+    here: QA's repro read a correct-looking `pending=False` beside a row that was
+    still on screen when the user returned to the session (QA Q2).
+    """
+    views = list(app.query(TranscriptView))
+    if not views:
+        return []
+    rows: list[str] = []
+    for block in views[0].blocks():
+        if not isinstance(block, NoticeBlock):
+            continue
+        # `_build` IS the renderable the block paints; asking it here rather than
+        # reading `_text` is what makes these rows the surface's own, and the
+        # isinstance is what tells pyright which renderable it is.
+        renderable = block._build()
+        if isinstance(renderable, Text):
+            rows.extend(renderable.plain.split("\n"))
+    return rows
+
+
 def _gave_up(detail: str, *, session_id: str = "remote-1") -> str:
     """The terminal sentence, spelled the way the app spells it.
 
     ONE concept, two spellings would drift: the app's copy names the session and
     the next step (UX U4) around whatever the last failure's own text was, so
     the test builds it from the same two pieces rather than pasting the whole
-    string twice.
+    string twice. The next step is its OWN authored row (design D2) — as one
+    flowing paragraph the 80-column wrap split `/resume` from the id beside it.
     """
-    return f"could not resume {session_id} — {detail}. Run /resume {session_id} again to retry."
+    return (
+        f"could not resume {session_id} — {detail}.\n" f"Run /resume {session_id} again to retry."
+    )
+
+
+def _stopped(*, session_id: str = "remote-1") -> str:
+    """The sentence a redial that never reached a verdict leaves behind.
+
+    The cancellation exit — the sidebar switch — which is the exit the
+    composer copy teaches as the way to stop the wait.
+    """
+    return (
+        f"resume of {session_id} stopped — the wait ended when you switched session.\n"
+        f"Run /resume {session_id} again to retry."
+    )
+
+
+def _static_refused(*, session_id: str = "remote-1") -> str:
+    """The terminal sentence for a capability gap no redial can change (UX U2)."""
+    return (
+        f"could not resume {session_id} — the process hosting it does not serve the "
+        "full TUI session state. Update or restart that process, then resume again."
+    )
 
 
 class _RedialClock:
@@ -229,7 +286,7 @@ async def test_a_transient_connect_failure_is_retried_rather_than_reported(monke
 
     async with _running(app):
         with pytest.raises(_Stranded):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == 2, "a transient failure was not retried"
         notices = _notices(app)
@@ -246,6 +303,11 @@ async def test_a_transient_connect_failure_is_retried_rather_than_reported(monke
         # ...and once the dial SUCCEEDS the row is retired, rather than left
         # claiming a reconnect that has already happened.
         assert not [n for n in notices if n.startswith("reconnecting to session")]
+        # NOTHING AT ALL, which is the sharper form of the same claim: a row
+        # restated into "the wait ended when you switched session" also stops
+        # starting with "reconnecting", and it would be FALSE here — the attach
+        # succeeded. That is what the settled flag at the break is for.
+        assert notices == [], notices
 
 
 @pytest.mark.asyncio
@@ -272,7 +334,7 @@ async def test_only_exhaustion_latches_and_it_says_so_honestly(monkeypatch, tmp_
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == _SHIPPED_ATTEMPTS, "the redial did not spend its budget"
         # THE ROW IS RESTATED INTO THE VERDICT, so the transcript holds exactly
@@ -305,9 +367,9 @@ async def test_a_second_resume_does_not_strand_the_first_ones_row(monkeypatch, t
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
         first = _notices(app)
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert first == [_gave_up("attach refused")]
         assert _notices(app) == [_gave_up("attach refused")] * 2
@@ -349,7 +411,7 @@ async def test_the_runtime_record_is_re_read_before_every_attempt(monkeypatch, t
 
     async with _running(app):
         with pytest.raises(_Stranded):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(lookups) == 2, "the record was captured once and reused"
         assert [r.pid for r in dialled] == [
@@ -365,9 +427,20 @@ async def test_a_static_refusal_is_not_retried(monkeypatch, tmp_path):
     Every redial would raise the identical refusal, so a budget spent on it is
     just a longer way to the same sentence — and since `frontend_attach_refusal`
     already answers the question `connect` refuses on (its docstring's "ONE
-    RULE, TWO CALLERS"), the refusal is taken BEFORE spending even one dial.
-    The expected sentence is built by that function rather than pasted, so the
-    two cannot drift apart.
+    RULE, TWO CALLERS"), the arm reads the answer off the same record rather
+    than inferring it from the exception.
+
+    ONE DIAL IS SPENT FIRST, and that is the behaviour (review n5, QA Q3):
+    `frontend_attach_refusal` is consulted only AFTER `connect` raises —
+    `connect_calls=1 socket_dials=0`, on this head and on the pre-delta base —
+    so the assertion is `len(dials) == 1`, not zero. Zero is the record
+    BELOW the attach protocol, which the first-attempt guard refuses before any
+    dial (see the neighbouring test). This docstring used to claim the refusal
+    was taken "BEFORE spending even one dial" three lines above that assertion.
+
+    The sentence is the app's own (UX U2), not the owner's internal one: the
+    token it used to print (`owner lacks tui_state_v1; … protocol >= 5`) is not
+    something the user can act on, and the arm had no session and no next step.
     """
     app = _app(monkeypatch, tmp_path)
     record = _record(90909, "the remote", capabilities=[])
@@ -386,10 +459,13 @@ async def test_a_static_refusal_is_not_retried(monkeypatch, tmp_path):
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == 1, "a static refusal was retried"
-        assert _notices(app) == [frontend_attach_refusal(record)]
+        assert _notices(app) == [_static_refused()]
+        assert not [
+            n for n in _notices(app) if "tui_state_v1" in n
+        ], "the owner's internal capability token reached the transcript"
 
 
 @pytest.mark.asyncio
@@ -430,7 +506,7 @@ async def test_an_empty_record_on_the_first_attempt_is_paced_not_refused(monkeyp
 
     async with _running(app):
         with pytest.raises(_Stranded):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == 1, "the empty first attempt did not reach the republished record"
         assert lookups == ["remote-1", "remote-1"]
@@ -451,6 +527,13 @@ async def test_an_owner_that_publishes_no_record_is_refused_by_its_own_pid(monke
     it — an older binary, or a registrant that failed to start. That IS the case
     the upgrade advice belongs to, and the pid it names must be the live owner's
     rather than the (possibly stale) one the command was invoked with.
+
+    THE ABSENCE IS ESTABLISHED HERE, NOT ASSUMED FROM THE TUPLE (review m3):
+    this test's registry really is empty, so `dialable_record_exists` answers
+    `False` and the refusal is the established one. Its sibling
+    `test_an_owner_with_a_live_record_under_another_session_id_is_paced_not_refused`
+    is the same `(None, pid)` input with a live record behind it, and it must NOT
+    reach this sentence.
     """
     app = _app(monkeypatch, tmp_path)
     dials: list[Any] = []
@@ -466,7 +549,7 @@ async def test_an_owner_that_publishes_no_record_is_refused_by_its_own_pid(monke
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert dials == []
         assert _notices(app)[-1] == (
@@ -502,7 +585,7 @@ async def test_a_record_below_the_attach_protocol_is_refused_with_the_older_proc
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert dials == []
         assert _notices(app)[-1] == (
@@ -542,7 +625,7 @@ async def test_an_owner_pid_that_moved_between_the_reads_is_paced_not_refused(
 
     async with _running(app):
         with pytest.raises(_Stranded):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == 1, "the redial refused a record whose owner pid had moved"
         assert not [
@@ -560,9 +643,17 @@ async def test_the_in_flight_row_states_the_bound_and_fits_the_notice_measure(
     app had not established ("the owner is not answering" — wrong whenever there
     is no record at all), use a noun this TUI uses nowhere else ("owner"), and
     restate an implementation counter the user cannot act on (`retry 48 of 48`)
-    while the wait itself had no stated end (design D2/D3/D4, UX U2). It is now
-    62 cells for a typical id — inside the 75-cell notice measure, so it fits on
-    one line instead of splitting its own parenthetical.
+    while the wait itself had no stated end (design D2/D3/D4, UX U2).
+
+    THE BOUND IS ANCHORED AS THE WHOLE WAIT'S, not a countdown (UX U4): said
+    verbatim, "still trying for up to 42 s" at t=13.3 s of a 24.86 s wait reads
+    as "42 s from now". "about … s in total" cannot be read that way, and the
+    hedge is also what keeps the number true — one loop-top record read per pass
+    is charged only after the dial that follows it, so the real worst case is
+    the stated bound plus that read (review n4). The non-breaking space keeps
+    `42 s` from splitting across a wrap in the narrower block a sidebar-open
+    layout leaves (design D2); it is asserted so a copy edit cannot quietly
+    drop it.
     """
     app = _app(monkeypatch, tmp_path)
     record = _record(90909, "the remote")
@@ -581,15 +672,20 @@ async def test_the_in_flight_row_states_the_bound_and_fits_the_notice_measure(
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         rows = [n for n in seen[1] if n.startswith("reconnecting to session")]
         assert rows == [
-            f"reconnecting to session remote-1 — still trying for up to " f"{_SHIPPED_BOUND_S:g} s"
+            f"reconnecting to session remote-1 — still trying, about "
+            f"{_SHIPPED_BOUND_S:g}\u00a0s in total"
         ]
         assert len(rows[0]) <= _NOTICE_MEASURE_CELLS, "the row splits in the notice measure"
         assert "owner" not in rows[0]
         assert "retry" not in rows[0]
+        # The whole-operation anchor, and the unit that must not break from its
+        # own number.
+        assert "in total" in rows[0]
+        assert f"{_SHIPPED_BOUND_S:g}\u00a0s" in rows[0]
 
 
 def test_the_budget_outlasts_the_transient_window_and_stays_in_tens_of_seconds():
@@ -654,7 +750,7 @@ async def test_the_redial_stops_when_the_wall_clock_is_spent_not_when_attempts_r
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert len(dials) == 2, "a silent owner spent more than two full envelopes"
         assert len(dials) < _SHIPPED_ATTEMPTS, "the ATTEMPT cap ended the loop, not the budget"
@@ -692,7 +788,7 @@ async def test_the_backoff_is_clamped_to_what_is_left_of_the_budget(monkeypatch,
     monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
 
     async with _running(app):
-        await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+        await app._attach_or_refuse(tmp_path, "remote-1")
 
         # 5, then 5, then the 2 s that were left — never the 5 the schedule asked
         # for, and never a wait that outlives the deadline.
@@ -721,6 +817,7 @@ async def test_the_composer_says_what_is_happening_during_a_resume_redial(monkey
         seen["target"] = app._resume_retry_target
         seen["blocked"] = app.composer_submission_blocked("/resume other")
         app.composer_submission_refused()
+        seen["during"] = list(_notices(app))
         raise ConnectionError("the runtime is not responding")
 
     monkeypatch.setattr(
@@ -732,15 +829,354 @@ async def test_the_composer_says_what_is_happening_during_a_resume_redial(monkey
     async with _running(app):
         app._session_transition_pending = True
         try:
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
         finally:
             app._session_transition_pending = False
 
         assert seen["target"] == "remote-1", "the redial never published its target"
         assert seen["blocked"] is True, "a submit the redial swallows was not refused"
         assert (
-            "Send unavailable until connected. Reconnecting to remote-1 — it will keep "
-            f"trying for up to {_SHIPPED_BOUND_S:g} s; switching session stops the wait."
-        ) in _notices(app), "the refused submit was silent"
+            "Send unavailable until connected. Reconnecting to session remote-1 — "
+            "switching session stops the wait."
+        ) in seen["during"], "the refused submit was silent"
+        # The TARGET is named one way and the bound is NOT restated: the retry row
+        # directly above is already carrying the number, and naming the session
+        # two ways (`session <id>` / bare `<id>`) is what design D3 found.
+        assert not [n for n in seen["during"] if "42" in n and n.startswith("Send")]
         # Cleared when the loop ends, so a later transition cannot inherit it.
         assert app._resume_retry_target == ""
+        # AND THE REFUSAL ROW DID NOT OUTLIVE IT. The refusal speaks for a state
+        # the loop owns, so the transcript after the verdict holds the verdict —
+        # nothing underneath still claiming the dial is running (UX U1).
+        assert _notices(app) == [_gave_up("the runtime is not responding")]
+        assert app._composer_refusal_notice is None
+
+
+@pytest.mark.asyncio
+async def test_a_redial_cancelled_by_a_sidebar_switch_settles_its_row(monkeypatch, tmp_path):
+    """The THIRD exit: a switch away leaves no live promise behind (D1/m4/Q2).
+
+    Three independent round-2 streams found this one: `verdict()` restated the
+    row on the give-up and static arms only, while the sidebar's switch cancels
+    this worker group (`_select_sidebar_session`) — so the loop died on
+    `CancelledError`, `finally` cleared `_resume_retry_target`, and the row went
+    on saying "still trying" in the session the user returned to. One more stuck
+    row per abandoned run, on the exit the new composer copy TEACHES.
+
+    Driven the way the key drives it — `cancel_group(app, "session")`, the same
+    edge the sidebar uses — with the loop parked inside a real dial, which is
+    where a silent owner holds it for a full 15 s envelope.
+
+    Asserted on the RENDERED notice, not only on the block list: QA's round-2
+    repro showed a correct-looking `pending=False`/`retry_target=''` beside a row
+    that was still on screen when the user came back (`repro_r3_stranded.py`,
+    `stranded-back-in-origin.png`).
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    parked = asyncio.Event()
+    dials: list[Any] = []
+
+    async def connect(*_args, **_kwargs):
+        dials.append(1)
+        if len(dials) == 1:
+            raise ConnectionError("attach refused")
+        # The envelope of a live-but-silent owner: the loop is parked HERE when
+        # the user switches away.
+        parked.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with _running(app) as pilot:
+        app._run_session_transition(app._attach_or_refuse(tmp_path, "remote-1"))
+        for _ in range(200):
+            await pilot.pause()
+            if parked.is_set():
+                break
+        assert parked.is_set(), "the redial never reached its second dial"
+        assert _notices(app) == [
+            f"reconnecting to session remote-1 — still trying, about "
+            f"{_SHIPPED_BOUND_S:g}\u00a0s in total"
+        ]
+        # And a refused Enter mid-wait, which writes the composer's own row: the
+        # same abandon falsifies its forward-looking clause too, so BOTH rows
+        # have to end with the wait (design D1 — "the composer's refusal row
+        # needs the same treatment on that exit").
+        app.composer_submission_refused()
+        assert len(_notices(app)) == 2, "the refusal did not speak"
+
+        # The sidebar's own abort. `cancel_group` is what a switch calls before
+        # the navigation starts, so this is the real edge rather than a
+        # hand-raised CancelledError.
+        app.workers.cancel_group(app, "session")
+        for _ in range(200):
+            await pilot.pause()
+            if not app._session_transition_pending:
+                break
+
+        assert len(dials) == 2, "the cancelled redial kept dialling"
+        assert app._resume_retry_target == ""
+        assert app._session_transition_pending is False
+        # ONE settled statement, in the past tense: the row the loop narrated,
+        # restated — not a second row under it and not the live one.
+        assert _notices(app) == [_stopped()]
+        rendered = _rendered_text(app)
+        assert "still trying" not in rendered, "a dead redial is still promising a dial"
+        # The AUTHORED statement, whitespace-collapsed: what the view paints is
+        # the same sentence wrapped to the block's own measure, so the claim is
+        # about the words on screen rather than about where the fold landed.
+        assert " ".join(_stopped().split()) in " ".join(rendered.split())
+        # Nothing here is a live promise: the composer answers as it does with no
+        # redial running, because none is.
+        assert app._unavailable_hint() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_redial_cancelled_during_its_first_dial_invents_no_row(monkeypatch, tmp_path):
+    """The settle restates the row the loop NARRATED; it never invents one.
+
+    A `/resume` abandoned inside its very first silent envelope has nothing on
+    screen yet, so there is nothing to correct — and the copy that would
+    otherwise be written ("the wait ended when you switched session") describes
+    a wait the user never saw. The invariant is about promises made, not about
+    exits taken.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    parked = asyncio.Event()
+    dials: list[Any] = []
+
+    async def connect(*_args, **_kwargs):
+        dials.append(1)
+        parked.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with _running(app) as pilot:
+        app._run_session_transition(app._attach_or_refuse(tmp_path, "remote-1"))
+        for _ in range(200):
+            await pilot.pause()
+            if parked.is_set():
+                break
+        assert parked.is_set()
+        assert _notices(app) == [], "the first envelope narrated a row already"
+
+        app.workers.cancel_group(app, "session")
+        for _ in range(200):
+            await pilot.pause()
+            if not app._session_transition_pending:
+                break
+
+        assert len(dials) == 1
+        assert _rendered_notice_rows(app) == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_restates_one_row_and_never_outlives_the_verdict(
+    monkeypatch, tmp_path
+):
+    """U1: the composer's row is ONE row, and it ends with the operation.
+
+    Enter is the user's response to silence, so a durable notice per refusal made
+    the count unbounded by construction: three Enters during one redial put
+    three two-line blocks of present-tense text on screen, each retracting the
+    sentence above it — and because `verdict()` restates the retry row IN PLACE,
+    a refusal in the redial's last second was left BELOW the verdict, making the
+    stale claim the last thing read. Seven refusals here, not three, so the check
+    is about the mechanism rather than about a count that happened to fit.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    during: list[list[str]] = []
+    refusals: list[int] = []
+
+    async def connect(*_args, **_kwargs):
+        if len(refusals) < 7:
+            refusals.append(1)
+            app.composer_submission_refused()
+            during.append(_notices(app))
+        raise ConnectionError("the runtime is not responding")
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with _running(app):
+        app._session_transition_pending = True
+        try:
+            await app._attach_or_refuse(tmp_path, "remote-1")
+        finally:
+            app._session_transition_pending = False
+
+        assert len(refusals) == 7, "the refusals did not all land in the redial"
+        assert (
+            len([n for n in during[-1] if n.startswith("Send unavailable")]) == 1
+        ), f"one Enter, one row — got {during[-1]}"
+        # THE VERDICT IS THE LAST THING READ, and the only notice left at all.
+        assert _notices(app) == [_gave_up("the runtime is not responding")]
+        assert "Send unavailable" not in "\n".join(_rendered_notice_rows(app))
+        assert app._composer_refusal_notice is None
+
+
+@pytest.mark.asyncio
+async def test_an_owner_with_a_live_record_under_another_session_id_is_paced_not_refused(
+    monkeypatch, tmp_path
+):
+    """review m3: `(None, pid)` is not only the publishes-no-record case.
+
+    `find_runtime_record` also returns it for the rebind race — a record for that
+    pid that is live, protocol-5 and perfectly dialable, still stamped with the
+    PREVIOUS `session_id` (its own docstring calls the welcome projection the
+    arbiter of that race). The first-attempt guard used to read the tuple as
+    "this owner is an old binary", which claimed an age the code never checked
+    and invited the user to close a healthy current-version runtime.
+
+    Paced, not dialled: the loop re-reads the record each pass and the timeout's
+    own sentence is the outcome, which is what a refusal that cannot name a
+    cause should degrade to. The pause list is asserted, so this pins the PACING
+    rather than merely the absence of the sentence.
+    """
+    app = _app(monkeypatch, tmp_path)
+    clock = _RedialClock()
+    clock.install(monkeypatch, wall_s=12.0)
+    monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", lambda _attempt: 5.0)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (None, 91234),
+    )
+    # A live, dialable record for that pid exists under ANOTHER session_id.
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.dialable_record_exists",
+        lambda _root, _pid: True,
+    )
+
+    async def explode(*_args, **_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("a paced absence dialled a record it never got")
+
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", explode)
+
+    async with _running(app):
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        assert clock.pauses == [5.0, 5.0, 2.0], "the refusal's pacing was skipped"
+        assert not [
+            n for n in _notices(app) if "older Local Operator process" in n
+        ], "the older-process sentence was printed for an owner the code never aged"
+        assert _notices(app) == [_gave_up(UNREACHABLE_OWNER_MESSAGE)]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_registry_is_paced_rather_than_refused(monkeypatch, tmp_path):
+    """A failed read is not evidence of absence — so it cannot be a refusal.
+
+    `dialable_record_exists` answers `None` when the registry cannot be read at
+    all, which is why it is not a plain bool: the refusal's sentence names a
+    cause ("open in an older Local Operator process"), and a scan that raised has
+    established nothing about the process. The redial ends on the timeout's own
+    honest sentence instead.
+    """
+    app = _app(monkeypatch, tmp_path)
+    clock = _RedialClock()
+    clock.install(monkeypatch, wall_s=12.0)
+    monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", lambda _attempt: 5.0)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (None, 91234),
+    )
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.dialable_record_exists",
+        lambda _root, _pid: None,
+    )
+
+    async with _running(app):
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        assert clock.pauses == [5.0, 5.0, 2.0]
+        assert not [n for n in _notices(app) if "older Local Operator process" in n]
+        assert _notices(app) == [_gave_up(UNREACHABLE_OWNER_MESSAGE)]
+
+
+def test_the_redial_outranks_a_latched_source_in_the_hint(monkeypatch, tmp_path):
+    """UX U3: the composer answers for the state the app is actually in.
+
+    `_unavailable_hint` is an ordered chain, and `self._interaction` is — for the
+    current session — the very object `_connect_sidebar_session` writes, so a
+    latched `connection_error` or a spent `connect_attempts` can sit on the
+    object a live redial is asking about. Behind those two fields, a refusal
+    mid-redial would answer "Select this session again to retry." while the retry
+    row directly above says the app is already retrying and that reselection is
+    not what is owed.
+
+    UX could not DRIVE that combination (both attempts healed), so the failure
+    itself stays unreproduced; what is pinned here is that the precedence no
+    longer depends on the order two fields happen to be tested in. The retry is
+    the more specific state — the app sets it for exactly the life of its loop.
+    """
+    app = _app(monkeypatch, tmp_path)
+    app._session_transition_pending = True
+    app._resume_retry_target = "remote-1"
+    app._interaction.connection_error = "the runtime is not responding"
+    app._interaction.connect_attempts = 3
+
+    assert app._unavailable_hint() == (
+        " Reconnecting to session remote-1 — switching session stops the wait."
+    )
+
+    # With no redial live, the latched state answers exactly as it did before.
+    app._resume_retry_target = ""
+    assert app._unavailable_hint() == " Select this session again to retry."
+
+    app._interaction.connection_error = ""
+    assert app._unavailable_hint() == " Reconnecting — it will keep trying for a few more seconds."
+
+
+@pytest.mark.asyncio
+async def test_the_verdict_keeps_its_next_step_on_one_row_at_eighty_columns(monkeypatch, tmp_path):
+    """design D2: the actionable half must not be split from its argument.
+
+    As one flowing paragraph the wrap fell wherever the cells landed, and at 80
+    columns — a width the original rig never filmed — it broke between `/resume`
+    and the session id the user has to type (measured 71.4 cells then 23.1),
+    i.e. the half they must act on was the half that got split. A newline before
+    the final sentence costs nothing at the widths where the row already wraps,
+    and this pins the rendered result rather than the authored string: the whole
+    sentence has to survive as ONE row of the block.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+
+    async def connect(*_args, **_kwargs):
+        raise ConnectionError("the runtime is not responding")
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with app.run_test(size=(80, 24)) as pilot:  # type: ignore[attr-defined]
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        rows = [row.strip() for row in _rendered_notice_rows(app)]
+        assert (
+            "Run /resume remote-1 again to retry." in rows
+        ), f"the next step was split across rows: {rows}"
+        # And it is still TWO authored statements, so the wider widths cannot
+        # silently rejoin it into the paragraph this replaced.
+        assert _gave_up("the runtime is not responding").count("\n") == 1

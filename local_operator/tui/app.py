@@ -1670,6 +1670,15 @@ def _resume_connect_limits() -> tuple[float, float]:
     already in flight when it expires can spend one more. Stated rather than
     rounded down, because the defect this replaces was an understated span —
     49 x 15 s of dials described as "135.75 s" of backoff.
+
+    IT IS NOT EXACT, AND THE SURFACE DOES NOT PRETEND IT IS (review n4). Every
+    pass re-reads the runtime record at the top of the loop and is charged for
+    that read only after the dial that follows it, so the true worst case is
+    this bound plus one record read; the envelope a connect may spend after its
+    own sync window is not charged either. That is why the row says "about ... s
+    in total" rather than asserting the number: folding the read into the
+    deadline check would narrow the gap by one slice and still not make the
+    figure exact, while the hedge costs one word.
     """
     from local_operator.session.attached import (
         COLD_FALLBACK_S,
@@ -3053,6 +3062,19 @@ class OperatorApp(App[None]):
         #: being LEFT, and naming it would be a false statement about which
         #: session the app is reconnecting to.
         self._resume_retry_target = ""
+        #: The row a refused Enter is currently speaking through, or None.
+        #:
+        #: THE ROW THE REFUSAL OWNS, so that the NEXT refusal can restate it
+        #: instead of appending a second one. A durable notice per refused Enter
+        #: was the shape this replaces, and Enter is the user's response to
+        #: silence, so the accumulation was unbounded by construction (UX U1:
+        #: three Enters during one redial put six lines of stale present-tense
+        #: text under the verdict). Retired by `_retire_composer_refusal` the
+        #: moment the state it describes ends — the redial's own exits, and a
+        #: sidebar connect that completed — because the sentence is
+        #: present-progressive about a state the app owns, not a timestamped
+        #: event like a chat message.
+        self._composer_refusal_notice: NoticeBlock | None = None
         #: Session ids that have run `eval`, so a `/move` restarting the
         #: runtime destroys the namespace they built up. Recorded when the call
         #: is drawn rather than re-derived from the transcript, because
@@ -6777,6 +6799,17 @@ class OperatorApp(App[None]):
             # and crediting it would hand the next real failure a budget it did
             # not earn.
             source.connect_attempts = 0
+            # THE COMPOSER'S OWN ROW ENDS WHEN THIS STATE DOES. A refused Enter
+            # during the connect wrote "Send unavailable until connected." —
+            # false the moment the commit above lands, and it was durable
+            # (UX U1). Retired only on a COMPLETED connect, for the same reason
+            # the budget is refilled only here: an attempt that returned early
+            # proved nothing about the owner, so the refusal it answered still
+            # describes the state. The block is removed from its own parent, not
+            # from `_transcript_view()`, because the row was written into the
+            # INCOMING session's view and this commit is what made that view
+            # current.
+            self._retire_composer_refusal()
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -11518,7 +11551,7 @@ class OperatorApp(App[None]):
                 # Discovery scans the filesystem; run it as a worker so the
                 # UI thread never blocks on it, and settle attach-vs-refuse
                 # when the record is in hand.
-                self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
+                self._run_session_transition(self._attach_or_refuse(config_dir(), concrete))
                 return
         # A navigation entered during /fork must not queue a stop behind its
         # snapshot RPC. The original's ownership guarantee lasts through that
@@ -11800,19 +11833,35 @@ class OperatorApp(App[None]):
         and the composer said nothing at all for the whole wait (UX U1) — see
         `composer_submission_refused`. It names the session it is reconnecting
         TO, because a user who retyped `/resume <other>` mid-wait is owed the
-        difference, and states the bound, because a wait with no stated end is
-        what made a bounded window read as a hang.
+        difference. It does NOT restate the bound: the retry row above is
+        already saying one number, and a second spelling of the same wait on the
+        same screen is what design D3 found.
+
+        ASKED FIRST IN THE CHAIN, deliberately. `self._interaction` is, for the
+        current session, the very object the sidebar connect writes (the app
+        assigns the same instance to `self._interaction` and to
+        `self._sidebar_sources[session_id]`), so a latched `connection_error` or
+        a spent `connect_attempts` can sit on the object a live redial is asking
+        about. Ordering by specificity is what keeps the answer true: a redial
+        in flight is a state the app ITSELF set for exactly the life of its
+        loop, and while it is set the honest advice is the redial's —
+        "reselection" is precisely what the retry row above contradicts. UX U3
+        could not drive that combination (both of its attempts healed), so the
+        reachability stayed unstated; the precedence is fixed by construction
+        here and pinned by
+        `test_the_redial_outranks_a_latched_source_in_the_hint` rather than
+        left to the order two fields happen to be tested in.
         """
         source = self._interaction
+        if self._session_transition_pending and self._resume_retry_target:
+            return (
+                f" Reconnecting to session {self._resume_retry_target} — "
+                "switching session stops the wait."
+            )
         if source.connection_error:
             return " Select this session again to retry."
         if source.connect_attempts:
             return " Reconnecting — it will keep trying for a few more seconds."
-        if self._session_transition_pending and self._resume_retry_target:
-            return (
-                f" Reconnecting to {self._resume_retry_target} — it will keep trying "
-                f"for up to {RESUME_CONNECT_BOUND_S:g} s; switching session stops the wait."
-            )
         return ""
 
     def composer_submission_refused(self) -> None:
@@ -11827,13 +11876,60 @@ class OperatorApp(App[None]):
         both dropped without a word — measured for 136 s, which is precisely long
         enough for the user to conclude the app had ignored them (UX U1). One
         branch, reusing the sidebar seam's copy and register.
+
+        ONE ROW, AND NOT A DURABLE ONE. The notice answers a gesture, but its
+        sentence is about a state the app owns, so it is restated by the next
+        refusal instead of stacked and retired by `_retire_composer_refusal`
+        when that state ends — the discipline the redial's own row already
+        follows. The alternative was measured: three Enters during one redial
+        left three two-line blocks of present-tense text under the verdict,
+        each one retracting the sentence above it (UX U1).
         """
         if (
             self._interaction.display_only
             or self._interaction.command_frame_pending
             or (self._session_transition_pending and self._resume_retry_target)
         ):
-            self._notice(f"Send unavailable until connected.{self._unavailable_hint()}", "warning")
+            text = f"Send unavailable until connected.{self._unavailable_hint()}"
+            held = self._composer_refusal_notice
+            if held is not None and held.is_attached:
+                # ONE ROW PER STATE, not one row per Enter. Appending a durable
+                # notice made the count unbounded by construction, because Enter
+                # is the user's response to silence: three Enters during one
+                # redial put six lines of stale present-tense text on screen,
+                # and they outlived the verdict (UX U1). Same mechanism as the
+                # redial's own row — restate in place while the state lasts,
+                # retire it when it ends — rather than a second one.
+                held.restate(text, "warning")
+            else:
+                notice = NoticeBlock(text, "warning")
+                self._composer_refusal_notice = notice
+                self._append_block(notice)
+
+    def _retire_composer_refusal(self) -> None:
+        """Take the refusal row down once the state it describes has ended.
+
+        The sentence is present-progressive about a state the app OWNS
+        ("Reconnecting to…"), so it may not outlive that state the way a chat
+        message can: left standing, a refused Enter goes on promising a
+        reconnect beneath the verdict that retires it, which is the reading
+        order UX U1 measured (the stale claim was the LAST thing read). The
+        slot is enough to retire because `composer_submission_refused` restates
+        in place, so there is at most one such row.
+
+        Called from the redial's every exit and from a sidebar connect that
+        COMPLETED — the two ways the state the row describes ends.
+        """
+        notice = self._composer_refusal_notice
+        self._composer_refusal_notice = None
+        if notice is None or not notice.is_attached:
+            return
+        # The block's OWN parent, not `self._transcript_view()`: for a sidebar
+        # connect the row is written into the INCOMING session's view, which by
+        # the time the connect commits is no longer the current one.
+        parent = notice.parent
+        if isinstance(parent, TranscriptView):
+            parent.remove_block(notice)
 
     def composer_submission_blocked(
         self, text: str | None = None, *, shell: bool | None = None
@@ -11852,7 +11948,7 @@ class OperatorApp(App[None]):
         entry = slash_command_for(editor.text if text is None else text)
         return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
-    async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
+    async def _attach_or_refuse(self, config_root, concrete: str) -> None:
         """Build a AttachedSession and adopt it like any ordinary resume.
 
         An owner below `FRONTEND_ATTACH_MIN_PROTOCOL` has no full event stream.
@@ -11879,7 +11975,10 @@ class OperatorApp(App[None]):
         attempts was ~58x longer than it read. See `_resume_connect_limits` for
         the derivation and for the bound the user is told.
         """
-        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.mobile.attach_client import (
+            dialable_record_exists,
+            find_runtime_record,
+        )
         from local_operator.session.attached import (
             FRONTEND_ATTACH_MIN_PROTOCOL,
             AttachedSession,
@@ -11893,11 +11992,30 @@ class OperatorApp(App[None]):
             assert self._resume_factory is not None
             return await self._resume_factory(concrete)
 
-        # EVERY PATH OUT OF THE REDIAL ENDS ON ONE ROW, restated in place
-        # rather than stacked. The budget spans tens of seconds, so a notice
-        # per attempt would write a hundred rows into a durable transcript to
-        # say one thing — the same reason `NoticeBlock.restate` exists.
+        # EVERY PATH OUT OF THE REDIAL SETTLES ITS ROW, and there are THREE of
+        # them, not two. A notice per attempt would write a hundred rows into a
+        # durable transcript to say one thing — the same reason
+        # `NoticeBlock.restate` exists — so the row is restated in place rather
+        # than stacked, and the exits are:
+        #
+        #   * give-up and the static refusal — `verdict()` restates it;
+        #   * a successful dial — the adopt below REMOVES it;
+        #   * CANCELLATION, which is the one that used to be missed.
+        #
+        # The sidebar's switch cancels this worker group
+        # (`_select_sidebar_session`), so the loop unwinds on `CancelledError`
+        # straight to `finally` — which cleared the target and left the row
+        # standing: the user came back to a session reading "still trying for up
+        # to 42 s" under a loop that was already dead, one more stranded row per
+        # abandoned run, on the very exit the new composer copy teaches (design
+        # D1 / review m4 / QA Q2 found it independently and it falsified this
+        # comment's claim). A settled flag is what closes it: `verdict()` and the
+        # successful adopt both set it, so the `finally` restates only a row
+        # nothing else has settled. A flag rather than `except CancelledError`,
+        # because the invariant is about exits rather than about one exception
+        # class — any unwind out of the loop owes the row the same ending.
         retry_notice: NoticeBlock | None = None
+        settled = False
 
         def narrate(text: str) -> None:
             nonlocal retry_notice
@@ -11917,10 +12035,12 @@ class OperatorApp(App[None]):
             stale pair frozen at `retry 48 of 48` — design D1, UX U3).
             Restating in place is the mirror of what the success path already
             does by removing the row, and it is what keeps the verdict the
-            BOTTOM row: nothing is left underneath it that still claims the
-            dial is running.
+            BOTTOM row — with the `finally`'s retirement of the composer's own
+            refusal row (see below), which is appended BELOW this one and used
+            to leave a present-tense claim under the outcome (UX U1).
             """
-            nonlocal retry_notice
+            nonlocal retry_notice, settled
+            settled = True
             if retry_notice is not None and retry_notice.is_attached:
                 retry_notice.restate(text, "warning")
                 retry_notice = None
@@ -11935,9 +12055,62 @@ class OperatorApp(App[None]):
             U4). An exhaustion that never saw a record at all reports the app's
             ONE sentence for an unreachable owner; the older-process advice
             next door belongs to the older-process case only (design D5).
+
+            THE NEXT STEP IS ITS OWN AUTHORED ROW (design D2). As one flowing
+            paragraph the wrap fell wherever the cells landed, and at 80 columns
+            — a width the original rig never filmed — that put `/resume` and the
+            id the user must type on different lines: the actionable half, split
+            from its own argument (measured 71.4 cells then 23.1). Two authored
+            rows cost nothing at the widths where the text already wrapped, and
+            render exactly as before at 44 columns.
             """
             detail = str(error).strip() or UNREACHABLE_OWNER_MESSAGE
-            return f"could not resume {concrete} — {detail}. Run /resume {concrete} again to retry."
+            return (
+                f"could not resume {concrete} — {detail}.\n"
+                f"Run /resume {concrete} again to retry."
+            )
+
+        def stopped_text(unwound: BaseException | None) -> str:
+            """The sentence for a redial that ended WITHOUT running to a verdict.
+
+            Reachable by cancellation — the sidebar switch, which is the exit the
+            composer copy recommends as the way to stop the wait — and by any
+            unexpected exception unwinding the loop. Only the row this loop
+            actually narrated is settled by it, so a `/resume` abandoned during
+            its first silent envelope (no row yet) gains no row here.
+
+            The copy names the cause it can name rather than a diagnosis it
+            cannot: a `CancelledError` here IS the user switching away — the
+            sidebar cancels this worker group and nothing else does — and the way
+            back is a fresh `/resume`. Anything else gets the give-up sentence,
+            which is true of it: the wait is over and no dial is pending.
+            """
+            if isinstance(unwound, asyncio.CancelledError):
+                return (
+                    f"resume of {concrete} stopped — the wait ended when you switched "
+                    f"session.\nRun /resume {concrete} again to retry."
+                )
+            return gave_up_text(unwound if isinstance(unwound, Exception) else ConnectionError())
+
+        def static_text() -> str:
+            """The terminal sentence for a gap no redial can change (UX U2).
+
+            This arm used to pass `str(error)` straight through, so the user was
+            handed the owner's own internal refusal — `owner lacks tui_state_v1;
+            canonical full-TUI attach needs protocol >= 5` — with no session
+            named and no next step, one arm over from the sibling fix that added
+            both. The token is dropped rather than translated because it is not
+            something the user can act on; what they can act on is the process,
+            named in the neighbouring arm's own register. Deliberately NOT a
+            "Run /resume … again to retry": the refusal is a STATIC property of
+            the owner, so a redial would reproduce it identically — which is why
+            this arm does not retry at all.
+            """
+            return (
+                f"could not resume {concrete} — the process hosting it does not serve "
+                "the full TUI session state. Update or restart that process, then "
+                "resume again."
+            )
 
         # The bound the user is told, in whole seconds: the wall-clock cap plus
         # the envelope of a dial that may already be in flight when it expires.
@@ -11981,6 +12154,20 @@ class OperatorApp(App[None]):
                 # record — an older binary, or a registrant that failed to
                 # start.
                 #
+                # ...AND THAT ABSENCE, TOO, IS ESTABLISHED RATHER THAN INFERRED
+                # (review m3). `(None, pid)` is ALSO what the rebind race looks
+                # like: a record for that pid that is live, protocol-5 and
+                # perfectly dialable, still stamped with the PREVIOUS
+                # `session_id` — the shape `find_runtime_record`'s own docstring
+                # describes as a race whose welcome-projection identity check
+                # arbitrates. Refusing there claimed an age the code never
+                # checked and invited the user to close a healthy
+                # current-version runtime. So the refusal is taken only when a
+                # scan says this pid publishes NO dialable record at all;
+                # anything else — a dialable record, or a registry that could
+                # not be read — is paced, and the timeout's own honest sentence
+                # is the outcome.
+                #
                 # A MOVED OWNER PID IS PACED, NOT REFUSED. `find_runtime_record`
                 # derives its own owner from the same `.session.pid` marker the
                 # caller read, so a mismatch can only mean the marker changed
@@ -11997,7 +12184,13 @@ class OperatorApp(App[None]):
                 if attempt == 0:
                     older_pid: int | None = None
                     if record is None:
-                        older_pid = found_owner
+                        if found_owner is not None and (
+                            await asyncio.to_thread(
+                                dialable_record_exists, config_root, found_owner
+                            )
+                            is False
+                        ):
+                            older_pid = found_owner
                     elif record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL:
                         older_pid = record.pid
                     if older_pid is not None:
@@ -12020,6 +12213,10 @@ class OperatorApp(App[None]):
                             config_dir=config_root,
                             takeover_factory=takeover_factory,
                         )
+                        # SETTLED BEFORE THE BREAK: the adopt below is the
+                        # row's other resolution (it REMOVES the row), so the
+                        # `finally` must not restate this as a cancellation.
+                        settled = True
                         break
                     except Exception as caught:  # noqa: BLE001 — classified below
                         error = caught
@@ -12028,25 +12225,56 @@ class OperatorApp(App[None]):
                 # every redial would raise the identical refusal and only make
                 # the user wait for a sentence already known. Read off the SAME
                 # record `connect` just refused, so the two cannot disagree.
+                #
+                # ONE DIAL IS STILL SPENT on the capability half of this (QA
+                # Q3: `connect_calls=1 socket_dials=0` on this head and on the
+                # base — `frontend_attach_refusal` is consulted only after the
+                # call). Only a record below the attach protocol is refused
+                # before any dial, at the first-attempt guard above.
                 static = frontend_attach_refusal(record) if record is not None else None
                 remaining = deadline - _resume_redial_clock()
                 if static is not None:
-                    verdict(str(error))
+                    verdict(static_text())
                     return
                 if attempt >= RESUME_CONNECT_ATTEMPTS or remaining <= 0:
                     verdict(gave_up_text(error))
                     return
                 # STATED AS A BOUND, and in the composer's register for the same
                 # wait: no denominator the user cannot act on, no diagnosis the
-                # app has not established, and short enough to sit on one line in
-                # the notice's 75-cell measure (design D2, D3, D4).
-                narrate(f"reconnecting to session {concrete} — still trying for up to {bound_s} s")
+                # app has not established, and short enough not to split in the
+                # notice's 75-cell measure with a typical id (design D2). The
+                # bound is anchored as the WHOLE wait's and hedged so it cannot
+                # be read as exact (UX U4, review n4 — see `bound_s`), and the
+                # non-breaking space keeps `42 s` from splitting across a wrap in
+                # the narrower block a sidebar-open layout leaves (design D2).
+                narrate(
+                    f"reconnecting to session {concrete} — still trying, about "
+                    f"{bound_s}\u00a0s in total"
+                )
                 await _resume_redial_pause(min(sidebar_connect_backoff_s(attempt), remaining))
         finally:
             self._resume_retry_target = ""
+            # THE CANCELLATION EXIT OWES THE ROW THE SAME ENDING. The sidebar's
+            # switch cancels this worker group, so the loop unwinds on
+            # `CancelledError` without reaching any verdict: without this, the
+            # row the user left behind still promises a dial that is over, in
+            # the session they return to, one more stranded row per abandoned
+            # run (design D1 / review m4 / QA Q2). Restating rather than
+            # removing keeps the one-row-per-run guarantee, and `settled` keeps
+            # this out of the two exits that already resolved the row. An
+            # unwind that delivered no dial at all has no row and gains none.
+            if not settled and retry_notice is not None and retry_notice.is_attached:
+                retry_notice.restate(stopped_text(sys.exc_info()[1]), "warning")
+                retry_notice = None
+            # The composer's refusal row describes the same state, so it ends
+            # with the operation on every exit too.
+            self._retire_composer_refusal()
 
         # The retry row described a dial that is now over; leaving it up would
-        # have the transcript promise a reconnect that already happened.
+        # have the transcript promise a reconnect that already happened. The
+        # refusal row was retired in the `finally` above, before this point, so
+        # what is left on screen after a successful adopt is the adopted session
+        # and nothing that still speaks in the present tense.
         if retry_notice is not None and retry_notice.is_attached:
             self._transcript_view().remove_block(retry_notice)
 
