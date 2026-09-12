@@ -164,6 +164,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # The sidebar's pin store, the same shape and the same argument as
+    # `remember_recent` above: both paths are the config ROOT joined with a
+    # fixed basename (`sidebar-pins.json`, or a `.sidebar-pins-` temp minted by
+    # `mkstemp` in that same directory), so neither is derived from a session id
+    # and neither can resolve under sessions/. The value written is a list of
+    # session-id STRINGS, never a path this module opens or removes — pruning a
+    # stale pin drops the id from that list and touches no directory.
+    (
+        "local_operator/tui/sidebar_pins.py::toggle_pin",
+        "os.replace",
+        "Atomic replacement of the single sidebar-pins.json file in the config dir, "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/tui/sidebar_pins.py::toggle_pin",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
