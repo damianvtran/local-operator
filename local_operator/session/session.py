@@ -2797,9 +2797,16 @@ class Session:
         only thing that puts a custom message back into a replayed context is
         its own persisted entry. Filtering it here is what makes the rebuilt
         context equal what a resume replays — the live/resume equivalence this
-        render exists to protect — and the absence is deliberate rather than a
-        loss: the live announcement still reaches the model through the
-        untouched request render.
+        render exists to protect.
+
+        The price is stated rather than glossed, because it is a real one: a
+        live-only record is now absent from the rebuilt context, so a transient
+        notice reaches the model through the untouched request render only
+        UNTIL the next pass. After a commit the model is no longer told it is
+        on a fallback — it reads the authoritative ``Model:`` line in the
+        prompt tail instead, which is the same thing a resume gives it. The
+        alternative is the reported defect: re-seating the notice as user text
+        it can never take back.
 
         The test is :meth:`Transcript.has_entry` (a constant-time id-set
         check), NEVER :func:`_is_persistable_message`. That predicate answers a
@@ -2809,13 +2816,13 @@ class Session:
         out of the rebuild and make a live context diverge from its own
         resume.
 
-        The compaction marker is the one ``CustomMessage`` whose entry the
-        transcript holds under a DIFFERENT id: ``append_compaction`` stores it
-        as its own entry type (see :data:`_PERSISTABLE_CUSTOM_TYPES`), so the
-        fresh id ``build_compaction_marker`` mints is in no entry set while a
-        resume still replays the marker from that payload. It is exempted by
-        TYPE rather than by id, and load-bearing: dropping it would price and
-        plan every later pass against a context that has lost its own summary.
+        The compaction marker is exempted because its entry IS persisted — as a
+        compaction entry, written by ``append_compaction`` under its own type
+        and its own id — so the message id ``build_compaction_marker`` mints is
+        in no entry set while a resume still replays the summary from that
+        payload. Without the exemption the structural rule would drop it from
+        the render it plans against; this is a statement about the predicate,
+        not a measurement of what any particular session's marker contains.
         """
 
         def _is_ephemeral_for_compaction(message: AgentMessage) -> bool:
@@ -2840,6 +2847,49 @@ class Session:
             ],
             keep_images=keep_images,
         )
+
+    def _restore_custom_sources(self, kept: list[Message]) -> list[AgentMessage]:
+        """Re-seat each rendered copy in ``kept`` onto the message it came from.
+
+        The commit rebuilds the live context from the RENDERED history, so
+        without this every delivery inside the kept window becomes an anonymous
+        stamped user message. The model still reads it, but every fold then
+        sees an injection-shaped row instead of the receipt its own type paints
+        — a hub note, a peer message, a wake line, a job result — while a
+        RESUME of the same session, which replays the persisted custom entries,
+        paints exactly those receipts. Restoring the source is what keeps live
+        equal to resume, on both the request and the display side.
+
+        The lookup is the LIVE CONTEXT, and that is complete by construction
+        rather than by luck: every custom message this render can contain is a
+        ``CustomMessage`` in ``_context.messages`` (the injection producers
+        append one, and a replayed marker or aside materialises as one), so the
+        render is a pure function of objects the map holds. The
+        ``has_entry`` guard is the belt on that brace — a copy whose id the
+        transcript does not hold is not a delivery a resume could paint, so it
+        keeps the rendered form rather than acquiring an identity no journal
+        can substantiate.
+
+        Deliberately limited to this one direction. Substituting in the other
+        (a custom the render never produced) would invent context; and a
+        context already anonymised by an older build is NOT healed here — it
+        heals on the next resume, where replay rehydrates the custom entries —
+        which is stated rather than implied because the alternative looks like
+        an omission.
+        """
+        sources: dict[str, CustomMessage] = {
+            message.id: message
+            for message in self._context.messages
+            if isinstance(message, CustomMessage)
+        }
+        restored: list[AgentMessage] = []
+        for message in kept:
+            source = sources.get(message.id)
+            if source is not None and self._transcript.has_entry(message.id):
+                restored.append(source)
+            else:
+                restored.append(message)
+        return restored
 
     async def _recover_if_request_too_large(self, error: BaseException | str) -> bool:
         """Graduated recovery from ``HTTP 413: Request exceeds the maximum size``.
@@ -9040,7 +9090,9 @@ class Session:
             # resume and ``/export`` keep their frames; this keeps the LIVE
             # context honest too. The strip still applies to what the next
             # request SENDS (``_render_history`` re-renders on the way out).
-            kept = self._render_for_compaction(keep_images=True)[plan.cut :]
+            kept = self._restore_custom_sources(
+                self._render_for_compaction(keep_images=True)[plan.cut :]
+            )
             if not kept:
                 kept = plan.llm_history[plan.cut :]
             summary, preserve_data = (
