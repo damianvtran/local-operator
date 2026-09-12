@@ -974,16 +974,23 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     # deliberate stop issued from the phone (UX round 1, U1).
     #
     # The durable outcome this frame's notice is already built from carries the
-    # end for exactly those arms, so the frame fills the MISSING field from it:
+    # end for exactly those arms, so the frame fills the MISSING end from it:
     # one record decides both the sentence and the button, which is what keeps
     # the word and the affordance from naming one act two ways (D7).
+    #    # FILL, never override: the fold's own ABORT outranks a durable record. A
+    # record may describe an EARLIER turn than the one the fold last saw, and
+    # the fold is the only party that saw an end event for the current one — so
+    # when it says `aborted`, its word and its `cut_off` flag stand, including
+    # the deliberate stop it classified (`aborted` + `cut_off=False`).
     #
-    # FILL, never override. A projection that folded a real ``AgentEndEvent``
-    # outranks a durable record — that record may describe an EARLIER turn than
-    # the one the fold last saw, and it is precisely the completed-turn case
-    # (``stop_reason='completed'``, no button) that must survive. Filling an
-    # empty field cannot touch it.
-    if not projection.streaming and not projection.stop_reason:
+    # `"completed"` is NOT such an end for this purpose: a completion cannot be
+    # the end being filled for (a completed turn publishes `kind='complete'`, so
+    # the store would not be carrying an error), and a session that finished a
+    # turn and then had the NEXT one stopped from the phone leaves exactly this
+    # pair — `stop_reason='completed'` from the earlier fold plus an
+    # `interrupted` outcome from the turn the fold never saw end. Requiring an
+    # EMPTY field there silently withheld the button from a deliberate stop.
+    if not projection.streaming and projection.stop_reason != "aborted":
         kind = str(attention.get("kind") or "")
         if kind in {"error", "interrupted"}:
             from local_operator.incidents import is_deliberate_cause
