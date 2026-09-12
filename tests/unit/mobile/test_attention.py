@@ -363,16 +363,29 @@ def test_the_phone_frame_fills_the_end_the_runtime_could_not_send(
     )
 
 
-def test_the_phone_frame_never_overrides_an_end_the_fold_saw() -> None:
-    """FILL, never override — the completed-turn case is the one at stake.
+def test_the_phone_frame_never_overrides_an_abort_the_fold_saw() -> None:
+    """FILL, never override — the FOLD's own abort outranks a durable record.
 
-    A durable record describes the LAST turn the store knows about, which may be
-    older than the end the fold folded; a completed turn carries
-    ``stop_reason='completed'`` and must keep offering no button at all.
+    A record may describe an earlier turn than the one the fold last saw, and
+    the fold is the only party that saw an end event for the current one. So a
+    folded ``aborted`` end keeps its word and its flag in both directions: a
+    deliberate stop the fold classified stays ``cut_off=False``, and a cut-off
+    it classified stays ``True``. And a frame with nothing to offer (a live
+    turn, no outcome, a completion) is left exactly as the fold produced it.
     """
-    completed = _end_frame(kind="error", cause="runtime-killed", stop_reason="completed")
-    assert completed["stop_reason"] == "completed"
-    assert completed["cut_off"] is False
+    # The fold saw the deliberate stop: the record's older error must not
+    # relabel the user's own act as a cut-off.
+    deliberate = _end_frame(
+        kind="error", cause="runtime-killed", stop_reason="aborted", cut_off=False
+    )
+    assert deliberate["stop_reason"] == "aborted"
+    assert deliberate["cut_off"] is False
+    # ...and the other way round: the fold saw the cut-off.
+    folded_cut_off = _end_frame(
+        kind="interrupted", cause="user-stop", stop_reason="aborted", cut_off=True
+    )
+    assert folded_cut_off["stop_reason"] == "aborted"
+    assert folded_cut_off["cut_off"] is True
     # A live turn banners nothing either: the suppression the notice already
     # applies is the same condition, so the field cannot fill ahead of it.
     live = _end_frame(kind="error", cause="runtime-killed", streaming=True)
@@ -381,6 +394,26 @@ def test_the_phone_frame_never_overrides_an_end_the_fold_saw() -> None:
     empty = _end_frame(kind=None)
     assert empty["stop_reason"] == ""
     # A completion is not a dead end either: no resume affordance is claimed
-    # for a turn that finished.
+    # for a turn that finished with nothing outstanding in the store.
     done = _end_frame(kind="complete")
     assert done["stop_reason"] == ""
+
+
+def test_a_stop_after_a_completed_turn_still_offers_the_way_back() -> None:
+    """``completed`` is not an END for this purpose, and requiring it be empty
+    withheld the button from a deliberate stop.
+
+    A session that finished a turn and then had the NEXT one stopped from the
+    phone leaves exactly this pair: ``stop_reason='completed'`` from the earlier
+    fold, and an ``interrupted`` outcome from the turn the fold never saw end
+    (the phone's stop path disposes the runtime, so no ``AgentEndEvent`` reaches
+    the follower). A completed turn publishes ``kind='complete'``, so a store
+    carrying an error or an interruption is describing the LATEST turn, not the
+    one the fold finished.
+    """
+    stopped = _end_frame(kind="interrupted", cause="user-stop", stop_reason="completed")
+    assert stopped["stop_reason"] == "aborted"
+    assert stopped["cut_off"] is False
+    cut_off = _end_frame(kind="error", cause="owner-lost", stop_reason="completed")
+    assert cut_off["stop_reason"] == "aborted"
+    assert cut_off["cut_off"] is True
