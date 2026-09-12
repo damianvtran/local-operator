@@ -316,7 +316,10 @@ class ScriptedModel:
     ``histories`` keeps every ``EpisodeTurn`` sequence the runner handed over,
     so a test can assert what the model was shown. ``compact_on`` names call
     indices at which the model reports a ``CompactionRecord`` (as a real
-    client would after rebuilding its context).
+    client would after rebuilding its context). ``cost_micros`` is the bill for
+    one call -- a scalar, or a per-call series for a test that needs a provider
+    reporting a cost pattern (a prompt-cache miss, a runaway); a series shorter
+    than the script repeats its last value.
     """
 
     def __init__(
@@ -325,15 +328,24 @@ class ScriptedModel:
         *,
         error: BaseException | None = None,
         compact_on: Sequence[int] = (),
+        cost_micros: Sequence[int] | int = 7,
     ):
         self.script = list(script or ["finish"])
         self.error = error
         self.calls = 0
         self.compact_on = set(compact_on)
+        self.costs = [cost_micros] if isinstance(cost_micros, int) else list(cost_micros)
         self.histories: list[tuple[EpisodeTurn, ...]] = []
         # Overridable so a test can simulate a provider serving a route other
         # than the pinned one.
         self.route = ROUTE
+
+    def _bill(self) -> int:
+        """The cost of the call about to be made, from the scripted series."""
+
+        if not self.costs:
+            return 0
+        return self.costs[self.calls] if self.calls < len(self.costs) else self.costs[-1]
 
     async def decide(
         self, observation: Observation, history: Sequence[EpisodeTurn], **kwargs: Any
@@ -342,6 +354,7 @@ class ScriptedModel:
         if self.error is not None:
             raise self.error
         kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
+        bill = self._bill()
         if kind == "reject":
             # A billed call whose reply failed parsing -- what the provider
             # client raises for the first paid episode's ``frame_id "1"``.
@@ -354,7 +367,7 @@ class ScriptedModel:
                 reply='{"actions": [{"kind": "click", "frame_id": "1"}]}',
                 route=self.route,
                 usage=ModelUsage(input_tokens=10, output_tokens=5),
-                cost_micros=7,
+                cost_micros=bill,
                 provider_request_id=f"rejected-{self.calls}",
                 prompt_cache_key="lop-eval-test",
             )
@@ -374,7 +387,7 @@ class ScriptedModel:
             action_batch=_batch(observation, kind),
             route=self.route,
             usage=ModelUsage(input_tokens=10, output_tokens=5),
-            cost_micros=7,
+            cost_micros=bill,
             prompt_cache_key="lop-eval-test",
             compaction=compaction,
         )
