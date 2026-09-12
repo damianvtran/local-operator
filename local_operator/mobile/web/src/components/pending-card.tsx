@@ -10,6 +10,24 @@
  * "Question N of M" header and re-renders the next question after each answer
  * (U1).
  *
+ * The card is an UNSHRINKABLE sibling of the transcript inside the session
+ * column, which is `h-dvh overflow-hidden` (screens/session-view.tsx): whatever
+ * height the card claims is taken off the transcript, and anything past the
+ * column's foot is clipped with no way to scroll to it. An uncapped card
+ * therefore did not merely look bad — a 10-option ask measured 1426px against
+ * an 844px viewport, so the last four options and the composer were off screen
+ * and unreachable by any gesture. Two guards, the same idiom the todos panel
+ * and the sheet use: the card is capped at ~60% of the viewport, and its BODY
+ * is a `lo-scroll` scroller, so a long question and a long option list are
+ * reached by scrolling inside the card while the composer stays put and the
+ * transcript keeps the rest of the column.
+ *
+ * 60dvh rather than the panels' 40dvh because a question awaiting an answer
+ * outranks a task list (branding §7), and rather than a fixed pixel height
+ * because the bound has to hold on every phone, not on the one it was measured
+ * on. The cap applies to every variant — options, free-text/secret, and the
+ * approval's approve/deny pair — because all three overflow the same column.
+ *
  * Transient card state (`busy`/`error`/`remember`/free-text draft) lives in
  * component-local `useState`, so it MUST NOT survive from one question to the
  * next: a stale `busy` leaves the next question's options disabled and
@@ -124,7 +142,19 @@ export function PendingCard({
 	const inert = busy || error !== "";
 
 	return (
-		<div className="border-accent bg-accent-wash mx-2 flex flex-col gap-2 rounded-md border p-2.5">
+		/* `shrink-0` keeps the card at its content height (up to the cap) rather
+		   than letting the column squeeze it toward nothing when the transcript is
+		   long; `max-h-[60dvh]` is what stops it taking the whole column. The
+		   padding stays on this element so the scrollbar rides the card's inner
+		   edge instead of overlapping the accent border. */
+		<div className="border-accent bg-accent-wash mx-2 flex max-h-[60dvh] shrink-0 flex-col rounded-md border p-2.5">
+			{/* The scroller is the whole card body, question included: on a phone a
+			   paragraph-length question can outgrow the cap on its own, so pinning
+			   it above the scroller would reintroduce the same unreachable tail it
+			   is meant to prevent. `min-h-0` is required — a flex child defaults to
+			   `min-height: auto` and would refuse to shrink below its content,
+			   which is precisely how the card grew past the viewport. */}
+			<div className="lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
 			<div className="flex flex-col gap-0.5">
 				<span className="flex items-center justify-between text-meta text-accent">
 					<span>
@@ -250,6 +280,7 @@ export function PendingCard({
 			)}
 
 			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
+			</div>
 		</div>
 	);
 }
