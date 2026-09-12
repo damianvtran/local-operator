@@ -74,11 +74,15 @@ NoticeSeverity = Literal["info", "warning", "error"]
 #: against the journal, where the stored turn's id names the entry whose
 #: ``custom_type`` is the delivery — so it never needs a wording rule. Measured
 #: fleet-wide (14 sessions): 229 of 233 carried envelope copies are shed that way on
-#: BOTH heads. The remaining four turns — ids that resolve to nothing — paint on
-#: this head as a parent receipt where the previous wording rule shed them; all four
-#: are real ``<parent-message>`` envelopes, the receipt is what that row honestly is,
-#: and user-kind row counts are unchanged. And it is a shape a person quotes
-#: verbatim when asking about it, which a wording rule would then eat
+#: BOTH heads. The residue is NOT shed, and what a surface then shows depends on the
+#: surface: the phone fold and the subagents panel PARSE the envelope
+#: (``mobile.projection`` calls :func:`extract_parent_message`; the panel has its own
+#: call) and paint a parent receipt, while the TUI fold has NO envelope parser and
+#: paints the model-facing envelope as the operator's own words. That difference is
+#: pre-existing on ``main`` and is not changed here: the PR records the measurements
+#: and leaves the fix — a display product call for hub steers — to a follow-up. It is
+#: also a shape a person quotes verbatim when asking about it, which a wording rule
+#: would then eat
 #: (`test_a_human_quoting_the_envelope_keeps_their_own_words` pins that). A notice
 #: has no such provenance to fall back on: nothing about ``[model switch] …`` is
 #: addressable, which is why text is the only test for one.
