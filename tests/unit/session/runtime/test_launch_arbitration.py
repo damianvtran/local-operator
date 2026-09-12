@@ -312,6 +312,53 @@ async def test_engaging_during_construction_waits_instead_of_spawning(
 
 
 @pytest.mark.asyncio
+async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
+    fleet: FakeRuntimeFleet, tmp_path: Path
+) -> None:
+    """A corpse is not a constructor: engage must spawn, and the spawn must win.
+
+    The loop reads "a lease with no record" as someone mid-construction and
+    waits for their record rather than spawning a doomed twin. That reading was
+    wrong for a claim whose owner had exited without being reaped — the pid is
+    still in the process table, so signal 0 called it a live constructor — and
+    the cost was the whole deadline (30 s) followed by a failure naming nobody,
+    which is the phone's first message to such a session never starting a
+    runtime. With the owner proven dead the loop spawns, and that candidate's
+    real ``acquire_session_lease`` takes the claim over.
+    """
+    from tests.unreaped import unreaped_child
+
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    fleet.loop = asyncio.get_running_loop()
+    with unreaped_child() as zombie_pid:
+        (session_dir / ".execution-lease").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "session_id": SESSION_ID,
+                    "generation": "d" * 32,
+                    "pid": zombie_pid,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        (session_dir / ".session.pid").write_text(str(zombie_pid), encoding="utf-8")
+
+        # Shorter than the loop's own 30 s deadline: if the corpse is read as a
+        # constructor, this raises TimeoutError rather than passing late.
+        await asyncio.wait_for(
+            engage_runtime(SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path),
+            timeout=15,
+        )
+
+    assert fleet.winners == 1, "the zombie's claim was never taken over"
+    assert fleet.losers == 0, "the corpse was read as a live contender"
+    assert fleet.deferred == [True]
+
+
+@pytest.mark.asyncio
 async def test_warm_errand_defers_materialisation_and_others_do_not(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
