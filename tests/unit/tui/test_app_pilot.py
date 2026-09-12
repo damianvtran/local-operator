@@ -9896,7 +9896,7 @@ async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> N
     """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
     The state ``AttachedSession._recover_runtime`` reaches at
-    ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
+    ``COLD_FALLBACK_S`` is cold with a callable ``_ensure_bound``, which is
     exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
     So the cold ladder in ``_activate_resolved_model`` is never consulted from
     this state, and the sentence the user reads comes from the bind attempt's

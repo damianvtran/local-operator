@@ -513,6 +513,47 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
+def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
+    """Publish the durable outcome for a runtime the scan just found dead.
+
+    WHY THE DAEMON HAS TO DO THIS. Every other writer of a session's durable
+    outcome needs either a process that still exists or an open that happens
+    after the fact: the dying runtime writes its OWN marker (so a SIGTERM is
+    covered and a SIGKILL is not), a watching viewer journals what it witnessed,
+    and ``Session.__init__`` classifies on the next open. A daemon-OWNED session
+    killed while nobody watched therefore had NO record at all — no notice on the
+    phone, no ``completion_kind`` for the list, and no outcome for the frame's
+    ``stop_reason`` to be filled from (UX round 1, U1/U5).
+
+    The same import, on the same worker thread, as ``_bootstrap_mobile_attention``
+    already runs for up to 100 directories at boot — this is that sweep moved to
+    the moment the death is DISCOVERED, which is the only new thing about it.
+    The caller bounds it to one call per discovered death and to a daemon that
+    dials (an observer daemon's contract is to write nothing), and
+    ``bootstrap_transcript`` itself publishes nothing while a live owner holds
+    the record — which is what makes the successor race harmless: a runtime that
+    retired has already republished, so this classifies nothing and the
+    successor's own outcome stands.
+
+    ``reaped_owner`` is the dead record ``registry.scan`` reported AND deleted,
+    handed on to the classification because the deletion is the whole reason the
+    caller cannot re-read it. Without it the daemon's own sweep is what erases
+    the evidence for the death it just discovered (review round 2, MINOR-1).
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    directory = _durable_user_session_dir(session_id)
+    if directory is None:
+        return
+    try:
+        bootstrap_transcript(
+            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
+        )
+    except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
+        logger.debug("classifying a discovered death failed", exc_info=True)
+
+
 def _bootstrap_mobile_attention() -> None:
     """Migrate the retained list once on daemon startup, not on passive reads."""
     from local_operator.paths import config_dir
@@ -926,6 +967,50 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     data, degraded = cap_projection_frame(projection)
     attention = projection.attention
     data["attention"] = attention
+    # A CUT-OFF'S END REACHES THE PHONE HERE OR NOWHERE. ``ProjectionFold``
+    # learns ``stop_reason``/``cut_off`` from a folded ``AgentEndEvent``, and a
+    # runtime that dies mid-turn never emits one — the follower's socket simply
+    # closes, so the projection is left with the empty field that means "no turn
+    # has ended yet". Measured on three real phone paths (attached with and
+    # without another follower, and a daemon-OWNED session) × two signals
+    # (SIGKILL/SIGTERM): ``stop_reason='' cut_off=False`` at every sample to
+    # t+40 s, while a turn that COMPLETES does fold ``'completed'``. And
+    # ``composer.tsx`` gates its whole resume affordance on
+    # ``stop_reason === "aborted"``, so the notice and the list mark arrived and
+    # the button that D7 exists to word never did — for a cut-off AND for a
+    # deliberate stop issued from the phone (UX round 1, U1).
+    #
+    # The durable outcome this frame's notice is already built from carries the
+    # end for exactly those arms, so the frame fills the MISSING end from it:
+    # one record decides both the sentence and the button, which is what keeps
+    # the word and the affordance from naming one act two ways (D7).
+    # FILL, never override: the fold's own ABORT outranks a durable record. A
+    # record may describe an EARLIER turn than the one the fold last saw, and
+    # the fold is the only party that saw an end event for the current one — so
+    # when it says `aborted`, its word and its `cut_off` flag stand, including
+    # the deliberate stop it classified (`aborted` + `cut_off=False`).
+    #
+    # `"completed"` is NOT such an end for this purpose: a completion cannot be
+    # the end being filled for (a completed turn publishes `kind='complete'`, so
+    # the store would not be carrying an error), and a session that finished a
+    # turn and then had the NEXT one stopped from the phone leaves exactly this
+    # pair — `stop_reason='completed'` from the earlier fold plus an
+    # `interrupted` outcome from the turn the fold never saw end. Requiring an
+    # EMPTY field there silently withheld the button from a deliberate stop.
+    if not projection.streaming and projection.stop_reason != "aborted":
+        kind = str(attention.get("kind") or "")
+        if kind in {"error", "interrupted"}:
+            from local_operator.incidents import is_deliberate_cause
+
+            data["stop_reason"] = "aborted"
+            # WHICH word the button says. ``aborted`` covers both acts; only an
+            # ``error`` kind that is not a recorded deliberate act is the
+            # involuntary one. ``error`` with no cause at all is still a cut-off
+            # — that is the "cause could not be determined" row, whose notice
+            # above already says so.
+            data["cut_off"] = kind == "error" and not is_deliberate_cause(
+                str(attention.get("cause") or "")
+            )
     if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
         # The sentence AND its severity come from `harness/rows.py`, which owns
         # row decisions for both surfaces: the phone's `NoticeRow` picks its
@@ -1420,8 +1505,31 @@ class MobileDaemon:
                 # session id) — the socket survives them by design.
                 entry.record = record
             if state == "stale":
+                # ONE classification per discovered death, gated on the TRANSITION
+                # (this branch re-runs every scan for as long as the stale record
+                # stays on disk, and a transcript import per 2 s pass is not a
+                # price a list may pay). Only a daemon that owns sockets writes:
+                # an observer daemon's whole contract is that it lists and serves
+                # and touches nothing durable.
+                first_sighting = not entry.ended
                 entry.ended = True
                 changed = True
+                if first_sighting and self.dial_registrants:
+                    # THE RECORD RIDES ALONG, because `registry.scan` has already
+                    # unlinked it: this branch runs on the tuple scan RETURNED,
+                    # and by the time we classify, the dead record the
+                    # classification depends on is gone from the run directory.
+                    # Re-reading (which is what `_run_record_evidence` does) then
+                    # finds nothing and every discovered death lands the
+                    # no-evidence arm — "the cause could not be determined" for
+                    # the one shape where the daemon just PROVED the pid dead
+                    # (review round 2, MINOR-1; the same sentence was measured on
+                    # the phone by the design round, D6). Passing the record in
+                    # is the evidence, and it is exactly as trustworthy as the
+                    # scan that produced it.
+                    await asyncio.to_thread(
+                        _classify_discovered_death, record.session_id, reaped_owner=record
+                    )
                 # SIGKILL cannot run owner cleanup. Discovery already proved the
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
