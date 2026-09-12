@@ -1,0 +1,72 @@
+{
+  "tag": "before",
+  "route": "container",
+  "repo": "/tmp/lo-analytics-scroll/before-tree",
+  "grid": [
+    120,
+    45
+  ],
+  "body_region": [
+    9,
+    8,
+    102,
+    29
+  ],
+  "body_size": [
+    102,
+    29
+  ],
+  "body_height": 29,
+  "page_height": 29,
+  "max_scroll_y": 31.0,
+  "states": [
+    {
+      "state": "step-01",
+      "key": "pagedown",
+      "route": "container",
+      "scroll_y": 5.0,
+      "target": 29.0,
+      "at_target": false
+    },
+    {
+      "state": "step-02",
+      "key": "pagedown",
+      "route": "container",
+      "scroll_y": 29.0,
+      "target": 29.0,
+      "at_target": true
+    },
+    {
+      "state": "step-03",
+      "key": "pagedown",
+      "route": "container",
+      "scroll_y": 29.0,
+      "target": 29.0,
+      "at_target": true
+    },
+    {
+      "state": "step-04",
+      "key": "pagedown",
+      "route": "container",
+      "scroll_y": 29.0,
+      "target": 29.0,
+      "at_target": true
+    },
+    {
+      "state": "step-05",
+      "key": "pagedown",
+      "route": "container",
+      "scroll_y": 29.0,
+      "target": 29.0,
+      "at_target": true
+    },
+    {
+      "state": "end-settled",
+      "key": "end",
+      "route": "container",
+      "scroll_y": 31.0,
+      "target": 31.0,
+      "at_target": true
+    }
+  ]
+}
