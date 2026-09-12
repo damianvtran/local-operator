@@ -1,4 +1,4 @@
-import { attach, BridgeCommandError, cdp, detach, pruneSurface, requireSurface } from "../cdp";
+import { attach, BridgeCommandError, cdp, detach, isStalled, pruneSurface, requireSurface } from "../cdp";
 import { dropLogCapture, startLogCapture } from "../log-capture";
 import {
   askOrigin,
@@ -7,7 +7,7 @@ import {
   withOriginGate,
   type OriginAdmission,
 } from "../origins";
-import { settle } from "../settle";
+import { CHROME_API_DEADLINE_MS, deadline, settle } from "../settle";
 import { reconcileTabGroup } from "../tab-groups";
 import { recordAllocation } from "../ownership";
 import {
@@ -18,6 +18,7 @@ import {
   redactToken,
   removeSurface,
   surfaceToken,
+  withAdmission,
   type StoredSurface,
 } from "../state";
 
@@ -34,9 +35,17 @@ async function liveSurfaces(): Promise<Record<string, StoredSurface>> {
   const live: Record<string, StoredSurface> = {};
   for (const [token, surface] of Object.entries(surfaces)) {
     try {
-      await chrome.tabs.get(surface.tabId);
+      await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
       live[token] = surface;
-    } catch {
+    } catch (error) {
+      // Only a real "no such tab" prunes. A per-call deadline means OUR event
+      // loop stalled, which says nothing about the tab — pruning a live surface
+      // here would retire a tab the session is still driving.
+      if (isStalled(error)) throw error;
       await pruneSurface(token, surface.tabId);
     }
   }
@@ -52,7 +61,11 @@ function sessionRequester(params: Record<string, unknown>): string {
 }
 
 async function page(tabId: number): Promise<{ url: string; title: string }> {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await deadline(
+    chrome.tabs.get(tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${tabId})`,
+  );
   return { url: tab.url ?? "", title: tab.title ?? "" };
 }
 
@@ -73,7 +86,11 @@ async function navigate(tabId: number, url: URL, requestId: string, admission: O
     requestId,
     async () => {
       const waiting = settle(tabId);
-      await chrome.tabs.update(tabId, { url: url.href });
+      await deadline(
+        chrome.tabs.update(tabId, { url: url.href }),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.update(${tabId})`,
+      );
       await waiting;
       return page(tabId);
     },
@@ -124,46 +141,68 @@ export async function open(params: Record<string, unknown>, requestId: string): 
     await putSurface(surface);
     return { tab: surfaceToken(surface), ...result };
   }
-  const surfaces = await liveSurfaces();
-  if (atSurfaceCap(surfaces)) {
-    // Typed refusal, not silent reuse: each parallel session opens its own
-    // tab now, so an unbounded map would let an agent fleet spray tabs into
-    // the user's real browser. See MAX_SURFACES for the cap rationale.
-    // Handles are REDACTED: the full token is the drive capability, and an
-    // error surface must not hand one session control of another's tab
-    // (finding M1).
-    throw new BridgeCommandError(
-      "tab_limit",
-      `already driving ${MAX_SURFACES} tabs — close one (action 'close' with its handle) before opening another`,
-      { limit: MAX_SURFACES, tabs: Object.keys(surfaces).map(redactToken) },
+  // ADMISSION: the cap read, the tab creation and the surface write are ONE
+  // atomic window (state.ts's `withAdmission`), and nothing else is. Two owners
+  // admitted concurrently would otherwise both read the last free slot and both
+  // take it — nine tabs against a cap of eight.
+  //
+  // Everything the old (global, whole-handler) lane covered is deliberately
+  // OUTSIDE this window: attach, log capture, grouping, and `navigate()` — which
+  // can park on a redirect's human origin-approval prompt — plus the whole
+  // rollback below. Those are post-admission work on a slot that has already
+  // been consumed, so they cannot change the count except by releasing it (and
+  // release goes through the store queue, which the next cap read observes);
+  // holding them inside is what let one owner's slow navigation delay a
+  // different owner's admission (audit A4).
+  const surface = await withAdmission(async () => {
+    const surfaces = await liveSurfaces();
+    if (atSurfaceCap(surfaces)) {
+      // Typed refusal, not silent reuse: each parallel session opens its own
+      // tab now, so an unbounded map would let an agent fleet spray tabs into
+      // the user's real browser. See MAX_SURFACES for the cap rationale.
+      // Handles are REDACTED: the full token is the drive capability, and an
+      // error surface must not hand one session control of another's tab
+      // (finding M1).
+      throw new BridgeCommandError(
+        "tab_limit",
+        `already driving ${MAX_SURFACES} tabs — close one (action 'close' with its handle) before opening another`,
+        { limit: MAX_SURFACES, tabs: Object.keys(surfaces).map(redactToken) },
+      );
+    }
+    // No separate pre-create gate: ensureTopLevelAccess above already refused a
+    // not-allowed origin, and gating again here would double-consume a once
+    // grant before navigate() (the single consumption point) ran.
+    // Create about:blank first. Creating directly at the destination starts its
+    // redirect chain before a debugger can attach, leaving a race where a second
+    // origin could receive cookies before the permission gate exists.
+    const tab = await deadline(
+      chrome.tabs.create({ active: false, url: "about:blank" }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.tabs.create",
     );
-  }
-  // No separate pre-create gate: ensureTopLevelAccess above already refused a
-  // not-allowed origin, and gating again here would double-consume a once
-  // grant before navigate() (the single consumption point) ran.
-  // Create about:blank first. Creating directly at the destination starts its
-  // redirect chain before a debugger can attach, leaving a race where a second
-  // origin could receive cookies before the permission gate exists.
-  const tab = await chrome.tabs.create({ active: false, url: "about:blank" });
-  if (tab.id === undefined) throw new BridgeCommandError("internal", "Chrome created no tab id");
-  const now = Date.now();
-  const surface: StoredSurface = {
-    tabId: tab.id,
-    nonce: crypto.randomUUID().replaceAll("-", ""),
-    epoch: 1,
-    allocationId: typeof params.allocation_id === "string" ? params.allocation_id : undefined,
-    createdAt: now,
-    lastUsedAt: now,
-  };
+    if (tab.id === undefined) throw new BridgeCommandError("internal", "Chrome created no tab id");
+    const now = Date.now();
+    const fresh: StoredSurface = {
+      tabId: tab.id,
+      nonce: crypto.randomUUID().replaceAll("-", ""),
+      epoch: 1,
+      allocationId: typeof params.allocation_id === "string" ? params.allocation_id : undefined,
+      createdAt: now,
+      lastUsedAt: now,
+    };
+    // The write that CONSUMES the slot. It must land inside the lane, or a
+    // concurrent admission's cap read cannot see it.
+    await putSurface(fresh);
+    return fresh;
+  });
   try {
-    await putSurface(surface);
     await recordAllocation(params, surfaceToken(surface), "allocated");
-    await attach(tab.id);
+    await attach(surface.tabId);
     // Arm capture and the origin gate before navigation; opening directly at
     // the destination would let a redirect escape permission admission.
-    await startLogCapture(tab.id, cdp);
+    await startLogCapture(surface.tabId, cdp);
     await reconcileTabGroup(surface, params, true);
-    const live = await navigate(tab.id, url, requestId, admission);
+    const live = await navigate(surface.tabId, url, requestId, admission);
     await recordAllocation(params, surfaceToken(surface), "owned");
     return { tab: surfaceToken(surface), ...live };
   } catch (error) {
@@ -237,7 +276,11 @@ export async function tabs(_params: Record<string, unknown>): Promise<Record<str
   const live: Record<string, unknown>[] = [];
   for (const [token, surface] of Object.entries(surfaces)) {
     try {
-      const tab = await chrome.tabs.get(surface.tabId);
+      const tab = await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
       live.push({
         tab: redactToken(token),
         url: tab.url ?? "",
@@ -245,8 +288,10 @@ export async function tabs(_params: Record<string, unknown>): Promise<Record<str
         createdAt: surface.createdAt,
         lastUsedAt: surface.lastUsedAt,
       });
-    } catch {
-      // Closed between the liveness pass and this read — rare; prune now.
+    } catch (error) {
+      // Closed between the liveness pass and this read — rare; prune now. A
+      // per-call deadline is not that (see isStalled).
+      if (isStalled(error)) throw error;
       await pruneSurface(token, surface.tabId);
     }
   }
@@ -258,11 +303,21 @@ async function closeSurface(token: string, surface: StoredSurface): Promise<void
   dropLogCapture(surface.tabId);
   await detach(surface.tabId);
   try {
-    await chrome.tabs.remove(surface.tabId);
+    await deadline(
+      chrome.tabs.remove(surface.tabId),
+      CHROME_API_DEADLINE_MS,
+      `chrome.tabs.remove(${surface.tabId})`,
+    );
   } catch (error) {
     // Only a confirmed missing tab is idempotent success. Policy/debugger or
     // transient failures must leave the capability available for retry.
-    try { await chrome.tabs.get(surface.tabId); } catch (missing) {
+    try {
+      await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
+    } catch (missing) {
       if (missing instanceof Error && /No tab with id|Invalid tab ID/i.test(missing.message)) {
         await removeSurface(token);
         return;

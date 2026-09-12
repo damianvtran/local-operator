@@ -212,3 +212,66 @@ test("protocol and unpair close codes keep their own states (J4 regression guard
     }
   }
 });
+
+/** Load one source module on its own, for the pure helpers. */
+async function loadModule(relative) {
+  const dir = await mkdtemp(join(tmpdir(), "lop-worker-evict-mod-"));
+  const outfile = join(dir, "module.mjs");
+  await build({
+    entryPoints: [join(HERE, "..", relative)],
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    outfile,
+  });
+  return import(pathToFileURL(outfile) + `?${Date.now()}`);
+}
+
+test("a post-onopen 4000 close re-dials on the attempt-0 fast path, not the alarm floor", async () => {
+  // The design's §4.2 claim — "the replacement registered in ~1 s" — pinned as
+  // a STRUCTURAL fact about the delay the worker ASKS for, not as a measurement
+  // of how long anything took (AGENTS.md: wait on the event, never on the
+  // clock). `onopen` resets `attempt` to 0, so a close that arrives after a
+  // successful open must arm `backoffDelayMs(0)`. If the reset were dropped,
+  // the requested delay would be 2000 and this fails.
+  const reconnect = await loadModule("src/reconnect.ts");
+  assert.equal(reconnect.backoffDelayMs(0), 1_000, "attempt 0 is the ~1 s fast path");
+  assert.equal(reconnect.backoffDelayMs(1), 2_000, "and attempt 1 doubles it");
+
+  const worker = await loadWorker();
+  const realSetTimeout = globalThis.setTimeout;
+  const requested = [];
+  globalThis.setTimeout = (fn, delay, ...rest) => {
+    requested.push(delay);
+    return realSetTimeout(fn, delay, ...rest);
+  };
+  try {
+    const first = await worker.evict(4000);
+    assert.equal(first.reconnectScheduled, true, "the worker must still re-dial after a 4000 eviction");
+    assert.ok(
+      requested.includes(1_000),
+      `expected the attempt-0 fast path, got delays ${JSON.stringify(requested)}`,
+    );
+    assert.ok(!requested.includes(2_000), "a post-onopen close must not be armed as attempt 1");
+
+    // Round 2 is what makes the RESET observable. The first close cannot
+    // distinguish "onopen reset attempt" from "attempt was never incremented",
+    // because it starts at 0 — so close a SECOND time, after a successful
+    // re-dial whose onopen should have reset the backoff. Without that reset
+    // the second close is armed as backoffDelayMs(1) = 2000.
+    requested.length = 0;
+    const second = await worker.evict(4000);
+    assert.equal(second.reconnectScheduled, true, "the re-dial must be repeatable");
+    assert.ok(
+      requested.includes(1_000),
+      `expected attempt-0 again after a successful re-dial, got ${JSON.stringify(requested)}`,
+    );
+    assert.ok(
+      !requested.includes(2_000),
+      "the backoff was not reset by the successful re-dial",
+    );
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    await worker.close();
+  }
+});

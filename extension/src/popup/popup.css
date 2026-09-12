@@ -422,13 +422,17 @@ input:disabled {
  * EVERY open — the resize it causes is unconditional, and only its duration
  * depends on how slow /health is.
  *
- * The pin is therefore chosen per user, from a synchronous localStorage hint:
- * 219px for a browser that has never paired (it becomes the 340px pairing form)
- * and 86px for one that has (it becomes the 207px connected card). A single pin
- * cannot serve both — pinning to the form costs the already-paired user, who
- * opens this popup for the rest of the product's life, a 133px settle; pinning
- * to the tallest state would leave a permanent band of empty card under
- * `connected` for everyone.
+ * The pin is therefore chosen per state, from a synchronous localStorage hint
+ * holding the pin show() recorded for the card it last rendered:
+ *
+ *   86px  -> the connected card (211.2px)
+ *   219px -> the pairing form (344.0px)
+ *   254px -> the unresponsive card (378.8px)
+ *
+ * Three values rather than a paired/unpaired boolean (design D3-1): a boolean
+ * cannot name the third state, and the one it has to collapse — the wedged but
+ * paired worker this popup exists for — is the one a user reopens from the
+ * recovery copy, where a wrong pin cost a measured 167.8px reflow.
  *
  * That choice is applied by first-paint.js, a CLASSIC script in <head>, NOT by
  * popup.ts. popup.js is a deferred module, so an inline style it sets arrives
@@ -439,8 +443,8 @@ input:disabled {
  *
  * All four numbers are measured at 300x600 and move together — the card's
  * height depends on the pairing form, which depends on the reserved error slot
- * below. Re-measure BOTH pins if any of them changes; a stale pin is a resize,
- * which is the defect this whole block exists to prevent. */
+ * below. Re-measure ALL THREE pins if any of them changes; a stale pin is a
+ * resize, which is the defect this whole block exists to prevent. */
 #pending {
   min-height: 219px;
 }

@@ -1894,14 +1894,50 @@ def browser_command(args: argparse.Namespace) -> int:
         print(f"installed:           {'yes' if result['installed'] else 'no'}")
         print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
         connected = bool(health.get("extension_connected"))
+        unresponsive = bool(health.get("extension_unresponsive"))
         print(f"extension connected: {'yes' if connected else 'no'}")
         print(f"paired:              {'yes' if result['paired'] else 'no'}")
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
+        # `extension_unresponsive` is the OTHER way to be paired-but-not-
+        # connected — the browser is open and the extension socket is up, but
+        # the worker stopped answering — and telling that user "browser not
+        # currently attached, it reconnects when opened" is precisely the
+        # misdiagnosis that made the wedge expensive. The two lines are
+        # mutually exclusive on purpose: `extension_connected` is false in both
+        # cases, so only the discriminator separates them.
+        #
+        # The unresponsive branch has TWO truthful spellings, chosen by
+        # `link_attached`, because the daemon both observes the state and then
+        # acts on it: while a mute socket is still attached the drop is still
+        # ahead ("will drop and re-dial"); once it has been dropped, the link is
+        # gone and re-dialling is in progress. Printing the future tense after
+        # the drop would assert a severing that already happened, which is the
+        # false trail D3 caught, and printing the past tense before it asserts a
+        # drop nothing has performed yet. Both say the same thing the user needs:
+        # this is not "open your browser".
         if result["paired"] and not connected:
-            print(
-                "                     (browser not currently attached; it reconnects when opened)"
-            )
+            if unresponsive:
+                # Payloads WITHOUT `link_attached` are a daemon from an earlier
+                # head of this very change (the field is additive). There the
+                # tense is unknowable, so say only what is certainly true and
+                # assert no mechanism rather than guess one.
+                attached_now = health.get("link_attached")
+                if attached_now is True:
+                    note = (
+                        "browser attached but not answering; the bridge will drop and re-dial "
+                        "the link — retry once in a few seconds"
+                    )
+                elif attached_now is False:
+                    note = (
+                        "browser attached but not answering; the bridge dropped the link and "
+                        "is re-dialling it — retry once in a few seconds"
+                    )
+                else:
+                    note = "browser attached but not answering; retry once in a few seconds"
+            else:
+                note = "browser not currently attached; it reconnects when opened"
+            print(f"                     ({note})")
         # Driven tabs, PLURAL and counted. `driving: <url>` implied a single
         # system-wide binding; with one tab per session that framing turned a
         # stale URL into "something is holding the bridge". Say how many tabs
