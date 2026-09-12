@@ -70,18 +70,22 @@ def is_zombie(pid: int) -> bool:
       the legacy ``.session.pid``-only branch, all of which require a holder to
       be *proven* dead before they move its claim.
     - ``resume.live_runtime_pid`` — after signal 0 has already said "exists",
-      because that answer decides whether an interface refuses to open a
-      session at all.
+      because at its user-facing call sites (the TUI's ``/resume``,
+      ``lop exec --resume``, the phone's attach) that answer decides whether
+      someone is refused the session they asked for. Its ``check_zombie=False``
+      mode exists for one caller, the engage loop's dense discovery pass, where
+      the same answer can only cost a wait.
     - ``registry.pid_alive(check_zombie=True)`` — ``registry.scan`` spends it on
       a record whose heartbeat has already gone quiet, so a healthy session's
       row stays fork-free.
 
     Two places deliberately do NOT, and both are latency trades rather than
     safety ones: ``registry.pid_alive``'s default, which keeps ``scan``
-    fork-free for healthy records, and ``launch._lease_holder``'s dense-window
-    call, where the engage loop polls every 10 ms and the fork would cost more
-    than the wait it is trying to shorten. Neither can take a claim — only
-    ``session_lease`` does that, and it always asks.
+    fork-free for healthy records, and the engage loop's two probes inside its
+    dense 10 ms grid (``find_runtime_record``'s owner lookup and
+    ``_lease_holder``), where a fork costs more than the wait it would shorten.
+    Neither can take a claim — only ``session_lease`` does that, and it always
+    asks.
     """
     if pid <= 0:
         return False
