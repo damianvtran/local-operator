@@ -108,6 +108,31 @@ def test_a_pin_to_a_deleted_session_is_pruned_at_read(tmp_path: Path) -> None:
     assert read_pins(tmp_path) == ["a" * 12]
 
 
+def test_an_id_bearing_a_path_separator_is_rejected(tmp_path: Path) -> None:
+    """A pin is a session id — ONE bare directory name — and the check runs
+    BEFORE the store-prune, because the prune is what would follow the escape:
+    it joins the id onto ``sessions/``, and ``sessions / "/tmp"`` IS ``/tmp``
+    while ``../agents`` climbs out of the store entirely. ``..`` is rejected
+    too, and would otherwise survive both halves — ``Path("..").name`` is
+    ``".."`` and ``sessions/..`` is a real directory.
+
+    Defence in depth rather than a live bug: nothing renders from a bogus
+    entry today, since ``load_catalog`` hydrates none of them. This keeps the
+    house rule — discovery metadata cannot redirect a read outside
+    ``sessions/`` — true of this file as well.
+    """
+    _session(tmp_path, "real")
+    (tmp_path / "agents").mkdir()
+
+    (tmp_path / PINS_FILE).write_text(json.dumps(["../agents", "..", "/tmp"]))
+    assert read_pins(tmp_path) == []
+
+    (tmp_path / PINS_FILE).write_text(
+        json.dumps(["real", "../agents", "..", ".", "/tmp", "sessions/../../etc", "real/../real"])
+    )
+    assert read_pins(tmp_path) == ["real"]
+
+
 def test_the_write_is_atomic(tmp_path: Path) -> None:
     """Same-directory temp then replace. Asserted by proving no temp file
     survives a successful write — a torn read would silently empty the pins."""
