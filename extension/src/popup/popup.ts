@@ -25,6 +25,7 @@ type State =
   | "pairing"
   | "disconnected"
   | "incompatible"
+  | "unresponsive"
   | "origin"
   | "origin-ack"
   // The neutral pre-render placeholder. Never shown BY render() — it is the
@@ -36,6 +37,7 @@ const sections = [
   "pairing",
   "disconnected",
   "incompatible",
+  "unresponsive",
   "origin",
   "origin-ack",
   "pending",
@@ -109,6 +111,15 @@ const repeatAskByOrigin = new Map<string, DecidedOrigin>();
 
 interface Health {
   extension_connected: boolean;
+  /** The socket is attached but the worker has stopped answering — either
+   * still attached and mute, or severed by the daemon for silence within its
+   * cooling-off window (`LINK_DROP_TTL_S`). The daemon reports it so this card
+   * can stop claiming the agent can drive when it cannot (design D4). Optional
+   * in the type because an older daemon simply does not send it. */
+  extension_unresponsive?: boolean;
+  /** Whether a link is attached right now; not the same as healthy. Paired
+   * with the flag above so a render can say what it actually observes. */
+  link_attached?: boolean;
   paired: boolean;
   browser: string;
   current_url?: string;
@@ -127,6 +138,10 @@ const TONE: Record<State, string> = {
   pairing: "var(--hairline-strong)",
   disconnected: "var(--hairline-strong)",
   incompatible: "var(--danger)",
+  // Danger, like `incompatible`: the user must recover this themselves and the
+  // agent cannot do it for them. It is emphatically NOT success — a green card
+  // over a mute worker is the symptom the incident was made of.
+  unresponsive: "var(--danger)",
   origin: "var(--hairline-strong)",
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
@@ -439,6 +454,16 @@ async function renderOnce(): Promise<void> {
   // unpair shrinks the next first paint back to the form's height.
   writePairedHint(health.paired);
   if (health.paired) {
+    // The worker is wedgeable in a way the socket does not show: attached,
+    // paired, and answering nothing. Say so instead of painting the green
+    // "Connected." card over a browser the agent cannot drive — that card is
+    // exactly what the incident looked like from this popup (design D4). One
+    // render after the state clears, the card returns to normal, because this
+    // reads /health on every render like everything else here.
+    if (health.extension_unresponsive === true) {
+      show("unresponsive");
+      return;
+    }
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
     // unpair (daemon revoke → close 4003) renders the form again instead of a
@@ -648,6 +673,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
+document.getElementById("retry-unresponsive")?.addEventListener("click", () => void render());
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {

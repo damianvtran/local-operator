@@ -1,3 +1,5 @@
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
+
 export const DEFAULT_PORT = 4099;
 
 // Hard ceiling on concurrently-driven tabs. Parallel sessions each open their
@@ -85,25 +87,40 @@ export interface SessionState {
 }
 
 export async function getLocal(): Promise<LocalState> {
-  return chrome.storage.local.get(["token", "port", "origins", "hostGrants", "siteGrants", "allowAllSites"]);
+  // Bounded like every other chrome API await a serialized chain or the
+  // connect() path depends on: a stalled storage read used to leave `connect`
+  // unable to decide and the store queue parked behind it.
+  return deadline(
+    chrome.storage.local.get(["token", "port", "origins", "hostGrants", "siteGrants", "allowAllSites"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.get(local state)",
+  );
 }
 
 export async function getSession(): Promise<SessionState> {
-  return chrome.storage.session.get([
-    "surfaces",
-    "refs",
-    "pendingOrigin",
-    "accessRequest",
-    "accessTombstones",
-    "accessQueueVersion",
-    "accessQueue",
-    "accessResults",
-    "onceGrants",
-  ]);
+  return deadline(
+    chrome.storage.session.get([
+      "surfaces",
+      "refs",
+      "pendingOrigin",
+      "accessRequest",
+      "accessTombstones",
+      "accessQueueVersion",
+      "accessQueue",
+      "accessResults",
+      "onceGrants",
+    ]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(session state)",
+  );
 }
 
 export async function getSurfaces(): Promise<Record<string, StoredSurface>> {
-  const { surfaces = {} } = (await chrome.storage.session.get(["surfaces"])) as SessionState;
+  const { surfaces = {} } = (await deadline(
+    chrome.storage.session.get(["surfaces"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(surfaces)",
+  )) as SessionState;
   return surfaces;
 }
 
@@ -114,6 +131,21 @@ export async function getSurfaces(): Promise<Record<string, StoredSurface>> {
 // had to face). Same promise-chain pattern as snapshot's axQueue: mutations
 // are rare and tiny, and each link swallows its predecessor's failure so the
 // chain cannot poison later calls.
+//
+// "Swallows its predecessor's failure" is true for a REJECTION and false for a
+// HANG — `.catch()` never runs on a promise that never settles. The chain is
+// self-draining only because every chrome API await INSIDE these ops carries a
+// `deadline` (settle.ts), so an op always settles. That includes this file's
+// ops AND the grant helpers in access-grants.ts, which reach this same lane
+// through `withSessionMutation`: `grep -rn 'await chrome\.' extension/src
+// --include=*.ts | grep -v '/popup/\|/options/'` is the closed inventory, and
+// anything it returns without a `deadline` is a hole in this promise rather
+// than an exemption (review R1-3 — that grep used to return 11 bare awaits in
+// access-grants.ts, command-reachable from the popup's Allow path). Do not
+// "fix" a wedge by resetting the chain head instead: `withStore` is the
+// atomicity mechanism for these read-modify-write sequences, and abandoning an
+// op mid-read while the next one reads the pre-mutation state loses an update
+// or double-spends a one-shot grant (see withSessionMutation below).
 let storeQueue: Promise<unknown> = Promise.resolve();
 function withStore<T>(op: () => Promise<T>): Promise<T> {
   const run = storeQueue.catch(() => {}).then(op);
@@ -138,20 +170,29 @@ export function putSurface(surface: StoredSurface): Promise<void> {
   return withStore(async () => {
     const surfaces = await getSurfaces();
     surfaces[surfaceToken(surface)] = surface;
-    await chrome.storage.session.set({ surfaces });
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
   });
 }
 
 /** Remove one surface and its snapshot refs; other surfaces are untouched. */
 export function removeSurface(token: string): Promise<void> {
   return withStore(async () => {
-    const { surfaces = {}, refs = {} } = (await chrome.storage.session.get([
-      "surfaces",
-      "refs",
-    ])) as SessionState;
+    const { surfaces = {}, refs = {} } = (await deadline(
+      chrome.storage.session.get(["surfaces", "refs"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(surfaces, refs)",
+    )) as SessionState;
     delete surfaces[token];
     delete refs[token];
-    await chrome.storage.session.set({ surfaces, refs });
+    await deadline(
+      chrome.storage.session.set({ surfaces, refs }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces, refs)",
+    );
   });
 }
 
@@ -170,20 +211,36 @@ export function touchSurface(token: string, at: number): Promise<void> {
     const surface = surfaces[token];
     if (!surface) return;
     surface.lastUsedAt = at;
-    await chrome.storage.session.set({ surfaces });
+    await deadline(
+      chrome.storage.session.set({ surfaces }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(surfaces)",
+    );
   });
 }
 
 export function setRefs(token: string, forSurface: Record<string, SnapshotRef>): Promise<void> {
   return withStore(async () => {
-    const { refs = {} } = (await chrome.storage.session.get(["refs"])) as SessionState;
+    const { refs = {} } = (await deadline(
+      chrome.storage.session.get(["refs"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(refs)",
+    )) as SessionState;
     refs[token] = forSurface;
-    await chrome.storage.session.set({ refs });
+    await deadline(
+      chrome.storage.session.set({ refs }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(refs)",
+    );
   });
 }
 
 export async function getRefs(token: string): Promise<Record<string, SnapshotRef>> {
-  const { refs = {} } = (await chrome.storage.session.get(["refs"])) as SessionState;
+  const { refs = {} } = (await deadline(
+    chrome.storage.session.get(["refs"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.get(refs)",
+  )) as SessionState;
   return refs[token] ?? {};
 }
 

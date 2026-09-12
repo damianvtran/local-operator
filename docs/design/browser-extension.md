@@ -308,12 +308,29 @@ Session-leg-only methods (answered by the daemon itself, never relayed):
 | `origin_prompt_pending` | Reserved for a future non-blocking flow; v1 never emits it. |
 | `debugger_conflict` | Another debugger (DevTools open on the bridge tab) holds the target. |
 | `busy` | A command is already in flight for this tab (daemon serializes; only returned if the queue is full). |
+| `extension_unresponsive` | The socket is up and paired but the worker has stopped answering (§5.2). Latched, so `/health` also reports it for 60 s after the daemon severs the link — the state it is observed in and the state that follows it must not be byte-identical. |
 | `proto_mismatch` | Handshake version disagreement. |
 | `internal` | Anything unclassified; message carries the detail. |
 
 Timeout is expressed as `nav_timeout`/`internal` with `data.timeout_s` rather
 than a transport-level silence: the daemon's per-command deadline (section
 5.4) guarantees every request gets a typed response.
+
+**`internal` carries structured discriminators, and that is deliberate.** A
+`data` key is how this protocol adds detail the peer can act on without adding
+a code, because of a hard constraint: `ErrorDetail.code` is typed to the
+`ErrorCode` enum, so an UNKNOWN code fails `Response.model_validate` on the
+receiving daemon and the frame is dropped silently — the command then times out,
+which is strictly worse than an `internal` it understands. So the extension
+never invents a code; it attaches a key:
+
+| code | `data` key | meaning |
+|---|---|---|
+| `internal` | `stalled` | One chrome/CDP call hit its own deadline and was abandoned (§5.4). Retryable. |
+| `internal` | `undrivable_tab` | Chrome refuses to debug the tab (e.g. it is another extension's page). The surface has been pruned; `open` a new tab. |
+| `internal` | `tab_crashed` | The page died under us. |
+| `internal` | `timeout_s` | **Daemon-generated**: the command exhausted its budget. Nothing else sets this key, which is why it is the discriminator that stops a daemon-side timeout being reported as "update your extension". |
+| `internal` | `phase` | **Daemon-generated** on an `extension_unresponsive`: `gate` / `send` / `response` names where the link gave up, and `dropped` the state after the daemon severed it. |
 
 ## 5. Extension architecture (Manifest V3)
 
@@ -385,6 +402,85 @@ as a feature**: it is the user-visible truth that an agent can drive a tab,
 and it disappears when the debugger detaches. We detach on `close` and when
 the bridge tab is gone, so the banner tracks reality.
 
+**Liveness is a property of the CONNECTION, not of the socket object, and this
+is load-bearing.** The daemon keeps a monotonic timestamp of the last frame
+received from the extension — ANY frame, taken at the top of the receive loop
+before any dispatch on its type, so an older build that only pongs counts — and
+exposes it as `ExtensionLink.proven`:
+
+```
+proven  ==  websocket is not None  and  now - last_frame_at <= LINK_SILENCE_TIMEOUT_S (50 s)
+```
+
+A socket OBJECT exists whenever TCP is up and the peer has not closed, so
+`websocket is not None` cannot distinguish a healthy idle extension from one
+that completed `hello`, paired, and then never spoke again. Every consumer of
+`extension_connected` — `publish()` into the discovery file, `/health`, the
+popup, `state.liveness()` ⇒ `available()`/`advertisable()`, and the STALE-rescue
+probe's `_health_ok` — reads that ONE bit, so making it honest fixes all of them
+at once. On the real incident this single unproven boolean is what let `status`
+report "extension connected: yes" for 42 of 42 samples across an 84 s window in
+which every command from three sessions hung.
+
+The threshold is **50 s = 2.5 ping intervals** (`PING_INTERVAL_S = 20`), because
+two consecutive missed pongs are required (one miss can be a dropped tick, and
+the ping loop's `await sleep(20)` drifts under load) plus one interval of slack.
+The cross-check that makes it safe is in the other direction: a HEALTHY worker
+pongs in microseconds from the socket's own `onmessage` handler — off every
+serialized queue, see §5.4 — and emits nothing else while idle, so its longest
+legitimate silence is one ping interval. 2.5× headroom. The one way a healthy
+worker misses a pong is suspension, and a suspended worker has no socket at
+all, which is already the disconnected path.
+
+When the link is unproven the daemon does the same teardown it uses for an
+ordinary disconnect — close with code **4000**, `link.disconnect()`, republish —
+from four triggers: the ping tick (which already runs every 20 s, so an idle
+bridge notices without waiting for a command), the `rpc()` gate (so a session's
+own command heals the link), the command-timeout **promotion rule**, and a
+bounded send (§5.4).
+
+The promotion rule fires when a command exhausted its budget while the link was
+ALSO silent for **1.5 ping intervals** (> 30 s), not one. The slack is the same
+reasoning the 50 s threshold above uses, and it is required here rather than
+optional: a healthy peer speaks only when spoken to, so its silence is a
+sawtooth from 0 to one interval plus whatever the DAEMON's own loop adds (a
+dropped tick; `_supervise`'s up-to-30 s backoff after a failed one), and the
+daemon is the only party that solicits speech — daemon-side delay is otherwise
+indistinguishable from peer death. With zero slack a healthy link was measured
+torn down (close 4000, every session's pending futures failed). A slow SITE
+cannot trip it at any slack: the extension pongs throughout, so `silent_for()`
+stays ~0. The cost of a false positive is not small — `_drop_unproven_link`
+fails every pending future across ALL sessions and clears `driven` and
+`awaiting_origin`, so one drifted tick would convert a slow page into every
+session losing its tab handles.
+
+**The reason a link was severed is LATCHED, because the teardown is the answer.**
+`_drop_unproven_link` records the silence it measured (`note_unproven_drop`),
+and `/health` reports `extension_unresponsive: true` with `link_attached: false`
+for `LINK_DROP_TTL_S = 60 s` afterwards. Without that, the honest
+"attached but not answering" state lived for exactly one command: the teardown
+nulls the socket AS PART OF answering, so the very next `lop browser status` —
+the command the error copy sends the user to — fell back to
+`(browser not currently attached; it reconnects when opened)`, i.e. advice to
+open a browser that is open, which is the misdiagnosis this section exists to
+remove. For the same window the `rpc()` gate answers `extension_unresponsive`
+(`phase: "dropped"`) instead of `extension_disconnected`, so the retry the copy
+advises cannot land on the wrong message either. The latch is cleared by
+anything that means the daemon did not sever the link — every ordinary socket
+end, a revoke, and a new authoritative socket — so a browser the user simply
+closed still reads as absent. 60 s is sized to the slowest real recovery
+(the 58.21 s alarm floor below), after which a worker that never re-dials
+correctly reads as absent because by then nothing is attached.
+
+**4000 is the whole wire-compatibility story.** An already-installed worker
+handles 4000 explicitly: it suppresses the `connState` write (4000 is the
+daemon's later-connection-wins eviction, not a loss of connectivity), still
+resets its state, and calls `scheduleReconnect()`, which with `attempt` reset to
+0 by the last `onopen` waits `backoffDelayMs(0) = 1000 ms`. Measured on real
+hardware, worst case is the alarm floor when the worker suspends inside that
+window: **58.21 s**. A code the peer had to INTERPRET would not be free — see
+§11.
+
 ### 5.3 Navigation settle
 
 Where the cmux backend had to poll two disagreeing views of the URL
@@ -415,6 +511,123 @@ a session): `open`/`goto` 30 s, `click`/`type` 25 s, `read`/`snapshot`/
 `screenshot` 20 s, origin prompt 60 s (section 6.3). Python's HTTP client uses
 budget + 5 s so the typed daemon error always wins the race. Every timeout
 yields a typed response, never a dropped id.
+
+**A hang is not an error, and that is the defect this section exists to
+prevent.** Every serialized queue in the extension is a promise chain built as
+`queue.catch(() => {}).then(op)` so that each link swallows its predecessor's
+failure. That comment is true for a REJECTION and false for a HANG: `.catch()`
+never runs on a promise that never settles, so ONE stuck chrome/CDP call parks
+every later command — and because the queues (`groupQueue`, `storeQueue`, `axQueue`,
+the per-`owner_proof` ownership lane and its global `allocations` lane) are
+module-level, it parks them for EVERY session at once. Reproduced on real
+hardware: a driven tab whose renderer stopped answering made `read` and then
+`tabs` time out at 20.0 s each, the poison held in the per-owner lane, and the
+daemon's own liveness ping is what kept the poisoned worker alive to stay wedged
+(§5.2).
+
+**The rule: bound the awaits INSIDE the ops; never time out the chain itself.**
+Resetting a chain head while the stuck op still holds a half-read copy of
+`surfaces` is a lost update, and via `withSessionMutation` a DOUBLE-SPENT
+one-shot approval — the hazard `state.ts` documents with its reproduced
+round-2 B2. Bounding the inner awaits instead makes the op SETTLE, which is what
+lets the chain's `.catch` drain to the next link. `settle.ts` owns the single
+helper:
+
+```ts
+export function deadline<T>(op: Promise<T>, ms: number, what: string): Promise<T>
+```
+
+It rejects with `BridgeCommandError("internal", …, {stalled: what})`, and the op
+is ABANDONED rather than cancelled (`chrome.debugger.sendCommand` has no
+cancellation); a stuck call may still complete later into nothing, which is safe
+because its result is discarded and the attach state is reconciled by
+`chrome.debugger.onDetach` and by prune. Per call class:
+
+| call class | deadline | why |
+|---|---|---|
+| `chrome.debugger.sendCommand` (every `cdp()` call) | 15 s | must fit under the tightest daemon budget that reaches CDP (20 s for `read`/`snapshot`/`screenshot`), leaving the handler 5 s to build and send its answer |
+| `chrome.debugger.attach`/`detach`, `ownAttachment`'s probe | 5 s | local browser IPC with no page involvement: milliseconds or broken |
+| `chrome.tabs.*`, `chrome.tabGroups.*`, `chrome.storage.*` (session and LOCAL — including every grant write in `access-grants.ts`), `chrome.alarms.clear` | 5 s | browser-process IPC with no page script on the path |
+| `chrome.scripting.executeScript` | 15 s | runs page script, so it shares the CDP risk profile and the same 20 s `read` budget |
+
+These are **catastrophe ceilings** — "this is milliseconds when healthy" — not
+measured distributions, so they are collected in one table rather than spelled
+at each site, and the tests exercise them with injected hangs rather than
+wall-clock measurements. They were originally derived from the "milliseconds
+when healthy" premise alone, and the record flagged them as its weakest numbers
+with the rule "raise a bound if real measurements land within 2× of it". They
+did, on the real-Chrome rig (QA round 1): a legitimate (not `SIGSTOP`ped) `read`
+took **7.49 s** and a heavy `screenshot` **10.91 s**, the second EXCEEDING the
+old 10 s ceiling, so a 10 s bound killed work the daemon's own 20 s budget would
+have accepted. The load A/B is the rest of the evidence: over one 16-call
+sequence on the same rig, daemon, ports and extension source, the fixed head was
+9/16 under a starved host (load 190–290) where the pre-fix extension — which had
+no inner bound at all — was 14/16, while both were 16/16 at normal load. So the
+10 s bound was load-sensitive rather than wrong, and 15 s is insurance for a
+starved host rather than a behaviour change at normal load.
+
+15 s is exactly as far as the nesting invariant below permits for the tightest
+budget these classes must stay inside: 20 s (`read`/`snapshot`/`screenshot`)
+minus 5 s for the handler to answer. It therefore still fires strictly before
+the daemon's deadline, and it still makes a HUNG call settle, which is the
+property the helper exists for. The remaining honest limit is unchanged and is
+stated rather than hidden: a pathological CHAIN of stalls can still exceed the
+daemon's budget (see below).
+
+The nesting invariant, extending the one in `protocol.py`, is that the innermost
+deadline must fire first:
+
+```
+extension per-call deadline (5-15 s)
+  < extension nav settle (30 s — unchanged; it is bounded already and calibrated
+    to the 30 s open/goto budget)
+  < daemon COMMAND_TIMEOUTS (20-30 s)
+  < daemon awaiting_origin extension (+65 s)
+  < session client timeout (base + 65 + 5)
+```
+
+So a single stalled call answers before the daemon gives up. A pathological
+CHAIN of stalls can still exceed the daemon's budget, which is acceptable — the
+daemon's own timeout is then correct, and §5.2's promotion rule corroborates it
+into `extension_unresponsive` rather than a silent wedge.
+
+Two things must NOT get a deadline. `settle()` is already bounded and its 30 s
+default is calibrated to `open`/`goto`; `input.ts`'s
+`settle(tabId, 10_000).catch(() => undefined)` is deliberately best-effort. And
+`await_access`'s slice is a PRODUCT deadline, not a hang guard.
+
+One deliberate asymmetry to know when reading a `catch`: a deadline rejection
+is OUR event loop stalling, not a fact about the tab. Every `catch` that reads a
+failure as "the tab is gone, prune the surface" must test `isStalled(error)`
+first, or a slow `chrome.tabs.get` retires a live surface and tells the session
+its tab was closed.
+
+The coverage of the rule is a CLOSED SET, and it is one grep rather than a
+review judgement:
+
+```sh
+grep -rn 'await chrome\.' extension/src --include=*.ts | grep -v '/popup/\|/options/'
+```
+
+Everything that returns must carry a `deadline`. That includes
+`access-grants.ts`, which is easy to miss because it looks like its own module
+but is the SAME module-global lane: `withSessionMutation` **is** `withStore`
+(`state.ts`), so its `chrome.storage.local` awaits queue every command of every
+session, and they are command-reachable — the popup's Allow path is
+`worker.ts` → `origins.ts` → `approval-store.ts` → `grantExactOriginLocked` /
+`grantSiteLocked`. Eleven bare awaits there re-opened the incident's exact shape
+on a button click, and falsified the comment in `state.ts` that claimed the lane
+was covered. Bound at source rather than documented as an exemption, therefore:
+a new `await chrome.` anywhere outside `popup/` and `options/` without a
+`deadline` is a hole in the promise, not a special case.
+
+A second consequence of bounding every await is worth stating so it is not
+re-derived: a timed-out `chrome.debugger.attach` rejects BEFORE it registers the
+tab in the local `attached` set, while Chrome may still complete the attach
+afterwards, and a later `detach()` then returns early and leaves a real debugger
+session (and its infobar) behind. That residue is tolerated, not tracked, because
+it reconciles on the next `cdp()` for the tab: the re-attach is refused with
+"already attached" and `ownAttachment` adopts the surviving session.
 
 ### 5.5 Snapshot and click refs
 
@@ -575,6 +788,10 @@ every wait.
 |---|---|
 | No cmux, no bridge state file / stale heartbeat | Tool **not advertised** (createIf) — the honest absence the current builder documents. |
 | Bridge daemon up, extension never connected / browser closed | `browser extension not connected: the bridge daemon is running but no browser is attached. Ask the user to open their browser (the extension reconnects automatically), or check the extension is enabled.` |
+| Attached, paired, and no longer answering | `extension_unresponsive` — the copy says the browser is attached but cannot be driven, advises ONE retry, and then names the measured cure: ask the user to toggle the extension OFF then ON in `chrome://extensions` (pairing preserved; open tab handles, snapshot refs and pending decisions lost). It never says "open your browser", and the daemon keeps answering this rather than `extension_disconnected` for 60 s after it severs the link, so the advised retry cannot land on the wrong message either. |
+| Daemon's own command budget expired (`internal` + `timeout_s`) | Names the action and its budget (`the browser extension received read but did not answer within 20s`), advises one retry, then the same toggle remedy. Codes and internal verb names stay in `details`, not in the sentence. |
+| One chrome/CDP call exceeded its deadline (`internal` + `stalled`) | `the browser extension stalled on <call> and gave up on this command` + retry, then the same toggle remedy. Names the CALL, which is the useful part when reporting it. |
+| Chrome refuses to debug the tab (`internal` + `undrivable_tab`) | `that tab cannot be driven: it is another extension's page, so Chrome refuses the debugger attachment.` + `open` the URL again. Names no tab: the only handle is the session's opaque capability string. |
 | Daemon up, extension unpaired | `browser bridge not paired: run 'lop browser pair' and enter the code in the extension popup, then retry.` |
 | Daemon died between availability check and call (POST refused) | `browser bridge unreachable: the daemon at 127.0.0.1:<port> is not answering. Run 'lop browser status'; 'lop browser install' starts it.` |
 | Origin denied / prompt timeout | `navigation to <origin> was denied by the user (or the permission prompt went unanswered). Do not retry the same origin; ask the user to allow it from the extension popup if it is needed.` |
@@ -723,6 +940,40 @@ Out of scope v1, and why:
   `PROTO_VERSION` mismatches must show up as the popup's "update needed"
   state and the daemon's 4001 close, not as mystery timeouts. Test the
   mismatch path explicitly before the first protocol bump, not after.
+- **What may change WITHOUT a `PROTO_VERSION` bump** — the rule, because it is
+  not obvious and gets violated by accident: a change is free when the other
+  side's degraded behaviour is "ignores it". That covers additive OPTIONAL
+  fields on `/health` (HTTP, not the WS protocol: the popup's interface is
+  structural TS typing, extra JSON keys are ignored at runtime, and `.get()`
+  returning `None` is exactly how the CLI already handles an older daemon),
+  new daemon→session `ErrorCode`s (the extension never PARSES a code, it only
+  emits one, and an old daemon simply never produces the new value), and
+  anything invisible on the wire (bounding a send). It excludes a new WS
+  **frame type** the peer must act on, and any close code the peer must
+  INTERPRET.
+- **The trap that decides which of those applies**: the daemon is STRICT about
+  frames — `WireModel` is `extra="forbid"` — and a `Response.model_validate`
+  failure is a silent `continue` in the receive loop. So an extension that adds
+a field to an EXISTING frame shape has that frame silently DROPPED by any
+already-released daemon, and the command then times out with no error anywhere.
+New information from the extension must therefore travel as a NEW event type
+(which old daemons ignore through the same drop, harmlessly) — never as a new
+field on `Response`, `TabUpdate` or `Hello`. This is also why an extension-side
+failure must not invent an `ErrorCode`: `ErrorDetail.code` is typed to the enum,
+an unknown value fails validation, and the frame is dropped — strictly worse
+than the `internal` + `data` discriminator it can rely on instead (§4.4).
+- **A wedged worker cannot be woken by the toolbar icon.** The popup is served
+  BY the worker, so an unresponsive worker has no popup to open; a reload via
+  `chrome://extensions` (which preserves pairing) or a browser restart is the
+  only recovery. This matters for support: the standard "click the icon" advice
+  is correct for an idle-SUSPENDED worker and a dead end for a wedged one.
+  The popup still renders the state HONESTLY when it is open — a dedicated card
+  keyed on `/health`'s `extension_unresponsive`, with the toggle remedy, instead
+  of the green "Connected." card that used to be painted over a mute worker —
+  and that is deliberately not the primary signal for this reason: the state can
+  reach an already-open popup (a silent link with the popup up, a worker that
+  wedges while it is open), and a surface that lies is worse than one that is
+  merely unreachable.
 - **Backend precedence surprises**: a cmux user with the extension installed
   gets cmux (7.1). If real usage shows people wanting to prefer the bridge
   inside cmux, add an explicit config knob then — do not guess now.

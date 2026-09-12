@@ -295,6 +295,11 @@ async def test_heartbeat_loop_survives_publish_failure(tmp_path: Path, monkeypat
     monkeypatch.setattr(state_store, "HEARTBEAT_INTERVAL_S", 0.01)
     service = daemon_module.BridgeService(root=tmp_path)
     service.link.websocket = object()  # type: ignore[assignment]
+    # `publish` now derives extension_connected from `link.proven`, not from the
+    # bare socket object, so a fixture standing in for a CONNECTED extension has
+    # to carry a fresh liveness stamp — otherwise this test would fail on the
+    # connection bit rather than on the publish-failure recovery it is about.
+    service.link.last_frame_at = time.monotonic()
 
     calls = {"n": 0}
     real_publish = state_store.publish
