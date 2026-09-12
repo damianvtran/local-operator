@@ -413,7 +413,7 @@ async def test_the_runtime_record_is_re_read_before_every_attempt(monkeypatch, t
     lookups: list[str] = []
     dialled: list[Any] = []
 
-    def lookup(_root, concrete):
+    def lookup(_root, concrete, **_probe):
         lookups.append(concrete)
         return (first, 90909) if len(lookups) == 1 else (republished, 91555)
 
@@ -506,7 +506,7 @@ async def test_an_empty_record_on_the_first_attempt_is_paced_not_refused(monkeyp
     dials: list[Any] = []
     seen: list[list[str]] = []
 
-    def lookup(_root, concrete):
+    def lookup(_root, concrete, **_probe):
         lookups.append(concrete)
         return (None, None) if len(lookups) == 1 else (record, 90909)
 
