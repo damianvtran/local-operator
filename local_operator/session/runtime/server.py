@@ -2207,6 +2207,12 @@ class RuntimeServer:
                 # push, and the handle is mid-dispose) or refused (nothing
                 # changed, so there is nothing to push).
                 "retire_now",
+                # Connection-local relay toggles, like ``watch`` above: they
+                # mutate only this connection's OWN event interest, never the
+                # session, so a refresh has nothing new to see and there is
+                # no changed state to push.
+                "event_mute",
+                "event_unmute",
             ):
                 await self._handle.refresh()
                 await self._push()

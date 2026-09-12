@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -475,3 +476,53 @@ async def test_controller_park_toggles_the_wire_mute(tmp_path) -> None:
             "parking must ask the owner to mute and reveal to unmute, and an "
             f"unchanged state must not re-send: got {calls}"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_connection_cannot_mute_its_events(tmp_path) -> None:
+    """The mute is attach-only, and a daemon asking for it gets the error frame.
+
+    ``event_mute`` inverts the guard ``desktop_watch`` has
+    (``test_server.py``'s ``test_desktop_visibility_...``): the relay the mute
+    gates is never sent to daemon connections, so a daemon sending this op is
+    a client bug and the honest reply is an error frame rather than a silent
+    no-op. Pins the ``conn.kind != "attach"`` branch — deleting it leaves the
+    rest of this module green, because every other test here dials through a
+    real attach viewer.
+    """
+    config = tmp_path / "config"
+    config.mkdir(exist_ok=True)
+    (config / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    directory = config / "sessions" / "synthetic-mute-daemon"
+    await seed_transcript(directory, [])
+    session = build_session(directory, ScriptedStream([text_turn("unused")]), cwd=tmp_path)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    server = RuntimeServer(handle, kind="daemon")
+    await server.start_in_process()
+    record = server._record
+    reader, writer = await asyncio.open_connection("127.0.0.1", record.control_port, limit=1 << 20)
+    try:
+        # No ``client`` field: that is the daemon default (absent-means-daemon),
+        # which is exactly the connection class the guard must refuse.
+        writer.write(json.dumps({"key": record.control_key}).encode() + b"\n")
+        await writer.drain()
+        welcome = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+        assert welcome["op"] == "projection"
+
+        writer.write(json.dumps({"op": "event_mute", "req": 71}).encode() + b"\n")
+        await writer.drain()
+        for _ in range(20):
+            frame = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+            if frame.get("op") == "error" and frame.get("req") == 71:
+                break
+        else:
+            raise AssertionError("a daemon event_mute was answered without an error frame")
+        assert (
+            "attach" in frame["message"]
+        ), f"the refusal must name the connection class it requires: {frame['message']!r}"
+    finally:
+        writer.close()
+        server.close()
+        await handle.dispose()
