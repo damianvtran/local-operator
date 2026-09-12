@@ -47,6 +47,7 @@ from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
     StreamEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -2486,6 +2487,17 @@ class OpenAICompatClient:
                     fragment = delta.get(reasoning_key)
                     if isinstance(fragment, str) and fragment:
                         reasoning_parts.setdefault(reasoning_key, []).append(fragment)
+                        # SURFACED as well as collected. The reasoning is kept
+                        # for replay whether or not anyone listens, but a
+                        # caller that sees no ``text_delta`` has no way to tell
+                        # "the model thought and said nothing" from "the client
+                        # threw away what it said" without this event -- the
+                        # ambiguity behind a "reply carried no tool call and no
+                        # text" rejection that could as easily have been ours.
+                        # Emitted on the reasoning channel only, so every
+                        # consumer that ignores it renders exactly the turn it
+                        # rendered before.
+                        yield StreamReasoningDelta(delta=fragment)
                 text = delta.get("content")
                 if text:
                     replay_text.append(text)
