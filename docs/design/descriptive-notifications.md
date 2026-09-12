@@ -401,7 +401,11 @@ weight.
 The backend mints it; the UI treats it as an opaque string and keys its existing
 TTL map on it. Shape:
 
-- completions: `complete:{session_id}:{completion_token}`
+- completions: `{kind}:{session_id}:{completion_token}` — the frame's own
+  `kind` (`complete` or `error`), so a store or dedupe-map dump reads
+  consistently beside the frame it keys. A token has exactly one kind, so the
+  prefix can never widen or narrow a collision; it is a label, not a
+  discriminator.
 - gates: `gate:{session_id}:{bridge_epoch}:{request_id}`
 
 **Why the backend mints it.** The UI's current completion key is
@@ -701,7 +705,7 @@ def _maybe_publish_notification(
             "body": composed.body,
             "body_is_snippet": composed.body_is_snippet,
             "title_is_session_name": composed.title_is_session_name,
-            "dedupe_key": f"complete:{self.session_id}:{token}",
+            "dedupe_key": f"{composed.kind}:{self.session_id}:{token}",
             "completion_token": token,
             "session_name": composed.title if composed.title_is_session_name else None,
             "focus_policy": "when_unfocused",

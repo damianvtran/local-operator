@@ -627,7 +627,11 @@ async def test_a_real_turn_emits_exactly_one_notification_after_many_turn_ends(
             assert payload["body"] == "Wrote the report to notification-evidence.txt."
             assert payload["body_is_snippet"] is True
             assert payload["completion_token"]
-            assert payload["dedupe_key"] == f"complete:{sid}:{payload['completion_token']}"
+            # Prefix is the frame's own kind (round 1, n1) — pinned relative to
+            # the kind asserted just above rather than as a separate literal.
+            assert payload["dedupe_key"] == (
+                f"{payload['kind']}:{sid}:{payload['completion_token']}"
+            )
             # The banner follows the receipt state that explains it.
             assert [f["type"] for f in frames].index("attention") < [
                 f["type"] for f in frames
