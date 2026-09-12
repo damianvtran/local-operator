@@ -931,6 +931,53 @@ def _iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     return _gen()
 
 
+async def _iter_deepseek_sse_events(response: httpx.Response) -> AsyncIterator[str]:
+    """Dispatch complete SSE events, never physical lines or an EOF tail.
+
+    Native DeepSeek's DONE contract depends on the event's blank terminator.
+    Assemble multiline data and universal line endings here rather than changing
+    the permissive parser other compatibility providers already depend on. The
+    shared text decoder and stall watchdog still own UTF-8/chunk timing.
+    """
+    buffer = ""
+    data_lines: list[str] = []
+    skip_lf = False
+    first_text = True
+    async for chunk in _guarded_chunks(response):
+        if not chunk:
+            continue
+        if first_text:
+            chunk = chunk.removeprefix("\ufeff")
+            first_text = False
+        if skip_lf:
+            chunk = chunk.removeprefix("\n")
+            skip_lf = False
+        buffer += chunk
+        while match := re.search(r"\r\n|\r|\n", buffer):
+            line, buffer = buffer[: match.start()], buffer[match.end() :]
+            # A CR is itself a terminator. If its optional LF arrives in the
+            # next chunk, swallow that LF instead of inventing a blank event.
+            if match.group() == "\r" and not buffer:
+                skip_lf = True
+            if not line:
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines.clear()
+            elif line.startswith("data:"):
+                value = line[5:]
+                data_lines.append(value[1:] if value.startswith(" ") else value)
+            elif line == "data":
+                data_lines.append("")
+            # Comments, event/id/retry and unknown SSE fields are not JSON data.
+    # No EOF flush: even a complete-looking DONE without the blank event
+    # terminator is truncation and is rejected by the native stream consumer.
+
+
+def _reject_json_constant(value: str) -> Any:
+    """Python's optional NaN/Infinity extension is not valid provider JSON."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 async def _guarded_chunks(response: httpx.Response) -> AsyncIterator[str]:
     """``response.aiter_text()`` with a stall watchdog after the first chunk."""
     iterator = response.aiter_text().__aiter__()
@@ -1288,6 +1335,15 @@ def _effective_max_tokens(request: ChatRequest) -> int:
             rather than sending a doomed cap.
     """
     requested = request.max_tokens or request.model.max_output_tokens
+    if request.model.provider == "deepseek":
+        # The documented 384K maximum is a capability, not a default budget.
+        # Match native defaults (8K disabled, 64K thinking, 128K max) while
+        # respecting explicit small errands and the advertised maximum.
+        effort = _reasoning_effort(request)
+        default_budget = 8192 if effort == "none" else 131072 if effort == "max" else 65536
+        requested = request.max_tokens or default_budget
+        if request.model.max_output_tokens > 0:
+            requested = min(requested, request.model.max_output_tokens)
     if not requested or requested <= 0:
         # No cap asked for anywhere: the caller omits the key entirely and lets
         # the provider apply its own default. Clamping a value nobody set would
@@ -1669,6 +1725,48 @@ def _is_empty_assistant(message: Message) -> bool:
     if any(isinstance(block, ImageContent) for block in message.content):
         return False
     return not message.text.strip()
+
+
+def _deepseek_tool_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep tool results strings and project images after their complete group.
+
+    DeepSeek's vision guide restricts image input to user messages; its official
+    harness serializes tool screenshots this way too. Do not insert a user turn
+    between parallel tool results: that breaks assistant/tool pairing. A stable
+    synthetic user turn also keeps all prior request prefixes byte-identical as
+    further turns append (unlike merging into the latest mutable user message).
+    """
+    output: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if images:
+            output.append({"role": "user", "content": list(images)})
+            images.clear()
+
+    for entry in messages:
+        if entry.get("role") != "tool":
+            flush()
+        content = entry.get("content")
+        if entry.get("role") == "tool" and isinstance(content, list):
+            texts = []
+            for block in content:
+                if block.get("type") == "image_url":
+                    images.extend(
+                        [
+                            {
+                                "type": "text",
+                                "text": f"Image from tool result {entry.get('tool_call_id', '')}:",
+                            },
+                            block,
+                        ]
+                    )
+                elif block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+            entry = {**entry, "content": "\n".join(texts)}
+        output.append(entry)
+    flush()
+    return output
 
 
 def _message_to_openai(message: Message) -> dict[str, Any]:
@@ -2146,18 +2244,24 @@ class OpenAICompatClient:
         request = bind_native_context(
             request, endpoint, "openai-chat", scope, _estimate_slope(request.model)
         )
-        messages = [
-            *self._system_messages(request),
-            # Empty assistant turns (errored/aborted model turns the harness
-            # persists) are dropped, not sent: Moonshot/Kimi 400s on them.
-            # See `_is_empty_assistant`.
-            *[
-                self._replay_chat_message(m, request.model, endpoint, scope)
-                for m in request.messages
-                if not _is_empty_assistant(m)
-            ],
-        ]
-        if request.model.supports_prompt_cache:
+        direct_deepseek = request.model.provider == "deepseek"
+        messages = self._system_messages(request)
+        for message in request.messages:
+            entry = self._replay_chat_message(message, request.model, endpoint, scope)
+            # DeepSeek tool requests replay ALL prior native reasoning, even a
+            # reasoning-only turn. Validate provenance before retaining it: a
+            # display-only thought or another model/account's payload is not
+            # replayable state, and other providers still reject empty turns.
+            native_reasoning = direct_deepseek and any(
+                isinstance(entry.get(key), str) and entry[key]
+                for key in ("reasoning_content", "reasoning")
+            )
+            if _is_empty_assistant(message) and not native_reasoning:
+                continue
+            messages.append(entry)
+        if direct_deepseek:
+            messages = _deepseek_tool_images(messages)
+        elif request.model.supports_prompt_cache:
             self._message_cache_markers(messages)
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -2198,7 +2302,14 @@ class OpenAICompatClient:
             # the extent of what was measured — an Anthropic model reached
             # through an aggregator, and the top rungs (`xhigh`/`max`), were not
             # exercised, so treat those as expected-to-work rather than proven.
-            body["reasoning_effort"] = effort
+            if direct_deepseek:
+                # Native Chat uses a separate toggle; 'none' is NOT a valid
+                # reasoning_effort. Never leak this dialect onto OpenRouter.
+                body["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+                if effort != "none":
+                    body["reasoning_effort"] = effort
+            else:
+                body["reasoning_effort"] = effort
         fast = _fast_mode_support(request)
         if fast is not None and fast.dialect == DIALECT_SERVICE_TIER:
             # Top-level, the shape OpenAI defined and every OpenAI-shaped route
@@ -2208,7 +2319,7 @@ class OpenAICompatClient:
             body["service_tier"] = fast.value
         if request.stop_sequences:
             body["stop"] = list(request.stop_sequences)
-        if request.model.supports_prompt_cache and request.prompt_cache_key:
+        if request.model.supports_prompt_cache and request.prompt_cache_key and not direct_deepseek:
             # OpenRouter provider sticky routing expires after 10 minutes of
             # inactivity (https://openrouter.ai/docs/guides/best-practices/prompt-caching).
             # After expiry the next request can land on a different upstream
@@ -2310,7 +2421,14 @@ class OpenAICompatClient:
         out: list[dict[str, Any]] = []
         stable_cutoff = max(len(blocks) - 2, 0)
         for i, block in enumerate(blocks):
-            if request.model.supports_prompt_cache and i < stable_cutoff:
+            # DeepSeek caches complete persisted prefixes automatically. Explicit
+            # ephemeral markers are undocumented there and moving them each turn
+            # rewrites old prefixes, defeating the very cache they try to help.
+            if (
+                request.model.supports_prompt_cache
+                and request.model.provider != "deepseek"
+                and i < stable_cutoff
+            ):
                 out.append(
                     {
                         "role": "system",
@@ -2508,6 +2626,8 @@ class OpenAICompatClient:
         #: ``StreamEndEvent.served_provider`` for why the display name is kept
         #: verbatim and why this is not part of ``provider_payload``.
         served_provider: str | None = None
+        direct_deepseek = request.model.provider == "deepseek"
+        done_received = False
 
         headers = self._headers(api_key, oauth_access)
         headers.update(self._grok_conv_headers(request, url))
@@ -2520,13 +2640,31 @@ class OpenAICompatClient:
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
-            async for data in _iter_sse_lines(response):
+            payloads = (
+                _iter_deepseek_sse_events(response)
+                if direct_deepseek
+                else _iter_sse_lines(response)
+            )
+            async for data in payloads:
                 if data == "[DONE]":
+                    done_received = True
                     break
                 try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
+                    chunk = (
+                        json.loads(data, parse_constant=_reject_json_constant)
+                        if direct_deepseek
+                        else json.loads(data)
+                    )
+                except ValueError as exc:
+                    if direct_deepseek:
+                        raise ProviderError(
+                            502, "DeepSeek returned malformed SSE JSON", retryable=True
+                        ) from exc
                     continue
+                if direct_deepseek and not isinstance(chunk, Mapping):
+                    raise ProviderError(
+                        502, "DeepSeek returned a non-object SSE chunk", retryable=True
+                    )
                 if isinstance(chunk.get("error"), (Mapping, str)):
                     # In-band mid-stream failure: the status line already said
                     # 200, so this chunk is the only channel the failure has.
@@ -2579,6 +2717,28 @@ class OpenAICompatClient:
                     continue
                 choice = choices[0]
                 delta = choice.get("delta") or {}
+                if direct_deepseek:
+                    # A finish seals the completion. Usage-only trailers may
+                    # still arrive before DONE, but later executable tools (or
+                    # text/reasoning) must never enter the assembled turn.
+                    if finish_reason is not None:
+                        new_finish = choice.get("finish_reason")
+                        if any(
+                            delta.get(field)
+                            for field in (
+                                "content",
+                                "reasoning_content",
+                                "reasoning",
+                                "reasoning_details",
+                                "tool_calls",
+                                "refusal",
+                            )
+                        ) or (new_finish is not None and new_finish != finish_reason):
+                            raise ProviderError(
+                                502,
+                                "DeepSeek returned completion data after its finish reason",
+                                retryable=True,
+                            )
                 for reasoning_key in ("reasoning_content", "reasoning"):
                     fragment = delta.get(reasoning_key)
                     if isinstance(fragment, str) and fragment:
@@ -2622,6 +2782,10 @@ class OpenAICompatClient:
                         yield StreamToolCallDelta(index=index, argument_delta=argument_delta)
                 if choice.get("finish_reason"):
                     finish_reason = str(choice["finish_reason"])
+                    if direct_deepseek and finish_reason == "insufficient_system_resource":
+                        raise ProviderError(
+                            503, "DeepSeek reported insufficient_system_resource", retryable=True
+                        )
                 if chunk.get("id") or chunk.get("system_fingerprint"):
                     provider_payload = {
                         "id": chunk.get("id"),
@@ -2641,6 +2805,17 @@ class OpenAICompatClient:
                 if candidate:
                     served_provider = candidate
 
+        # DeepSeek's protocol ends with [DONE] AND a recognized finish reason.
+        # Natural EOF is a truncated response, not a successful answer. Raising
+        # through the existing ProviderError path preserves retry/error handling;
+        # cancellation still propagates without manufacturing a terminal event.
+        if direct_deepseek:
+            if not done_received:
+                raise ProviderError(502, "DeepSeek stream ended before [DONE]", retryable=True)
+            if finish_reason not in {"stop", "length", "tool_calls", "content_filter"}:
+                raise ProviderError(
+                    502, "DeepSeek stream has no recognized finish reason", retryable=True
+                )
         stop_reason = _FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop")
         # A refusal delta with a non-filter finish (OpenAI sends
         # ``finish_reason=stop`` for its own refusals; only third-party filters
