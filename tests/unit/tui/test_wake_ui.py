@@ -178,7 +178,10 @@ async def test_real_pointer_hover_and_click_use_the_tool_trace_contract() -> Non
 
         assert wake.size.height == 1
         assert below.has_class(GAP_CLASS)
-        assert below.region.y - wake.region.y == 2
+        # Ink pitch 3: the summary, the card's own pad row, one row of ground.
+        # A wake receipt rides the same action-row rule as a tool call, so it
+        # carries the same pad rather than standing a row shorter beside them.
+        assert below.region.y - wake.region.y == 3
         assert EXPAND_HINT not in _wake_text(wake).plain
 
         landed = await pilot.hover(wake)
@@ -192,13 +195,13 @@ async def test_real_pointer_hover_and_click_use_the_tool_trace_contract() -> Non
         assert wake.expanded is True
         assert wake.size.height == 2
         assert COLLAPSE_HINT in _wake_text(wake).plain
-        assert below.region.y - wake.region.y == 3
+        assert below.region.y - wake.region.y == 4
 
         await pilot.click(wake)
         await pilot.pause()
         assert wake.expanded is False
         assert wake.size.height == 1
-        assert below.region.y - wake.region.y == 2
+        assert below.region.y - wake.region.y == 3
 
 
 def test_retheme_is_the_shared_finalized_re_entry_point() -> None:
