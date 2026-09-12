@@ -1,0 +1,8 @@
+context replay rows: 302 | switch-text: 4
+   ctx: fcd0e90bb6f64bf7b0f94b7ba8ea4cd9 ('user', ['harness_injected'], '[model switch] You are now running as za')
+   ctx: 36815b3d798c471a8d92f6512b41c2e7 ('user', ['harness_injected'], '[model switch] You are now running as ki')
+   ctx: bff7f67fa95d463586c698754acced20 ('user', ['harness_injected'], '[model switch] You are now running as al')
+   ctx: cea8f4e2554644c19a22972ac41e5182 ('user', ['harness_injected'], '[model switch] You are now running as xa')
+page1 rows: 119 | switch-text: 4 | opener: 'Can you review the OSWorld benchmark, how is it performed, could lop compete on | total: 302 | themes: 157
+   page 23: rows=74 switch-text=4 audit=True
+pages: 175 | switch-text over all pages: 8

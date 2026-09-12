@@ -1,0 +1,9 @@
+first resume frame: user rows=1 notice rows=0
+after page-back 1: user rows=5 notice rows=4
+after page-back 2: user rows=5 notice rows=4
+after page-back 3: user rows=5 notice rows=4
+after page-back 4: user rows=5 notice rows=4
+after page-back 5: user rows=6 notice rows=4
+after page-back 6: user rows=30 notice rows=12
+after page-back 7: user rows=54 notice rows=12
+landed at content offset 116 (scroll_y=116)
