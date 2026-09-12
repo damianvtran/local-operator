@@ -59,6 +59,12 @@ _HARMLESS: dict[str, str] = {
     "COLORTERM": "colour-capability probe; reported by /info, names no machine resource",
     "TERM_PROGRAM": "terminal identity for tab-title / notification routing",
     "NO_COLOR": "colour probe; tests pin it themselves",
+    # Textual reads this once as a ``Final`` at ``textual.constants`` import;
+    # ``guard_pixel_mouse_latch`` sets it to 0 and DEFERS to an inherited value
+    # as a deliberate user override. Selects a parser gate, names nothing on
+    # the machine, and the parser-side tests pin the constant by attribute
+    # rather than reading the environment.
+    "TEXTUAL_SMOOTH_SCROLL": "in-band resize negotiation gate; a switch, not a resource",
     "TMUX": "presence probe for terminal-title routing; never used to address a pane",
     "KITTY_WINDOW_ID": "presence probe for terminal-title routing",
     "ITERM_SESSION_ID": "presence probe for terminal detection; never used to address",
@@ -79,6 +85,7 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_NO_NERD_ICONS": "glyph set switch",
     "LOCAL_OPERATOR_NO_SHIMMER": "animation switch; the visual harness sets it",
     "LOCAL_OPERATOR_NO_TERMINAL_TITLE": "title-escape switch",
+    "LOCAL_OPERATOR_NO_MODE_RESET": "kill switch for the in-band resize reset escape",
     "LOCAL_OPERATOR_NO_MULTIPLEXER_RESUME": "kill switch for the pane resume marker; safer ON",
     "LOCAL_OPERATOR_NO_HERDR": "kill switch for the Herdr Agents-panel reporter; safer ON",
     "LOCAL_OPERATOR_NO_NOTIFICATIONS": "desktop-notification kill switch (safer ON)",

@@ -209,8 +209,16 @@ class _FakeStream:
         self.flushes += 1
 
 
-def test_reset_writes_only_to_a_tty() -> None:
-    """Nothing is written to a pipe; a tty gets exactly the reset; errors are swallowed."""
+def test_reset_writes_only_to_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing is written to a pipe; a tty gets exactly the reset; errors are swallowed.
+
+    The kill switch is cleared rather than scrubbed suite-wide: it is a switch
+    naming no machine resource, so it belongs in this file's own setup the way
+    ``test_herdr_reporter.py`` clears ``LOCAL_OPERATOR_NO_HERDR``. A developer
+    who exports it would otherwise see this test alone fail.
+    """
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_MODE_RESET", raising=False)
+
     piped = _FakeStream(tty=False)
     assert reset_in_band_resize(piped) is False  # type: ignore[arg-type]
     assert piped.written == ""
