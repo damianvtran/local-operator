@@ -102,7 +102,6 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
-from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
     read_replay_suffix,
@@ -137,51 +136,38 @@ UNIDENTIFIED_STEER_ID = "remote-steer"
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
 
-#: The SECOND, longer bound on recovery — the one that applies when the viewer
-#: cannot go cold at ``COLD_FALLBACK_S`` (``_can_go_cold`` is False, i.e. every
-#: terminal ``connect()`` viewer, which is what the TUI builds).
+#: The SECOND bound on recovery used to live here: ``RECOVERY_GIVE_UP_S = 2 *
+#: HEARTBEAT_TIMEOUT_S`` (90 s), for the LIVE-BUT-SILENT owner — a record is
+#: found on every pass, the socket accepts, the canonical sync never lands.
 #:
-#: It exists because that path had NO bounded exit at all. ``COLD_FALLBACK_S``
-#: returns only for a viewer that may go cold; the legacy arm beneath it ends
-#: the in-flight turn and keeps looping, and the takeover that arm is written
-#: to reach lives in the no-record ``else`` branch — so an owner that is LIVE
-#: BUT SILENT (a record is found every pass, the socket accepts, the canonical
-#: sync never lands) kept the loop cycling forever with no verdict to offer.
-#: ``_recovering`` is set for the whole of that loop, so what latches is not a
-#: cosmetic flag: it is the state that REFUSES ``/model``, ``/goal``,
-#: ``/rename``, ``/effort``, ``/compact``, ``/fork`` and ``/credential`` with
-#: ``_RECONNECTING_SLASH_NOTICE``, and that PARKS ``prompt`` silently on
-#: ``_runtime_ready`` with no message and no spinner resolution. Reported from
-#: the field as a session whose model could not be switched by any number of
-#: retries or ``/resume``s.
+#: DELETED, and the reason matters: it was one bound too many, and it bounded
+#: the wrong thing. Whatever the registry would eventually conclude about that
+#: owner, the VIEWER has already concluded it at ``COLD_FALLBACK_S`` — that is
+#: where the in-flight turn is ended locally with a named ``owner-lost``
+#: cut-off. What the 90 s then bought was 82 more seconds of ``_recovering``,
+#: which REFUSES ``/model``, ``/goal``, ``/rename``, ``/effort``, ``/compact``,
+#: ``/fork`` and ``/credential`` with ``_RECONNECTING_SLASH_NOTICE`` and PARKS
+#: ``prompt`` silently on ``_runtime_ready`` with no message, no spinner
+#: resolution and no advice. Measured with a discoverable-but-silent owner: the
+#: verdict landed at t+8.1 s, the user typed at t+8.6 s, and the message was
+#: served at t+50.4 s — 41.75 s of ``streaming=True, recovering=True`` and
+#: nothing on screen (UX round 1, U2).
 #:
-#: DERIVED from ``HEARTBEAT_TIMEOUT_S`` rather than written as a literal 90.0,
-#: because the question this bounds is the owner's own liveness contract: the
-#: registry classifies a record ``wedged`` rather than ``live`` after one
-#: heartbeat timeout, and a viewer must not conclude an owner is unreachable
-#: FASTER than the registry concludes it is wedged — a turn-boundary stall
-#: inside that window is normal (see ``FRONTEND_SYNC_BACKSTOP_S`` on the
-#: 15-vs-45 s window). Two of them also buys ~6 genuine attempts at the
-#: measured silent-owner cadence of one redial per ``FRONTEND_SYNC_BLOCKED_S``.
-#: A bare literal would silently stop tracking that contract if the heartbeat
-#: moved.
+#: What it did NOT buy was the chase. The exit is COLD AND REBINDABLE rather
+#: than failed (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``:
+#: the transcript stays, ``_runtime_ready`` is set, and the next action
+#: re-engages through ``_ensure_bound`` against that very same record), so a
+#: released caller re-dials what the loop was dialing, and a released prompt is
+#: served or reports its failure instead of parking. Nor can the early release
+#: double-bind or double-spawn: ``engage_runtime`` short-circuits on a
+#: discoverable record and otherwise waits rather than spawning while a live pid
+#: holds the lease.
 #:
-#: SCOPED TO A RECORD HAVING BEEN SEEN. This bound answers "an owner is there
-#: and will not answer", never "no owner is there": the latter is the DEAD
-#: shape, whose contract is to keep chasing a successor through the takeover
-#: arm, and it keeps that contract unchanged. ``_recover_runtime`` tracks the
-#: sighting across passes (``record_seen``) because the deadline is necessarily
-#: evaluated before the pass reads a record.
-#:
-#: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
-#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_runtime``), so the
-#: transcript stays on screen, ``_runtime_ready`` is set, and the next prompt
-#: re-engages through ``_ensure_bound`` against this very same live record.
-#: That rebind is the whole repair, and it is why no user-facing copy was added
-#: for this state: a typed ``/model p/id`` on the resulting facade is diverted
-#: by ``OperatorApp._needs_runtime_first`` into ``_bind_then_dispatch``, which
-#: performs exactly that retry and reports its outcome.
-RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
+#: So the rule is now ONE rule for every arm that has not produced a usable
+#: runtime — no-record and record-seen alike — and it is the cold window that a
+#: runtime restarting after ``kill -9`` has to republish in anyway. A successor
+#: that IS coming is still caught: the loop reattaches the moment a record it
+#: can use appears, and the give-up's own rebind catches a slower one.
 
 #: Backoff ceiling for ``_recover_runtime``'s DIAL-FAILURE arm specifically.
 #:
@@ -2099,13 +2085,15 @@ class AttachedSession:
         """
         await self._ensure_bound()
         await self._runtime_ready.wait()
-        if self._recovering:
-            # The give-up exits set ``_runtime_ready`` INSIDE the loop and the
-            # loop's ``finally`` clears ``_recovering`` a statement later, so a
-            # waiter can be scheduled in that gap. Yield one turn rather than
-            # binding under a latch that is already being lifted — the loop has
-            # no await left before it clears the flag.
-            await asyncio.sleep(0)
+        # NO YIELD IS NEEDED BETWEEN THE WAIT AND THE SECOND BIND, and an earlier
+        # revision's ``await asyncio.sleep(0)`` here was removed rather than
+        # kept as a belt: the give-up exit ``return``s immediately after
+        # ``_give_up_recovery`` with no ``await`` between, so this loop's
+        # ``finally`` clears ``_recovering`` synchronously and the event loop
+        # cannot resume THIS waiter until the facade is already consistent. The
+        # comment that stood here described a scheduling gap that cannot occur
+        # (review round 1, NIT-2), and a comment describing a mechanism nobody
+        # can reproduce is worse than no comment at all.
         await self._ensure_bound()
 
     @asynccontextmanager
@@ -4258,7 +4246,7 @@ class AttachedSession:
             # hook stays off it: this facade has no standing to publish an
             # outcome for an end it cannot name.
             if end.cut_off_cause:
-                self._journal_witnessed_cut_off()
+                self._journal_witnessed_cut_off(cause=str(end.cut_off_cause))
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -4282,7 +4270,7 @@ class AttachedSession:
             self._streaming = False
             self._suspect_generation = None
 
-    def _journal_witnessed_cut_off(self) -> None:
+    def _journal_witnessed_cut_off(self, *, cause: str) -> None:
         """Journal the cut-off this viewer just witnessed, off the loop.
 
         WHY. The durable outcome a sidebar row reads is written by
@@ -4298,14 +4286,25 @@ class AttachedSession:
         reason this was deferred.
 
         The CLASSIFIER's verdict is published, never this facade's own
-        ``owner-lost``. Opening the same session runs exactly this classifier
-        and gets ``runtime-killed`` (or the no-evidence sentence); two sentences
-        for one death, depending on which surface you looked at, is the
-        divergence the taxonomy exists to prevent.
+        ``owner-lost`` — except where the classifier CANNOT run, which is the
+        one case ``cause`` is for (review round 1, MINOR-2). Opening the same
+        session runs exactly this classifier and gets ``runtime-killed`` (or the
+        no-evidence sentence); two sentences for one death, depending on which
+        surface you looked at, is the divergence the taxonomy exists to prevent.
+        But when a record on disk still points at a live pid, the classifier's
+        in-flight arm publishes NOTHING by design — it cannot tell a dead owner
+        behind a recycled pid from a healthy run — so the give-up arm that ends
+        a live-but-silent chase used to leave the sidebar row un-errored while
+        the terminal carried a named ``owner-lost`` verdict.
 
-        SAFE WHEN THE OWNER IS ACTUALLY ALIVE. The classifier's in-flight arm
-        publishes NOTHING while a live owner holds the record, so the worst case
-        for a viewer that mistook a stall for a death is a no-op.
+        PUBLISHED PROVISIONALLY, WHICH IS WHAT MAKES THAT SAFE. The record this
+        writes is ``provisional_anchor(token)``, so the live owner's real
+        outcome — same token, real anchor — SUPERSEDES it
+        (``AttentionStore._supersedes_provisional``), and a viewer that mistook
+        a stall for a death cannot leave a wrong row behind. Meanwhile the
+        surfaces a live session is showing are exactly where a provisional
+        ``error`` is suppressed while it is still busy, which is why the wrong
+        row cannot outrank work in progress.
 
         Fire-and-forget on the default executor, fully guarded, and deliberately
         so: this is a notice for OTHER surfaces, and nothing about painting this
@@ -4320,7 +4319,7 @@ class AttachedSession:
             store = AttentionStore(self._config_dir / "attention.db")
             transcript = Transcript(directory)
             asyncio.get_running_loop().run_in_executor(
-                None, _journal_witnessed_cut_off, transcript, store
+                None, _journal_witnessed_cut_off, transcript, store, cause
             )
         except Exception:  # noqa: BLE001 — a notice must not break the verdict
             logger.debug("journalling the witnessed cut-off failed", exc_info=True)
@@ -4639,10 +4638,6 @@ class AttachedSession:
         # the next message engages a fresh runtime. Without a bound the loop
         # would redial forever against a session nobody is running.
         cold_deadline = time.monotonic() + COLD_FALLBACK_S
-        # The second, longer bound for the surface that cannot take the branch
-        # above. See ``RECOVERY_GIVE_UP_S`` for why it is derived from the
-        # heartbeat contract rather than calibrated here.
-        #
         # READ ONCE HERE, DELIBERATELY, and not re-derived per pass. A deadline
         # recomputed inside the loop is a deadline that resets every pass and
         # therefore never fires — the exact never-terminates shape this bound
@@ -4651,46 +4646,34 @@ class AttachedSession:
         # correct: the constant is static in production, and a live change to a
         # bound already being waited on has no defined meaning (review round 1,
         # R4).
-        give_up_deadline = time.monotonic() + RECOVERY_GIVE_UP_S
-        # Whether ANY pass of this loop has found a discoverable owner record.
+        # ONE BOUND FOR EVERY ARM THAT HAS NOT PRODUCED A USABLE RUNTIME, and it
+        # is the cold one. There used to be a second, longer deadline here
+        # (``RECOVERY_GIVE_UP_S``, 90 s = two heartbeat timeouts) for the
+        # LIVE-BUT-SILENT owner — a record found on every pass, the socket
+        # accepting, the canonical sync never landing — scoped by a
+        # ``record_seen`` sighting so it could not fire for a genuinely dead
+        # owner, and a third condition for the takeover arm that cannot run.
         #
-        # The give-up exit below is scoped to the live-but-silent shape — an
-        # owner that keeps publishing a record and never answers — and must not
-        # fire for an owner that is genuinely DEAD, whose contract is to keep
-        # chasing a successor through the takeover arm. The check has to sit at
-        # the top of the pass (that is where a deadline can be evaluated before
-        # the pass spends its time on a dial that may block), which is BEFORE
-        # ``find_runtime_record`` runs, so the exit cannot consult this pass's
-        # record. It consults the previous passes' instead: one sighting is
-        # enough, because a record seen at all is what distinguishes "an owner
-        # is there and silent" from "nothing is there". Without this the exit
-        # fired for a no-record viewer too, marking a dead runtime as merely
-        # unresponsive (QA round 1 Q849-1, review round 1 R3).
-        record_seen = False
-        # The OTHER way this loop can be unable to make progress: the takeover
-        # arm itself. ``_takeover_factory`` is a viewer's last resort, and for
-        # `lop`'s own TUI it is a factory that raises BY CONSTRUCTION —
-        # ``cli.py`` wires one whose body is ``raise RuntimeError("a viewer
-        # never takes over a session")``, because a terminal must never win the
-        # transcript lease.
+        # The longer bound was the WRONG twenty seconds to be strict about.
+        # Whatever the registry would eventually conclude about that owner, the
+        # VIEWER has already concluded it here: the cold deadline below is where
+        # the in-flight turn is ended with a named ``owner-lost`` cut-off. The
+        # 90 s then bought 82 more seconds of ``_recovering``, which refuses
+        # every mutation seam and parks ``prompt`` on ``_runtime_ready`` with
+        # nothing on screen — measured with a discoverable-but-silent owner, the
+        # verdict landed at t+8.1 s, the user typed at t+8.6 s and the message
+        # was served at t+50.4 s (UX round 1, U2).
         #
-        # That makes the dead-owner contract above vacuous on exactly the
-        # surface the operator uses: no record ever appears, so ``record_seen``
-        # never becomes True and the give-up exit can never fire, while the
-        # takeover it was written to reach raises on every pass. Measured on
-        # ``main`` (95fccacda): a watched SIGKILL left ``_recovering`` latched,
-        # the next message accepted and never served, the band spinning with a
-        # live clock at 242 s and counting, and no error, no timeout and no
-        # advice (UX round 2, U7).
-        #
-        # So the chase is bounded on EVIDENCE OF PROGRESS rather than on the
-        # shape of the owner. ``SessionLeaseHeldError`` IS progress — another
-        # follower won the lease and will publish a record — as is a factory
-        # that returns a session. A factory that has never once returned and
-        # raises something else is a dead end, and the loop must stop claiming
-        # a verdict it cannot deliver.
-        takeover_attempts = 0
-        takeover_progress = False
+        # It bought no chase either: the exit is COLD AND REBINDABLE
+        # (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``), so
+        # the released caller re-dials the very same record through
+        # ``_ensure_bound`` and a released prompt is served or reports its
+        # failure. A successor that IS coming is still caught — the loop
+        # reattaches the moment a record it can use appears, and the give-up's
+        # own rebind catches a slower one — and the early release cannot
+        # double-bind or double-spawn because ``engage_runtime``
+        # short-circuits on a discoverable record and otherwise waits rather
+        # than spawning while a live pid holds the lease.
 
         def paced(seconds: float) -> float:
             """``seconds``, shortened so the loop wakes AT the cold deadline.
@@ -4719,17 +4702,19 @@ class AttachedSession:
                         )
                         self._go_cold()
                         return
-                    # The LEGACY attach surface does not go cold at THIS bound
-                    # (``_can_go_cold`` is desktop-only) because its contract is
-                    # to keep chasing a successor. It does now go cold at a
-                    # second, longer one — see the give-up branch below; this
-                    # comment used to say it had "no cold state to fall into"
-                    # at all, which is how the forever-latch survived review.
-                    # But the turn must still reach a
-                    # verdict: with the abort deferred to recovery, a genuine
-                    # owner death whose takeover keeps failing (lease held by
-                    # another follower, or any raise — both retry forever by
-                    # design) left the working line spinning with nothing able
+                    # The LEGACY attach surface does not go cold at the FIRST
+                    # branch above (``_can_go_cold`` is desktop-only) because its
+                    # contract is to keep chasing a successor — but it reaches a
+                    # cold state HERE, through ``_give_up_recovery``, at the same
+                    # bound. That comment used to say this surface had "no cold
+                    # state to fall into" at all, which is how the forever-latch
+                    # survived review.
+                    #
+                    # The turn must still reach a verdict: with the abort
+                    # deferred to recovery, a genuine owner death whose takeover
+                    # keeps failing (lease held by another follower, or any
+                    # raise — both retry forever by design) left the working line
+                    # spinning with nothing able
                     # to clear it. That is strictly worse than the false
                     # "interrupted" this PR removes — review round 1,
                     # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
@@ -4760,87 +4745,53 @@ class AttachedSession:
                             error=format_cut_off_notice("owner-lost"),
                         )
                     # ...and AFTER that verdict, the loop itself must reach one.
-                    # Ending the turn left ``_recovering`` set, and the only
-                    # other exits are the cold branch above (unreachable here)
-                    # and the takeover in the no-record ``else`` — which a
-                    # LIVE BUT SILENT owner never reaches, because a record is
-                    # found on every pass. So the chase had no terminal state:
-                    # ``/model`` and every other mutation seam refused forever
-                    # and ``prompt`` parked silently on ``_runtime_ready``.
+                    # Ending the turn left ``_recovering`` set, and the other
+                    # exits are the cold branch above (unreachable here) and the
+                    # takeover in the ``else`` below — which a LIVE BUT SILENT
+                    # owner never reaches, because a record is found on every
+                    # pass, and which `lop`'s own TUI cannot reach either, since
+                    # ``cli.py`` wires a takeover factory whose body raises BY
+                    # CONSTRUCTION (a terminal must never win the transcript
+                    # lease). Measured on ``main`` (95fccacda): a watched SIGKILL
+                    # left ``_recovering`` latched and the next message accepted
+                    # and never served, the band spinning with a live clock at
+                    # 242 s and counting, with no error, no timeout and no advice
+                    # (UX round 2, U7).
                     #
-                    # SCOPED TO ``record_seen``, which is what makes the
-                    # paragraph below true rather than merely intended. The
-                    # condition cannot be "this pass found a record" — the
-                    # deadline is evaluated before ``find_runtime_record`` runs —
-                    # so it is "some pass did", which selects the same class:
-                    # an owner that is discoverable at all is the live-but-
-                    # silent shape.
+                    # So the loop stops claiming a chase it cannot finish, on the
+                    # SAME bound for every arm. No record at all, a record this
+                    # viewer cannot use, a record that never answers, and a
+                    # takeover that never runs are ONE class from the user's
+                    # seat: no runtime this viewer can use. Each arm used to
+                    # carry its own deadline and its own scoping rule
+                    # (``record_seen``, ``takeover_attempts`` /
+                    # ``takeover_progress``), which is how the surface the
+                    # operator actually uses ended up with no reachable exit.
                     #
-                    # A never-discoverable owner is NOT unbounded here — it is
-                    # bounded on the takeover arm's own progress, in the
-                    # no-record arm below, which is the half this scoping
-                    # cannot reach (UX round 2, U7).
+                    # An IN-FLIGHT takeover is untouched by this: the deadline is
+                    # checked at the top of a pass, and a factory that is still
+                    # working is inside its own await, so a slow-but-real
+                    # takeover still completes and returns above.
                     #
                     # Going cold here does not weaken the chase contract, which
                     # is written for a DEAD owner and is vacuous for a live one:
                     # ``acquire_session_lease`` raises ``SessionLeaseHeldError``
-                    # unless the holder is proven dead, so a live owner cannot
-                    # be taken over even if this arm did reach the factory. Nor
-                    # does it engage a second runtime for a session that has
-                    # one: ``engage_runtime`` short-circuits on a discoverable
-                    # record and, failing that, waits rather than spawning while
-                    # a live pid holds the lease. ``_takeover_factory`` stays
-                    # armed for a LATER genuine death — a subsequent owner loss
-                    # re-enters this loop and, with the record gone by then,
-                    # takes the else-branch exactly as it always has.
-                    if record_seen and time.monotonic() >= give_up_deadline:
-                        # (Everything from here to the ``return`` used to be
-                        # inlined in this branch; it moved into
-                        # ``_give_up_recovery`` when the NO-RECORD arm below
-                        # needed the same exit, so the ordering rule cannot be
-                        # honoured in one branch and forgotten in the other.)
-                        self._give_up_recovery(
-                            after=RECOVERY_GIVE_UP_S,
-                            because="a discoverable owner never answered",
-                        )
-                        return
-                    # THE NO-RECORD DEAD END — the arm ``record_seen`` cannot
-                    # reach, and the one the operator's reported flow lands on.
-                    #
-                    # Once the COLD window has passed with no record AND the
-                    # takeover arm has produced no evidence it can run (see
-                    # ``takeover_attempts`` / ``takeover_progress`` above),
-                    # there is nothing left to chase and the loop must stop
-                    # pretending otherwise: every mutation seam refuses and
-                    # ``prompt`` parks on ``_runtime_ready`` with no message and
-                    # no spinner resolution.
-                    #
-                    # BOUNDED BY ``COLD_FALLBACK_S``, not by
-                    # ``RECOVERY_GIVE_UP_S``. This is the bound whose documented
-                    # contract is already "no successor has appeared, so the
-                    # viewer stops chasing one", and the window it grants is
-                    # exactly the one a runtime restarting after ``kill -9``
-                    # republishes in — so a successor that IS coming is still
-                    # caught. Waiting the longer bound would park the operator's
-                    # message for 90 s to reach a state the evidence in hand
-                    # already justifies at 8, which is the reported complaint
-                    # ("sessions being forgotten about") wearing a shorter
-                    # timeout.
-                    #
-                    # The verdict ABOVE has already been delivered when a turn
-                    # was live, so this arm never replaces a named cut-off with
-                    # silence; it only refuses to keep the facade unusable
-                    # afterwards. For an IDLE owner death there is nothing to
-                    # name (a runtime that exits when it has nothing to do is
-                    # the ordinary end of a run-to-completion runtime), and the
-                    # outcome the user sees is the ordinary cold one: the next
-                    # message engages a fresh runtime.
-                    if takeover_attempts and not takeover_progress:
-                        self._give_up_recovery(
-                            after=COLD_FALLBACK_S,
-                            because="the takeover arm cannot run in this viewer",
-                        )
-                        return
+                    # unless the holder is proven dead OR UNVERIFIABLE — the
+                    # premise an earlier revision of this comment got wrong — so a
+                    # live owner cannot be taken over even if this arm did reach
+                    # the factory. Nor does it engage a second runtime for a
+                    # session that has one: ``engage_runtime`` short-circuits on a
+                    # discoverable record and, failing that, waits rather than
+                    # spawning while a live pid holds the lease.
+                    # ``_takeover_factory`` stays armed for a LATER genuine
+                    # death — a subsequent owner loss re-enters this loop and,
+                    # with the record gone by then, takes the else-branch exactly
+                    # as it always has.
+                    self._give_up_recovery(
+                        after=COLD_FALLBACK_S,
+                        because="no runtime this viewer could use appeared",
+                    )
+                    return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
@@ -4859,14 +4810,6 @@ class AttachedSession:
                     and record.protocol >= 5
                     and FRONTEND_CAPABILITY in record.capabilities
                 ):
-                    # Stamped on the SAME condition that selects the reattach
-                    # arm, not on ``record is not None``: a record this viewer
-                    # cannot use (an older protocol, no frontend capability)
-                    # falls through to the takeover ``else`` and belongs to the
-                    # dead-owner contract, so counting it as a sighting would
-                    # let the give-up exit fire for a chase that never had a
-                    # reattach to give up ON.
-                    record_seen = True
                     try:
                         pending_sync = await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):
@@ -4966,25 +4909,44 @@ class AttachedSession:
                         # ``_discard_rejected_client``.
                         self._discard_rejected_client()
                 else:
-                    takeover_attempts += 1
                     try:
                         local = await self._takeover_factory()
                     except SessionLeaseHeldError:
                         # Another follower won the kernel-arbitrated stale
-                        # recovery lock. Back off, then discover its fresh
-                        # registrant record and reattach.
+                        # recovery lock. Back off and re-dial on the next pass:
+                        # its fresh registrant record is what this loop is
+                        # waiting for, and the SAME cold deadline above bounds
+                        # the wait.
                         #
-                        # PROGRESS, which is the point of tracking it at all:
-                        # the winner is a live process holding the transcript,
-                        # so a record is on its way and the chase is doing
-                        # exactly what it is for. Only a raise that means "this
-                        # arm cannot run here at all" may bound the loop — see
-                        # ``takeover_progress``.
-                        takeover_progress = True
+                        # WHAT A LEASE HOLDER ACTUALLY PROVES (review round 1,
+                        # MINOR-1 — an earlier comment here, and the PR body,
+                        # asserted "a live process", which is not what the
+                        # exception means). ``SessionLeaseHeldError`` is raised
+                        # for "another live OR UNVERIFIABLE process"
+                        # (``session_lease.py``): ``_pid_state`` returns
+                        # ``"uncertain"`` for any unexpected ``OSError``, the
+                        # legacy ``.session.pid`` mirror raises merely because a
+                        # pid is NOT DEAD, and an unreadable claim raises with
+                        # ``pid=None``. None of those implies a process that will
+                        # ever publish a record — a recycled pid or a candidate
+                        # publishing an unattachable one (protocol < 5, no
+                        # ``FRONTEND_CAPABILITY``) reaches this raise forever.
+                        #
+                        # That shape used to latch the facade indefinitely,
+                        # because this raise was counted as PROGRESS and
+                        # progress disabled the give-up arm. It does not any
+                        # more: the deadline is evaluated at the top of every
+                        # pass and does not consult this flag, so an unprobeable
+                        # holder is bounded exactly like every other arm — and
+                        # the release is rebindable, so if that holder IS alive
+                        # and eventually publishes, the next action re-dials it.
+                        logger.debug(
+                            "remote takeover: another follower holds the lease for %s",
+                            self._session_id,
+                        )
                     except Exception:
                         logger.debug("remote takeover attempt failed", exc_info=True)
                     else:
-                        takeover_progress = True
                         callback = self._takeover_callback
                         if callback is not None:
                             # Takeover means the owner is gone and the turn did
@@ -5020,13 +4982,17 @@ class AttachedSession:
     def _give_up_recovery(self, *, after: float, because: str) -> None:
         """Stop chasing an owner that cannot be reached, and stay REBINDABLE.
 
-        The single exit for both shapes of "this chase has no verdict left to
-        deliver": a discoverable owner that never answers (the ``record_seen``
-        arm, after ``RECOVERY_GIVE_UP_S``) and a takeover arm that cannot run in
-        this viewer at all — no record ever, ``_takeover_factory`` raising on
-        every pass (the no-record arm, after ``COLD_FALLBACK_S``; UX round 2,
+        The single exit for every arm that has not produced a usable runtime
+        within the cold window: no record at all, a record this viewer cannot
+        use, a record that never answers, and a takeover arm that cannot run in
+        this viewer (``_takeover_factory`` raising on every pass — UX round 2,
         U7). One method rather than a copy per branch, because the ordering rule
         below is load-bearing and a second copy is how it gets forgotten.
+
+        ``after`` is the bound that expired, and it is only logged: the bound
+        differs per arm at most in which constant is named, and the log line is
+        what lets a reader tell which arm released the facade without reading
+        the source.
 
         LOAD-BEARING, and it must precede ``_go_cold``: ``_ensure_bound``
         returns immediately when ``_can_go_cold`` is False, so clearing
@@ -6277,7 +6243,7 @@ async def _await_handler(result: Any) -> None:
     await result
 
 
-def _journal_witnessed_cut_off(transcript: Any, store: Any) -> None:
+def _journal_witnessed_cut_off(transcript: Any, store: Any, cause: str) -> None:
     """Publish a witnessed cut-off's durable outcome, on a worker thread.
 
     The executor body of :meth:`AttachedSession._journal_witnessed_cut_off`,
@@ -6285,11 +6251,21 @@ def _journal_witnessed_cut_off(transcript: Any, store: Any) -> None:
     parse) cannot reach back into the facade and so the whole thing is one
     testable call. Never raises: a sidebar notice is not worth a task
     exception in the operator's log.
+
+    ``cause`` is the viewer's own verdict token, and it is only used when the
+    classifier refuses to classify — see the caller's docstring for why that is
+    safe (the record it writes is provisional and the live owner's real outcome
+    supersedes it).
     """
+    from local_operator.incidents import render_cut_off_reason
     from local_operator.session.attention import bootstrap_transcript
 
     try:
-        bootstrap_transcript(transcript, store)
+        bootstrap_transcript(
+            transcript,
+            store,
+            witnessed_cut_off=(cause, render_cut_off_reason(cause)),
+        )
     except Exception:  # noqa: BLE001 — the verdict it describes is already painted
         logger.debug("journalling the witnessed cut-off failed", exc_info=True)
 

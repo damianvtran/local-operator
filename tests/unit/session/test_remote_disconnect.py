@@ -716,7 +716,6 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[AttachedSession, list[f
 
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BLOCKED_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = AttachedSession(
@@ -884,35 +883,30 @@ async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
-    tmp_path, monkeypatch
-) -> None:
-    """Guard against over-reach: the chase contract survives for a DEAD owner.
+async def test_a_lease_held_chase_is_bounded_at_the_cold_window(tmp_path, monkeypatch) -> None:
+    """A lease holder no longer buys an UNBOUNDED wait (UX round 1, U2; MINOR-1).
 
-    The give-up exit is scoped to a record having been SEEN (`record_seen` in
-    `_recover_runtime`), so with no record and a takeover arm that CAN make
-    progress the loop must keep chasing. ``SessionLeaseHeldError`` is the raise
-    that says so: another follower won the kernel-arbitrated lock, it is alive,
-    and its fresh registrant record is what the chase is waiting for.
+    ``SessionLeaseHeldError`` used to be counted as EVIDENCE OF PROGRESS —
+    "another follower won the kernel-arbitrated lock, so a record is on its
+    way" — and progress disabled the give-up arm entirely. What that exception
+    actually proves is weaker: ``session_lease.py`` raises it for "another live
+    OR UNVERIFIABLE process" (``_pid_state`` returns ``"uncertain"`` on an
+    unexpected ``OSError``, the legacy ``.session.pid`` mirror raises merely
+    because a pid is NOT DEAD, and an unreadable claim raises with
+    ``pid=None``), and none of those implies a process that will ever publish.
+    With a raising factory and no record ever appearing, the latch was
+    reachable: ``record_seen`` stayed False and ``takeover_progress`` stayed
+    True, so NEITHER give-up arm could fire and ``_recovering`` held every
+    mutation seam while ``prompt`` parked on ``_runtime_ready`` with no message
+    and no spinner resolution.
 
-    THE ARM'S AVAILABILITY IS THE AXIS, not the shape of the owner (UX round 2,
-    U7). ``test_a_viewer_that_cannot_take_over_gives_up_at_the_cold_bound``
-    pins the other side of it: a factory that raises anything else — `lop`'s
-    viewer factory does, by construction — has nothing to wait for and is
-    bounded at ``COLD_FALLBACK_S``. Revising this test's factory to
-    ``RuntimeError`` would re-pin the defect the U7 cell removes.
-
-    WATCHES PAST ITS OWN BOUND, and that is the whole guard. Sampling at an
-    attempt COUNT is what made the first version of this test unable to fail:
-    three takeover attempts arrive at ~0.28 s against a monkeypatched 0.3 s
-    `RECOVERY_GIVE_UP_S`, so it stopped watching ~20 ms before the deadline it
-    exists to prove is never reached, and it stayed green against a tree that
-    took the exit (QA round 1, Q849-2). The wait below is therefore expressed
-    as a multiple of the bound rather than as a number of attempts, and the
-    assertions are read after it has comfortably elapsed.
+    The bound is now the SAME cold window every other arm uses, and the release
+    is REBINDABLE (``_give_up_recovery`` flips ``_can_go_cold`` before
+    ``_go_cold``), so the chase is not abandoned — the next action re-dials the
+    very same record. Watched WELL PAST the monkeypatched bound rather than to
+    an attempt count, which is the blindness QA round 1 Q849-2 measured.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
     attempts: list[int] = []
 
@@ -932,42 +926,39 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
     remote.set_went_cold_callback(lambda: went_cold.append("cold"))
 
     remote._on_disconnected("owner exited")
-    # Watch WELL PAST the bound, never to an attempt count. Three attempts land
-    # before the deadline, so breaking on them samples a loop that has not yet
-    # had the chance to take the exit — the blindness Q849-2 measured. The wait
-    # is a multiple of the monkeypatched bound, so compressing the bound
-    # compresses the test with it and no wall-clock literal is asserted on.
-    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    deadline = time.monotonic() + remote_module.COLD_FALLBACK_S * 8
     while time.monotonic() < deadline:
         if not remote._recovering:
-            break  # the loop returned: the exit was taken, which is the failure
+            break
         await asyncio.sleep(0.01)
     still_chasing = remote._recovering
     cold_calls = list(went_cold)
     attempt_count = len(attempts)
+    can_go_cold = remote._can_go_cold
     await _cancel_recovery(remote)
 
-    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
-    assert still_chasing is True, "the no-record branch took the give-up exit"
-    assert cold_calls == [], "a dead owner took the give-up cold exit"
+    assert attempt_count >= 1, "the takeover arm was never reached"
+    assert still_chasing is False, (
+        "a lease holder still latches the facade: every /model, /fork, /compact "
+        "is refused and prompt parks on _runtime_ready"
+    )
+    assert cold_calls == ["cold"], "the release left the viewer in neither state"
+    assert can_go_cold is True, "the viewer can never bind again"
 
 
 @pytest.mark.asyncio
-async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
-    tmp_path, monkeypatch
-) -> None:
-    """A record this viewer cannot ATTACH to belongs to the dead-owner contract.
+async def test_an_unusable_record_is_bounded_at_the_cold_window(tmp_path, monkeypatch) -> None:
+    """A record this viewer cannot ATTACH to is one of the "no usable runtime" arms.
 
-    `record_seen` is stamped on the same condition that selects the reattach
-    arm — protocol >= 5 with `FRONTEND_CAPABILITY` — rather than on `record is
-    not None`. A record failing either check falls through to the takeover
-    `else`, so counting it as a sighting would arm the give-up exit for a chase
-    that never had a reattach to give up on: the loop would go cold instead of
-    chasing a successor, which is the over-reach Q849-1 measured wearing a
-    different hat.
+    A pre-frontend owner (protocol < 5, no ``FRONTEND_CAPABILITY``) falls
+    through to the takeover ``else``: this viewer can never bind it, and the
+    only thing it could wait for is a successor. It is therefore the same class
+    as "nothing is there" from the user's seat, and is bounded on the same cold
+    window — the release is rebindable, so a successor that does appear is
+    re-dialled by the next action, and a viewer that keeps waiting does not get
+    to refuse every mutation seam in the meantime.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
 
     stale = _live_record()
     stale.protocol = 4  # a pre-frontend owner: discoverable, not attachable
@@ -990,7 +981,7 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
     remote.set_went_cold_callback(lambda: went_cold.append("cold"))
 
     remote._on_disconnected("owner exited")
-    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    deadline = time.monotonic() + remote_module.COLD_FALLBACK_S * 8
     while time.monotonic() < deadline:
         if not remote._recovering:
             break
@@ -998,11 +989,13 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
     still_chasing = remote._recovering
     cold_calls = list(went_cold)
     attempt_count = len(attempts)
+    can_go_cold = remote._can_go_cold
     await _cancel_recovery(remote)
 
-    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
-    assert still_chasing is True, "an unattachable record armed the give-up exit"
-    assert cold_calls == [], "an unattachable record took the give-up cold exit"
+    assert attempt_count >= 1, "the takeover arm was never reached"
+    assert still_chasing is False, "an unattachable record still latches the facade"
+    assert cold_calls == ["cold"], "an unattachable record left the viewer nowhere"
+    assert can_go_cold is True, "the viewer can never bind again"
 
 
 @pytest.mark.asyncio
@@ -1016,7 +1009,6 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
     against wall time.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 60.0)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 60.0)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = AttachedSession(
