@@ -1691,6 +1691,19 @@ class AnalyticsScreen(ModalScreen[None]):
         # "one gesture owns the viewport" split: KEYS move the cursor and scroll
         # it into view, while the WHEEL and the scrollbar still move the viewport
         # alone and leave the cursor where it was.
+        #
+        # ``priority=True`` on the PAGINATION keys for the SAME reason, and it is
+        # what makes them unanimated rather than merely ours: the container has
+        # its own ``pageup``/``pagedown``/``home``/``end`` bindings
+        # (``ScrollView.BINDINGS``) handing the key to ``Widget.action_page_down``
+        # and friends, which call ``scroll_page_down()`` with the ``animate=True``
+        # default. Measured on this screen at 120x45: one ``pagedown`` handled by
+        # the container wrote 17-26 compositor frames of all 29 body rows (the
+        # count moves with frame scheduling, the order of magnitude does not). So
+        # a plain binding here left the operator's key press animated AND left
+        # the unanimated actions below unreachable on any report tall enough to
+        # scroll — two symptoms, one cause. See the actions for why the move must
+        # be unanimated.
         Binding("up", "move_up", "Up", show=False, priority=True),
         Binding("down", "move_down", "Down", show=False, priority=True),
         Binding("enter", "toggle_row", "Expand/collapse", show=False, priority=True),
@@ -1698,10 +1711,10 @@ class AnalyticsScreen(ModalScreen[None]):
         Binding("right", "expand_row", "Expand", show=False, priority=True),
         Binding("left", "collapse_row", "Collapse", show=False, priority=True),
         Binding("e", "toggle_all", "Expand/collapse all", show=False),
-        Binding("pageup", "page_up", "Page up", show=False),
-        Binding("pagedown", "page_down", "Page down", show=False),
-        Binding("home", "scroll_home", "Top", show=False),
-        Binding("end", "scroll_end", "Bottom", show=False),
+        Binding("pageup", "page_up", "Page up", show=False, priority=True),
+        Binding("pagedown", "page_down", "Page down", show=False, priority=True),
+        Binding("home", "scroll_home", "Top", show=False, priority=True),
+        Binding("end", "scroll_end", "Bottom", show=False, priority=True),
     ]
 
     def __init__(
@@ -2830,14 +2843,41 @@ class AnalyticsScreen(ModalScreen[None]):
             )
         return self._forest_cache
 
+    # ``animate=False`` on all four DESTINATION moves, deliberately, and it is
+    # the same rule ``_scroll_by_line`` states for the arrows.
+    #
+    # The body is a line-API ``ReportView`` whose ``render_line(y)`` serves
+    # ``scroll_offset.y + y``: shifting the offset by ONE line changes EVERY
+    # viewport row, so each eased step of the default animation is a
+    # full-viewport rewrite. Measured at 120x45 on the 40-root fixture (body
+    # region 102x29, ``max_scroll_y`` 31): one ``pagedown`` wrote 17-26
+    # compositor frames across runs — the count moves with frame scheduling, the
+    # order of magnitude does not — every one of them all 29 rows, with the
+    # offset walking 3 -> 5 -> 7 -> ... -> 29 one line at a time. That is the
+    # operator's report of an update passing down the TUI one line at a time.
+    # ``end`` and ``home`` travel the furthest and wrote up to 49. One frame is
+    # what the gesture needs; the easing bought only intermediate redraws of a
+    # page the reader had already asked to leave.
+    #
+    # These four actions only bind if the key reaches the SCREEN: with the
+    # container's own ``ScrollView`` bindings left unpinned, a real ``pagedown``
+    # went to ``Widget.action_page_down`` (which passes the ``animate=True``
+    # default) and the actions here were unreachable on any report tall enough to
+    # scroll — measured, and fixed by ``priority=True`` on the bindings above.
+    # Without that half, animating these methods would have changed nothing the
+    # operator could press.
+    #
+    # It is also why the coalesced hover re-resolve exists: ``_viewport_moved``
+    # watches ``scroll_y``, which was an animated value firing ~28 notifications
+    # per ``pagedown``. With no animation the burst is one notification.
     def action_page_up(self) -> None:
-        self._scroll.scroll_page_up()
+        self._scroll.scroll_page_up(animate=False)
 
     def action_page_down(self) -> None:
-        self._scroll.scroll_page_down()
+        self._scroll.scroll_page_down(animate=False)
 
     def action_scroll_home(self) -> None:
-        self._scroll.scroll_home()
+        self._scroll.scroll_home(animate=False)
 
     def action_scroll_end(self) -> None:
-        self._scroll.scroll_end()
+        self._scroll.scroll_end(animate=False)
