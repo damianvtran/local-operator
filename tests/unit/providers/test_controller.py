@@ -282,7 +282,14 @@ class TestUsageIsPerAccount:
         seen: list[tuple[str, str | None]] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append((provider, account_id))
             return UsageReport(provider=provider, limits=[])
@@ -303,7 +310,14 @@ class TestUsageIsPerAccount:
         ]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return UsageReport(provider=provider, limits=[])
 
@@ -322,7 +336,14 @@ class TestUsageIsPerAccount:
         ]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if account_id == "acct-1":
                 raise RuntimeError("quota endpoint exploded")
@@ -349,7 +370,14 @@ class TestUsageIsPerAccount:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -766,7 +794,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -789,7 +824,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -819,7 +861,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -855,7 +904,14 @@ class TestUsageCache:
         fail = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if fail:
                 return None  # what a 429/outage actually looks like to callers
@@ -896,7 +952,14 @@ class TestUsageCache:
         calls = 0
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -938,7 +1001,14 @@ class TestUsageCache:
         store.api_keys["openrouter"] = "sk-or-1"
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return None  # blank answer, endpoint reachable
 
@@ -1035,7 +1105,14 @@ class TestPerAccountLastKnown:
         fail_gominerva = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if fail_gominerva and account_id == "acct-gominerva":
                 return None
@@ -1090,7 +1167,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [self._account("new@example.com", "acct-new")]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return None
 
@@ -1136,7 +1220,14 @@ class TestPerAccountLastKnown:
         succeed = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             nonlocal calls
             calls += 1
@@ -1217,7 +1308,14 @@ class TestPerAccountLastKnown:
         succeed = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             if succeed:
                 return self._report("me@example.com", 23.0)
@@ -1276,7 +1374,14 @@ class TestPerAccountLastKnown:
         fail = False
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append(account_id)
             if fail and account_id == "acct-fail":
@@ -1343,7 +1448,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [self._account("live@example.com", "acct-live")]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("live@example.com", 22.0)
 
@@ -1376,7 +1488,14 @@ class TestPerAccountLastKnown:
         probed: list[str | None] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             probed.append(account_id)
             raise AssertionError("a dead grant must never be probed")
@@ -1409,7 +1528,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 61.0)
 
@@ -1441,7 +1567,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 5.0)
 
@@ -1478,7 +1611,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             return self._report("dead@example.com", 7.0)
 
@@ -1561,7 +1701,14 @@ class TestPerAccountLastKnown:
         store.oauth_accounts["anthropic"] = [dead]
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             raise AssertionError("a dead grant must not be probed")
 
@@ -1648,7 +1795,14 @@ class TestPerAccountLastKnown:
         seen: list[tuple[str | None, str | None]] = []
 
         async def fake_fetch(
-            client, provider, *, api_key, access_token, account_id, oauth_creds=None
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
         ):
             seen.append((api_key, account_id))
             return UsageReport(
@@ -1681,6 +1835,365 @@ class TestPerAccountLastKnown:
                 "damianvtran@gmail.com",
             }
         )
+
+
+class TestQwenCloudConsoleRoute:
+    """The console route for an account whose OAuth grant can never refresh.
+
+    This route failed SILENTLY in production before it existed, and the
+    symptom was an empty ``/usage`` table indistinguishable from "this
+    provider has no quota endpoint" — the failure mode usage.py:36-44 says
+    this module has already been bitten by four times. The cause is that the
+    two identity enumerators disagree for ``alibaba-token-plan``:
+    ``list_oauth_identities`` names the stored login while
+    ``list_oauth_accesses`` mints no bearer (the row's ``expires`` is in the
+    past and no ``ProviderDefinition`` declares a refresh token, so
+    ``_ensure_oauth_fresh`` can never revive it). ``expected`` is therefore
+    non-empty, ``_fetch_provider`` takes the ``if expected:`` branch, every
+    identity hits ``access is None``, and the API-key route below it is
+    unreachable.
+
+    These tests pin the MECHANISM, not just the outcome: reinstating a bare
+    ``continue`` at the ``access is None`` point must turn them red.
+    """
+
+    #: The console gateway's own host, so a test can assert it was — or was
+    #: never — contacted without matching on a path substring.
+    CONSOLE_HOST = "cs-data.qwencloud.com"
+
+    #: A placeholder session cookie. The real credential is a full-account
+    #: console ticket and never appears in this repository.
+    TICKET = "fake-console-ticket"
+
+    def _dead_grant(self, store) -> str:
+        """Store the real account's shape: a login that mints no bearer.
+
+        The row makes ``list_oauth_identities`` non-empty while
+        ``oauth_accounts`` stays unset, which is exactly the disagreement
+        that made the route unreachable.
+        """
+        email = "fake@example.test"
+        store.upsert_credential(
+            "alibaba-token-plan",
+            {
+                "type": "oauth",
+                "access": "fake-mgmt",
+                "email": email,
+                "expires": 1,
+                "account_id": "fake-acct",
+            },
+        )
+        return email
+
+    def _ticket(self, store) -> None:
+        store.upsert_credential(
+            "qwencloud-console",
+            {"ticket": self.TICKET, "project_id": "qwencloud-console:personal"},
+        )
+
+    @staticmethod
+    def _spy(monkeypatch, controller, report=None):
+        """Record every ``_fetch_one`` call, mirroring the double at :541."""
+        calls: list[dict[str, Any]] = []
+        original = type(controller)._fetch_one
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append({"provider": provider, "access": access, "extra_creds": extra_creds})
+            if report is not None:
+                return report
+            return await original(
+                controller, client, provider, access=access, extra_creds=extra_creds
+            )
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_a_stored_ticket_reaches_the_console_route(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The point of the slice: ``_fetch_one`` RUNS, carrying the ticket.
+
+        Asserting only on the returned report would still pass if the report
+        arrived by some other route, so this pins the call itself.
+        """
+        email = self._dead_grant(store)
+        self._ticket(store)
+        expected = UsageReport(provider="alibaba-token-plan", limits=[])
+        calls = self._spy(monkeypatch, controller, report=expected)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "a bare `continue` here is the defect under test"
+        assert calls[0]["provider"] == "alibaba-token-plan"
+        # The console credential is not an OAuth account: it arrives beside
+        # `access=None`, which is what makes the api-key early-return skip it.
+        assert calls[0]["access"] is None
+        assert calls[0]["extra_creds"] is not None
+        assert calls[0]["extra_creds"]["ticket"] == self.TICKET
+        # And the report reaches the panel under the stored identity.
+        assert [r.identity for r in reports] == [email]
+
+    @pytest.mark.asyncio
+    async def test_the_ticket_reaches_the_usage_dispatcher(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The other half of reachability: ``_fetch_one`` FORWARDS the ticket.
+
+        Patching ``_fetch_one`` proves it is called but says nothing about
+        what it does, so dropping ``extra_creds`` from the ``fetch_usage``
+        call would leave that test green while the fetcher goes unreachable
+        again — the dead-code defect this slice exists to avoid. This runs
+        the real ``_fetch_one`` and pins the dispatcher's arguments instead.
+        """
+        self._dead_grant(store)
+        self._ticket(store)
+        seen: list[dict[str, Any] | None] = []
+
+        async def fake_fetch(
+            client,
+            provider,
+            *,
+            api_key,
+            access_token,
+            account_id,
+            oauth_creds=None,
+            extra_creds=None,
+        ):
+            seen.append(extra_creds)
+            return UsageReport(provider=provider, limits=[])
+
+        monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(seen) == 1, "the dispatcher must be reached exactly once"
+        assert seen[0] is not None, "dropping extra_creds here makes the fetcher dead code"
+        assert seen[0]["ticket"] == self.TICKET
+
+    @pytest.mark.asyncio
+    async def test_no_ticket_means_no_console_request(self, controller, store, monkeypatch) -> None:
+        """Without a stored ticket the route must not fire at all.
+
+        The guard against the opposite defect: an unconditional console
+        attempt would contact the gateway for every dead grant on the box.
+        """
+        self._dead_grant(store)
+        calls = self._spy(monkeypatch, controller)
+
+        def no_network(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError(f"no ticket stored, yet {request.url} was contacted")
+
+        # Bound before patching: the replacement builds a real client, so
+        # reading the name through the module would recurse into itself.
+        real_client = httpx.AsyncClient
+
+        def _mock_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            return real_client(transport=httpx.MockTransport(no_network))
+
+        monkeypatch.setattr("local_operator.providers.controller.httpx.AsyncClient", _mock_client)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert calls == [], "no credential to spend, so nothing to fetch"
+        # Unchanged from before the console route existed: the expected
+        # identity is still named, with no numbers behind it.
+        assert [r.identity for r in reports] == ["fake@example.test"]
+        assert reports[0].limits == []
+
+    @pytest.mark.asyncio
+    async def test_another_provider_never_queries_the_ticket_namespace(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """``_qwencloud_console_creds`` is guarded on the storage id.
+
+        Without the guard every provider's fetch would query the
+        ``qwencloud-console`` namespace on every cycle, and any provider with
+        a dead grant would try to spend a QwenCloud cookie on its own API.
+        """
+        self._ticket(store)
+        store.upsert_credential(
+            "anthropic",
+            {"type": "oauth", "access": "tok", "email": "other@example.test", "expires": 1},
+        )
+        asked: list[str | None] = []
+        real_list = store.list_credentials
+
+        def _watch(provider=None):
+            asked.append(provider)
+            return real_list(provider)
+
+        monkeypatch.setattr(store, "list_credentials", _watch)
+        calls = self._spy(monkeypatch, controller)
+
+        reports = await controller.fetch_usage(["anthropic"])
+
+        assert "qwencloud-console" not in asked, "the ticket namespace is QwenCloud's alone"
+        assert calls == [], "anthropic's dead grant must not reach the console route"
+        assert [r.identity for r in reports] == ["other@example.test"]
+        assert controller._qwencloud_console_creds("anthropic") is None
+
+    @pytest.mark.asyncio
+    async def test_the_console_report_merges_into_one_credits_row(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Exactly ONE ``credits-7d`` survives at the panel's own grain.
+
+        ``usage_panel`` flattens ``[limit for report in reports for limit in
+        report.limits]`` with no dedup by id, and ``_merge_account_reports``
+        merges at ACCOUNT grain without concatenating limits. So a console
+        report landing under a DIFFERENT identity key than the stored login
+        renders the same window twice. Measured the way the panel measures it.
+        """
+        email = self._dead_grant(store)
+        self._ticket(store)
+        console_report = UsageReport(
+            provider="alibaba-token-plan",
+            limits=[
+                UsageLimit(
+                    id="credits-7d",
+                    label="Credits (7d)",
+                    amount=UsageAmount(used=24.05, limit=100.0, unit="percent"),
+                )
+            ],
+        )
+        self._spy(monkeypatch, controller, report=console_report)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        limit_ids = [limit.id for report in reports for limit in report.limits]
+        assert limit_ids == ["credits-7d"], "a second row means two identity keys"
+        assert [r.identity for r in reports] == [email]
+
+    @pytest.mark.asyncio
+    async def test_two_dead_grants_spend_the_one_ticket_once(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """One console session for the account, not one per login.
+
+        The ticket is account-wide, so attempting the route per identity
+        would send a request each and land a report under each. The panel
+        flattens limits with no dedup by id (usage_panel.py:407), so the same
+        7-day window would render TWICE. This is the duplicate-row failure
+        the ``live[...]`` key mirroring prevents for ONE report, arriving
+        through a second door: mirroring cannot help when two identities each
+        produce their own console report.
+        """
+        emails = []
+        for name in ("one", "two"):
+            email = f"{name}@example.test"
+            store.upsert_credential(
+                "alibaba-token-plan",
+                {
+                    "type": "oauth",
+                    "access": "fake-mgmt",
+                    "email": email,
+                    "expires": 1,
+                    "account_id": f"acct-{name}",
+                },
+            )
+            emails.append(email)
+        self._ticket(store)
+        assert controller._expected_oauth_identities("alibaba-token-plan") == emails
+
+        def _report() -> UsageReport:
+            # A fresh object per call: one shared instance would collapse the
+            # duplicate by identity rather than by the fix under test.
+            return UsageReport(
+                provider="alibaba-token-plan",
+                limits=[
+                    UsageLimit(
+                        id="credits-7d",
+                        label="Credits (7d)",
+                        amount=UsageAmount(used=24.05, limit=100.0, unit="percent"),
+                    )
+                ],
+            )
+
+        calls: list[dict[str, Any] | None] = []
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append(extra_creds)
+            return _report()
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+
+        reports = await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "one account-wide ticket, so one request per cycle"
+        limit_ids = [limit.id for report in reports for limit in report.limits]
+        assert limit_ids == ["credits-7d"], "the same window must not render twice"
+        # The second login keeps its row on the panel; it simply carries no
+        # numbers, which is what it did before the console route existed.
+        assert [r.identity for r in reports] == emails
+
+    @pytest.mark.asyncio
+    async def test_a_failing_ticket_is_not_retried_per_identity(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The attempt is counted, not the success.
+
+        A ticket that answers ``None`` (expired -- the gateway returns 200
+        with an errorCode) is a property of the TICKET, not of the identity
+        that happened to reach it. Counting only successes would retry the
+        same dead cookie once per expected login, turning one useless
+        request into N on every refresh of a multi-login account.
+        """
+        for name in ("one", "two"):
+            store.upsert_credential(
+                "alibaba-token-plan",
+                {
+                    "type": "oauth",
+                    "access": "fake-mgmt",
+                    "email": f"{name}@example.test",
+                    "expires": 1,
+                    "account_id": f"acct-{name}",
+                },
+            )
+        self._ticket(store)
+        calls: list[str] = []
+
+        async def _record(client, provider, *, access=None, extra_creds=None):
+            calls.append(provider)
+            return None
+
+        monkeypatch.setattr(controller, "_fetch_one", _record)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1, "a dead ticket costs one request, not one per login"
+
+    @pytest.mark.asyncio
+    async def test_the_oauth_flavour_alias_reaches_the_route_too(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """``alibaba-token-plan-oauth`` stores under ``alibaba-token-plan``.
+
+        The guard compares the STORAGE id (``credential_provider_id``), not
+        the spelling the caller used, so both ids find the same ticket. The
+        alias resolution itself is covered at
+        ``test_credential_alias_resolves_storage_id``; this pins that the
+        console guard honours it rather than matching a literal string.
+        """
+        self._ticket(store)
+
+        assert controller._qwencloud_console_creds("alibaba-token-plan-oauth") is not None
+        assert controller._qwencloud_console_creds(
+            "alibaba-token-plan-oauth"
+        ) == controller._qwencloud_console_creds("alibaba-token-plan")
+
+    @pytest.mark.asyncio
+    async def test_a_ticketless_row_is_not_a_credential(self, controller, store) -> None:
+        """A row in the namespace with no ``ticket`` must not count.
+
+        The CLI writes the row before the capture completes, so an empty
+        ticket is a real state — and returning it would send a request with
+        no cookie, which reads as a generic auth failure rather than as
+        "no ticket stored yet".
+        """
+        store.upsert_credential("qwencloud-console", {"ticket": "", "project_id": "p"})
+
+        assert controller._qwencloud_console_creds("alibaba-token-plan") is None
 
 
 # ---------------------------------------------------------------------------
