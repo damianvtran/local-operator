@@ -65,6 +65,7 @@ from local_operator.compaction.cutpoint import (
     RENDERED_INJECTION_KEY,
 )
 from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
     build_compaction_marker,
     render_compaction_marker,
     replayed_user_message,
@@ -2737,12 +2738,13 @@ class Session:
     def _render_for_compaction(self, *, keep_images: bool = False) -> list[Message]:
         """The rendered history a compaction pass plans and commits against.
 
-        :meth:`_render_history` minus the todo reminders, because a reminder is
-        the ONE injection nothing persists (``_todo_continuation`` hands it to
-        the loop as a follow-up, which emits no event and reaches no
-        transcript), and compaction is built on the rendered history being
-        persisted history. Rendered into it, one reminder broke the pass at both
-        ends:
+        :meth:`_render_history` minus every LIVE-CONTEXT-ONLY injection — a
+        ``CustomMessage`` the transcript does not hold, which is one a resume
+        cannot replay. A todo reminder is the original member of that class:
+        ``_todo_continuation`` hands the reminder to the loop as a follow-up,
+        which emits no event and reaches no transcript. Compaction is built on
+        the rendered history being persisted history, and rendered into it one
+        ephemeral injection broke the pass at both ends:
 
         - ``_plan_compaction``'s replayability guard matches ``kept[0].id``
           against the transcript's entry ids, and a reminder's id is in no
@@ -2783,20 +2785,63 @@ class Session:
         the allow-list removal closed. Excluding it here keeps the live
         announcement in the REQUEST render (``_render_history``, untouched)
         while the rebuild the compaction commit owns stays persisted-only.
+
+        Those two are special cases of ONE class, and the enumeration was
+        itself the defect: an ephemeral injection type added later is filtered
+        only if someone remembers to list it here. The TRANSIENT model-switch
+        notice was the third member and went unlisted —
+        ``journal_model_switch(transient=True)`` appends a live-only failover
+        record, and the render baked it into the rebuilt context as a plain
+        ``Message(role="user")`` which the turn-end pass then persisted, so a
+        failover notice landed in a real session's transcript as a genuine
+        user row (four consecutive such rows in session ``835fbcafdc27``) and
+        every front end painted it as the user's own words. The predicate is
+        therefore STRUCTURAL rather than a list: a ``CustomMessage`` the
+        transcript does not hold is one a resume cannot replay, because the
+        only thing that puts a custom message back into a replayed context is
+        its own persisted entry. Filtering it here is what makes the rebuilt
+        context equal what a resume replays — the live/resume equivalence this
+        render exists to protect.
+
+        The price is stated rather than glossed, because it is a real one: a
+        live-only record is now absent from the rebuilt context, so a transient
+        notice reaches the model through the untouched request render only
+        UNTIL the next pass. After a commit the model is no longer told it is
+        on a fallback — it reads the authoritative ``Model:`` line in the
+        prompt tail instead, which is the same thing a resume gives it. The
+        alternative is the reported defect: re-seating the notice as user text
+        it can never take back.
+
+        The test is :meth:`Transcript.has_entry` (a constant-time id-set
+        check), NEVER :func:`_is_persistable_message`. That predicate answers a
+        different question — may the turn-end flush write this? — and returns
+        False for ``hub_message``, ``peer_message`` and ``wake_prompt``, whose
+        PRODUCERS persist them. Borrowing it here would drop persisted history
+        out of the rebuild and make a live context diverge from its own
+        resume.
+
+        The compaction marker is exempted because its entry IS persisted — as a
+        compaction entry, written by ``append_compaction`` under its own type
+        and its own id — so the message id ``build_compaction_marker`` mints is
+        in no entry set while a resume still replays the summary from that
+        payload. Without the exemption the structural rule would drop it from
+        the render it plans against; this is a statement about the predicate,
+        not a measurement of what any particular session's marker contains.
         """
 
         def _is_ephemeral_for_compaction(message: AgentMessage) -> bool:
             """Whether ``message`` must stay out of the compaction render.
 
-            Named rather than inlined because BOTH filters are
-            live-context-only injections whose rendered (id-carrying) copy
-            would otherwise be baked into the kept window and persisted by the
-            turn-end pass despite never being transcript material.
+            Named rather than inlined because every arm is a live-context-only
+            injection whose rendered (id-carrying) copy would otherwise be
+            baked into the kept window and persisted by the turn-end pass
+            despite never being transcript material.
             """
-            return _is_todo_reminder(message) or (
-                isinstance(message, CustomMessage)
-                and message.custom_type == SESSION_CREDENTIAL_MESSAGE_TYPE
-            )
+            if not isinstance(message, CustomMessage):
+                return False
+            if message.custom_type == COMPACTION_MARKER_TYPE:
+                return False
+            return not self._transcript.has_entry(message.id)
 
         return self._render_history(
             [
@@ -2806,6 +2851,62 @@ class Session:
             ],
             keep_images=keep_images,
         )
+
+    def _restore_custom_sources(self, kept: list[Message]) -> list[AgentMessage]:
+        """Re-seat each rendered copy in ``kept`` onto the message it came from.
+
+        The commit rebuilds the live context from the RENDERED history, so
+        without this every delivery inside the kept window becomes an anonymous
+        stamped user message. The model still reads it, but every fold then
+        sees an injection-shaped row instead of the receipt its own type paints
+        — a hub note, a peer message, a wake line, a job result — while a
+        RESUME of the same session, which replays the persisted custom entries,
+        paints exactly those receipts. Restoring the source is what keeps live
+        equal to resume, on both the request and the display side.
+
+        The lookup is the LIVE CONTEXT, and that is complete by construction
+        rather than by luck: every custom message this render can contain is a
+        ``CustomMessage`` in ``_context.messages`` (the injection producers
+        append one, and a replayed marker or aside materialises as one), so the
+        render is a pure function of objects the map holds. The
+        ``has_entry`` guard is the belt on that brace — a copy whose id the
+        transcript does not hold is not a delivery a resume could paint, so it
+        keeps the rendered form rather than acquiring an identity no journal
+        can substantiate.
+
+        Deliberately limited to this one direction. Substituting in the other
+        (a custom the render never produced) would invent context; and a
+        context already anonymised by an older build is NOT healed here — it
+        heals on the next resume, where replay rehydrates the custom entries —
+        which is stated rather than implied because the alternative looks like
+        an omission. Each id is re-seated at most once, so two kept rows that
+        share a custom's id cannot collapse onto a single object.
+        """
+        sources: dict[str, CustomMessage] = {
+            message.id: message
+            for message in self._context.messages
+            if isinstance(message, CustomMessage)
+        }
+        restored: list[AgentMessage] = []
+        re_seated: set[str] = set()
+        for message in kept:
+            source = sources.get(message.id)
+            # ``re_seated`` is why the substitution is once per id: two kept rows
+            # can carry the same id (a duplicated delivery, a render emitted for
+            # both halves of a split), and collapsing both onto one object would
+            # silently drop the second row's content from the model's context —
+            # the one loss this whole pass must never cause. The second row keeps
+            # its rendered form, which is what it already is.
+            if (
+                source is not None
+                and message.id not in re_seated
+                and self._transcript.has_entry(message.id)
+            ):
+                re_seated.add(message.id)
+                restored.append(source)
+            else:
+                restored.append(message)
+        return restored
 
     async def _recover_if_request_too_large(self, error: BaseException | str) -> bool:
         """Graduated recovery from ``HTTP 413: Request exceeds the maximum size``.
@@ -9006,9 +9107,15 @@ class Session:
             # resume and ``/export`` keep their frames; this keeps the LIVE
             # context honest too. The strip still applies to what the next
             # request SENDS (``_render_history`` re-renders on the way out).
-            kept = self._render_for_compaction(keep_images=True)[plan.cut :]
-            if not kept:
-                kept = plan.llm_history[plan.cut :]
+            rendered = self._render_for_compaction(keep_images=True)[plan.cut :]
+            if not rendered:
+                # The fallback is the plan's STRIPPED history, so it goes through
+                # the same identity restore as the render above — the two paths
+                # must not differ in whether a receipt survives a pass, and a
+                # fallback that skipped it would be invisible until a delivery
+                # happened to land on it.
+                rendered = plan.llm_history[plan.cut :]
+            kept = self._restore_custom_sources(rendered)
             summary, preserve_data = (
                 summarized
                 if summarized is not None

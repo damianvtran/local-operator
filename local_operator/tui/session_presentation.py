@@ -812,6 +812,7 @@ def project_settled_rows(
         compaction_refused_notice,
         gate_timeout_notice,
         is_harness_chrome,
+        is_harness_notice_row,
         user_row_text,
     )
     from local_operator.tui.app import (
@@ -1051,6 +1052,16 @@ def project_settled_rows(
                 # partial copy — suppressing the connectivity prompt while
                 # painting the other two as the user's own words.
                 if is_harness_chrome(text):
+                    continue
+                # A row the harness wrote and re-seated, or minted from a
+                # ``CustomMessage`` (a model-switch notice, a session incident,
+                # a wake delivery) is neither the operator's words nor, on the
+                # live path, ever painted here — so skipping it is live/replay
+                # parity rather than a second opinion, and it also covers the
+                # rows an older build already wrote to existing transcripts
+                # (stamped, or carried forward in a compaction block without a
+                # stamp). See ``harness/rows.py`` for the one decision.
+                if is_harness_notice_row(message):
                     continue
                 # A `$skill` invocation persists as its EXPANDED payload,
                 # because that is what the model was sent. Replaying it
