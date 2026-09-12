@@ -32,10 +32,23 @@ submit exits so the transcript row can stay short, and :meth:`Session.prompt`
 expands unconditionally so every non-TUI surface (CLI, headless, server,
 scheduler, mobile, subagent) gets the feature with zero per-surface work. That
 makes IDEMPOTENCE a hard requirement rather than a nicety —
-``expand_references(expand_references(t).sent).expanded is False`` — and it is
-true BY CONSTRUCTION here: :func:`_reference_spans` skips any ``@`` sitting
-inside an already-emitted block. Were it true only by luck, every operator
-message would carry a doubled block.
+``expand_references(expand_references(t).sent).expanded is False``. Were it
+true only by luck, every operator message would carry a doubled block.
+
+It rests on TWO mechanisms, and both are load-bearing. :func:`_block_spans`
+skips any ``@`` sitting inside an already-emitted block, AND every token a pass
+CONSUMED is named inside that block with a ``typed=`` attribute that
+:func:`_already_expanded` reads back. The second half is what the first cannot
+supply: a token can be consumed without its content being carried — the block
+cap was reached, or it duplicated an earlier token — and such a token used to
+leave no trace in the block at all. It was therefore invisible to pass 2 and
+expanded AGAIN. Measured through the real TUI-then-``Session.prompt`` sequence:
+a 63-character message reached 27,584 chars after pass 1 and 55,084 chars with
+TWO blocks after pass 2, from three ordinary 16,383-byte files and no attacker.
+So overflowed and deduplicated tokens are named as ``<listed>`` elements, and
+the one case where naming them all cannot fit inside
+:data:`BLOCK_LIMIT_CHARS` expands nothing at all (:func:`_too_many`) — a
+verdict that is a pure function of the text, so pass 2 reaches it too.
 
 NO PROVENANCE FLAG (D7)
 -----------------------
@@ -63,8 +76,12 @@ their original callers; a NEW caller should import them from ``sigils``.
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import heapq
 import mimetypes
 import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -134,7 +151,19 @@ AT_REFERENCES_ENV = "LOCAL_OPERATOR_AT_REFERENCES"
 #: one file; this bounds a message that names twenty. References past it are
 #: listed BY PATH ONLY with a line saying so, which keeps the worst case
 #: bounded regardless of who typed the text or how many tokens they typed —
-#: and under D7 the typer need not be the operator.
+#: and under D7 the typer need not be the operator, which is why this bound
+#: exists at all.
+#:
+#: HOW IT IS ACTUALLY HELD: every append goes through :class:`_Block`, which
+#: charges the markers, the preamble, each element and the overflow tail
+#: against one counter, and reserves the tail's worst case BEFORE carrying an
+#: element. It was previously tracked for carried elements only, with the
+#: preamble, the notice and the by-path-only tail appended afterwards and
+#: unaccounted — so this was not a bound: 300 tokens × 35-char names measured
+#: 42,576 chars (1.30×), 1000 × 35 measured 67,776 (2.07×) and 300 × 120
+#: measured 67,164 (2.05×). When even naming the overflow will not fit, the
+#: pass expands NOTHING rather than overrunning; see :meth:`_Block.list_only`
+#: for why those two requirements genuinely collide at that scale.
 BLOCK_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS * 4
 
 #: Ceiling on the candidate list one scan builds. The picker windows to 8 rows,
@@ -151,10 +180,29 @@ SCAN_CANDIDATE_LIMIT = 2000
 #: Matching does NOT refuse. It escalates to the same prompt an outside path
 #: gets, with a description naming why, so the operator can still reference
 #: their own ``.env`` deliberately; they just have to say yes.
+#:
+#: FOUR RULES, ALL SET MEMBERSHIP, and the uniformity is the point rather than
+#: tidiness. Three of these were frozensets and the fourth was an inline
+#: ``name.startswith(".env")`` with no set behind it — which matched ``.env``
+#: and ``.env.local`` but NOT a name ENDING in ``.env``. Measured before the
+#: fix: ``prod.env``, ``secrets.env``, ``config.env`` and ``workspace.env`` all
+#: reached the model with their contents and no prompt. Design §2.7 claims
+#: ``~/.credentials/workspace.env`` is caught by the directory part AND the
+#: name, "two independent gates"; only the directory gate fired, so the stated
+#: property was one gate — and this repo's own ``AGENTS.md`` names that exact
+#: file as the live credential file. A gap hiding in a branch is invisible; a
+#: gap in a frozenset is visible at the data, which is why the fourth rule now
+#: has a set of its own.
 SENSITIVE_NAMES = frozenset(
     {".env", ".netrc", ".npmrc", ".pypirc", "credentials", "id_rsa", "id_ed25519"}
 )
-SENSITIVE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".keystore"})
+#: ``.env`` sits here as well as in :data:`SENSITIVE_NAMES` because the two
+#: rules answer different questions: the name set catches the file CALLED
+#: ``.env``, this suffix set catches ``prod.env`` and ``workspace.env``.
+SENSITIVE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".keystore", ".env"})
+#: A ``.env*`` PREFIX counts: ``.env.local`` holds the same class of secret
+#: ``.env`` does, and its suffix is ``.local``, so neither set above sees it.
+SENSITIVE_NAME_PREFIXES = frozenset({".env"})
 SENSITIVE_DIR_PARTS = frozenset({".ssh", ".gnupg", ".credentials", ".aws", ".kube"})
 
 #: Bytes sampled for the NUL probe, and the probe itself — the SAME detection
@@ -177,16 +225,30 @@ def at_references_enabled() -> bool:
     return os.environ.get(AT_REFERENCES_ENV, "1").strip() not in ("0", "false", "no")
 
 
-def _is_sensitive(path: Path) -> bool:
-    """Whether ``path`` trips the deny-list, and therefore must be asked about."""
-    name = path.name
+def _sensitive_name(name: str) -> bool:
+    """Whether a BARE entry name trips one of the three name-shaped rules.
+
+    Split out from :func:`_is_sensitive` because the fourth rule (ancestor
+    directories) is a property of the PARENT and is therefore constant across
+    every entry in one listing — see :func:`scan_directory`, which evaluates it
+    once instead of ten thousand times.
+
+    ``os.path.splitext`` rather than ``Path.suffix`` so this costs no ``Path``
+    construction: it agrees with ``Path.suffix`` on every name in the sets
+    above (``.env`` -> ``''``, ``.env.local`` -> ``'.local'``, ``prod.env`` ->
+    ``'.env'``), and constructing a ``Path`` per entry measured 0.74 ms per
+    2000 entries on the keystroke path.
+    """
     if name in SENSITIVE_NAMES:
         return True
-    # A `.env*` PREFIX counts: `.env.local` holds the same class of secret
-    # `.env` does, and a name-set membership test alone would wave it through.
-    if name.startswith(".env"):
+    if any(name.startswith(prefix) for prefix in SENSITIVE_NAME_PREFIXES):
         return True
-    if path.suffix in SENSITIVE_SUFFIXES:
+    return os.path.splitext(name)[1] in SENSITIVE_SUFFIXES
+
+
+def _is_sensitive(path: Path) -> bool:
+    """Whether ``path`` trips the deny-list, and therefore must be asked about."""
+    if _sensitive_name(path.name):
         return True
     return bool(SENSITIVE_DIR_PARTS.intersection(path.parts))
 
@@ -260,47 +322,72 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
         return []
     try:
         rules = [("", _load_ignore_rules(path, ""))]
+        # The CHEAP pass: stream the listing and keep only what survives the
+        # predicates that cost no syscall. Not sorted here — see the cap below.
+        eligible: list[tuple[str, bool, os.DirEntry[str]]] = []
         with os.scandir(path) as scan:
-            entries = sorted(scan, key=lambda entry: entry.name)
+            for entry in scan:
+                name = entry.name
+                # The walker's own exclusion vocabulary, imported rather than
+                # retyped so ``@`` agrees with ``grep`` and ``glob`` about what
+                # is worth showing. A second copy of these names is the drift
+                # defect this repo names repeatedly.
+                if name in _GREP_PRUNE_DIRS or name.startswith("."):
+                    continue
+                try:
+                    # ``DirEntry.is_dir(follow_symlinks=False)`` reads the
+                    # ``d_type`` the kernel already returned with the listing,
+                    # so classification costs ZERO extra syscalls — the
+                    # reasoning is written out at ``builtin.py:5086-5096``,
+                    # where ``iterdir`` + per-entry ``Path`` predicates paid
+                    # three stat(2) calls per entry.
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if _ignored(name, is_dir, rules):
+                    continue
+                eligible.append((name, is_dir, entry))
     except OSError:
         # A missing, unreadable or racing directory is an empty list, never an
         # exception: the caller is a keystroke handler and Textual turns an
         # escaped error into a full-screen crash.
         return []
 
-    choices: list[ArgumentChoice] = []
-    for entry in entries:
-        if len(choices) >= SCAN_CANDIDATE_LIMIT:
-            break
-        name = entry.name
-        # The walker's own exclusion vocabulary, imported rather than retyped so
-        # ``@`` agrees with ``grep`` and ``glob`` about what is worth showing. A
-        # second copy of these names is the drift defect this repo names
-        # repeatedly.
-        if name in _GREP_PRUNE_DIRS or name.startswith("."):
-            continue
-        try:
-            # ``DirEntry.is_dir(follow_symlinks=False)`` reads the ``d_type``
-            # the kernel already returned with the listing, so classification
-            # costs ZERO extra syscalls — the reasoning is written out at
-            # ``builtin.py:5086-5096``, where ``iterdir`` + per-entry ``Path``
-            # predicates paid three stat(2) calls per entry.
-            is_dir = entry.is_dir(follow_symlinks=False)
-        except OSError:
-            continue
-        if _ignored(name, is_dir, rules):
-            continue
-        choices.append(
-            ArgumentChoice(
-                # Trailing ``/`` on a directory, matching ``_list_dir_entries``
-                # (``builtin.py:3232-3238``) so one listing convention serves
-                # both the picker and the expanded payload.
-                name=name + ("/" if is_dir else ""),
-                detail=_entry_detail(entry, is_dir),
-                alert=_is_sensitive(Path(entry.path)),
-            )
+    # THE CAP BOUNDS THE EXPENSIVE WORK, not just the list length. The previous
+    # shape sorted every entry and then `break`ed at the cap, so the ordering
+    # cost scaled with the directory while the cap only trimmed the result.
+    # `nsmallest` is O(n log k) and, more importantly, hands back exactly the
+    # rows that will be built — so the per-row `stat` below runs at most
+    # SCAN_CANDIDATE_LIMIT times no matter how large the directory is. That is
+    # the bound `test_reference_scan.py` asserts structurally, by counting
+    # syscalls rather than by timing the call.
+    #
+    # Alphabetical, matching the previous behaviour exactly: `nsmallest` on the
+    # name key returns the same rows the old sort-then-truncate did, so the
+    # picker's ordering is unchanged.
+    if len(eligible) > SCAN_CANDIDATE_LIMIT:
+        kept = heapq.nsmallest(SCAN_CANDIDATE_LIMIT, eligible, key=lambda item: item[0])
+    else:
+        kept = sorted(eligible, key=lambda item: item[0])
+
+    # Hoisted out of the loop because it is a property of the PARENT and so is
+    # constant for every entry in one listing. Inside the loop it rebuilt a
+    # ``Path`` per entry to ask the same question 2000 times: measured 3.94 ms
+    # per 2000 entries, against 0.13 ms for the ignore check beside it, on a
+    # path with a 16.7 ms frame budget.
+    under_sensitive_dir = bool(SENSITIVE_DIR_PARTS.intersection(path.parts))
+
+    return [
+        ArgumentChoice(
+            # Trailing ``/`` on a directory, matching ``_list_dir_entries``
+            # (``builtin.py:3232-3238``) so one listing convention serves
+            # both the picker and the expanded payload.
+            name=name + ("/" if is_dir else ""),
+            detail=_entry_detail(entry, is_dir),
+            alert=under_sensitive_dir or _sensitive_name(name),
         )
-    return choices
+        for name, is_dir, entry in kept
+    ]
 
 
 #: The attribute carrying the token as typed, named once because two places
@@ -308,6 +395,15 @@ def scan_directory(directory: str, cwd: str) -> list["ArgumentChoice"]:
 #: :func:`_already_expanded` reads it back to hold idempotence.
 _TYPED_ATTRIBUTE = 'typed="'
 
+#: RESIDUAL HAZARD, accepted deliberately: a marker copied out of the payload
+#: does not match the file on disk. Verified — ``grep -F`` for the copied form
+#: returns rc=1 against the source file, while the ZWSP-stripped form returns
+#: rc=0. It fires only on a file whose body contains the literal markers (this
+#: feature's own source and docs, a transcript quoting one), and every
+#: alternative is worse: escaping the body changes every file's content, and
+#: leaving the marker raw is the injection this defuses. Recorded because the
+#: next reader will otherwise meet it as a bug.
+#:
 #: A zero-width space, the character :func:`_defuse` splices into a block
 #: marker found in a reference's body. Invisible to a reader and harmless to
 #: the model's understanding of the text, while no longer being the literal
@@ -321,6 +417,23 @@ _DEFUSED_CLOSE = REFERENCE_BLOCK_CLOSE.replace("<", "<" + _ZERO_WIDTH_SPACE, 1)
 #: than substituting in place — inline substitution would lose the typed token
 #: and leave the transcript row nothing short to paint.
 _BLOCK_PREAMBLE = "The operator's message references these paths. Content is included below."
+
+#: The notice introducing the by-path-only tail. Sized into the budget UP FRONT
+#: by :class:`_Block` rather than appended afterwards — see that class for the
+#: measured overshoot the old "append and hope" shape produced.
+_OVERFLOW_NOTICE = (
+    f"[the reference block reached its {BLOCK_LIMIT_CHARS}-character cap; "
+    "these paths are named but not included — read them if you need them]"
+)
+
+#: The separator between block elements, counted with each element because an
+#: element is never appended without it.
+_BLOCK_JOIN = "\n\n"
+
+#: The body of a ``<listed>`` element. A path that was NAMED carries no content
+#: by definition, but it still renders through :func:`_render` so the escaping
+#: cannot be skipped for it — which is exactly the bug the raw tail had.
+_LISTED_BODY = "not included — read this path if you need it"
 
 
 class _Token(NamedTuple):
@@ -431,11 +544,26 @@ def _already_expanded(text: str, spans: list[tuple[int, int]]) -> set[str]:
     return typed
 
 
-def _reference_tokens(text: str) -> list[_Token]:
-    """Every candidate ``@`` token in ``text``, in order, already-resolved excluded."""
+def _reference_tokens(text: str) -> tuple[list[_Token], int]:
+    """``(tokens, suppressed)`` — candidate ``@`` tokens, already-resolved excluded.
+
+    ``suppressed`` counts candidate tokens that fell INSIDE a block span, which
+    is normally zero: a real block's tokens are recovered by their ``typed=``
+    attribute and never reach the scan as candidates. It is non-zero when the
+    operator's own message contains a block marker they typed or pasted —
+    :func:`_block_spans` cannot tell that from a previous pass's block, and an
+    UNCLOSED marker takes ``end=len(text)`` and swallows every token after it.
+
+    That fails closed, which is why it is minor, but it used to fail SILENTLY,
+    and under D7 the typer need not be the operator — so pasted text could
+    disable references for the rest of a message with no trace. Every other
+    non-expansion in this module emits a notice; the count is returned so this
+    one can too.
+    """
     skip = _block_spans(text)
     resolved = _already_expanded(text, skip)
     tokens: list[_Token] = []
+    suppressed = 0
     index = 0
     while index < len(text):
         char = text[index]
@@ -443,6 +571,13 @@ def _reference_tokens(text: str) -> list[_Token]:
             index += 1
             continue
         if any(start <= index < end for start, end in skip):
+            # Only a token with a QUERY would have been a candidate, so a bare
+            # `@` inside a block is not a suppression worth reporting.
+            line_stop = text.find("\n", index)
+            line_stop = len(text) if line_stop == -1 else line_stop
+            _end, query = _token_end(text[index:line_stop], 0)
+            if query and text[index : index + _end] not in resolved:
+                suppressed += 1
             index += 1
             continue
         # The token never spans a newline, so the line slice the composer
@@ -455,7 +590,7 @@ def _reference_tokens(text: str) -> list[_Token]:
         if query and typed not in resolved:
             tokens.append(_Token(typed=typed, raw=query))
         index += max(end, 1)
-    return tokens
+    return tokens, suppressed
 
 
 def _describe(path: Path, inside: bool, resolvable: bool, sensitive: bool) -> str:
@@ -569,6 +704,17 @@ def _file_payload(path: Path, size: int, limit: int, shown: str) -> tuple[str, d
     return text, {"bytes": str(size), "lines": str(len(text.splitlines()))}
 
 
+def _file_payload_of(path: Path, limit: int, shown: str) -> tuple[str, dict[str, str]]:
+    """:func:`_file_payload` with its ``stat`` done on the SAME thread.
+
+    The ``st_size`` lookup is a blocking syscall like the read it sizes, so it
+    belongs on the worker thread rather than on the event loop. One function to
+    hand to :func:`asyncio.to_thread`, so the caller cannot offload the read and
+    leave the ``stat`` behind.
+    """
+    return _file_payload(path, path.stat().st_size, limit, shown)
+
+
 def _shown(path: Path, cwd: str) -> str:
     """``path`` relative to ``cwd``, absolute only when it lies outside.
 
@@ -614,8 +760,19 @@ def _defuse(body: str) -> str:
     )
 
 
-def _render(path: Path, typed: str, body: str, attributes: dict[str, str], cwd: str) -> str:
-    """One ``<reference>`` element.
+def _render(
+    path: Path,
+    typed: str,
+    body: str,
+    attributes: dict[str, str],
+    cwd: str,
+    tag: str = "reference",
+) -> str:
+    """One ``<reference>`` element, or with ``tag="listed"`` one ``<listed>``.
+
+    Both shapes go through this one function so the escaping cannot be skipped
+    for one of them — which is precisely what happened to the overflow tail.
+    See :func:`_render_listed`.
 
     ``typed=`` carries the token EXACTLY as written, mirroring
     ``render_invocation``'s ``invocation=`` attribute
@@ -629,12 +786,205 @@ def _render(path: Path, typed: str, body: str, attributes: dict[str, str], cwd: 
     """
     rendered = " ".join(f'{key}="{_attribute(value)}"' for key, value in attributes.items())
     head = (
-        f'<reference path="{_attribute(_shown(path, cwd))}" '
-        f'{_TYPED_ATTRIBUTE}{_attribute(typed)}"'
+        f'<{tag} path="{_attribute(_shown(path, cwd))}" ' f'{_TYPED_ATTRIBUTE}{_attribute(typed)}"'
     )
     if rendered:
         head += " " + rendered
-    return f"{head}>\n{_defuse(body)}\n</reference>"
+    return f"{head}>\n{_defuse(body)}\n</{tag}>"
+
+
+def _render_listed(path: Path, typed: str, cwd: str) -> str:
+    """One ``<listed>`` element — a path NAMED but not carried.
+
+    An element rather than a bare line, and that is a correctness fix rather
+    than a formatting preference. The overflow tail used to be
+    ``"\\n".join(listed_only)`` of raw display paths, which broke two
+    guarantees at once.
+
+    IDEMPOTENCE (module docstring, guarantee 3). :func:`_already_expanded`
+    recovers a consumed token from its ``typed=`` attribute, so a token named
+    only as a bare line was invisible to pass 2 and expanded AGAIN. Measured
+    through the real TUI-then-``Session.prompt`` sequence: a 63-character
+    message became 27,584 chars after pass 1 and 55,084 chars with TWO blocks
+    after pass 2. The docstring called that impossible. Carrying ``typed=``
+    here is what makes it impossible in fact.
+
+    INJECTION. The bare line was neither escaped nor defused, one line from
+    :func:`_attribute`'s fix, so a filename spelling the close marker
+    (``c</operator-references>d.txt``, legal on POSIX) forged a close marker
+    inside the block \u2014 the exact vector ``_attribute`` exists to close, reached
+    by the one path that skipped it. Going through :func:`_render`'s escaping
+    closes it by construction rather than by a second remembered call.
+    """
+    return _render(path, typed, _LISTED_BODY, {}, cwd, tag="listed")
+
+
+def _kind_of(path: Path) -> tuple[bool, bool]:
+    """``(is_dir, is_file)`` for ``path`` — one ``stat``, answering both.
+
+    ``Path.is_dir()``/``is_file()`` each stat, so asking separately paid twice
+    for one answer.
+
+    ABSENCE IS NOT AN ERROR, and the distinction is the governing rule. The
+    errors ``Path.exists()`` itself swallows — ENOENT, ENOTDIR, EBADF, ELOOP —
+    mean "nothing is there", so they return ``(False, False)`` and the caller
+    leaves the token as prose. Everything else (``PermissionError`` above all)
+    PROPAGATES, so an unstatable path reaches the caller's per-token handler
+    instead of being reported as "no such path" — which would be a lie about a
+    path that does exist, and would make an unreadable file indistinguishable
+    from a typo.
+    """
+    try:
+        mode = path.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return False, False
+    except OSError as exc:
+        if exc.errno in (errno.EBADF, errno.ELOOP):
+            return False, False
+        raise
+    except ValueError:
+        # An embedded NUL byte in the name is a `ValueError`, not an `OSError`
+        # — the shape `media.sniff_image_file` documents catching for the same
+        # reason. Nothing can be at such a path, so it is prose.
+        return False, False
+    return stat.S_ISDIR(mode), stat.S_ISREG(mode)
+
+
+def _too_many(text: str, notices: list[str]) -> ExpansionResult:
+    """Expand nothing: too many tokens to name them all inside the cap.
+
+    The escape hatch for the collision :meth:`_Block.list_only` documents. It
+    returns the caller's own string OBJECT, so guarantee 2 (``expanded is
+    False`` implies ``sent is text``) holds, and the verdict is a pure function
+    of the text, so pass 2 takes this same branch and guarantee 3 holds too.
+
+    A notice rather than silence, because every other non-expansion in this
+    module emits one and an operator who named 1000 paths is owed the reason.
+    """
+    return ExpansionResult(
+        text,
+        False,
+        [
+            *notices,
+            f"too many references to include within the {BLOCK_LIMIT_CHARS}-character "
+            "block cap; none were expanded — reference fewer paths",
+        ],
+    )
+
+
+class _Block:
+    """The reference block under construction, and its ONE budget.
+
+    Every append goes through :meth:`fits`, which is the whole design. The
+    previous shape tracked ``used`` for carried elements only and appended the
+    preamble, the overflow notice and the by-path-only tail afterwards with no
+    accounting \u2014 the budget was tracked in one place and spent in three.
+    :data:`BLOCK_LIMIT_CHARS` was consequently not a bound at all. Measured:
+    300 tokens \u00d7 35-char names produced 42,576 chars (1.30\u00d7 the 32,768 cap),
+    1000 \u00d7 35 produced 67,776 (2.07\u00d7) and 300 \u00d7 120 produced 67,164 (2.05\u00d7).
+
+    That cap is not cosmetic. Under D7 the typer need not be the operator (see
+    :data:`AT_REFERENCES_ENV`'s neighbours and the module docstring), so an
+    unbounded tail removes the containment the whole no-provenance-flag
+    argument rests on.
+
+    The tail's worst case is therefore RESERVED before any element is carried,
+    not discovered afterwards: :meth:`fits` refuses a carried element that
+    would leave no room for the overflow notice plus a ``<listed>`` entry for
+    every token still outstanding. A reservation can only shrink as tokens are
+    consumed, so a block that fits at the start still fits at the end.
+    """
+
+    def __init__(self, limit: int = BLOCK_LIMIT_CHARS) -> None:
+        self._limit = limit
+        self._elements: list[str] = []
+        # The preamble and the two markers are spent the moment the block
+        # exists, so they are charged at construction rather than at render.
+        self._used = (
+            len(REFERENCE_BLOCK_OPEN)
+            + len(_BLOCK_JOIN)
+            + len(_BLOCK_PREAMBLE)
+            + len(_BLOCK_JOIN)
+            + len(REFERENCE_BLOCK_CLOSE)
+        )
+        self._overflow: list[str] = []
+        self._notice_charged = False
+
+    def _charge(self, element: str) -> None:
+        self._elements.append(element)
+        self._used += len(_BLOCK_JOIN) + len(element)
+
+    def fits(self, element: str, reserved: int) -> bool:
+        """Whether ``element`` can be CARRIED with ``reserved`` chars still due.
+
+        ``reserved`` is the caller's worst case for the tokens not yet decided
+        — one ``<listed>`` element each. The overflow notice is added here
+        rather than by the caller, because whether it is still owed is this
+        object's state and not the caller's: it is charged at most once.
+
+        This reservation is what stops the last carried element from consuming
+        the room the tail needs, which is how the cap was overshot before.
+        """
+        due = reserved
+        if reserved and not self._notice_charged:
+            due += len(_BLOCK_JOIN) + len(_OVERFLOW_NOTICE)
+        return self._used + len(_BLOCK_JOIN) + len(element) + due <= self._limit
+
+    def carry(self, element: str) -> None:
+        """Append a full ``<reference>``. Call only when :meth:`fits` said yes."""
+        self._charge(element)
+
+    def list_only(self, element: str) -> bool:
+        """Name a path without carrying it; False when even THAT will not fit.
+
+        Charged through the same counter as a carried element, including the
+        one-off overflow notice, so the tail cannot escape the budget the way
+        the appended-afterwards version did.
+
+        THE FALSE RETURN IS NOT A DETAIL — it is where two of this module's
+        guarantees genuinely collide. Guarantee 3 (idempotence) requires every
+        token a pass consumed to be recoverable from the block, which costs at
+        minimum a ``typed="@…"`` per token. :data:`BLOCK_LIMIT_CHARS` requires
+        the block to fit in 32,768 characters. For 1000 tokens of 35 characters
+        the minimum possible tail is ~45,000 characters, so at that scale the
+        two requirements cannot BOTH hold: naming everything overruns the cap,
+        and capping the tail leaves unnamed tokens that pass 2 re-expands.
+
+        The caller resolves it by expanding NOTHING — see
+        :func:`expand_references`. That keeps the cap absolutely, keeps
+        idempotence (the decision is a pure function of the text, so pass 2
+        reaches it again and also expands nothing), and fails closed with a
+        notice rather than silently. Returning the verdict instead of raising
+        keeps this object free of control flow that the ``never raises``
+        contract would have to catch.
+        """
+        due = 0 if self._notice_charged else len(_BLOCK_JOIN) + len(_OVERFLOW_NOTICE)
+        if self._used + due + len(_BLOCK_JOIN) + len(element) > self._limit:
+            return False
+        if not self._notice_charged:
+            self._charge(_OVERFLOW_NOTICE)
+            self._notice_charged = True
+        self._charge(element)
+        self._overflow.append(element)
+        return True
+
+    @property
+    def elements(self) -> list[str]:
+        """Everything the block will render, carried and listed alike.
+
+        Empty means no token resolved, which is the caller's signal to return
+        the operator's own string OBJECT untouched (guarantee 2).
+        """
+        return self._elements
+
+    @property
+    def overflowed(self) -> bool:
+        """Whether anything was listed rather than carried."""
+        return bool(self._overflow)
+
+    def render(self) -> str:
+        body = _BLOCK_JOIN.join([_BLOCK_PREAMBLE, *self._elements])
+        return f"{REFERENCE_BLOCK_OPEN}{_BLOCK_JOIN}{body}{_BLOCK_JOIN}{REFERENCE_BLOCK_CLOSE}"
 
 
 async def _approved(
@@ -677,6 +1027,23 @@ async def expand_references(
     path of every surface: a raised exception here does not lose a reference,
     it loses the user's message.
 
+    AND IT RETURNS, which is a separate claim and was the weaker one. "Never
+    raises" is worthless if the coroutine can simply never finish, and a FIFO
+    on the submit path did exactly that: the path exists, is not a directory,
+    took the file branch, and ``read_bytes()`` blocked forever with no writer.
+    The block was UNCANCELLABLE — ``asyncio.wait_for(..., timeout=4)`` never
+    regained control, because the thread was stopped in the kernel rather than
+    at an await — so the operator's message was lost in precisely the way this
+    contract exists to prevent. Two mechanisms now stand behind the claim: only
+    a regular file or a directory is read at all (:func:`_kind_of`), and the
+    reads run via :func:`asyncio.to_thread`, so the residual stat-then-read
+    race leaves the event loop responsive and recoverable instead of wedged.
+
+    Non-terminating pathologies that remain are the ordinary ones every reader
+    on this machine shares — an NFS mount that never answers, a disk that never
+    completes a read — and they are now survivable rather than fatal to the
+    loop.
+
     When ``expanded`` is False the returned ``sent`` IS ``text``, by identity.
     """
     try:
@@ -696,19 +1063,57 @@ async def _expand(
     job_id: str | None,
 ) -> ExpansionResult:
     """The body :func:`expand_references` wraps. May raise; the caller degrades."""
-    tokens = _reference_tokens(text)
+    tokens, suppressed = _reference_tokens(text)
+    # A marker the operator typed or pasted reads as a previous pass's block, so
+    # the tokens inside it are skipped. Failing closed is right; failing
+    # silently is not — see `_reference_tokens`.
+    suppressed_notices = (
+        [
+            f"{suppressed} reference"
+            f"{'' if suppressed == 1 else 's'} not expanded: the message contains a "
+            f"{REFERENCE_BLOCK_OPEN} marker, so that text is treated as an "
+            "already-expanded block"
+        ]
+        if suppressed
+        else []
+    )
     if not tokens:
-        return ExpansionResult(text, False, [])
+        return ExpansionResult(text, False, suppressed_notices)
 
-    notices: list[str] = []
-    rendered: list[str] = []
-    listed_only: list[str] = []
+    notices: list[str] = list(suppressed_notices)
+    block = _Block()
     seen: set[Path] = set()
-    used = len(REFERENCE_BLOCK_OPEN) + len(REFERENCE_BLOCK_CLOSE) + len(_BLOCK_PREAMBLE)
+    # Every token this pass CONSUMES must end up named in the block, or pass 2
+    # re-expands it. Counted down rather than recomputed so `_Block.fits` can
+    # reserve the tail's worst case against what is still outstanding.
+    outstanding = len(tokens)
 
     for token in tokens:
+        outstanding -= 1
         path, inside, resolvable = _resolve_workspace_path(token.raw, cwd)
-        if not resolvable or not path.exists():
+        # `Path.exists()` PROPAGATES `PermissionError` — it swallows only
+        # ENOENT/ENOTDIR/EBADF/ELOOP — so an unstatable path used to escape past
+        # the per-token handler below to the catch-all in `expand_references`
+        # and abandon the WHOLE message: `@README.md and @noperm/s.txt`
+        # expanded neither, though §3's governing rule is per-token
+        # degradation. `is_file()`/`is_dir()` raise the same way, so the one
+        # statement covers all three.
+        #
+        # `is_file()` rather than `exists()` is also the FIFO fix. A FIFO
+        # exists, is not a directory, and therefore took the file branch, where
+        # `read_bytes()` blocks forever with no writer — not a raise but a
+        # WEDGE, on the submit path of every surface, and `asyncio.wait_for`
+        # cannot cancel it because the thread is blocked in the kernel rather
+        # than at an await. `expand_references` is documented never to raise;
+        # it must also be able to return. A device, socket or FIFO is not a
+        # file to include, so the governing rule applies: it is prose.
+        try:
+            # One `stat` for both questions, off the loop with the reads below.
+            is_dir, is_file = await asyncio.to_thread(_kind_of, path)
+        except OSError as exc:
+            notices.append(f"{token.typed} — could not be read ({exc.strerror or exc})")
+            continue
+        if not resolvable or not (is_dir or is_file):
             # THE GOVERNING RULE. Not a reference, so no block entry and no
             # change to the prose — this is the branch `@me` takes.
             notices.append(f"{token.typed} — no such path; sent as written")
@@ -716,7 +1121,14 @@ async def _expand(
         # Dedupe by RESOLVED path, so `@./README.md` and `@README.md` are one
         # reference. Both tokens stay in the prose: the user wrote them, and
         # the model reads the sentence, not the block.
+        #
+        # The duplicate is still NAMED, because a token that is silently
+        # skipped is invisible to `_already_expanded` and expands again on pass
+        # 2 — `@n.md and @./n.md` produced a doubled block. Naming it costs one
+        # short `<listed>` element and makes guarantee 3 true for this path.
         if path in seen:
+            if not block.list_only(_render_listed(path, token.typed, cwd)):
+                return _too_many(text, notices)
             continue
         seen.add(path)
         if not await _approved(path, inside, resolvable, request_approval, job_id):
@@ -727,37 +1139,50 @@ async def _expand(
         # inside its body, so the two can never name different addresses.
         shown = _shown(path, cwd)
         try:
-            if path.is_dir():
-                body, attributes = _directory_payload(path)
+            # OFF THE EVENT LOOP, matching `execute_read`'s precedent
+            # (`builtin.py:3405`, `:3458`): every read here was inline, and
+            # this sits on the submit path of every surface, so a slow disk
+            # stalled the loop for the whole read. For ordinary files the
+            # inline cost was minor (8 near-cap files measured 10.1 ms expand,
+            # 13.2 ms max loop stall), so this is not a latency fix.
+            #
+            # It is a RECOVERABILITY fix for the residual TOCTOU window the
+            # `is_file()` check above cannot close: the check and the read are
+            # separate syscalls, so a path that is a regular file at the stat
+            # and a FIFO at the read still blocks. Measured: inline, that block
+            # is uncancellable — `asyncio.wait_for` never regains control
+            # because the thread is stopped in the kernel, not at an await. In
+            # a worker thread the same block leaves the loop responsive and
+            # `wait_for` recovers in 3.0 s (the thread leaks; a leaked thread
+            # is recoverable, a wedged event loop is not).
+            if is_dir:
+                body, attributes = await asyncio.to_thread(_directory_payload, path)
             else:
-                body, attributes = _file_payload(
-                    path, path.stat().st_size, INTERNAL_READ_LIMIT_CHARS, shown
+                body, attributes = await asyncio.to_thread(
+                    _file_payload_of, path, INTERNAL_READ_LIMIT_CHARS, shown
                 )
         except OSError as exc:
             notices.append(f"{token.typed} — could not be read ({exc.strerror or exc})")
             continue
         element = _render(path, token.typed, body, attributes, cwd)
-        if used + len(element) > BLOCK_LIMIT_CHARS:
+        listed = _render_listed(path, token.typed, cwd)
+        # The tail still owed if every remaining token overflows. Reserving it
+        # BEFORE carrying this element is what makes `BLOCK_LIMIT_CHARS` a
+        # bound rather than a suggestion.
+        reserved = outstanding * (len(_BLOCK_JOIN) + len(listed))
+        if not block.fits(element, reserved):
             # Past the whole-block cap the reference is named, not carried.
             # Naming it beats dropping it silently: the model can `read` a path
-            # it has been told about.
-            listed_only.append(shown)
+            # it has been told about, and pass 2 can see it was consumed.
+            if not block.list_only(listed):
+                return _too_many(text, notices)
             continue
-        used += len(element) + 2
-        rendered.append(element)
+        block.carry(element)
 
-    if not rendered and not listed_only:
+    if not block.elements:
         return ExpansionResult(text, False, notices)
 
-    block = [REFERENCE_BLOCK_OPEN, _BLOCK_PREAMBLE, *rendered]
-    if listed_only:
-        block.append(
-            f"[the reference block reached its {BLOCK_LIMIT_CHARS}-character cap; "
-            "these paths are named but not included — read them if you need them]\n"
-            + "\n".join(listed_only)
-        )
-    block.append(REFERENCE_BLOCK_CLOSE)
-    return ExpansionResult(text + "\n\n" + "\n\n".join(block), True, notices)
+    return ExpansionResult(text + _BLOCK_JOIN + block.render(), True, notices)
 
 
 __all__ = [
