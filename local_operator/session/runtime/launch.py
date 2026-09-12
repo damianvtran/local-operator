@@ -239,7 +239,7 @@ def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = Tru
     costs a ``ps`` fork (2.4-4.6 ms across runs on an M-series box, tracking
     load, against the
     23-30 µs budget published for one poll iteration at ``_poll_delay``), so
-    spending it on every 10 ms pass would stretch that period by 24-39% and eat
+    spending it on every 10 ms pass would stretch that period by 24-46% and eat
     the dead time the dense grid exists to remove. The loop therefore asks
     for the cheap answer while a construction is KNOWN to be in flight and for
     the proof once that belief has expired — see the call site. A wrong "live"
@@ -619,7 +619,7 @@ async def engage_runtime(
             # to be in flight, against a published budget of 23-30 µs for one
             # iteration (see ``_poll_delay``); the zombie probe is a `ps` fork
             # measured at 2.4-4.6 ms on this class of host, so asking for it
-            # here would stretch the dense period by 24-39% and add that same
+            # here would stretch the dense period by 24-46% and add that same
             # cost to the attach dead time the dense grid exists to remove.
             #
             # So the cheap probe answers first and the proof is spent once the
@@ -861,7 +861,7 @@ def _poll_delay(backoff: float, constructing_for_s: float | None) -> tuple[float
     holder is a corpse (rather than merely a pid signal 0 accepts) costs that
     same fork — measured at 2.4-4.6 ms across runs here, against the 23-30 µs
     budget above. Asking for it every pass would have stretched the dense period
-    by 24-39% and added the fork straight onto the dead time this grid exists to
+    by 24-46% and added the fork straight onto the dead time this grid exists to
     remove, so
     the loop asks for the cheap answer while a construction is KNOWN to be in
     flight and only for the proof once ``_CONSTRUCTING_WINDOW_S`` has lapsed
