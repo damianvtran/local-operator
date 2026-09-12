@@ -699,6 +699,100 @@ describe("AgentConversation", () => {
 		}
 	});
 
+	it("keeps a running child's dropped polls quiet once a prompt-carrying tail has landed", async () => {
+		/* The same rule as the test above, in the shape the daemon actually
+		   sends: ``prompt`` set (so ``agentConversationEntries`` synthesizes a
+		   ``parent_message`` head) AND running AND polling. That head is a label
+		   for the child, not a landed transcript row — the gate has to read what
+		   the FETCH returned, or this shape would be silent about a drop it must
+		   not report; a landed row still suppresses the card, and the poll still
+		   recovers without the user asking. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			// ``launch_message_id`` kept: the roster row for a launched child
+			// carries both fields, and the entry it names is not in the wire tail.
+			const running = { ...detail, status: "running" as const, transcript: [] };
+			expect(running.prompt).not.toBe("");
+			const live = entry("live", "assistant", "Live step one");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			// A mode rather than a call counter: the number of ticks a virtual
+			// interval produces is an implementation detail of the timer, and the
+			// property under test is "every tick since the landing one failed".
+			let mode: "live" | "broken" | "recovered" = "live";
+			getSubagentHistory.mockImplementation(async () => {
+				if (mode === "broken") throw new Error("poll dropped");
+				return {
+					entries: mode === "live" ? [live] : [live, entry("tail", "assistant", "Live step two")],
+					has_more: false,
+				};
+			});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(screen.getByText("Live step one")).toBeTruthy());
+			// Every tick from here fails: the landed row stays and no card is painted.
+			mode = "broken";
+			await vi.advanceTimersByTimeAsync(3200);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(3);
+			expect(screen.getByText("Live step one")).toBeTruthy();
+			expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+			expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+			mode = "recovered";
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Live step two")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("tells the user when a running child's launch-prompted tail never lands (MAJOR-1)", async () => {
+		/* The production shape for a launched child — ``prompt`` set, running,
+		   and the history route failing on EVERY poll — with nothing landed. The
+		   synthesized head row is a label, not content: gating the exemption on
+		   the painted list let it stand in for the transcript, so this child
+		   painted its launch row and a live "running" header with no error, no
+		   Retry and no loading affordance for as long as it ran. The card is the
+		   only signal anything failed, and it is honest here because nothing is
+		   in flight; a later tick that lands content clears it in place. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = { ...detail, status: "running" as const, transcript: [] };
+			expect(running.prompt).not.toBe("");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			// Released on demand: the assertion is that the route fails on every
+			// poll for a while and then recovers, not that it fails N times.
+			let released = false;
+			getSubagentHistory.mockImplementation(async () => {
+				if (!released) throw new Error("history route dropped");
+				return { entries: [entry("landed", "assistant", "Landed at last")], has_more: false };
+			});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(getSubagentHistory).toHaveBeenCalledTimes(1));
+			// ~6 s of polls, every one of them failing: the launch row is there,
+			// the body is not silent about it.
+			await vi.advanceTimersByTimeAsync(6800);
+			expect(getSubagentHistory.mock.calls.length).toBeGreaterThanOrEqual(4);
+			expect(screen.getAllByText(/One request/).length).toBeGreaterThan(0);
+			expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy();
+			expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+			// The next tick lands rows; the card clears without the user asking.
+			released = true;
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Landed at last")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps the retry card when a settled child's later fetch fails (U1)", async () => {
 		/* The mirror of the rule above, and the reason it keys on ``running``
 		   rather than on rows alone: a settled child has NO poll, so nothing

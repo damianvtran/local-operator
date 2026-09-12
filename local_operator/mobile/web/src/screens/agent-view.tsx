@@ -467,7 +467,8 @@ interface LazyTranscript {
 	 * body paints depends on whether a poll can recover it — a SETTLED child
 	 * has no poll, so its single dropped fetch must surface an error + retry
 	 * rather than a silent blank (U1), while a running child's drop stays quiet
-	 * over the rows already on screen (see ``transientCard``). Mutually
+	 * over the rows its earlier fetches LANDED (see ``transientCard`` — the
+	 * synthesized launch head does not count as a landed row). Mutually
 	 * exclusive with ``unavailable``, so the newest fetch decides. */
 	failed: boolean;
 	/** The route answered 404: this child has no readable transcript (the daemon
@@ -723,17 +724,32 @@ export function AgentConversation({
 	// shape (D1/Q1, Q2), so ``emptyContent`` is now only for a body with nothing
 	// in it at all and the rows get the state underneath them.
 	const hasRows = entries.length > 0;
-	// A dropped poll on a RUNNING child whose rows are already on screen must NOT
-	// paint the transient card: that child's own 1.5 s poll is its recovery path
-	// (see the hook's catch block), so the drop self-heals on the next tick while
-	// the card would contradict rows that are still live — and on a flaky link
-	// flash an error once per drop over a transcript the user can read. It stays
-	// quiet until a tick lands. Two shapes keep the card, and neither has a poll
-	// to recover it: a SETTLED child's single fetch (U1), and a running child with
-	// nothing on screen yet, where the card is the only signal anything failed.
+	// ``transcript`` — the entries the FETCH landed — and never ``entries``, the
+	// painted list. ``entries`` carries synthesized rows: ``agentConversationEntries``
+	// prepends a ``prompt:<job_id>`` head whenever ``detail.prompt`` is non-empty,
+	// and the daemon sends that prompt for every launched child
+	// (``mobile/daemon.py:623``, ``run_subagent`` → ``record_launch``). So for the
+	// production shape — running, launched, transcript never fetched — the painted
+	// list is non-empty with ZERO transcript rows on screen, and gating on it
+	// swallowed the error surface for exactly the child this screen exists for: a
+	// persistent non-404 failure (5xx, unparseable body, a throw in the fetch path)
+	// painted the launch row and the running header and nothing else, for as long as
+	// the child ran, while the comment below promised the opposite (MAJOR-1).
+	// The trap is the head row: it is a durable label for the child, not evidence
+	// that content arrived.
+	const landedRows = transcript.length > 0;
+	// A dropped poll on a RUNNING child whose rows have already been FETCHED must
+	// NOT paint the transient card: that child's own 1.5 s poll is its recovery
+	// path (see the hook's catch block), so the drop self-heals on the next tick
+	// while the card would contradict rows that are still live — and on a flaky
+	// link flash an error once per drop over a transcript the user can read. It
+	// stays quiet until a tick lands. Two shapes keep the card: a SETTLED child's
+	// single fetch (U1), and a child with no landed rows, running or not — while
+	// its poll is live the card is the only signal anything failed, and if the poll
+	// never lands the body must not stay silent forever.
 	// The terminal 404 card is deliberately not gated: a 404 is a verdict about
 	// the child, not a transient fact about the link (D3).
-	const transientCard = failed && !(running && hasRows);
+	const transientCard = failed && !(running && landedRows);
 	const fetchState = unavailable ? (
 		<TranscriptFetchError
 			connected={connected}
