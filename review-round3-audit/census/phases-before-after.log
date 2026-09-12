@@ -1,0 +1,6 @@
+== round-2 head (9992708fc) ==
+context : rows=   343 user=  65 notice_rows=  5 painted_by_the_fold=0
+audit   : rows= 15501 user=  68 notice_rows=  4 painted_by_the_fold=4
+== this head ==
+context : rows=   343 user=  65 notice_rows=  5 painted_by_the_fold=0
+audit   : rows= 15501 user=  68 notice_rows=  8 painted_by_the_fold=0

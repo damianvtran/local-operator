@@ -1,0 +1,114 @@
+settled: blocks=61 notices=0
+page-back 5: notices=0 pending=40
+page-back 10: notices=0 pending=40
+page-back 15: notices=0 pending=40
+  … oldest='· older messages above — scroll up to load' pending=40
+page-back 20: notices=0 pending=40
+page-back 25: notices=0 pending=40
+page-back 30: notices=0 pending=40
+page-back 35: notices=0 pending=40
+  … oldest='· older messages above — scroll up to load' pending=40
+page-back 40: notices=0 pending=40
+page-back 45: notices=0 pending=40
+page-back 50: notices=0 pending=40
+page-back 55: notices=0 pending=40
+  … oldest='· older messages above — scroll up to load' pending=40
+page-back 60: notices=0 pending=40
+page-back 65: notices=0 pending=16
+page-back 70: notices=0 pending=16
+page-back 75: notices=0 pending=16
+  … oldest='· older messages above — scroll up to load' pending=16
+page-back 80: notices=0 pending=16
+page-back 85: notices=0 pending=0
+page-back 90: notices=0 pending=0
+page-back 95: notices=0 pending=96
+  … oldest='· older messages above — scroll up to load' pending=96
+page-back 100: notices=0 pending=96
+page-back 105: notices=0 pending=57
+page-back 110: notices=0 pending=57
+page-back 115: notices=0 pending=57
+  … oldest='· older messages above — scroll up to load' pending=57
+page-back 120: notices=0 pending=57
+page-back 125: notices=0 pending=33
+page-back 130: notices=0 pending=33
+page-back 135: notices=0 pending=33
+  … oldest='· older messages above — scroll up to load' pending=9
+page-back 140: notices=0 pending=9
+page-back 145: notices=0 pending=9
+page-back 150: notices=0 pending=9
+page-back 155: notices=0 pending=59
+  … oldest='· older messages above — scroll up to load' pending=59
+page-back 160: notices=0 pending=59
+page-back 165: notices=0 pending=59
+page-back 170: notices=0 pending=59
+page-back 175: notices=0 pending=59
+  … oldest='· older messages above — scroll up to load' pending=59
+page-back 180: notices=0 pending=59
+page-back 185: notices=0 pending=59
+page-back 190: notices=0 pending=35
+page-back 195: notices=0 pending=35
+  … oldest='· older messages above — scroll up to load' pending=35
+page-back 200: notices=0 pending=35
+page-back 205: notices=0 pending=35
+page-back 210: notices=0 pending=35
+page-back 215: notices=0 pending=35
+  … oldest='· older messages above — scroll up to load' pending=35
+page-back 220: notices=0 pending=35
+page-back 225: notices=0 pending=35
+page-back 230: notices=0 pending=35
+page-back 235: notices=0 pending=11
+  … oldest='· older messages above — scroll up to load' pending=11
+page-back 240: notices=0 pending=11
+page-back 245: notices=0 pending=11
+page-back 250: notices=0 pending=11
+page-back 255: notices=0 pending=11
+  … oldest='· older messages above — scroll up to load' pending=11
+page-back 260: notices=0 pending=11
+page-back 265: notices=0 pending=11
+page-back 270: notices=0 pending=11
+page-back 275: notices=0 pending=0
+  … oldest='· older messages above — scroll up to load' pending=0
+page-back 280: notices=0 pending=0
+page-back 285: notices=0 pending=0
+page-back 290: notices=0 pending=0
+page-back 295: notices=0 pending=85
+  … oldest='· earlier history above — scroll up to load' pending=85
+page-back 300: notices=0 pending=85
+page-back 305: notices=0 pending=85
+page-back 310: notices=0 pending=85
+page-back 315: notices=0 pending=85
+  … oldest='· earlier history above — scroll up to load' pending=85
+page-back 320: notices=0 pending=85
+page-back 325: notices=0 pending=85
+page-back 330: notices=0 pending=85
+page-back 335: notices=0 pending=85
+  … oldest='· earlier history above — scroll up to load' pending=85
+page-back 340: notices=0 pending=85
+page-back 345: notices=0 pending=85
+page-back 350: notices=0 pending=85
+page-back 355: notices=0 pending=60
+  … oldest='· earlier history above — scroll up to load' pending=60
+page-back 360: notices=0 pending=60
+page-back 365: notices=0 pending=60
+page-back 370: notices=0 pending=60
+page-back 375: notices=0 pending=60
+  … oldest='· earlier history above — scroll up to load' pending=36
+page-back 380: notices=0 pending=36
+page-back 385: notices=0 pending=36
+page-back 390: notices=0 pending=36
+page-back 395: notices=0 pending=36
+  … oldest='· earlier history above — scroll up to load' pending=36
+page-back 400: notices=0 pending=36
+FINAL: notices=0 users=60
+.
+=============================== warnings summary ===============================
+local_operator/types.py:426
+  /Users/damian/workspace/repos/lo-switch-leak/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator(
+
+local_operator/types.py:446
+  /Users/damian/workspace/repos/lo-switch-leak/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator("end_time_utc")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 2 warnings in 82.50s (0:01:22)
