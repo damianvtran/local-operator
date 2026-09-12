@@ -194,6 +194,14 @@ DEFAULT_CONFIG = Config(
                 "openai": {"api": "responses", "use_max_context_window": True},
                 "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
                 "openrouter": {
+                    # The one HARNESS-side key in this block: read by
+                    # `SessionStreamFn._affinity_enabled`, never by
+                    # `_openrouter_provider_preferences`, so it does not make
+                    # the shipped config express a wire-level opinion. On by
+                    # default — reusing the host that served the last turn is
+                    # what keeps a long conversation's prompt cache warm, and
+                    # any explicit routing preference below turns it off.
+                    "provider_affinity": True,
                     "sort": "",
                     "order": [],
                     "only": [],
