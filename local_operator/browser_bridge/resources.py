@@ -225,7 +225,32 @@ class BrowserResource:
             # not implement ownership at all. Keying on the typed code rather
             # than on the old side's wording is what stops a reworded message
             # from silently degrading this into a raw internal error.
-            if exc.code in (ErrorCode.INTERNAL, ErrorCode.PROTO_MISMATCH):
+            #
+            # The narrowing matters as much as the mapping: TWO kinds of
+            # data-carrying INTERNAL now reach this branch and NEITHER may be
+            # reported as a version mismatch, because both mean "the extension
+            # is wedged" — the one thing the old message told the operator not
+            # to look for.
+            #
+            #   * a DAEMON-side timeout, which carries `timeout_s`; and
+            #   * an EXTENSION-side per-call deadline, which carries `stalled`
+            #     (settle.ts's `deadline()`), i.e. exactly the wedged worker
+            #     this PR exists for — `owner_recover` reaches it through
+            #     `withOwnership` → `withSessionMutation` → `scopes()`, so the
+            #     recovery command would otherwise tell the operator to update
+            #     a perfectly current extension from inside the incident.
+            #
+            # Only a genuinely old extension returns `internal` with NEITHER
+            # key (its HANDLERS fallthrough), so only that gets the message the
+            # reasoning above was written for. Keying on the absence of both
+            # discriminators is what keeps a future third producer from
+            # silently re-creating the misdiagnosis; a new `data` key belongs
+            # in this predicate.
+            if exc.code is ErrorCode.PROTO_MISMATCH or (
+                exc.code is ErrorCode.INTERNAL
+                and "timeout_s" not in exc.data
+                and not exc.data.get("stalled")
+            ):
                 raise BrowserOwnershipError(
                     "Browser ownership recovery requires an updated Local Operator extension. "
                     "Update the extension, reconnect it, then retry; no new tab was allocated."

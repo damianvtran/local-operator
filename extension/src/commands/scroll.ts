@@ -5,6 +5,7 @@ import {
   SCROLL_INTO_VIEW_FN,
   scrollExpressionFor,
 } from "../scroll-expressions";
+import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
 import { getRefs, surfaceToken, type StoredSurface } from "../state";
 
 interface CallResult { result: { value?: unknown } }
@@ -168,6 +169,10 @@ export async function scroll(params: Record<string, unknown>): Promise<Record<st
   // after; a short settle keeps the reported position and moreBelow honest.
   await new Promise((resolve) => setTimeout(resolve, 150));
   const metrics = await readMetrics(tabId);
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await deadline(
+    chrome.tabs.get(tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${tabId})`,
+  );
   return { ...metrics, url: tab.url ?? "", title: tab.title ?? "" };
 }

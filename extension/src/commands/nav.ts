@@ -1,4 +1,4 @@
-import { attach, BridgeCommandError, cdp, detach, pruneSurface, requireSurface } from "../cdp";
+import { attach, BridgeCommandError, cdp, detach, isStalled, pruneSurface, requireSurface } from "../cdp";
 import { dropLogCapture, startLogCapture } from "../log-capture";
 import {
   askOrigin,
@@ -7,7 +7,7 @@ import {
   withOriginGate,
   type OriginAdmission,
 } from "../origins";
-import { settle } from "../settle";
+import { CHROME_API_DEADLINE_MS, deadline, settle } from "../settle";
 import { reconcileTabGroup } from "../tab-groups";
 import { recordAllocation } from "../ownership";
 import {
@@ -34,9 +34,17 @@ async function liveSurfaces(): Promise<Record<string, StoredSurface>> {
   const live: Record<string, StoredSurface> = {};
   for (const [token, surface] of Object.entries(surfaces)) {
     try {
-      await chrome.tabs.get(surface.tabId);
+      await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
       live[token] = surface;
-    } catch {
+    } catch (error) {
+      // Only a real "no such tab" prunes. A per-call deadline means OUR event
+      // loop stalled, which says nothing about the tab — pruning a live surface
+      // here would retire a tab the session is still driving.
+      if (isStalled(error)) throw error;
       await pruneSurface(token, surface.tabId);
     }
   }
@@ -52,7 +60,11 @@ function sessionRequester(params: Record<string, unknown>): string {
 }
 
 async function page(tabId: number): Promise<{ url: string; title: string }> {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await deadline(
+    chrome.tabs.get(tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${tabId})`,
+  );
   return { url: tab.url ?? "", title: tab.title ?? "" };
 }
 
@@ -73,7 +85,11 @@ async function navigate(tabId: number, url: URL, requestId: string, admission: O
     requestId,
     async () => {
       const waiting = settle(tabId);
-      await chrome.tabs.update(tabId, { url: url.href });
+      await deadline(
+        chrome.tabs.update(tabId, { url: url.href }),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.update(${tabId})`,
+      );
       await waiting;
       return page(tabId);
     },
@@ -144,7 +160,11 @@ export async function open(params: Record<string, unknown>, requestId: string): 
   // Create about:blank first. Creating directly at the destination starts its
   // redirect chain before a debugger can attach, leaving a race where a second
   // origin could receive cookies before the permission gate exists.
-  const tab = await chrome.tabs.create({ active: false, url: "about:blank" });
+  const tab = await deadline(
+    chrome.tabs.create({ active: false, url: "about:blank" }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.tabs.create",
+  );
   if (tab.id === undefined) throw new BridgeCommandError("internal", "Chrome created no tab id");
   const now = Date.now();
   const surface: StoredSurface = {
@@ -237,7 +257,11 @@ export async function tabs(_params: Record<string, unknown>): Promise<Record<str
   const live: Record<string, unknown>[] = [];
   for (const [token, surface] of Object.entries(surfaces)) {
     try {
-      const tab = await chrome.tabs.get(surface.tabId);
+      const tab = await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
       live.push({
         tab: redactToken(token),
         url: tab.url ?? "",
@@ -245,8 +269,10 @@ export async function tabs(_params: Record<string, unknown>): Promise<Record<str
         createdAt: surface.createdAt,
         lastUsedAt: surface.lastUsedAt,
       });
-    } catch {
-      // Closed between the liveness pass and this read — rare; prune now.
+    } catch (error) {
+      // Closed between the liveness pass and this read — rare; prune now. A
+      // per-call deadline is not that (see isStalled).
+      if (isStalled(error)) throw error;
       await pruneSurface(token, surface.tabId);
     }
   }
@@ -258,11 +284,21 @@ async function closeSurface(token: string, surface: StoredSurface): Promise<void
   dropLogCapture(surface.tabId);
   await detach(surface.tabId);
   try {
-    await chrome.tabs.remove(surface.tabId);
+    await deadline(
+      chrome.tabs.remove(surface.tabId),
+      CHROME_API_DEADLINE_MS,
+      `chrome.tabs.remove(${surface.tabId})`,
+    );
   } catch (error) {
     // Only a confirmed missing tab is idempotent success. Policy/debugger or
     // transient failures must leave the capability available for retry.
-    try { await chrome.tabs.get(surface.tabId); } catch (missing) {
+    try {
+      await deadline(
+        chrome.tabs.get(surface.tabId),
+        CHROME_API_DEADLINE_MS,
+        `chrome.tabs.get(${surface.tabId})`,
+      );
+    } catch (missing) {
       if (missing instanceof Error && /No tab with id|Invalid tab ID/i.test(missing.message)) {
         await removeSurface(token);
         return;

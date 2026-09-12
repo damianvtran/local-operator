@@ -49,6 +49,52 @@ from local_operator.paths import config_dir
 logger = logging.getLogger(__name__)
 DEFAULT_PORT = 4099
 PING_INTERVAL_S = 20.0
+#: How long the daemon tolerates TOTAL silence — no frame of any kind — from a
+#: TCP-connected extension before it declares the link unproven. Two missed
+#: pings plus one interval of slack: the ping loop is `await sleep(20)` then
+#: send, so tick spacing drifts with loop load, and the supervisor can add its
+#: first 1 s of backoff after a failure.
+#:
+#: A healthy worker pongs in microseconds from the socket's own onmessage
+#: handler (`worker.ts`, `frame.event === "ping"`) — NOT behind any of the
+#: extension's serialized queues — and emits nothing else while idle, so its
+#: longest legitimate silence is one ping interval. That is the bound that sets
+#: this number, and 50 s leaves 2.5x headroom against it.
+#:
+#: Cross-checked against the client's patience so the session always gets this
+#: typed error rather than an HTTP timeout: the tightest session budget is the
+#: base command timeout + ORIGIN_PROMPT_WINDOW_S + margin (90 s for `read`).
+LINK_SILENCE_TIMEOUT_S = 50.0
+#: How long the daemon keeps reporting a link it severed as *unresponsive*
+#: rather than absent, once the socket is gone.
+#:
+#: The teardown ANSWERS with the honest state and nulls the socket in the same
+#: breath, so without a latched reason the two facts a session most needs to
+#: tell apart — "the browser is open but mute" and "no browser is attached" —
+#: become byte-identical one command later, and the second one tells the
+#: operator to open a browser that is already open. That is the misdiagnosis
+#: this change exists to remove (design D2/R1-5, QA Q1). The latch is what lets
+#: the CLI, `/health`, the popup and the next RPC answer honestly for as long as
+#: the observation is still true.
+#:
+#: Sized to the slowest real recovery so it outlives the state it describes:
+#: after a signal-4000 close the worker re-dials on its ~1 s fast path, but a
+#: worker that suspends inside that window returns on the alarm floor —
+#: measured at 58.21 s on real hardware (§5.2). 60 s covers it. A genuinely
+#: wedged worker that never re-dials stays honest only for this window, then
+#: correctly reads as absent (by then nothing is attached, and it is not).
+LINK_DROP_TTL_S = 60.0
+#: Ceiling on one write to the extension socket. A loopback `send_json` of a
+#: small frame is sub-millisecond; seconds here means a peer that has stopped
+#: draining its TCP receive buffer, which is already fatal. Generous enough
+#: that a GC pause or a momentarily full buffer cannot trip it, and short
+#: enough to be invisible inside a 20-30 s command budget.
+#:
+#: This wraps `ExtensionLink.send` INCLUDING its lock acquisition, which is what
+#: makes a *stuck lock holder* bounded rather than merely a stuck `send_json`.
+#: Note `wait_for` cancels the waiter, not the holder — the teardown that
+#: follows is what deals with the holder.
+LINK_SEND_TIMEOUT_S = 5.0
 #: How often the daemon re-reads the pairing file to notice an out-of-process
 #: revoke. Short enough that "Unpair" feels immediate, cheap enough to poll.
 REVOKE_WATCH_S = 3.0
@@ -201,6 +247,85 @@ class ExtensionLink:
         # makes closing one tab clear exactly that tab.
         self.driven: dict[str, DrivenTab] = {}
         self.send_lock = asyncio.Lock()
+        # Monotonic timestamp of the last frame received from the extension —
+        # ANY frame, before any dispatch on its type, so an older extension's
+        # frames count too. Set when the socket is accepted (the peer has just
+        # spoken: it sent `hello`) and on every frame of the receive loop; reset
+        # by `disconnect`. This is the only thing that can tell a healthy idle
+        # extension from a mute one, and without it `status` advertised a wedged
+        # bridge as connected while every session hung.
+        self.last_frame_at = 0.0
+        # Why the daemon last severed an attached link, and the silence it had
+        # measured when it did. Read as a LATCHED fact that outlives the socket
+        # for LINK_DROP_TTL_S, because `disconnect()` (the same teardown used
+        # for an ordinary peer close) nulls the socket as part of ANSWERING
+        # with the unresponsive state. See LINK_DROP_TTL_S for the whole
+        # reasoning; `silent_drop_*` is set only by `_drop_unproven_link`, so a
+        # browser that was simply closed never reads as "attached but mute".
+        self.silent_drop_at = 0.0
+        self.silent_drop_silence_s = 0.0
+
+    @property
+    def proven(self) -> bool:
+        """Whether the connected socket has recently proven it is listening.
+
+        ``websocket is not None`` is true whenever TCP is up and the peer has
+        not closed, so a peer that completes `hello`, pairs, and then never
+        speaks again is indistinguishable from a healthy idle one. Never trust
+        the bare socket object: a silent link must fail sessions fast and be
+        dropped, not be advertised as connected.
+        """
+        if self.websocket is None or self.last_frame_at <= 0.0:
+            return False
+        return (time.monotonic() - self.last_frame_at) <= LINK_SILENCE_TIMEOUT_S
+
+    def silent_for(self) -> float:
+        """Seconds since the extension last said anything; 0.0 if it never has.
+
+        Read by the promotion rule in ``_dispatch_locked``: a command that
+        consumed its whole budget while the link was ALSO silent for 1.5 ping
+        intervals is corroborated as a dead peer rather than a slow page.
+        """
+        if self.last_frame_at <= 0.0:
+            return 0.0
+        return max(0.0, time.monotonic() - self.last_frame_at)
+
+    def note_unproven_drop(self, silence_s: float) -> None:
+        """Latch WHY the link was severed, for as long as that stays true."""
+        self.silent_drop_at = time.monotonic()
+        self.silent_drop_silence_s = silence_s
+
+    def clear_unproven_drop(self) -> None:
+        """Forget the latched reason: a link this daemon did not sever.
+
+        Called when the socket ends for any ordinary reason (the worker died,
+        the browser closed, the peer was evicted) and when a NEW socket becomes
+        authoritative, so the latch can never make a freshly connected bridge
+        look mute.
+        """
+        self.silent_drop_at = 0.0
+        self.silent_drop_silence_s = 0.0
+
+    def recent_drop_silence(self) -> float:
+        """The silence measured at the last unproven drop, while the latch is live.
+
+        0.0 when no such drop happened or the window has expired. It can also be
+        0.0 while the latch IS live (a `link.send` deadline can fire with the peer
+        still ponging), so "is it latched" is a separate question — see
+        `dropped_unproven`.
+        """
+        return self.silent_drop_silence_s if self.dropped_unproven() else 0.0
+
+    def dropped_unproven(self) -> bool:
+        """Whether "this daemon severed an attached link" is still the truth.
+
+        The discriminator that keeps "attached but not answering" from
+        outliving the state it describes: it expires after `LINK_DROP_TTL_S`,
+        and every path that ends the link for another reason clears it.
+        """
+        if self.silent_drop_at <= 0.0:
+            return False
+        return (time.monotonic() - self.silent_drop_at) <= LINK_DROP_TTL_S
 
     @property
     def current_url(self) -> str:
@@ -311,6 +436,7 @@ class ExtensionLink:
     def disconnect(self) -> None:
         self.websocket = None
         self.paired = False
+        self.last_frame_at = 0.0
         for future in self.pending.values():
             if not future.done():
                 future.set_exception(RuntimeError("extension disconnected"))
@@ -350,7 +476,12 @@ class BridgeService:
         self._tab_locks: dict[str, asyncio.Lock] = {}
 
     def publish(self) -> None:
-        self.state.extension_connected = self.link.websocket is not None
+        # `proven`, never `websocket is not None` (see ExtensionLink.proven).
+        # Every downstream consumer reads this ONE bit: state.liveness() turns
+        # it into ABSENT, which makes available()/advertisable() false, which is
+        # what stops sessions hanging on a mute peer and falls them back to cmux
+        # (or to a typed diagnostic) instead.
+        self.state.extension_connected = self.link.proven
         self.state.paired = self.link.paired
         self.state.extension_id = self.link.extension_id
         self.state.browser_name = self.link.browser
@@ -452,11 +583,64 @@ class BridgeService:
 
     async def _ping_tick(self) -> None:
         await asyncio.sleep(PING_INTERVAL_S)
-        if self.link.websocket is not None:
-            try:
-                await self.link.send({"event": "ping"})
-            except Exception:  # noqa: BLE001 - receive loop owns teardown
-                logger.debug("browser extension ping failed", exc_info=True)
+        if self.link.websocket is None:
+            return
+        if not self.link.proven:
+            # Total silence for two ping intervals: not a slow peer, a dead
+            # one. The check lives HERE because this loop already ticks every
+            # PING_INTERVAL_S whether or not a session is active, so an idle
+            # bridge still notices instead of waiting for the next command.
+            await self._drop_unproven_link(
+                f"no frame for {self.link.silent_for():.0f}s "
+                f"(deadline {LINK_SILENCE_TIMEOUT_S:.0f}s)"
+            )
+            return
+        try:
+            # Bounded for the same reason as every other send: a ping that
+            # parks silently disarms the very detector this design rests on.
+            await asyncio.wait_for(self.link.send({"event": "ping"}), timeout=LINK_SEND_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            await self._drop_unproven_link("ping send exceeded its deadline")
+        except Exception:  # noqa: BLE001 - receive loop owns teardown
+            logger.debug("browser extension ping failed", exc_info=True)
+
+    async def _drop_unproven_link(self, reason: str) -> None:
+        """Sever a link the daemon no longer trusts, and say why ONCE.
+
+        Deliberately the SAME teardown the ordinary disconnect path uses
+        (``link.disconnect()``), with a new trigger rather than a new mechanism:
+        every pending future is failed with ``extension disconnected`` (which
+        the dispatch site turns into a typed EXTENSION_DISCONNECTED response),
+        and ``awaiting_origin``/``driven`` are cleared — so every waiting
+        session gets a typed answer now instead of timing out.
+
+        Close code 4000 is the whole wire-compatibility story: an
+        already-installed worker handles 4000 explicitly, so it resets its
+        state and arms its ~1 s fast-path reconnect rather than reading the
+        close as a lost pairing. A code the old worker does not understand
+        would be treated as an ordinary close (which is why 4000, already
+        meaningful to every released build, is the right one).
+        """
+        websocket = self.link.websocket
+        logger.warning("browser bridge dropped an unresponsive extension: %s", reason)
+        # Latch WHY, and how long the peer had been quiet, BEFORE the teardown
+        # nulls the socket: this is the answer `_drop_unproven_link` is about to
+        # give, and without the latch it would be gone by the time anyone (the
+        # next RPC, `/health`, the CLI or the popup) could read it.
+        self.link.note_unproven_drop(self.link.silent_for())
+        # Clear the link BEFORE the close, not after. `disconnect()` is what
+        # fails every pending future, i.e. what turns three waiting sessions into
+        # three typed answers; `websocket.close()` is a SEND, so it can block on
+        # a peer that has stopped draining — the same hazard as any other
+        # unbounded write on this socket. Ordering the close first would make the
+        # teardown itself the next thing that can hang, which is the class of bug
+        # this whole change exists to remove. The close still goes out, and a
+        # peer that never sees it is already the disconnected path.
+        self.link.disconnect()
+        self.publish_safely()
+        if websocket is not None:
+            with suppress(Exception):
+                await websocket.close(code=4000)
 
     async def _heartbeat(self) -> None:
         await self._supervise("heartbeat", self._heartbeat_tick)
@@ -486,6 +670,9 @@ class BridgeService:
         """
         reset_pairing(self.root)
         self.link.paired = False
+        # An unpair is not a wedge: forget any latched unresponsive reason, or a
+        # deliberate revoke would keep reading as "attached but not answering".
+        self.link.clear_unproven_drop()
         websocket = self.link.websocket
         if websocket is not None:
             with suppress(Exception):
@@ -672,6 +859,14 @@ class BridgeService:
         self.link.websocket = websocket
         self.link.extension_id = extension_id
         self.link.browser = hello.browser
+        # A fresh authoritative socket supersedes any latched drop reason from
+        # the link it just replaced (including the "later connection wins"
+        # eviction above), so a reconnect cannot inherit a mute label.
+        self.link.clear_unproven_drop()
+        # The peer has just proven it is listening by sending `hello`; stamp it
+        # so `proven` is true from the first instant of the connection instead
+        # of waiting for the first pong.
+        self.link.last_frame_at = time.monotonic()
         self.link.paired = self._valid_saved_token(extension_id, hello.token)
         if not self.link.paired:
             self._ensure_pending(extension_id)
@@ -680,6 +875,11 @@ class BridgeService:
         try:
             while True:
                 frame = await websocket.receive_json()
+                # ANY frame, recorded BEFORE any dispatch on its type: this is
+                # the liveness signal `proven` reads, and taking it here (rather
+                # than inside each event branch) is what makes an older
+                # extension that only pongs count as alive.
+                self.link.last_frame_at = time.monotonic()
                 if frame.get("event") == "pair":
                     try:
                         pair = PairRequest.model_validate(frame)
@@ -758,6 +958,11 @@ class BridgeService:
             pass
         finally:
             if self.link.websocket is websocket:
+                # The peer ended this link itself (worker died, browser closed,
+                # tab torn down). That is NOT the unresponsive path — the daemon
+                # did not sever it — so drop any latched unresponsive reason and
+                # let the honest "not currently attached" state stand.
+                self.link.clear_unproven_drop()
                 self.link.disconnect()
                 self.publish_safely()
 
@@ -772,8 +977,40 @@ class BridgeService:
         if request.method == "ping":
             return JSONResponse({"id": request.id, "ok": True, "result": {"pong": True}})
         if self.link.websocket is None:
+            # A link THIS daemon severed for silence must not answer with
+            # EXTENSION_DISCONNECTED's "no browser is attached; ask the user to
+            # open their browser" for the LINK_DROP_TTL_S cooling-off window.
+            # The browser IS attached (and re-dialling); telling the operator to
+            # open it re-creates, one step later, exactly the misdirection this
+            # change exists to remove (design D1/D2). A peer that REALLY closed
+            # never latches the reason (`clear_unproven_drop` runs on every
+            # ordinary socket end), so it still gets the honest absent copy.
+            dropped_for = self.link.recent_drop_silence()
+            if self.link.dropped_unproven():
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_UNRESPONSIVE,
+                    "the browser extension is attached but has not re-dialled since the "
+                    "bridge dropped its unresponsive link",
+                    {"phase": "dropped", "link_silent_s": dropped_for},
+                )
             return self._error_response(
                 request.id, ErrorCode.EXTENSION_DISCONNECTED, "extension not connected"
+            )
+        if not self.link.proven:
+            # A socket that is TCP-open but has said nothing for
+            # LINK_SILENCE_TIMEOUT_S. Refuse in milliseconds rather than let
+            # the command burn its whole budget on a peer nobody is home at,
+            # AND drop the link so the extension re-dials instead of staying
+            # wedged. This is the gate that turns "everything hangs" into
+            # "typed error immediately" even before a ping tick has noticed.
+            silent = self.link.silent_for()
+            await self._drop_unproven_link(f"command refused: link silent for {silent:.0f}s")
+            return self._error_response(
+                request.id,
+                ErrorCode.EXTENSION_UNRESPONSIVE,
+                "the browser extension stopped answering",
+                {"phase": "gate", "link_silent_s": silent},
             )
         # Re-validate against the on-disk record, not just the in-memory flag:
         # a separate-process ``pair --reset`` must fail in-flight and subsequent
@@ -859,12 +1096,71 @@ class BridgeService:
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()
         self.link.pending[request.id] = future
         try:
-            await self.link.send(request.model_dump(mode="json"))
+            # Bounded INCLUDING the ``send_lock`` acquisition inside
+            # ``link.send``: a stuck lock holder used to hang the RPC past every
+            # deadline in COMMAND_TIMEOUTS while holding this tab's lock key,
+            # queueing every other command for the same key behind it.
+            await asyncio.wait_for(
+                self.link.send(request.model_dump(mode="json")), timeout=LINK_SEND_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            # Never left the daemon. Distinct from "delivered, no answer" and
+            # reported as such, so the diagnostic distinguishes "could not
+            # deliver" from "no reply".
+            #
+            # Drop OUR future before the teardown: the teardown fails every
+            # pending future with RuntimeError, and this one is never awaited
+            # (we return a typed error instead), so leaving it registered would
+            # produce an unretrieved-exception warning at collection time.
+            self.link.pending.pop(request.id, None)
+            silent = self.link.silent_for()
+            await self._drop_unproven_link(
+                f"send of {request.method} exceeded {LINK_SEND_TIMEOUT_S:.0f}s"
+            )
+            return self._error_response(
+                request.id,
+                ErrorCode.EXTENSION_UNRESPONSIVE,
+                f"{request.method} could not be delivered to the browser extension",
+                {"phase": "send", "link_silent_s": silent},
+            )
+        except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
+            self.link.pending.pop(request.id, None)
+            return self._error_response(request.id, ErrorCode.EXTENSION_DISCONNECTED, str(exc))
+        try:
             response = await self._await_response(
                 request.id, future, COMMAND_TIMEOUTS[request.method]
             )
             return JSONResponse(response.model_dump(mode="json", exclude_none=True))
         except asyncio.TimeoutError:
+            silent = self.link.silent_for()
+            # Promotion rule: a command that consumed its whole budget while the
+            # link was ALSO silent for 1.5 ping intervals is a dead peer, not a
+            # slow page. The slack is the record's own derivation for the
+            # sibling threshold — one tick can be dropped or delayed, tick
+            # spacing drifts with loop load, and `_supervise` inserts up to
+            # SUPERVISOR_BACKOFF_CAP_S of backoff after a failed tick, all of
+            # which make a HEALTHY peer's silence a sawtooth that can exceed a
+            # bare PING_INTERVAL_S (review R1-2 reproduced a healthy link torn
+            # down, close 4000, every session's pending futures failed). Zero
+            # slack here was strictly more aggressive than the 2.5× silence
+            # threshold it corroborates with, which is backwards.
+            #
+            # 1.5× covers a dropped tick plus the first backoff step (~21 s of
+            # spacing). Beyond that the DAEMON's own ping loop is the delayed
+            # party, and a genuine wedge has the rpc gate's 50 s detector and
+            # the full candidate length to trip on. A slow SITE still cannot
+            # trip this: the extension is ponging throughout, so silent_for()
+            # stays ~0.
+            if silent > PING_INTERVAL_S * 1.5:
+                await self._drop_unproven_link(
+                    f"{request.method} unanswered with the link silent for {silent:.0f}s"
+                )
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_UNRESPONSIVE,
+                    f"{request.method} was delivered but the extension stopped answering",
+                    {"phase": "response", "link_silent_s": silent},
+                )
             code = (
                 ErrorCode.NAV_TIMEOUT if request.method in ("open", "goto") else ErrorCode.INTERNAL
             )
@@ -933,15 +1229,49 @@ class BridgeService:
         # current_url/pending_origin let the popup render the Connected site
         # (U3) and any in-flight approval (U2) without a separate RPC.
         pending = sorted(set(self.link.awaiting_origin.values()))
+        connected = self.link.proven
         return JSONResponse(
             {
                 "status": "ok",
                 "proto": PROTO_VERSION,
-                "extension_connected": self.link.websocket is not None,
+                # `proven`, never `websocket is not None` (see
+                # ExtensionLink.proven): a mute peer is NOT connected, and this
+                # one bit is what the popup, `lop browser status` and
+                # backend._health_ok all read.
+                "extension_connected": connected,
                 "paired": self.link.paired,
                 "browser": self.link.browser,
                 "current_url": self.link.current_url,
                 "current_title": self.link.current_title,
+                # Additive OPTIONAL fields (HTTP, not the WS protocol, so an old
+                # client that does not know them simply ignores them). They let
+                # the CLI AND the popup tell "no browser" from "browser present
+                # but mute" directly instead of inferring it from one boolean.
+                #
+                # `extension_unresponsive` covers BOTH halves of that state:
+                # a socket still attached and mute, and the LINK_DROP_TTL_S
+                # window after the daemon severed it for silence. Without the
+                # second half the honest line survives only until the teardown
+                # that ANSWERS with it, i.e. exactly one command — and the user
+                # who runs `lop browser status` afterwards, as the guide tells
+                # them to, reads "browser not currently attached" about a browser
+                # that is open (design D2/R1-5, QA Q1).
+                "extension_unresponsive": (self.link.websocket is not None and not connected)
+                or self.link.dropped_unproven(),
+                # Whether a link is attached RIGHT NOW, which is not the same as
+                # healthy (`extension_connected` owns that). It exists so the
+                # status line can word the same observation truthfully in both
+                # halves: the bridge WILL drop a mute-but-attached link, and HAS
+                # dropped one that is only latched (design D3).
+                "link_attached": self.link.websocket is not None,
+                # Live silence while a socket is up; otherwise the silence
+                # measured at the drop that latched the state, so the number
+                # does not collapse to 0 the instant the daemon acts on it.
+                "link_silent_s": (
+                    self.link.silent_for()
+                    if self.link.websocket is not None
+                    else self.link.recent_drop_silence()
+                ),
                 # How many tabs are driven, and their URLs. `current_url` alone
                 # framed a multi-tab world as one binding, so a stale value
                 # read as a system-wide lock; the count lets `status` say "no
@@ -973,7 +1303,7 @@ class BridgeService:
         """
         cleaned: list[str] = []
         before = dict(self.link.driven)
-        if self.link.websocket is not None and before:
+        if self.link.proven and before:
             # The extension's own live-surface listing is the ground truth;
             # anything we advertise that it does not list is a ghost. `tabs`
             # prunes dead surfaces extension-side as it lists, so this also
@@ -1009,8 +1339,11 @@ class BridgeService:
             except Exception:  # noqa: BLE001 - repair must never fail loudly
                 logger.warning("browser bridge repair could not list tabs", exc_info=True)
         elif before:
-            # No browser attached: nothing can be driven, so every record is a
-            # ghost by definition.
+            # No browser attached, OR one attached that has stopped answering:
+            # nothing can be driven either way, so every record is a ghost by
+            # definition. Reading `proven` here (not the bare socket) is what
+            # keeps repair's answer truthful about a mute peer instead of
+            # dispatching a `tabs` RPC that now fails fast and clearing nothing.
             cleaned = [tab.url for tab in before.values() if tab.url]
             self.link.driven.clear()
         republished = self.publish_safely()
@@ -1020,7 +1353,7 @@ class BridgeService:
                 "cleared_tabs": cleaned,
                 "driven_tabs": len(self.link.driven),
                 "heartbeat_republished": republished,
-                "extension_connected": self.link.websocket is not None,
+                "extension_connected": self.link.proven,
             }
         )
 

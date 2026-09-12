@@ -153,6 +153,29 @@
           </div>
         </section>
 
+        <!-- The honest rendering of a wedged worker, and the state that used to
+             be a LIE: the browser is open and paired and the daemon is
+             reachable, but the extension has stopped answering, so nothing can
+             be driven. Before this section the popup showed the GREEN connected
+             card in exactly that state (health.extension_unresponsive was in
+             its type and never read), i.e. the incident's own symptom on the
+             one surface the GUIDE sends the user to (design D4).
+             The remedy is the measured one, and the wording is matched to the
+             CLI/error copy so the user meets one instruction rather than three
+             spellings of it: toggle OFF then ON (pairing survives). -->
+        <section id="unresponsive" class="state hidden">
+          <h1 class="title">Extension stopped answering.</h1>
+          <p class="sub">
+            This browser is paired, but the Local Operator extension has stopped responding, so
+            the agent can't drive it. Toggle the extension OFF then ON in
+            <code>chrome://extensions</code> to reload it — pairing is kept, so there is no new
+            code to enter, but open tabs the agent was driving are lost.
+          </p>
+          <div class="actions">
+            <button id="retry-unresponsive" class="btn block">Check again</button>
+          </div>
+        </section>
+
         <!-- Origin-decision acknowledgement, shown from the click alone
              (popup.ts): session storage and /health echo the prompt until the
              worker round-trip lands, and a prompt left up with live buttons

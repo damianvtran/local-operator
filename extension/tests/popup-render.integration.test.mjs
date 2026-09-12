@@ -28,11 +28,13 @@ import { pathToFileURL } from "node:url";
  * silently stops covering an element because the parse missed it is worse
  * than one that fails when an id is renamed. */
 const IDS = [
-  "connected", "paired", "pairing", "disconnected", "incompatible", "origin", "origin-ack",
+  "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
+  "origin", "origin-ack",
   "origin-host", "origin-again", "origin-scope", "origin-scope-detail", "origin-position",
   "origin-waiting", "origin-allow", "origin-deny", "origin-previous", "origin-next",
   "origin-ack-title", "origin-ack-sub", "origin-ack-check", "card", "retry",
-  "retry-incompatible", "connected-all-sites", "connected-all-sites-off", "pair-form",
+  "retry-incompatible", "retry-unresponsive", "connected-all-sites", "connected-all-sites-off",
+  "pair-form",
   "pair-code", "pair-error", "port", "port-row",
 ];
 
@@ -423,6 +425,49 @@ test("a deny re-ask does not claim the answer was used (U11)", async () => {
       /already been used/,
       "nothing was used: the agent did not visit the site",
     );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a wedged worker is not painted as connected (D4)", async () => {
+  const nodes = installDomStub();
+  installChromeStub();
+  // A live daemon that reports the state this whole change exists for: paired,
+  // socket attached, nothing answered. `extension_unresponsive` is the field the
+  // popup must CONSUME — it was in the Health type and never read, so the green
+  // card claimed the agent could drive while no command could be answered.
+  let health = { paired: true, extension_connected: true, protocol_version: 1, pending_origin: undefined };
+  globalThis.fetch = async () => ({ ok: true, json: async () => health });
+  const bundle = await loadPopup();
+  try {
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "precondition: healthy renders the connected card");
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), true, "precondition: no wedge, no wedge card");
+
+    // The worker goes mute. /health keeps `paired: true` (and so does the LINK),
+    // which is exactly why the connected card used to stay up.
+    health = { ...health, extension_connected: false, extension_unresponsive: true, link_attached: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "a wedged worker must not render as connected");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true, "the success card must be REPLACED, not merely annotated");
+
+    // RENDER N+1: the same state, one more storage event. Every defect in this
+    // class is correct on render N and wrong on N+1.
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "must survive a later render");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true);
+
+    // The link comes back: the card must recover, or the fix would be its own
+    // sticky lie.
+    health = { ...health, extension_connected: true, extension_unresponsive: false };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "must recover to the connected card");
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), true);
   } finally {
     await bundle.close();
   }

@@ -1,5 +1,6 @@
 import { compactAX, type AXNode } from "../ax-compact";
 import { cdp, requireSurface } from "../cdp";
+import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
 import { setRefs, surfaceToken } from "../state";
 
 // Serializes the enable→read→disable window below. The worker dispatches
@@ -10,7 +11,9 @@ import { setRefs, surfaceToken } from "../state";
 // latent, but the extension should not depend on that scheduling promise.
 // A promise chain (not a refcount) keeps it simple: snapshots are rare and
 // heavy, so serializing them costs nothing observable. Failures are swallowed
-// by each link's own try/finally, so the chain can never poison later calls.
+// by each link's own try/finally, so the chain can never poison later calls —
+// which holds for a REJECTION, and for a HANG only because the cdps inside
+// `run` are each bounded by settle.ts's deadline.
 let axQueue: Promise<unknown> = Promise.resolve();
 
 export async function snapshot(params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -40,6 +43,10 @@ export async function snapshot(params: Record<string, unknown>): Promise<Record<
   // parallel, a global ref map would let one tab's snapshot silently repoint
   // another tab's click targets.
   await setRefs(surfaceToken(surface), rendered.refs);
-  const tab = await chrome.tabs.get(surface.tabId);
+  const tab = await deadline(
+    chrome.tabs.get(surface.tabId),
+    CHROME_API_DEADLINE_MS,
+    `chrome.tabs.get(${surface.tabId})`,
+  );
   return { snapshot: rendered.snapshot, url: tab.url ?? "", title: tab.title ?? "" };
 }

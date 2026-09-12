@@ -1,4 +1,5 @@
 import { BridgeCommandError } from "./cdp";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getSurfaces, withSessionMutation } from "./state";
 
 /** A private proof is intentionally separate from ownerKey (tab-group copy).
@@ -21,7 +22,13 @@ const queues = new Map<string, Promise<unknown>>();
 let allocations: Promise<unknown> = Promise.resolve();
 
 async function scopes(): Promise<Record<string, Scope>> {
-  return (await chrome.storage.session.get(["ownerScopes"])).ownerScopes ?? {};
+  return (
+    (await deadline(
+      chrome.storage.session.get(["ownerScopes"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.get(ownerScopes)",
+    )).ownerScopes ?? {}
+  );
 }
 function identity(params: Params): [string, string, string] {
   const proof = String(params.owner_proof ?? "");
@@ -42,7 +49,11 @@ async function mutate<T>(params: Params, fn: (scope: Scope) => T, create = false
       throw new BridgeCommandError("owner_refused", "browser owner generation is stale or unresolved");
     }
     const result = fn(scope);
-    await chrome.storage.session.set({ ownerScopes: all });
+    await deadline(
+      chrome.storage.session.set({ ownerScopes: all }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(ownerScopes)",
+    );
     return result;
   });
 }
@@ -60,6 +71,13 @@ export async function recordAllocation(params: Params, tab: string, state: strin
  * write. A finish cannot overtake an in-flight allocation and then let its late
  * navigation resurrect the tab. The daemon's deadlines remain bounded; a lost
  * response is replayed by allocation id rather than creating a second tab.
+ *
+ * `queues` is keyed by `owner_proof` and `allocations` is global, and both are
+ * module-level, so a HUNG op here parked `owner_recover` — the recovery path
+ * itself — for every session on that proof. The chains swallow a predecessor's
+ * rejection but not its hang (`.catch()` never runs on a promise that never
+ * settles); every chrome await inside the ops is bounded by `deadline` so the
+ * link always settles.
  */
 export function withOwnership(
   method: string, params: Params, handler: () => Promise<Record<string, unknown>>,
@@ -97,7 +115,11 @@ export function withOwnership(
         // above, so a foreign caller cannot use it to clear someone else's.
         if (scope.generation !== generation || params.resumed_scope === true) delete scope.terminal;
         scope.generation = generation;
-        await chrome.storage.session.set({ ownerScopes: all });
+        await deadline(
+          chrome.storage.session.set({ ownerScopes: all }),
+          CHROME_API_DEADLINE_MS,
+          "chrome.storage.session.set(ownerScopes)",
+        );
         const allocation = scope.allocations[String(params.allocation_id ?? "")];
         const live = allocation?.tab && (await getSurfaces())[allocation.tab];
         const unresolved = allocation && ["allocating", "allocated", "cleanup_pending"].includes(allocation.state);
@@ -120,7 +142,11 @@ export function withOwnership(
         // the recorded capability without navigating/submitting a second time.
         const surface = (await getSurfaces())[existing.tab];
         if (!surface) throw new BridgeCommandError("tab_closed", "browser tab disappeared");
-        const tab = await chrome.tabs.get(surface.tabId);
+        const tab = await deadline(
+          chrome.tabs.get(surface.tabId),
+          CHROME_API_DEADLINE_MS,
+          `chrome.tabs.get(${surface.tabId})`,
+        );
         return { tab: existing.tab, url: tab.url ?? "", title: tab.title ?? "", state: existing.state };
       }
       if (existing && existing.state !== "closed") {

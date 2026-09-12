@@ -78,6 +78,23 @@ function send(frame: object): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
 }
 
+/**
+ * Fire-and-forget chrome API call whose rejection nobody can act on.
+ *
+ * A floating promise that rejects surfaces in an MV3 worker as
+ * `Uncaught (in promise) Error: …`, captured from the operator's own console
+ * as "Could not establish connection. Receiving end does not exist." from
+ * `chrome.runtime.sendMessage` when no popup was open to receive the frame.
+ * None of these call sites has a caller who could act on a failure, so the only
+ * correct handling is to record it and move on — but a fire-and-forget that can
+ * surface as an uncaught error is a defect whether or not the rejection is
+ * expected, and an uncaught error in the worker is indistinguishable from a
+ * crash when someone is reading the console to diagnose a bridge fault.
+ */
+function fireAndForget(op: Promise<unknown> | undefined | void, what: string): void {
+  void Promise.resolve(op).catch((error) => console.warn(`${what} failed`, error));
+}
+
 // Raise a system notification when a site decision is pending (finding U2).
 // BEST-EFFORT ONLY: on macOS this banner frequently never reaches the user —
 // Chrome needs its own Notification Center authorization (System Settings →
@@ -174,7 +191,19 @@ async function daemonPort(): Promise<number> {
 }
 
 async function respond(response: Response): Promise<void> {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(response));
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(response));
+    return;
+  }
+  // A completed command whose socket is no longer OPEN: the daemon evicted it
+  // ("later connection wins") mid-command, and this is the extension's side of
+  // the resulting `RuntimeError('extension disconnected')` the daemon logs.
+  // There is no correct place to DELIVER the frame — the socket is gone, the
+  // daemon has already failed every pending future, and a response queue would
+  // replay a stale result onto a NEW socket that never asked for it. So do not
+  // pretend it was sent: say so, which is what makes those daemon-side
+  // disconnects attributable to a dropped answer rather than a mystery timeout.
+  console.warn(`dropped response for ${response.id}: the extension socket is not open`);
 }
 
 async function dispatch(request: { id: string; method: string; params: Record<string, unknown> }): Promise<void> {
@@ -311,8 +340,13 @@ async function connect(): Promise<void> {
     else if (frame.event === "ping") wire.send(JSON.stringify({ event: "pong" }));
     else if (frame.event === "hello_ack") {
       paired = frame.paired;
-      void chrome.storage.session.set({ connState: frame.paired ? "connected" : "pairing" });
-    } else if (frame.event === "pair_result" && frame.ok) chrome.storage.local.set({ token: frame.token });
+      fireAndForget(
+        chrome.storage.session.set({ connState: frame.paired ? "connected" : "pairing" }),
+        "connState write",
+      );
+    } else if (frame.event === "pair_result" && frame.ok) {
+      fireAndForget(chrome.storage.local.set({ token: frame.token }), "token write");
+    }
   };
   const teardown = (event?: CloseEvent) => {
     clearDialTimer();
@@ -323,8 +357,8 @@ async function connect(): Promise<void> {
     // Preserve the close code so the popup can distinguish a protocol mismatch
     // (4001 — "update needed", which pairing cannot fix) from an ordinary
     // disconnect (finding D2). 4003 is an unpair/revoke.
-    if (event?.code === 4001) void chrome.storage.session.set({ connState: "incompatible" });
-    else if (event?.code === 4003) void chrome.storage.session.set({ connState: "pairing" });
+    if (event?.code === 4001) fireAndForget(chrome.storage.session.set({ connState: "incompatible" }), "connState write");
+    else if (event?.code === 4003) fireAndForget(chrome.storage.session.set({ connState: "pairing" }), "connState write");
     // 4000 is the daemon's later-connection-wins eviction (daemon.py), which the
     // POPUP's own pairing socket triggers on every pair attempt. It is not a
     // loss of connectivity, so publishing "disconnected" here drove the popup's
@@ -338,7 +372,7 @@ async function connect(): Promise<void> {
     // Drive authority is enforced daemon-side by link.paired (a second socket
     // arrives paired:false and its RPCs are refused not_paired), never by this
     // storage key, so suppressing the write grants nothing.
-    else if (event?.code !== 4000) void chrome.storage.session.set({ connState: "disconnected" });
+    else if (event?.code !== 4000) fireAndForget(chrome.storage.session.set({ connState: "disconnected" }), "connState write");
     scheduleReconnect();
   };
   wire.onclose = (event) => teardown(event);
@@ -446,7 +480,15 @@ chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes.accessQueue) {
-    void chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue });
+    // With no popup open there is no receiver for this message, and MV3 rejects
+    // the send with "Could not establish connection. Receiving end does not
+    // exist." — an EXPECTED outcome for a background-only delivery attempt, not
+    // an error, so it must not surface as an uncaught rejection in the worker
+    // console (captured live from the operator's own hands).
+    fireAndForget(
+      chrome.runtime.sendMessage({ event: "origin_prompt", queue: changes.accessQueue.newValue }),
+      "origin_prompt broadcast",
+    );
   }
   // The all-sites switch is written by the options page directly (never by
   // a message to this worker or a daemon RPC: there is deliberately no such

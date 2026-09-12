@@ -29,10 +29,16 @@ export async function fixture() {
   const mocks = {
     cdp: `import {getSurfaces,removeSurface} from ${JSON.stringify(resolve("src/state.ts"))};
       export class BridgeCommandError extends Error {constructor(code,message,data={}){super(message);this.code=code;this.data=data}}
+      export const isStalled=()=>false;
       export const attach=async()=>{if(globalThis.ownershipFaults.attach)throw Error('attach failed')},detach=async()=>{},cdp=async()=>({result:{value:JSON.stringify({url:'https://example.test/',title:'fixture'})}}),pruneSurface=async(t)=>removeSurface(t),requireSurface=async(t)=>{const s=(await getSurfaces())[t];if(!s)throw new BridgeCommandError('tab_closed','gone');await chrome.tabs.get(s.tabId);return s};`,
     "log-capture": `export const dropLogCapture=()=>{},startLogCapture=async()=>{if(globalThis.ownershipFaults.capture)throw Error('capture failed')};`,
     origins: `export const safeHttpUrl=v=>new URL(v),ensureTopLevelAccess=async()=>({allowed:true}),askOrigin=async()=>true,withOriginGate=async(t,r,fn)=>fn();`,
-    settle: `export const settle=async()=>{};`,
+    // The real helper and its constants are pass-throughs in this harness: the
+    // modules under test still import them by NAME, so the fixture has to
+    // export them or esbuild fails the build ("No matching export in
+    // fixture:settle"). Handing back the op unchanged keeps the harness's
+    // fault injection (which rejects) exactly as it was.
+    settle: `export const settle=async()=>{};export const CHROME_API_DEADLINE_MS=5000;export const deadline=(op)=>op;`,
     "tab-groups": `export const reconcileTabGroup=async()=>{};`,
   };
   const outfile = join(dir, "bundle.mjs");
