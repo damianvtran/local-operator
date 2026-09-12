@@ -19,7 +19,9 @@ the two halves of the bargain:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -766,3 +768,183 @@ async def test_a_viewer_attaching_during_the_announcement_keeps_the_runtime() ->
 
     assert sent[-1]["detail"] == "kept: 1 viewer(s) attached while stopping was announced"
     assert handle.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_warm_binds_in_the_background_envelope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R1: the warm must reach ``_ensure_bound`` with ``foreground=False``.
+
+    Structural (argument capture) rather than timed, because the hazard is not
+    slowness — it is which envelope the bind claims. ``foreground=True`` here
+    would publish the speculative warm on ``_foreground_waiting``, so the warm
+    would preempt ITSELF out of the generous envelope a background bind is
+    entitled to, and would claim the short foreground budget besides.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    seen: list[bool] = []
+
+    async def record(*, foreground: bool = True) -> None:
+        seen.append(foreground)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        monkeypatch.setattr(viewer, "_ensure_bound", record)
+        await viewer.warm_runtime()
+    finally:
+        await viewer.dispose()
+
+    assert seen == [False], "a speculative warm must take the background envelope"
+
+
+@pytest.mark.asyncio
+async def test_a_send_arriving_during_a_warm_announces_itself_as_foreground(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R1's other half: the in-flight warm must SEE the real send arrive.
+
+    This is the mechanism that keeps a warm from making the next send wait out
+    a 120 s background envelope (a foreground caller was once measured at
+    134.5 s against 29.5 s when a bind took the lock raw). The warm does not
+    solve that itself — it inherits the solution by going through
+    ``_bind_lock_for``, which is exactly why it must never hand-roll its own
+    acquisition.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    parked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        parked.set()
+        await release.wait()
+        raise ConnectionError("no runtime in this test")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record", lambda *a: (None, None)
+    )
+    _configure_provider(tmp_path)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        warm = asyncio.ensure_future(viewer.warm_runtime())
+        await asyncio.wait_for(parked.wait(), timeout=DEADLOCK_GUARD_S)
+        assert viewer.engage_in_flight, "the warm should be holding the bind lock"
+        assert not viewer._foreground_arrived.is_set(), "a warm must not claim foreground"
+
+        send = asyncio.ensure_future(viewer._ensure_bound(foreground=True))
+        # The foreground claim is published BEFORE the acquire, so it is
+        # observable while the warm still holds the lock.
+        for _ in range(100):
+            if viewer._foreground_arrived.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert viewer._foreground_arrived.is_set(), "the send never announced itself"
+        assert viewer._foreground_waiting == 1
+
+        release.set()
+        await asyncio.wait_for(warm, timeout=DEADLOCK_GUARD_S)
+        with contextlib.suppress(ConnectionError):
+            await asyncio.wait_for(send, timeout=DEADLOCK_GUARD_S)
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_warms_and_a_send_spawn_exactly_one_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """R4: two warms racing a send must not produce two runtimes.
+
+    The guarantee belongs to ``_bind_lock``, not to ``warm()``'s
+    ``engage_in_flight`` check — that check only avoids creating a pointless
+    task. This drives the calls straight at the facade so the lock is the only
+    thing under test.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+
+    engages = 0
+
+    async def fake_engage(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        nonlocal engages
+        engages += 1
+        # Yield so the racers genuinely interleave rather than each running to
+        # completion inside one scheduling slot. Without an await here the
+        # test would pass against a BROKEN implementation, because the first
+        # caller would never give the others a chance to start.
+        await asyncio.sleep(0.05)
+
+    class BoundClient:
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+    async def fake_bind_to(record, *, sync_timeout, preempt=None):  # noqa: ANN001
+        """Stand in for the dial: the ONLY thing that matters here is that a
+        successful bind makes the viewer non-cold, which is what every later
+        lock-winner returns on."""
+        viewer._client = BoundClient()  # type: ignore[assignment]
+        viewer._ready_for_events = True
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda *a: (SimpleNamespace(pid=1234), None),
+    )
+    _configure_provider(tmp_path)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    monkeypatch.setattr(viewer, "_bind_to", fake_bind_to)
+    try:
+        results = await asyncio.gather(
+            viewer.warm_runtime(),
+            viewer.warm_runtime(),
+            viewer._ensure_bound(foreground=True),
+            return_exceptions=True,
+        )
+        # Sampled BEFORE teardown: `dispose()` drops the client, so reading
+        # `is_cold` after the finally would assert about the teardown instead
+        # of about the race.
+        bound = not viewer.is_cold
+    finally:
+        viewer._client = None
+        await viewer.dispose()
+
+    assert results == [None, None, None], results
+    # THE claim: three racing callers, one spawn. The second and third take
+    # the lock after the first has bound and return at `_bind_under_lock`'s
+    # `is_cold` guard without reaching `engage_runtime` at all.
+    assert engages == 1, f"one session must spawn one runtime, saw {engages}"
+    assert bound, "the winning caller should have left the viewer attached"

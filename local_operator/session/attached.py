@@ -1746,15 +1746,39 @@ class AttachedSession:
             return True
         return self._engage_in_flight()
 
-    def _engage_in_flight(self) -> bool:
-        """Whether an engage is running that a move would have to join.
+    @property
+    def engage_in_flight(self) -> bool:
+        """Whether an engage is running that another caller would have to join.
 
-        ONE definition, read by both the decision to join and the decision to
-        narrate it. Two copies would let the frontend promise a wait the move
-        does not take, or stay silent through one it does — which is the
-        divergence this whole feature exists to prevent, in miniature.
+        ONE definition, read by every consumer of the question. Two copies would
+        let the frontend promise a wait the move does not take, or stay silent
+        through one it does — which is the divergence this whole feature exists
+        to prevent, in miniature.
+
+        PUBLIC because the desktop bridge is a third consumer: ``warm()`` reads
+        it to decide whether a speculative engage is already under way and it
+        can therefore start nothing. That read is the same question the move
+        asks, so it must resolve to the same expression rather than to a copy
+        in ``server/`` that drifts from this one.
+
+        A HINT, never a guarantee, for every caller: it samples the lock at one
+        instant, so a bind taken in the window after the sample is missed by
+        construction. What makes a missed sample safe is the lock itself —
+        ``_ensure_bound`` serialises binds and the loser returns at its
+        ``is_cold`` check — not the accuracy of this predicate. See
+        ``set_working_directory``'s own account of sampling this and then
+        acquiring anyway.
         """
         return self._can_go_cold and self._bind_lock.locked() and not self._recovering
+
+    def _engage_in_flight(self) -> bool:
+        """Deprecated spelling of :attr:`engage_in_flight`, kept for callers here.
+
+        A thin alias rather than a second expression: the predicate was private
+        until the desktop bridge needed it, and rewriting every internal call
+        site in the same change would have mixed a rename into a feature diff.
+        """
+        return self.engage_in_flight
 
     async def set_working_directory(self, cwd: str) -> str:
         """Point this session at ``cwd``; returns what happened, for the receipt.
@@ -2009,6 +2033,50 @@ class AttachedSession:
             )
         except Exception:  # noqa: BLE001 — a completed move must not fail on its index
             logger.debug("could not repoint armed wakes after a move", exc_info=True)
+
+    async def warm_runtime(self) -> None:
+        """Engage a runtime for a viewer nobody is waiting on. Never raises.
+
+        The HTTP twin of the TUI's ``_start_runtime_engage`` worker
+        (``tui/app.py``): same ``foreground=False`` envelope, same silence on
+        failure, same reason — a speculative warm-up the user did not ask for
+        must never become an error they have to read, and the real send that
+        follows engages again through this same lock and reports properly.
+
+        WHY THIS EXISTS AT ALL. The desktop/HTTP surface had no way to engage a
+        runtime without also submitting work, so the first message POST for a
+        session paid the whole cold engage inline — spawn, dial, welcome ack,
+        frontend sync — measured at a 1146 ms median against 12-42 ms for the
+        second send. Every other surface already warms off the critical path;
+        this is that capability, reached over HTTP.
+
+        ``foreground=False`` IS MANDATORY AND IS NOT A STYLE CHOICE. Two
+        distinct regressions follow from ``True``:
+
+        * It claims the 15 s foreground bind budget for a bind nobody is
+          waiting on, where the background envelope is what a speculative warm
+          is entitled to; and
+        * far worse, ``_bind_lock_for(foreground=True)`` publishes on
+          ``_foreground_waiting``/``_foreground_arrived``, so the warm would
+          announce itself as a user-visible caller and **preempt itself** out
+          of that generous envelope.
+
+        The related hazard — a warm holding ``_bind_lock`` on the background
+        budget while a real send queues behind it — is already solved and must
+        stay solved by the EXISTING mechanism: the send announces itself
+        foreground before acquiring, the in-flight warm samples
+        ``_foreground_arrived`` before its engage, and the cut is
+        ``_BACKGROUND_YIELD_BUDGET_S``. The precedent for opting out is
+        measured: a foreground caller waiting 134.5 s against 29.5 s once a
+        bind took the lock raw. So this method must never grow its own
+        ``wait_for``, its own timeout, or a raw ``async with self._bind_lock``
+        — the entire safety argument is that it is the ordinary background
+        engage and nothing else.
+        """
+        try:
+            await self._ensure_bound(foreground=False)
+        except Exception:  # noqa: BLE001 — the real prompt reports the failure
+            logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
     async def _ensure_bound(self, *, foreground: bool = True) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
