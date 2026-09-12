@@ -954,10 +954,25 @@ async def test_the_phone_frame_carries_the_end_the_daemon_saw(
             cut_off_elapsed = time.monotonic() - started
             # The notice and the button come from ONE record, so a frame that
             # carries the end must carry the sentence it words.
-            assert any(
-                "cut off" in str(row.get("text") or "")
-                for row in cut_off_frame.get("transcript") or []
-            ), cut_off_frame.get("transcript")
+            #
+            # WHICH SENTENCE MOVED, and why this is not a relaxation. Until
+            # round 2 this shape landed the no-evidence arm — the daemon's
+            # discovery classified only AFTER its own sweep had deleted the dead
+            # record — so the row read "the turn was cut off and the cause could
+            # not be determined", and "cut off" was what this cell could look
+            # for (reviewer MINOR-1). With the record handed to the
+            # classification the same death NAMES the runtime it found dead,
+            # pid included, which is the stronger claim: the row is asserted
+            # against the cause token and the killed pid rather than against a
+            # wording that was an artefact of the loss.
+            notices = " ".join(
+                str(row.get("text") or "") for row in cut_off_frame.get("transcript") or []
+            )
+            assert "Stopped with an error" in notices, cut_off_frame.get("transcript")
+            assert f"pid {pid}" in notices, notices
+            assert (
+                cut_off_frame.get("attention", {}).get("cause") == "runtime-killed"
+            ), cut_off_frame.get("attention")
 
             # --- a DELIBERATE STOP, issued from the phone ----------------
             session_id, pid = await start_session()

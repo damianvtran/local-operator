@@ -417,3 +417,66 @@ def test_a_stop_after_a_completed_turn_still_offers_the_way_back() -> None:
     cut_off = _end_frame(kind="error", cause="owner-lost", stop_reason="completed")
     assert cut_off["stop_reason"] == "aborted"
     assert cut_off["cut_off"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_discovered_kill_names_the_runtime_it_found_dead() -> None:
+    """MINOR-1 on the daemon's own path, not on the classifier in isolation.
+
+    The discovery branch classifies the death `registry.scan` just reported —
+    and that same scan UNLINKS the record. The daemon therefore hands the record
+    it is holding to the classification; without it the phone's notice for a
+    daemon-owned SIGKILL was the no-evidence sentence ("the cause could not be
+    determined") even though the pid had just been proved dead, and the design
+    round measured exactly that sentence on a real frame (D6).
+
+    Driven through `_scan_once`, the daemon's real 2 s pass, because the bug was
+    an ORDERING between two of its own calls and a classifier-level test cannot
+    see it.
+    """
+    import json
+    import uuid as _uuid
+
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    session_id = "discovered1"
+    directory = config_dir() / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    token = str(_uuid.uuid4())
+    await Transcript(directory).append_custom(
+        "attention_started", {"conversation_id": f"session/{session_id}", "token": token}
+    )
+    dead_pid = 2**22 + 13
+    run = config_dir() / RUN_DIRNAME
+    run.mkdir(parents=True, exist_ok=True)
+    (run / f"{dead_pid}.json").write_text(
+        json.dumps(
+            SessionRecord(
+                pid=dead_pid,
+                kind="daemon",
+                session_id=session_id,
+                conversation_name=session_id,
+                cwd=str(directory),
+                model_label="m",
+                control_port=1,
+                control_key="k",
+                version="1.2.3",
+                source_ref="abcdef0",
+            ).to_json()
+        ),
+        encoding="utf-8",
+    )
+
+    daemon = MobileDaemon(port=0, password="pw")
+    # The BOOT sweep is a different path with its own ordering (it classifies up
+    # to 100 recent directories before this loop's scan runs), and it is not what
+    # this test is about. Production reaches the discovery branch on every pass
+    # after the first; pre-marking is how the test lands on that pass.
+    daemon._attention_bootstrapped = True
+    await daemon._scan_once()
+
+    state = AttentionStore().state(f"session/{session_id}")
+    assert (state["kind"], state["cause"]) == ("error", "runtime-killed"), state
+    assert f"pid {dead_pid}" in state["reason"], state["reason"]
+    assert not (run / f"{dead_pid}.json").exists(), "the record was not reaped"

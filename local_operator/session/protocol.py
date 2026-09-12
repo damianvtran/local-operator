@@ -1061,6 +1061,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """The recall twin of :meth:`set_cancel_resolution`."""
         ...
 
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Called with the id of a queued steer whose bind was refused.
+
+        The third asynchronous refusal, and the only one with no sender to
+        report it: ``steer_message`` spawns a task nobody awaits, so a message
+        the app has already echoed as sent can fail without the user ever
+        learning. See ``AttachedSession._send_steer_when_ready``.
+        """
+        ...
+
     # --- engine state a viewer host renders --------------------------------
     #
     # The MCP status segment and its menus, the subagent and job views, the

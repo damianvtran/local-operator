@@ -513,7 +513,7 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
-def _classify_discovered_death(session_id: str) -> None:
+def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
     """Publish the durable outcome for a runtime the scan just found dead.
 
     WHY THE DAEMON HAS TO DO THIS. Every other writer of a session's durable
@@ -534,6 +534,11 @@ def _classify_discovered_death(session_id: str) -> None:
     the record — which is what makes the successor race harmless: a runtime that
     retired has already republished, so this classifies nothing and the
     successor's own outcome stands.
+
+    ``reaped_owner`` is the dead record ``registry.scan`` reported AND deleted,
+    handed on to the classification because the deletion is the whole reason the
+    caller cannot re-read it. Without it the daemon's own sweep is what erases
+    the evidence for the death it just discovered (review round 2, MINOR-1).
     """
     from local_operator.session.attention import bootstrap_transcript
     from local_operator.session.transcript import Transcript
@@ -542,7 +547,9 @@ def _classify_discovered_death(session_id: str) -> None:
     if directory is None:
         return
     try:
-        bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        bootstrap_transcript(
+            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
+        )
     except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
         logger.debug("classifying a discovered death failed", exc_info=True)
 
@@ -977,7 +984,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     # end for exactly those arms, so the frame fills the MISSING end from it:
     # one record decides both the sentence and the button, which is what keeps
     # the word and the affordance from naming one act two ways (D7).
-    #    # FILL, never override: the fold's own ABORT outranks a durable record. A
+    # FILL, never override: the fold's own ABORT outranks a durable record. A
     # record may describe an EARLIER turn than the one the fold last saw, and
     # the fold is the only party that saw an end event for the current one — so
     # when it says `aborted`, its word and its `cut_off` flag stand, including
@@ -1508,7 +1515,21 @@ class MobileDaemon:
                 entry.ended = True
                 changed = True
                 if first_sighting and self.dial_registrants:
-                    await asyncio.to_thread(_classify_discovered_death, record.session_id)
+                    # THE RECORD RIDES ALONG, because `registry.scan` has already
+                    # unlinked it: this branch runs on the tuple scan RETURNED,
+                    # and by the time we classify, the dead record the
+                    # classification depends on is gone from the run directory.
+                    # Re-reading (which is what `_run_record_evidence` does) then
+                    # finds nothing and every discovered death lands the
+                    # no-evidence arm — "the cause could not be determined" for
+                    # the one shape where the daemon just PROVED the pid dead
+                    # (review round 2, MINOR-1; the same sentence was measured on
+                    # the phone by the design round, D6). Passing the record in
+                    # is the evidence, and it is exactly as trustworthy as the
+                    # scan that produced it.
+                    await asyncio.to_thread(
+                        _classify_discovered_death, record.session_id, reaped_owner=record
+                    )
                 # SIGKILL cannot run owner cleanup. Discovery already proved the
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
