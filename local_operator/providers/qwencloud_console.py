@@ -49,6 +49,15 @@ QWENCLOUD_CONSOLE_PROJECT_ID = "qwencloud-console:personal"
 #: says so rather than leaving the user to guess.
 QWENCLOUD_TICKET_STALE_MS = 7 * 24 * 60 * 60 * 1000
 
+#: Upper bound on a stored ticket, chosen from evidence rather than taste.
+#: The live console cookie this feature was verified against is 172
+#: characters, so 4096 leaves ~23x headroom for a longer session token while
+#: still making the 10 MB paste QA landed here structurally impossible. 4096
+#: is also the conventional single-header budget at the other end (nginx's
+#: `large_client_header_buffers` is 8k for the whole block), so a value above
+#: it would be refused by an intermediary even if it reached one.
+QWENCLOUD_TICKET_MAX_LENGTH = 4096
+
 
 class TicketStoreError(RuntimeError):
     """The ticket cannot be stored safely. The message never carries a value."""
@@ -146,6 +155,13 @@ def _reject_unsendable(ticket: str) -> None:
     stop it, but a value carrying any of them is equally incapable of being
     sent, so one rule covers both.
     """
+    if len(ticket) > QWENCLOUD_TICKET_MAX_LENGTH:
+        raise TicketStoreError(
+            f"the ticket is {len(ticket)} characters, over the "
+            f"{QWENCLOUD_TICKET_MAX_LENGTH}-character limit; this is not a "
+            f"console session cookie. Copy only the login_qwencloud_ticket "
+            f"value, not the surrounding request or document"
+        )
     for char in ticket:
         if ord(char) < 0x20 or ord(char) == 0x7F:
             name = "a newline" if char in "\r\n" else f"a control character (0x{ord(char):02x})"

@@ -24,6 +24,7 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.qwencloud_console import (
     QWENCLOUD_CONSOLE_PROJECT_ID,
     QWENCLOUD_CONSOLE_PROVIDER,
+    QWENCLOUD_TICKET_MAX_LENGTH,
     QWENCLOUD_TICKET_STALE_MS,
     TicketStoreError,
     TicketStoreUnreadable,
@@ -360,6 +361,22 @@ def test_the_refusal_message_never_echoes_the_value(store: AuthStore) -> None:
         store_ticket(store, secret)
     assert "an-embedded-newline" not in str(excinfo.value)
     assert "fake-console-ticket-with" not in str(excinfo.value)
+
+
+def test_an_oversized_ticket_is_refused(store: AuthStore) -> None:
+    """A 10 MB paste was accepted and interpolated into every fetch (QA D9)."""
+    with pytest.raises(TicketStoreError) as excinfo:
+        store_ticket(store, "x" * (QWENCLOUD_TICKET_MAX_LENGTH + 1))
+    assert str(QWENCLOUD_TICKET_MAX_LENGTH) in str(excinfo.value)
+    assert store.list_credentials(QWENCLOUD_CONSOLE_PROVIDER) == []
+
+
+def test_a_ticket_at_the_limit_is_still_accepted(store: AuthStore) -> None:
+    """The bound rejects a document, not a long session token."""
+    store_ticket(store, "x" * QWENCLOUD_TICKET_MAX_LENGTH)
+    record = read_ticket_record(store)
+    assert record is not None
+    assert record["length"] == QWENCLOUD_TICKET_MAX_LENGTH
 
 
 def test_read_ticket_record_never_returns_the_value(store: AuthStore) -> None:
