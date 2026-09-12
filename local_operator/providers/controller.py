@@ -37,6 +37,7 @@ from local_operator.model.discovery import (
 )
 from local_operator.model.naming import model_label
 from local_operator.model.registry import static_models
+from local_operator.providers.qwencloud_console import QWENCLOUD_CONSOLE_PROVIDER
 from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
@@ -93,10 +94,6 @@ EMPTY_OVER_DATA_ACCEPT_MS = 30 * 60_000
 #: re-list nine providers. Boot and repaint paths keep the default 24h hard TTL
 #: (with an hourly background refresh) because there a request IS visible.
 PICKER_TTL_S = 15 * 60
-
-#: Row namespace for the QwenCloud console session cookie. Not a registry
-#: provider -- see :meth:`ProviderController._qwencloud_console_creds`.
-QWENCLOUD_CONSOLE_PROVIDER = "qwencloud-console"
 
 
 @dataclasses.dataclass(frozen=True)
