@@ -26291,35 +26291,34 @@ class OperatorApp(App[None]):
             # everywhere else (``provider/model_id``) rather than as the two
             # registry keys ``hosting``/``model_name``: at 120 columns a notice
             # row holds 110 cells, and the key-per-half spelling pushed this
-            # receipt from the base 109 to 128, orphaning ``(used by new
-            # sessions)`` on a second line. The new third key is the half that
-            # must NOT be cut — it is the only place the level just made durable
-            # is named — so the cells come out of the preamble and the pair, which
-            # carry the same information the file path and the label already show.
+            # receipt from the base 109 to 128, orphaning the qualifier on a
+            # second line. The third key is the half that must NOT be cut — it is
+            # the only place the level just made durable is named — so the cells
+            # come out of the preamble and the pair, which carry the same
+            # information the file path and the label already show.
             #
-            # "for new sessions", the noun PERSIST_HINT already uses ("… saves
-            # this for new sessions"), not "from the next launch" (design review
-            # D3): a user who ran this after reading the footer met three
-            # phrasings of "when" within two rows. "New sessions" is also the
-            # fuller claim — `/new` reloads `hosting`/`model_name` before it
-            # builds, so the default applies there as well as at relaunch. The
-            # settings page keeps its own "new launch" vocabulary; it is a
-            # different surface.
+            # "new sessions" is the noun PERSIST_HINT itself uses ("… saves this
+            # for new sessions"), not "from the next launch" (D3): a user who ran
+            # this after reading the footer met three phrasings of "when" within
+            # two rows. "New sessions" is also the fuller claim — `/new` reloads
+            # `hosting`/`model_name` before it builds, so the default applies
+            # there as well as at relaunch. The settings page keeps its own "new
+            # launch" vocabulary; it is a different surface.
             #
-            # The 110-cell budget at 120 columns is measured against the path a
-            # DEFAULT install renders — `~/.local-operator/config.yml` (28 cells
-            # home-relative), not the 19-cell `~/config/config.yml` a redirected
-            # test home produces, which is the 9 cells that took this row to 111
-            # and widowed the qualifier (U8). Two words bought the room back:
-            # `boot ` (5 cells) and `used by` (4). "new sessions" is the noun
-            # PERSIST_HINT itself uses, so the shorter qualifier keeps the
-            # vocabulary the sibling receipt already prints, and the row now fits
-            # every shipped direct label INCLUDING the longest rung the shared
-            # vocabulary can carry. What it cannot fit is a selector long enough
-            # to spend the whole budget by itself — see NEW-3 in the round-3
-            # comment: `openrouter/deepseek/deepseek-chat-v3.1-terminus` is 47
-            # cells of model id against a 110-cell row that also carries a 28-cell
-            # path, and no copy of this receipt holds that.
+            # The 110-cell budget is measured against the path a DEFAULT install
+            # renders — `~/.local-operator/config.yml` (28 cells home-relative),
+            # not the 19-cell `~/config/config.yml` a redirected test home
+            # produces, which is the 9 cells that took this row to 111 and
+            # widowed the qualifier (U8). Two words bought the room back: `boot `
+            # (5 cells; the command the user just typed already says what kind of
+            # default this is) and `used by` (4, so the qualifier is
+            # `(new sessions)` — the same noun PERSIST_HINT prints). The row now
+            # fits every shipped direct label INCLUDING the longest rung the
+            # shared vocabulary can carry (110 at `claude-opus-5` with `minimal`).
+            # What it cannot fit is a selector long enough to spend the whole
+            # budget by itself — see NEW-3 in the round-3 comment:
+            # `openrouter/deepseek/deepseek-chat-v3.1-terminus` is 47 cells of
+            # model id against a 110-cell row that also carries a 28-cell path.
             notice(
                 f"default: {saved_to} — {provider}/{model_id}, "
                 f"model_effort {saved_effort or 'auto'} (new sessions){suffix}"
