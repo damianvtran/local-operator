@@ -695,6 +695,71 @@ async def test_a_waiting_model_runs_to_the_step_cap_under_default_guards(
 
 
 @pytest.mark.asyncio
+async def test_a_bounded_episode_is_not_cut_by_the_cost_rate_ratio(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The regression this guards: an episode with a stated step budget AND an
+    explicit cost cap is judged by those caps, so a per-cycle cost jump (a
+    prompt-cache miss) no longer truncates it at the ratio's first full
+    windows -- it reaches the step budget instead."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # Ten cheap cycles then a ten-cycle jump: a 3x ratio guard fires on this.
+    model = ScriptedModel(["step"] * 40, cost_micros=[7] * 20 + [70] * 4)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=24),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 24
+    assert [step.truncation_reason for step in steps] == [None] * 23 + ["max-steps"]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_episode_still_stops_a_cycle_over_its_remaining_pace(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The caps are the authority, and the prorated ceiling is part of them: a
+    cycle costing more than the remaining budget affords per remaining step is
+    still truncated, and before the ratio could fire (two cycles in)."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # 300_000 micro-USD per cycle against a 1_000_000 cap over 8 steps: inside
+    # the pace at step 1 (400_000), over it at step 2 (266_666).
+    model = ScriptedModel(["step"] * 20, cost_micros=300_000)
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
+        build_config(tmp_path, max_steps=8),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 2
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "cost-spike"
+
+
+@pytest.mark.asyncio
 async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id: str) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = _runner(
@@ -715,11 +780,14 @@ async def test_budget_cap_truncates_not_cancels(tmp_path: Path, episode_id: str)
     """A reached provider-cost cap is enforced as a scored truncation, where
     before it was only reported as an overrun after the fact."""
 
-    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap.
+    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap. The
+    # step budget is sized so the CAP is what binds -- a cost guard that
+    # prorates a tiny 14-micro-USD allowance over ten steps would stop the
+    # episode as over-pace on its first cycle, which is a different test.
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id, caps={"provider_usd_micros": 14}),
-        build_config(tmp_path, max_steps=10),
+        build_config(tmp_path, max_steps=4),
         selector=selector(tmp_path),
         model=ScriptedModel(["step"] * 8),
         launch=lambda _: adapter,
