@@ -2029,6 +2029,35 @@ class ChatRequest(BaseModel):
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
+    # "Keep this conversation on the host that served it." Only the
+    # OpenAI-compatible CHAT wire consumes this (``OpenAICompatClient._build_
+    # body`` turns it into ``provider.order``); every other wire ignores it.
+    #
+    # It rides on the REQUEST rather than on the session for the same reason
+    # ``prompt_cache_key`` does: the wire client is rebuilt per route-key
+    # inside the failover driver, so client-held state cannot survive a call,
+    # while the request is what failover CLONES for each retry — so the pin
+    # follows a retry to the same host for free.
+    #
+    # Only OpenRouter populates it today. Its default route is price-weighted
+    # load balancing across many upstream hosts, and each switch is a cold
+    # prompt cache; the session records the host that served the last turn and
+    # asks for it again. An unrecognized entry is silently ignored by
+    # OpenRouter (verified: 200 + default routing), so a stale pin degrades to
+    # today's behaviour rather than failing the call.
+    provider_affinity: str | None = None
+    # Hosts this conversation has RETIRED: they served warm turns and returned
+    # no prefix reuse, so pinning to them is worse than churn (measured: one
+    # upstream cached 38% of same-host turns while its peers managed 99%, and
+    # the misses billed at full input price, 33x a cache read).
+    #
+    # Rendered as `provider.ignore`, which is a HARD filter — verified live
+    # that it composes with `order` (the ignored host is never attempted while
+    # the ordered host still serves). That hardness is why the set is bounded;
+    # see ``SessionStreamFn.MAX_RETIRED_PROVIDERS``. Sorted by the producer so
+    # the body stays byte-stable across turns, which matters for a field that
+    # rides in front of a cached prefix.
+    provider_avoid: list[str] = Field(default_factory=list)
     #: Coarse context-size hint for optional cache TTL, never wire content.
     #: The host seeds this from its last Usage; SessionStreamFn replaces it
     #: with the counted prefix plus estimated appended content when possible.
@@ -2194,6 +2223,20 @@ class StreamEndEvent(BaseModel):
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None
+    #: The upstream host an aggregator actually routed this call to, as the
+    #: aggregator's own DISPLAY NAME (OpenRouter's ``provider`` chunk field:
+    #: "AtlasCloud", "Z.AI", "Google AI Studio"). Verbatim on purpose — the
+    #: display name is what an ``order`` entry accepts, and slug-normalising it
+    #: is wrong for 13 of 106 providers (``Z.AI`` is ``z-ai``, ``AtlasCloud``
+    #: is ``atlas-cloud``), so there is no table to keep in sync.
+    #:
+    #: Deliberately NOT ``provider_payload``: that dict is persisted per
+    #: message and is the substrate for native replay and compaction, so a
+    #: routing hint written there becomes transcript content. And deliberately
+    #: on the END event, not the start: the start event is the acceptance
+    #: boundary, and a stream that dies mid-way must not move the pin onto a
+    #: host that did not actually serve a turn.
+    served_provider: str | None = None
     #: The provider's own words about an abnormal end. For ``refusal`` this is
     #: the refusal message (or a line naming the provider's terminal marker when
     #: it sent no prose). Refusals used to be mapped onto ``stop``, which ended

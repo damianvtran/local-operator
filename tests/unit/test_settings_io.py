@@ -121,6 +121,12 @@ def _consumer_defaults() -> dict[str, object]:
         # constant exists to compare against, and inventing one would be a
         # third restatement), so the registry default and DEFAULT_CONFIG must
         # not be allowed to disagree.
+        # Not a wire key: its consumer is ``SessionStreamFn._affinity_enabled``,
+        # which reads the settings mapping directly. Guarded against the shipped
+        # config block for the same reason as the rows below.
+        "providers.openrouter.provider_affinity": (
+            DEFAULT_CONFIG.values["providers"]["openrouter"]["provider_affinity"]
+        ),
         "providers.openrouter.sort": DEFAULT_CONFIG.values["providers"]["openrouter"]["sort"],
         "providers.openrouter.order": DEFAULT_CONFIG.values["providers"]["openrouter"]["order"],
         "providers.openrouter.only": DEFAULT_CONFIG.values["providers"]["openrouter"]["only"],
@@ -602,7 +608,14 @@ def test_openrouter_defaults_mean_no_opinion() -> None:
         for key in settings_io.BY_KEY
         if key.startswith("providers.openrouter.")
     }
-    assert len(defaults) == 13
+    assert len(defaults) == 14
+    # STILL None with all 14 defaults present, including the ON-by-default
+    # ``provider_affinity``. That is the point of asserting it here: that key is
+    # a HARNESS switch read by ``SessionStreamFn._affinity_enabled``, and it is
+    # deliberately NOT read by this resolver — so turning it on must not make
+    # the shipped config start emitting a ``provider`` object. The pin reaches
+    # the wire through ``ChatRequest.provider_affinity`` instead, per request,
+    # only once a host has actually served a turn.
     assert _openrouter_provider_preferences({"providers": {"openrouter": defaults}}) is None
 
 
