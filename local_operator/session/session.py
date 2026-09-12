@@ -2376,6 +2376,10 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: Set by the deliver trampoline, consumed by the next persist, which
+        #: is what stamps ``last_fired_at`` on the wake index entry. See
+        #: :meth:`_persist_wake_schedules`.
+        self._wake_fired_since_persist = False
         # Catch-up state for the wake deliveries the process was DOWN for:
         # (occurrences skipped while down, grace re-arm from the just-run
         # load(), text of the aggregated catch-up prompt, and whether that
@@ -10640,6 +10644,11 @@ class Session:
         """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
         time, so swapping the hook (resume catch-up shim) takes effect without
         rebuilding the scheduler."""
+        # Marked before the hook runs, not after: a delivery that RAISES still
+        # advances the schedule (the scheduler's documented behaviour, so one
+        # broken wake cannot become a hot loop), so it must still count as a
+        # fire for the purpose of "when did this last go off".
+        self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
     def _prepare_missed_wake_catchup(self) -> None:
@@ -10842,18 +10851,31 @@ class Session:
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
         )
-        self._write_wake_index_entry(schedules, clear=())
+        # A persist that follows a delivery stamps `last_fired_at`. The
+        # scheduler's pump delivers and THEN persists the advanced list, so
+        # the flag set at delivery is still standing here; consuming it (not
+        # just reading it) keeps a later unrelated persist — the wake tool
+        # adding a schedule, say — from restamping a fire that did not happen.
+        stamp = "last_fired_at" if self._wake_fired_since_persist else ""
+        self._wake_fired_since_persist = False
+        self._write_wake_index_entry(schedules, clear=(), stamp=stamp)
         if schedules:
             self._ensure_wake_supervisor()
 
     def _rebuild_wake_index_entry(self) -> None:
         """Open-time rewrite of the index entry from the scheduler's adopted
         rows. Clears ``stopped_at``: a stopped session's wakes are dormant
-        only until someone opens it again, and opening is exactly this."""
-        self._write_wake_index_entry(list(self._wake.schedules), clear=("stopped_at",))
+        only until someone opens it again, and opening is exactly this.
+
+        Stamps ``last_attempt_at``: a runtime existing for this session is
+        precisely what the supervisor engages to achieve, so this is where
+        "the wake machinery got this far" becomes observable."""
+        self._write_wake_index_entry(
+            list(self._wake.schedules), clear=("stopped_at",), stamp="last_attempt_at"
+        )
 
     def _write_wake_index_entry(
-        self, schedules: list[WakeSchedule], *, clear: tuple[str, ...]
+        self, schedules: list[WakeSchedule], *, clear: tuple[str, ...], stamp: str = ""
     ) -> None:
         """Best-effort index write. Swallows everything: see
         :meth:`_persist_wake_schedules` for why a failure here must not
@@ -10877,6 +10899,21 @@ class Session:
             # child), and the directory should not be touched twice for a
             # file that almost never exists.
             existing = wake_store.read_entry(root, self._session_id) if schedules else None
+            if stamp:
+                # LATENESS TELEMETRY, written by the one writer of schedule
+                # state. The supervisor deliberately never writes here (it
+                # would then be able to disagree with the session about what
+                # has fired), so the only way `lop wake status` can report how
+                # late a wake actually was is for the session to record these
+                # two instants as it passes them:
+                #
+                #   last_attempt_at — a runtime came up for this session
+                #   last_fired_at   — a wake was actually delivered
+                #
+                # The gap between `next_due_at` and these is the lateness the
+                # whole defect was invisible for. They ride on `preserve`, so
+                # an ordinary persist that stamps neither keeps both.
+                existing = {**(existing or {}), stamp: int(time.time() * 1000)}
             wake_store.write_entry(
                 root,
                 self._session_id,
