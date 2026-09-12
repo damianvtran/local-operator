@@ -3051,7 +3051,16 @@ class FrontendStateStore:
                 "sequence": update.sequence,
             }
         )
-        normalized = {name: getattr(patch, name) for name in patch.model_fields_set}
+        # Unknown wire names may collide with our properties or BaseModel
+        # methods (e.g. model_dump). Attribute lookup would substitute the
+        # property/method for the accepted JSON value and poison later exports.
+        # Read validated storage instead; extras have their own owning mapping.
+        normalized = {
+            name: patch.__dict__[name]
+            for name in patch.model_fields_set
+            if name in FrontendSessionState.model_fields
+        }
+        normalized.update(patch.model_extra or {})
         candidate = self._state.model_copy(update=normalized)
         self._state = _freeze_state_jobs(candidate, jobs_are_canonical="jobs" not in changes)
         self._todo_sequences = todo_sequences

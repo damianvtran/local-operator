@@ -7,6 +7,7 @@ compatibility facade would still freeze the production TUI after the unit test.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -86,6 +87,48 @@ def test_scalar_patch_preserves_model_validators_extras_and_public_isolation() -
     assert current is not None and current["future_new_field"] == {"nested": ["new"]}
     assert store.state.jobs[0].label != "public mutation"
     assert original.sequence == 0 and store.state.sequence == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("cumulative_cost", 42),
+        ("model_label", "new-wire-label"),
+        ("model_dump", {"nested": [{"value": "future"}]}),
+        ("model_fields", {"nested": [{"value": "future"}]}),
+        ("model_extra", {"nested": [{"value": "future"}]}),
+        ("model_fields_set", {"nested": [{"value": "future"}]}),
+    ],
+)
+def test_reserved_extra_names_preserve_wire_values_and_nested_isolation(
+    name: str, value: Any
+) -> None:
+    # A newer runtime is allowed to introduce a field whose name happens to be
+    # a property/method in this viewer. Attribute lookup is not value lookup.
+    original_extra = {"nested": [{"value": "retained"}]}
+    seed = state().model_copy(update={"existing_extra": original_extra})
+    store = FrontendStateStore(seed)
+    publications: list[FrontendUpdate] = []
+    store.subscribe(publications.append)
+    incoming = delta(**{name: copy.deepcopy(value)})
+    result = store.apply_update(incoming)
+    assert result.model_dump(mode="json")[name] == value
+    assert result.model_extra is not None
+    assert result.model_extra["existing_extra"] == {"nested": [{"value": "retained"}]}
+
+    original_extra["nested"][0]["value"] = "original caller mutation"
+    result.model_extra["existing_extra"]["nested"][0]["value"] = "public mutation"
+    if isinstance(value, dict):
+        incoming.changes[name]["nested"][0]["value"] = "incoming mutation"
+        result.model_extra[name]["nested"][0]["value"] = "public collision mutation"
+        publications[0].changes[name]["nested"][0]["value"] = "subscriber mutation"
+    # Unchanged nested extras survive another scalar edge and neither their
+    # original caller nor a public snapshot/subscriber owns canonical storage.
+    current = store.apply_update(
+        FrontendUpdate(epoch="owner", sequence=2, changes={"activity_phase": "responding"})
+    ).model_dump(mode="json")
+    assert current[name] == value
+    assert current["existing_extra"] == {"nested": [{"value": "retained"}]}
 
 
 def test_invalid_job_patch_does_not_commit_state_or_todo_watermarks() -> None:
