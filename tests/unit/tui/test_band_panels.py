@@ -1208,13 +1208,16 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
 
             def without_inset(self: Any) -> None:
                 original(self)
-                # Same guard the real `_sync_band_inset` carries one line up,
-                # and for the same reason: this runs on every band refresh
-                # INCLUDING the ones during boot, before `#band` is composed.
-                # The production method swallows that (`except: return`), so a
-                # wrapper that queries unguarded raises `NoMatches` out of a
-                # path the app treats as normal — which showed up as a boot-
-                # timing flake here rather than as a defect in the app.
+                # Same guard the real `_sync_band_inset` carries, and for the
+                # same reason: this runs on every band refresh INCLUDING the
+                # ones during boot, before `#band` is composed. The production
+                # method swallows that (`except Exception: return`, "never
+                # raises"), so a wrapper that queries unguarded raises
+                # `NoMatches` out of a path the app treats as normal — which
+                # surfaces as a boot-timing flake here rather than as a defect
+                # in the app. Measured on a loaded host: the unguarded shape
+                # fails intermittently with `NoMatches` on a screen still
+                # classed `boot boot-card`.
                 #
                 # NARROWER than the production method's bare `except
                 # Exception`, deliberately. There the breadth is the point (a
