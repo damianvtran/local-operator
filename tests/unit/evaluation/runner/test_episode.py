@@ -1065,9 +1065,12 @@ async def test_a_rejection_without_a_captured_reply_records_the_diagnostic_alone
     from local_operator.evaluation.runner.episode import _rejection_detail
     from local_operator.evaluation.runner.model import DecisionRejected
 
-    assert _rejection_detail(DecisionRejected("refused")) == "refused"
-    assert _rejection_detail(DecisionRejected("refused", reply="")) == "refused"
-    assert "--- rejected reply ---" in _rejection_detail(DecisionRejected("refused", reply="{}"))
+    # ``None`` is the explicit "in-process rendering, never evidence" case the
+    # signature requires a caller to state (``_diagnostic``'s rule).
+    assert _rejection_detail(DecisionRejected("refused"), None) == "refused"
+    assert _rejection_detail(DecisionRejected("refused", reply=""), None) == "refused"
+    detail = _rejection_detail(DecisionRejected("refused", reply="{}"), None)
+    assert "--- rejected reply ---" in detail
 
 
 @pytest.mark.asyncio

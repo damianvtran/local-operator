@@ -35,6 +35,7 @@ from local_operator.harness.types import (
     RenderedStreamError,
     StreamEvent,
     StreamModelEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
@@ -2719,17 +2720,31 @@ async def stream_with_failover(
                     # ``forwarded_any`` gates retry, and it means exactly one
                     # thing: the caller has SEEN output that cannot be un-shown,
                     # so replaying this attempt would stream deltas twice.
-                    # A ``StreamStartEvent`` shows the user nothing — it is a
-                    # boundary marker announcing that the provider began — so
-                    # counting it would make every failure that lands after
-                    # acceptance but before the first token non-retryable
-                    # (Anthropic 529s, in-band error chunks on a 200 stream),
-                    # bypassing credential rotation and the whole fallback
-                    # chain. It would also misreport a pre-content transport
-                    # death as a MID-STREAM loss, which is what
-                    # ``is_mid_stream_connectivity_loss`` infers from this very
-                    # flag. Nothing has been rendered, so nothing blocks a retry.
-                    if not isinstance(event, StreamStartEvent):
+                    # Two events show the user nothing and are carved out for
+                    # that reason:
+                    #
+                    # * ``StreamStartEvent`` is a boundary marker announcing that
+                    #   the provider began. Counting it would make every failure
+                    #   that lands after acceptance but before the first token
+                    #   non-retryable (Anthropic 529s, in-band error chunks on a
+                    #   200 stream), bypassing credential rotation and the whole
+                    #   fallback chain. It would also misreport a pre-content
+                    #   transport death as a MID-STREAM loss, which is what
+                    #   ``is_mid_stream_connectivity_loss`` infers from this very
+                    #   flag.
+                    # * ``StreamReasoningDelta`` carries the model's private
+                    #   reasoning, which NOTHING renders: the loop appends text
+                    #   only for its visible channel, no frontend handler exists,
+                    #   and the transcript never sees it. Counting it would
+                    #   reintroduce exactly the bug above, but only for models
+                    #   that think before they answer -- the reasoning families
+                    #   this harness runs -- so a pre-content 5xx after the first
+                    #   reasoning chunk would stop rotating credentials and stop
+                    #   walking the fallback chain, and a pre-content transport
+                    #   death would be misreported as a mid-stream loss.
+                    #
+                    # Nothing has been rendered, so nothing blocks a retry.
+                    if not isinstance(event, (StreamStartEvent, StreamReasoningDelta)):
                         forwarded_any = True
                     yield stamped
                 # This selector just answered: from here on an unknown-model
