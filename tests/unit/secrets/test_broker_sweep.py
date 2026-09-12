@@ -591,8 +591,14 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
     """
     pid = _start(config_root)
     try:
+        # ``-ww`` is REQUIRED, and CI proved it: with stdout not a tty, Linux `ps`
+        # falls back to an 80-column screen width and CUTS the row, which took
+        # the 3.12 shard red on `... -m local_operator.secrets.brok`. The label
+        # was intact; the instrument was not. Anything reading this row in a
+        # teardown dump needs the same flag (or `/proc/<pid>/cmdline`), which is
+        # worth knowing for the issue this test belongs to.
         listing = subprocess.run(
-            ["ps", "-o", "args=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -609,6 +615,9 @@ def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path)
             f"the label does not name this broker's store: {listing!r}; expected the "
             f"digest {digest} that also names its runtime directory"
         )
+        # Last, because it is the furthest right and so the first casualty of a
+        # truncating reader — the failure above. The module must stay in argv:
+        # it is how the issue's own reopen condition is checked.
         assert "local_operator.secrets.brokerd" in listing, (
             "the module must stay in argv: it is how the issue's reopen condition "
             f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
