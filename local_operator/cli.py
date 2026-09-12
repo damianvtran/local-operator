@@ -3067,12 +3067,28 @@ def wake_command(args: argparse.Namespace) -> int:
         head = fixed + (when_w + 1 if show_when else 0)
         message_w = max(message_floor, term_width - head - 1)
         header = f"{'WHEN':<{when_w}} " if show_when else ""
-        # THE FLOOR IS 50 COLUMNS, stated rather than left to be discovered:
-        # 11 (DUE) + 13 (SESSION) + 2 gaps + a 24-character message. Below
-        # that a row overflows even with WHEN dropped, because clamping the
-        # message further would leave too little of it to recognise. 40-column
-        # terminals therefore wrap here, deliberately — the alternative is a
-        # table whose message column says nothing.
+        # WHAT A NARROW TERMINAL ACTUALLY GETS, measured rather than intended.
+        # `message_w` is a budget for the message column, and the row also
+        # carries a state TAIL (` · every 20m, 12/40 fired`, 25 characters on
+        # the widest real row) that the budget does not include — `room` below
+        # subtracts it and can go negative. So on a terminal narrower than the
+        # row needs, BOTH things happen at once:
+        #
+        #   * the row overflows anyway — measured 50-53 columns at COLUMNS=40,
+        #     53 being a row whose tail is 25 characters; and
+        #   * the message degrades to one character plus an ellipsis (`r…`),
+        #     because `room` is negative and the clamp floors at 1.
+        #
+        # 53 columns is the point at which the widest tailed row stops
+        # overflowing (measured across 40/44/48/50/51/52/53/54/58/60 on the
+        # design round's own fixture), and it is IRREDUCIBLE for that row:
+        # 26 fixed + 1 gap + 25 tail + 1 message character = 53. A wider
+        # message budget cannot help — it makes the row longer, not shorter —
+        # and the only lever that would is clamping the tail, which round 5
+        # (R6/U16) deliberately forbade because the tail carries the bounds a
+        # user cannot be expected to remember. Narrower terminals therefore
+        # wrap, and the message column really does stop saying anything; the
+        # honest fix is a different layout for that width, not a budget tweak.
         print(f"{header}{'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
             when = when_cells[row["next_due_at"]]
@@ -3134,6 +3150,12 @@ def wake_command(args: argparse.Namespace) -> int:
             # message is the one part of the row they already know.
             tail = f"{repeat}{mark}"
             message = row["message"]
+            # `room` GOES NEGATIVE on a narrow terminal, because `message_w` is
+            # a budget for the whole cell and the tail is subtracted from it
+            # here rather than reserved there. The `max(..., 1)` then floors
+            # the message at one character plus an ellipsis (`r…`) and the row
+            # overflows regardless — see the width note above the header for
+            # the measured numbers and why no budget change fixes it.
             room = message_w - len(tail)
             if len(message) > room:
                 message = message[: max(room - 1, 1)] + "…"
