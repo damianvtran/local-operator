@@ -3,14 +3,26 @@
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/harness_injection_shot.py out.svg
 
 Drives the REAL ``OperatorApp`` (the one that loads ``local_operator.tcss``)
-and replays the SHAPE of the operator's own session: the four
-``harness_injected`` rows a compaction pass baked into session
-``835fbcafdc27`` (each one the fallover notice ``format_model_switch_message``
-renders, copied here through the real producer) beside the assistant line that
-followed them. Then it posts the failover receipt the live path paints for that
-moment — the retry notice, then the band's effective-model edge — so one frame
-answers both halves of the report: the notice must not read as the user's own
-words, and the receipt the user actually gets must still be there.
+over a SEED OF THE REPORTED SHAPE — the four ``harness_injected`` rows a
+compaction pass baked into session ``835fbcafdc27`` (each one the fallover
+notice ``format_model_switch_message`` renders, rebuilt here through the real
+producer) beside the assistant line that followed them — and then posts the
+failover receipt the live path paints for that moment, so one frame answers
+both halves of the report: the notice must not read as the user's own words, and
+the moment is still announced.
+
+This is a SHAPE, not the operator's transcript: the real session is replayed by
+``scripts/legacy_notice_resume_shot.py`` against a copy of it, which is the
+frame that shows the reported data. That script is also the one that covers the
+legacy pre-stamp notices, which this seed does not carry.
+
+TWO THINGS THE RECEIPT IS, and the caption on the PR must say both: it is the
+``NoticeEvent`` ``configure.py::_on_route_change`` emits ("<reason> — falling
+back to <selector>", plus ``_on_route_settle``'s "back to <primary>" on
+recovery), and it is the account of the event only WHILE THE SESSION IS LIVE —
+reopening the conversation carries no trace of it by design, which is why the
+harness also tells the MODEL through the injected notice this fix stops from
+surfacing as user text.
 
 Run it against a pre-fix checkout for the before-frame (the leaked rows paint as
 user bubbles there, one per notice, which is the screenshot the operator sent).
@@ -36,11 +48,7 @@ from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY  # noqa: E
 from local_operator.harness.types import Message, TextContent  # noqa: E402
 from local_operator.incidents import format_model_switch_message  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.events import (  # noqa: E402
-    EffectiveModelChanged,
-    NoticePosted,
-    RetryStarted,
-)
+from local_operator.tui.events import EffectiveModelChanged, NoticePosted  # noqa: E402
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     TranscriptView,
     UserBlock,
@@ -145,8 +153,16 @@ async def main() -> None:
         await _pump_until(pilot, lambda: any(isinstance(b, UserBlock) for b in transcript.blocks()))
         # …and the receipt the LIVE path paints for the failover: the retry
         # notice, then the band's own effective-model edge.
-        app.post_message(RetryStarted(1, "anthropic quota exhausted (0% remaining)", "zai/glm-5.3"))
-        app.post_message(NoticePosted("provider failure — falling back to zai/glm-5.3", "warning"))
+        # The live failover receipt, exactly as ``configure.py::_on_route_change``
+        # emits it (a ``NoticeEvent`` carrying "<reason> — falling back to
+        # <selector>"). Nothing in this tree raises a retry notice for a
+        # model fallback, which is why this is the NoticePosted shape.
+        app.post_message(
+            NoticePosted(
+                "anthropic quota exhausted (0% remaining) — falling back to zai/glm-5.3",
+                "warning",
+            )
+        )
         app.post_message(EffectiveModelChanged("xai", "grok-4.6", None, "provider failure", True))
         for _ in range(4):
             await pilot.pause()

@@ -27,6 +27,10 @@ import pytest
 from rich.cells import cell_len
 from textual.events import MouseScrollUp
 
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.comms import (
     HUB_COMMUNICATION_CUSTOM_TYPE,
     HUB_MESSAGE_TYPE,
@@ -971,13 +975,33 @@ def test_a_harness_injected_row_is_not_painted_as_the_parents_words() -> None:
             "content": [{"type": "text", "text": text}],
         }
         if injected:
-            payload["provider_payload"] = {"harness_injected": True}
+            payload["provider_payload"] = {RENDERED_INJECTION_KEY: True}
         return TranscriptEntry(id=entry_id, ts=1.0, type=ENTRY_MESSAGE, payload=payload)
 
     folded = fold_transcript_entries(
         [row("leaked", notice, injected=True), row("typed", "the real ask", injected=False)]
     )
     assert [(entry.kind, entry.text) for entry in folded] == [("user", "the real ask")]
+
+    # The LEGACY shape is refused too: a notice a compaction block carried
+    # forward from before the stamp existed arrives as a plain row with only
+    # ``compaction_preserved`` on it (QA Q1 measured eight on the parent's own
+    # session, and a child's transcript carries them the same way).
+    def carried(entry_id: str) -> TranscriptEntry:
+        return TranscriptEntry(
+            id=entry_id,
+            ts=1.0,
+            type=ENTRY_MESSAGE,
+            payload={
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": notice}],
+                "provider_payload": {PRESERVED_USER_TURN_KEY: True},
+            },
+        )
+
+    carried_rows = fold_transcript_entries([carried("carried-notice")])
+    assert carried_rows == []
 
     # Negative control: the same TEXT without the stamp is the parent's own
     # words (a pasted notice is a realistic thing to send) and must paint.

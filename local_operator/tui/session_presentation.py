@@ -812,7 +812,7 @@ def project_settled_rows(
         compaction_refused_notice,
         gate_timeout_notice,
         is_harness_chrome,
-        is_harness_injection,
+        is_harness_notice_row,
         user_row_text,
     )
     from local_operator.tui.app import (
@@ -1053,17 +1053,15 @@ def project_settled_rows(
                 # painting the other two as the user's own words.
                 if is_harness_chrome(text):
                     continue
-                # A row the harness MINTED from a ``CustomMessage`` — a
-                # model-switch notice, a session incident, a wake delivery —
-                # carries ``provider_payload["harness_injected"]`` and is not
-                # the operator's words. The live path never paints one (the
-                # failover moment has its own receipt: the retry notice, the
-                # splash toast, the band), so skipping is live/replay parity
-                # rather than a second opinion, and it also covers the rows an
-                # older build already wrote to existing transcripts. The
-                # decision lives in ``harness/rows.py`` so the phone fold, the
-                # subagents panel and the opener scans make the SAME one.
-                if is_harness_injection(message):
+                # A row the harness wrote and re-seated, or minted from a
+                # ``CustomMessage`` (a model-switch notice, a session incident,
+                # a wake delivery) is neither the operator's words nor, on the
+                # live path, ever painted here — so skipping it is live/replay
+                # parity rather than a second opinion, and it also covers the
+                # rows an older build already wrote to existing transcripts
+                # (stamped, or carried forward in a compaction block without a
+                # stamp). See ``harness/rows.py`` for the one decision.
+                if is_harness_notice_row(message):
                     continue
                 # A `$skill` invocation persists as its EXPANDED payload,
                 # because that is what the model was sent. Replaying it

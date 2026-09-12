@@ -49,7 +49,10 @@ from typing import Any
 
 import pytest
 
-from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import (
@@ -154,6 +157,20 @@ def _injected_notice(text: str | None = None) -> Message:
     )
 
 
+def _carried_notice() -> Message:
+    """The legacy shape: a notice a compaction block carried forward.
+
+    Written before the stamp existed, so it is re-seated with
+    ``compaction_preserved`` and no stamp at all — QA measured eight of these on
+    the operator's own session, painted behind the user gutter twice each.
+    """
+    return Message(
+        role="user",
+        content=[TextContent(text=_switch_notice())],
+        provider_payload={PRESERVED_USER_TURN_KEY: True},
+    )
+
+
 def _assistant(text: str = "", calls=(), stop=None, payload=None) -> Message:
     message = Message(
         role="assistant",
@@ -208,6 +225,7 @@ CORPUS: dict[str, Sequence[AgentMessage]] = {
         ToolResult(tool_call_id="sh1", content=[TextContent(text="total 0")], is_error=False),
     ),
     "D12 harness injection": [Message.user("why did the model change?"), _injected_notice()],
+    "D13 carried notice": [Message.user("why did the model change?"), _carried_notice()],
     "settled conversation": [
         Message.user("edit it"),
         _assistant("editing", calls=[ToolCall(id="e1", name="edit", arguments={"path": "/x"})]),
@@ -435,6 +453,14 @@ def test_a_harness_injected_row_is_never_painted_as_the_users_words() -> None:
     for rows in (_page_rows(history), _attach_rows(history)):
         assert [row.kind for row in rows] == ["user"]
         assert rows[0].text == "why did the model change?"
+        assert notice not in " ".join(row.text for row in rows)
+
+    # …and the same decision covers the LEGACY shape: a notice a compaction
+    # block carried forward from before the stamp existed (QA Q1, measured on
+    # the operator's own session). Both folds, again.
+    carried = [Message.user("why did the model change?"), _carried_notice()]
+    for rows in (_page_rows(carried), _attach_rows(carried)):
+        assert [row.kind for row in rows] == ["user"]
         assert notice not in " ".join(row.text for row in rows)
 
     # Negative control: the same WORDING without the stamp is the user's own
