@@ -3722,6 +3722,15 @@ def login_status_command() -> int:
         auth_store.close()
 
 
+#: The provider whose `/usage` window the console ticket feeds. The ticket is
+#: stored under its OWN namespace (`qwencloud-console`) so it can never satisfy
+#: `has_any_credential` and make local-operator believe it can CHAT on a
+#: read-only console cookie -- but the usage it reports is filed under this id,
+#: so this is the cache row a ticket change invalidates and the credential the
+#: ticket augments rather than replaces.
+_QWENCLOUD_TICKET_AUGMENTS = "alibaba-token-plan"
+
+
 def qwencloud_ticket_command(args: argparse.Namespace) -> int:
     """Store / inspect / remove the QwenCloud console session cookie.
 
@@ -3749,6 +3758,15 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
     place, and so a test can drive a verb against a temp store it still needs
     to read assertions from afterwards.
     """
+    # `_invalidate_cached_usage` is auth_cli's, reused rather than re-spelled:
+    # `lop login` and `lop logout` already drop the cached usage row on a
+    # credential change (auth_cli.py:400, :409) precisely so the change shows
+    # at once, and the console ticket is a credential change this command's
+    # own cache key cannot observe -- `_account_fingerprint` reads the
+    # provider's rows, and the ticket lives in a separate namespace on
+    # purpose. A second mechanism here would be the "second way of doing
+    # something" this codebase treats as a defect.
+    from local_operator.providers.auth_cli import _invalidate_cached_usage
     from local_operator.providers.qwencloud_console import (
         QWENCLOUD_TICKET_STALE_MS,
         TicketStoreError,
@@ -3784,6 +3802,13 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         except TicketStoreError:
             record = None
         length = record["length"] if record else len(value.strip())
+        # Same call and the same position as the login path's: after the write
+        # succeeded, before the receipt. Without it a ticket swap changes
+        # NOTHING the cache key observes -- the key was measured identical
+        # across two different tickets -- so a latched `usage unavailable` row
+        # is served for up to ~12.5 min (USAGE_UNAVAILABLE_RETRY_MS 10 min,
+        # +/-25% jitter) after the user has already fixed the problem.
+        _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
         print(f"Stored QwenCloud console ticket ({length} characters).")
         return 0
 
@@ -3860,6 +3885,10 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
         if not removed:
             print("No QwenCloud console ticket stored.")
             return 0
+        # Symmetrical with `set`, for the reason `run_logout` drops its
+        # listing: a window fetched under the credential just removed must not
+        # keep rendering as though it were live.
+        _invalidate_cached_usage(_QWENCLOUD_TICKET_AUGMENTS, store)
         print("Removed the stored QwenCloud console ticket.")
         # The advice belongs HERE and not only on the failure path: someone
         # revoking this credential is usually doing it because it may be
