@@ -289,6 +289,55 @@ def resolve_effort_in(
     )
 
 
+def configured_effort(config_manager: object) -> str | None:
+    """The stored ``model_effort`` default, normalised; ``None`` means "no opinion".
+
+    A thin reader rather than a second config vocabulary: the key is resolved
+    through the registry (``settings_io.resolve_key``) so the NAME lives in one
+    place, and the value is normalised only as far as stripping and lowercasing.
+
+    An UNKNOWN word is passed through deliberately. ``resolve_effort_in``
+    answers an off-vocabulary request with the model's own default, so a
+    hand-edited typo degrades to the model default instead of raising. This
+    function sits on the BOOT path (``session_factory._prepare``,
+    ``bootstrap.resolve_model_configuration``), and a broken config must not be
+    able to fail a launch, so it never raises either: a missing key, an
+    unreadable file and a non-string value all read as ``None``.
+
+    Empty, absent and whitespace all read as ``None`` — the registry's own
+    "no opinion" is the empty string, and the two spellings must not diverge.
+
+    The import is function-local because this module is a deliberate LEAF
+    (``re``/``dataclasses`` only): ``settings_io`` is on the CLI path and must
+    not be dragged onto the import graph of every module that reads a ladder.
+    """
+    try:
+        from local_operator import settings_io
+
+        setting = settings_io.resolve_key("model_effort")
+        if setting is None:  # pragma: no cover - the row is registered
+            return None
+        raw = settings_io.read_setting(config_manager, setting)  # type: ignore[arg-type]
+    except Exception:
+        # Any failure — a broken config.yml, a manager that cannot read — means
+        # "no configured effort", which is exactly the pre-change behaviour.
+        return None
+    # A NON-STRING is "no opinion", checked BEFORE the strip/lower (B1).
+    # ``str(raw)`` mapped a YAML null — ``model_effort:`` with no value,
+    # ``model_effort: null``, ``model_effort: ~`` — onto the word ``"None"``,
+    # whose lowercase spelling ``none`` is a REAL rung of :data:`EFFORT_ORDER`.
+    # So the plainest spelling of "clear the key" turned reasoning off on every
+    # new conversation of any model whose ladder offers ``none``: silently,
+    # durably (D6's clause 2 reads the same value back for a later
+    # ``/model default``), and against this docstring's own promise that a
+    # non-string value reads as ``None``. ``none`` is the one wrong type that is
+    # also a rung, which is why this cannot be left to ``resolve_effort_in``'s
+    # vocabulary check below.
+    if not isinstance(raw, str):
+        return None
+    return raw.strip().lower() or None
+
+
 def next_effort(levels: tuple[str, ...], current: str | None) -> str | None:
     """The level one cycle step above ``current``, wrapping at the top.
 

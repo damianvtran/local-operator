@@ -4075,3 +4075,93 @@ async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session
 
     stream.forget_fast_refusal()
     assert not state.fast_refused_for("anthropic/claude-opus-5")
+
+
+class TestTheConfiguredEffortClamp:
+    """``configure_model(reasoning_effort=…)`` — the config default, clamped.
+
+    The clamp belongs on the spec builder because that is the one place a
+    session spec is BORN: the status band, the wire client's membership
+    re-check and the failover driver then all read a single value rather than
+    re-deriving one. It clamps against the SPEC's own ladder rather than the
+    effort table's, because an aggregator listing can narrow the ladder below
+    the table's — the split brain ``resolve_effort_in``'s docstring documents.
+    """
+
+    def test_a_supported_level_is_applied(self, mock_credential_manager) -> None:
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="low"
+        )
+        assert config.spec.reasoning_effort == "low"
+
+    def test_an_unsupported_level_lands_on_the_nearest_rung(self, mock_credential_manager) -> None:
+        """`claude-opus-4-6` offers low/medium/high/max, so `xhigh` is one rung
+        from `high` and one from `max`; a tie goes DOWN (``resolve_effort_in``).
+        Reaching the wire unclamped would be a silent drop beneath a band that
+        still named the level."""
+        config = configure_model(
+            "anthropic", "claude-opus-4-6", mock_credential_manager, reasoning_effort="xhigh"
+        )
+        assert config.spec.reasoning_effort == "high"
+
+    def test_the_clamp_can_move_upward_too(self, mock_credential_manager) -> None:
+        """`gpt-6-astra`'s ladder starts at `low`, so the vocabulary's `none`
+        has only one rung to land on and it is ABOVE the request."""
+        config = configure_model(
+            "openai", "gpt-6-astra", mock_credential_manager, reasoning_effort="none"
+        )
+        assert config.spec.reasoning_effort == "low"
+
+    def test_a_model_with_no_ladder_ignores_the_level(self, mock_credential_manager) -> None:
+        """A non-reasoning model must not acquire a level it would silently
+        drop — and no warning either, since a standing config value the model
+        simply cannot express is not an error, only a level out of reach."""
+        config = configure_model(
+            "deepseek", "deepseek-chat", mock_credential_manager, reasoning_effort="high"
+        )
+        assert config.spec.reasoning_efforts == ()
+        assert config.spec.reasoning_effort is None
+
+    def test_the_models_own_default_is_never_overwritten(self, mock_credential_manager) -> None:
+        """``/effort auto`` RESTORES ``reasoning_default_effort``, so it has to
+        stay the MODEL's documented default and not the configured one (D4).
+        Overwriting it would make "auto" mean the configured level, the exact
+        opposite of the withdrawal the command performs."""
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="low"
+        )
+        assert config.spec.reasoning_default_effort == "high"
+
+    def test_a_level_already_in_force_is_left_alone(self, mock_credential_manager) -> None:
+        """Anthropic seeds `high` directly, so asking for `high` must resolve to
+        what the spec already carries. The observable guard is the value; the
+        point of the ``!=`` in the implementation is to skip the copy."""
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="high"
+        )
+        assert config.spec.reasoning_effort == "high"
+
+    def test_no_argument_leaves_the_builders_seed(self, mock_credential_manager) -> None:
+        """``None`` is "no opinion": an absent key must not disturb the spec
+        builder's own seeding, which for a direct Anthropic route is `high`."""
+        config = configure_model("anthropic", "claude-opus-5", mock_credential_manager)
+        assert config.spec.reasoning_effort == "high"
+
+    def test_a_listing_narrowed_ladder_is_the_clamp_target(self, mock_credential_manager) -> None:
+        """The split-brain case made concrete: a listing can offer
+        medium/high/xhigh while the table for the same id offers
+        none/low/medium/high/xhigh. Clamping against the TABLE would keep a
+        ``low`` the route rejects; the clamp must read the SPEC's ladder, which
+        ``build_model_spec`` installed from the listing."""
+        widened = build_model_spec("openai", "gpt-5.4")
+        narrowed = widened.model_copy(
+            update={
+                "reasoning_efforts": ("medium", "high", "xhigh"),
+                "reasoning_default_effort": "medium",
+            }
+        )
+        with patch("local_operator.model.configure.build_model_spec", return_value=narrowed):
+            config = configure_model(
+                "openai", "gpt-5.4", mock_credential_manager, reasoning_effort="low"
+            )
+        assert config.spec.reasoning_effort == "medium"

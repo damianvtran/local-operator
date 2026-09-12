@@ -23,6 +23,7 @@ from textual import events
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.settings_io import Kind
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.model_picker import ModelRow
@@ -2651,8 +2652,11 @@ async def test_selecting_a_row_keeps_its_attached_explanation_on_screen(
         # The ceiling is generous, not tight: sections added above the cascade
         # (the OpenRouter routing section, design round 1 D1) push the
         # discovered height up, and the contract being pinned is about the
-        # scroll model, not about any one era's row count.
-        for height in range(48, 8, -1):
+        # scroll model, not about any one era's row count. It is the range END
+        # that a new row above the cascade moves, so it has to move WITH one:
+        # `model_effort` (the effort default) added a third `model` row and took
+        # the discovered height from 48 to 49, one past the old ceiling of 48.
+        for height in range(64, 8, -1):
             await pilot.resize_terminal(120, height)
             await pilot.pause()
             if view._body_rows() == wanted:
@@ -5238,3 +5242,46 @@ async def test_a_coercion_error_with_no_message_still_shows_something(
 
         assert view._error, "a coercion failure left the error slot empty"
         assert view._error == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_the_effort_row_renders_expands_and_resets(tmp_path: Path) -> None:
+    """The ``model_effort`` row end to end, on the page that OWNS the registry.
+
+    It renders ``auto`` for the unset ``""``, expands to the shared ladder as
+    choice rows, stores a level through one of them, and ``r`` takes it back to
+    the unset default — the same contract every other ENUM row has. The value
+    space is the vocabulary itself, so this is also where "a rung the model
+    lacks" stays OFFERABLE: the clamp happens at session build, not by hiding
+    rows the page cannot resolve a model to hide.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+
+        index = _select(view, "model_effort")
+        view.action_activate()
+        await pilot.pause()
+        assert view._expanded == "model_effort"
+        choices = [row.choice for row in view._rows if row.kind == "choice"]
+        assert choices[0].label == "auto"
+        assert [choice.value for choice in choices[1:]] == list(EFFORT_ORDER)
+
+        for offset, row in enumerate(view._rows[index + 1 :], start=index + 1):
+            if row.kind == "choice" and row.choice.value == "high":
+                view._selected = offset
+                break
+        else:
+            raise AssertionError("no `high` choice row")
+        view.action_activate()
+        await pilot.pause()
+        assert _values(tmp_path)["model_effort"] == "high"
+        assert view._expanded is None
+
+        _select(view, "model_effort")
+        view.action_reset()
+        await pilot.pause()
+        assert "model_effort" not in _values(tmp_path)
