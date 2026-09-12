@@ -1965,6 +1965,42 @@ class ModelSpec(BaseModel):
     # knowledge out of the widgets — the division ``model.effort`` claims in its
     # own docstring and which those two sites were quietly breaking.
     reasoning_default_effort: str | None = None
+    # Provider REASONING-BOUNDARY MARKERS this model's chat template emits at
+    # the HEAD of the content channel, in the order they may appear. An EMPTY
+    # tuple -- the default, and what every unlisted model gets -- means the
+    # harness strips nothing from a reply, which is the ordinary case.
+    #
+    # **What this is.** MiniMax M3 through OpenRouter splits one model turn
+    # across two wire channels: the reasoning text arrives as
+    # ``reasoning_content`` and the answer as ``content``. The template's
+    # closing boundary token (``</mm:think>``) is emitted at the JOINT -- the
+    # opening half stays on the reasoning channel and only the closing half
+    # leaks into ``content``. So the reply the harness assembles is not prose
+    # and not model output at all: it is a template artifact welded to the
+    # front of a byte-perfect action batch. Measured over the sealed MiniMax
+    # campaign (329 rejection artifacts, 40 of which publish their reply text;
+    # counted 2026-09-12): 17 replies carried the token, all 17 at offset 0, all
+    # 17 CLOSING tags, zero opening tags -- an authorship signature no model
+    # prose can produce.
+    #
+    # **Why it is declared here rather than stripped at the call site.** The
+    # frontier this file already draws: no wire client, widget or runner
+    # recognises a model name, so a template token must be derived once, in
+    # ``build_model_spec``, and READ by the code that needs it. A hardcoded
+    # ``</mm:think>`` in the reply assembler would be a model-name check wearing
+    # a string literal, and it would silently mangle the first model whose
+    # prose legitimately starts with that text.
+    #
+    # **Why only the HEAD and only an exact token.** The strip is the one place
+    # in the reply path that can rewrite what the model sent, so its licence is
+    # kept as narrow as the evidence: a declared token at the very start of the
+    # assembled reply, removed whole. Nothing is searched for, nothing is
+    # removed from the middle, and a token inside a string value or behind a
+    # character of prose is left alone and judged as the bytes it is. Extracting
+    # the first balanced JSON object from prose -- the other way to rescue these
+    # replies -- remains refused for the reason ``_decode_leading_json`` gives:
+    # it can execute a batch the model never sent.
+    reasoning_boundary_markers: tuple[str, ...] = ()
     # Whether this ROUTE can serve this model at the provider's fast tier, and
     # whether the user has asked it to. Same division of labour as the effort
     # pair above, and for the same reason: the wire clients need "do I send the

@@ -25,9 +25,16 @@ from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
 from local_operator.evaluation.protocol import KeyAction
 from local_operator.evaluation.runner.provider_client import (
     REJECTION_CLASS_UNKNOWN,
+    DecisionParseError,
     _action_schema_lines,
+    _decode_leading_json,
     classify_rejection,
     rejection_hint,
+    strip_reasoning_boundary_markers,
+)
+from local_operator.evaluation.runner.public_reply import (
+    decode_public_reply,
+    is_public_reply,
 )
 from tests.unit.evaluation.runner.test_provider_client import observation
 
@@ -216,6 +223,24 @@ def test_an_unrecognised_message_is_still_recordable_and_still_answered() -> Non
     not _corpus_root().exists(),
     reason=f"no sealed rejection corpus at {_corpus_root()} (set {CORPUS_ENV})",
 )
+def _records_its_class(artifact: str) -> bool:
+    """Whether the artifact itself states the class it was bucketed into.
+
+    Two generations of bundle, and the difference decides what can be CHECKED.
+    A bundle written since the class key exists carries it (``class:``) and also
+    replaced the decoder's parse error with the HINT the model was shown -- so
+    its diagnostic can no longer be classified, and the recorded key is the only
+    honest source. A bundle written before it carries the raw decoder text, which
+    is what makes ``classify_rejection`` a text classifier in the first place.
+    """
+
+    return any(line.startswith("class: ") for line in artifact.splitlines())
+
+
+@pytest.mark.skipif(
+    not _corpus_root().exists(),
+    reason=f"no sealed rejection corpus at {_corpus_root()} (set {CORPUS_ENV})",
+)
 def test_every_sealed_rejection_artifact_classifies(capsys: pytest.CaptureFixture[str]) -> None:
     """The classes, over the artifacts a paid campaign actually produced.
 
@@ -224,6 +249,12 @@ def test_every_sealed_rejection_artifact_classifies(capsys: pytest.CaptureFixtur
     traffic), and the classes the corpus ranks are all present (so the keys are
     not merely reachable in theory). The histogram is printed because it is the
     measurement -- the reason the class key exists at all.
+
+    The two generations are checked differently on purpose. Where the bundle
+    records its class, the recorded key must be a real class. Where it does not,
+    the derivation from the decoder's own text must agree with what the reader
+    returns -- that equality is the property that keeps a report tool's reading
+    of an old bundle identical to the run's own bucketing.
     """
 
     artifacts = _sealed_rejection_artifacts()
@@ -232,11 +263,11 @@ def test_every_sealed_rejection_artifact_classifies(capsys: pytest.CaptureFixtur
 
     histogram: dict[str, int] = {}
     for artifact, episode in artifacts:
-        derived = classify_rejection(_diagnostic_of(artifact))
         key = _class_of(artifact)
         histogram[key] = histogram.get(key, 0) + 1
-        assert derived != REJECTION_CLASS_UNKNOWN, episode
-        assert derived == key, episode
+        assert key != REJECTION_CLASS_UNKNOWN, episode
+        if not _records_its_class(artifact):
+            assert classify_rejection(_diagnostic_of(artifact)) == key, episode
 
     with capsys.disabled():
         print(f"\nsealed rejection classes ({len(artifacts)} artifacts):")
@@ -244,7 +275,6 @@ def test_every_sealed_rejection_artifact_classifies(capsys: pytest.CaptureFixtur
             print(f"  {count:4d}  {key}")
 
     ranked = {
-        "malformed-json",
         "unsupported-reply-version",
         "envelope-shape",
         "extra-action-key",
@@ -252,6 +282,11 @@ def test_every_sealed_rejection_artifact_classifies(capsys: pytest.CaptureFixtur
         "out-of-frame-coordinate",
     }
     assert ranked.issubset(histogram), sorted(histogram)
+    # The split halves, asserted apart from ``malformed-json``: the old class
+    # still appears (bundles recorded before the split), and the two halves that
+    # replaced it must both be ranked by the corpus, or the split has not
+    # actually separated the traffic it was built for.
+    assert {"leading-delimiter", "incomplete-json"} & set(histogram), sorted(histogram)
 
 
 def test_a_sealed_artifact_reads_the_way_report_tools_will_read_it() -> None:
@@ -279,7 +314,11 @@ def test_a_sealed_artifact_reads_the_way_report_tools_will_read_it() -> None:
         '{"actions": ['
     )
 
-    assert _class_of(old) == "malformed-json"
+    assert _class_of(old) == "leading-delimiter"
+    # A bundle that RECORDS a class this build no longer derives still reads as
+    # what it says: the split renamed the halves of ``malformed-json``, and a
+    # reader that reclassified a sealed bundle by this build's names would
+    # silently rewrite history for every run made before the split.
     assert _class_of(new) == "malformed-json"
     # The diagnostic section excludes everything the artifact added around it,
     # so a reader that WANTS the prose gets the prose and not the header.
@@ -287,3 +326,172 @@ def test_a_sealed_artifact_reads_the_way_report_tools_will_read_it() -> None:
         assert "--- rejected reply ---" not in _diagnostic_of(artifact)
         assert not _diagnostic_of(artifact).startswith("class: ")
     assert "stream:" not in _diagnostic_of(new)
+
+
+# ---------------------------------------------------------------------------
+# The offline replay: the reply NORMALISER, over the corpus it was built for
+# ---------------------------------------------------------------------------
+#
+# The classes above measure what a refusal was CALLED. This measures what the
+# normaliser DID to the reply, which is the change itself, and it is the
+# acceptance test for it: no credentials, no model spend, just the replies a
+# paid campaign already sealed.
+#
+# What it can prove and what it cannot: the replay runs the two decode
+# boundaries the reply is judged at (``_decode_leading_json``, then the reserved
+# envelope). Observation binding -- whether the batch names the screen in front
+# of the model -- CANNOT be replayed, because a sealed rejection does not publish
+# the observation it answered, so a reply that clears both boundaries is reported
+# as ``accepted-shape`` rather than claimed as a decision. That is the boundary
+# the change is about anyway: a reply the decoder could not even READ never
+# reached the observation check.
+
+#: What the replay calls a reply that clears both decode boundaries. Deliberately
+#: not a rejection class: it says "nothing in the reply's own bytes refuses it",
+#: which is the claim the replay is entitled to make.
+_ACCEPTED_SHAPE = "accepted-shape"
+
+#: The placeholder a bundle writes instead of a reply it may not publish. A JSON
+#: reply cannot start with a bracket, so this is an exact test rather than a
+#: heuristic -- and the 271 artifacts that carry it are why the class taxonomy
+#: was built to read the diagnostic instead of the reply.
+_PLACEHOLDER_PREFIX = "(model reply rejected"
+
+
+def _published_reply(artifact: str) -> str | None:
+    """The reply section of the artifact, or ``None`` when it kept none."""
+
+    if "\n\n--- rejected reply ---\n" not in artifact:
+        return None
+    reply = artifact.split("\n\n--- rejected reply ---\n", 1)[1]
+    if reply.startswith(_PLACEHOLDER_PREFIX):
+        return None
+    return reply
+
+
+#: Manifests are read once per episode: the corpus has dozens of episodes and
+#: hundreds of rejection artifacts, and re-reading one manifest per artifact
+#: would make the replay's cost a function of how badly a run went.
+_MARKER_CACHE: dict[str, tuple[str, ...]] = {}
+
+
+def _declared_markers(episode: str) -> tuple[str, ...]:
+    """The boundary markers the harness would have declared for that episode.
+
+    Read from the bundle's own manifest rather than hardcoded, so the replay
+    tests the DECLARATION that production applies to the route that produced the
+    corpus -- a table row that stopped matching the model id OpenRouter serves
+    would show up here as a corpus that recovered nothing.
+    """
+
+    if episode in _MARKER_CACHE:
+        return _MARKER_CACHE[episode]
+    markers: tuple[str, ...] = ()
+    manifest = Path(episode) / "manifest.json"
+    if manifest.exists():
+        try:
+            route = json.loads(manifest.read_text(encoding="utf-8")).get("requested_route") or {}
+        except ValueError:
+            route = {}
+        from local_operator.model.configure import _reasoning_boundary_markers
+
+        markers = _reasoning_boundary_markers(str(route.get("model_id") or ""))
+    _MARKER_CACHE[episode] = markers
+    return markers
+
+
+def _replay_verdict(reply: str) -> str:
+    """The class a reply's own bytes earn it, at the two decode boundaries."""
+
+    payload = reply.strip()
+    try:
+        decoded, _trailing = _decode_leading_json(payload)
+    except DecisionParseError as error:
+        # The same reason string ``parse_decision`` would hand the classifier,
+        # so the replayed class is derived by the SAME function the run used.
+        return classify_rejection(str(error))
+    if not isinstance(decoded, dict):
+        return "batch-shape"
+    if is_public_reply(decoded):
+        try:
+            decoded = decode_public_reply(payload)["action_batch"]
+        except (ValueError, KeyError) as error:
+            return classify_rejection(str(error))
+    actions = decoded.get("actions") if isinstance(decoded, dict) else None
+    if not isinstance(actions, list) or not actions:
+        return "batch-shape"
+    return _ACCEPTED_SHAPE
+
+
+@pytest.mark.skipif(
+    not _corpus_root().exists(),
+    reason=f"no sealed rejection corpus at {_corpus_root()} (set {CORPUS_ENV})",
+)
+def test_the_sealed_corpus_replays_through_the_reply_normaliser(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Replay every published sealed reply, and account for every verdict.
+
+    Four claims, and the corpus is the only place they can be made at this
+    scale -- 40 published replies from a paid campaign, of which 17 arrived
+    carrying a provider reasoning boundary token:
+
+    1. A reply with NO declared marker at its head is left byte-identical and
+       keeps its verdict. That is "no previously-passing reply changes verdict",
+       asserted over every published reply rather than over a sample.
+    2. A reply that IS stripped was, before the strip, unreadable at offset 0.
+       A strip may only ever rescue a reply the decoder could not START -- it can
+       never be a repair of a reply that was merely wrong.
+    3. The set of rejection classes the corpus produces afterwards is a subset of
+       the set it produced before: the split renames two halves of one class and
+       the strip removes one cause, so a class that is NEW after the change is a
+       class the change invented.
+    4. At least one reply is actually recovered. Without it the corpus has
+       stopped exercising the path this exists for, which is a measurement
+       failure rather than a pass.
+
+    The counts themselves are printed rather than pinned: the corpus is a paid
+    run's output that grows as canary batches land, and a hard-coded 15 would go
+    red on the next run and read as a regression. Measured 2026-09-12: 329
+    artifacts, 311 with a reply section, 40 published replies, 17 tagged, 15
+    recovered -- and the 2 tagged ones that did not recover are the ones whose
+    remainder is still not JSON, which arrived as ``incomplete-json``.
+    """
+
+    published = [
+        (artifact, episode)
+        for artifact, episode in _sealed_rejection_artifacts()
+        if _published_reply(artifact) is not None
+    ]
+    if len(published) < _MIN_CORPUS_ARTIFACTS:
+        pytest.skip(f"corpus has rotated: {len(published)} published replies left")
+
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    transitions: dict[str, int] = {}
+    for artifact, episode in published:
+        reply = _published_reply(artifact) or ""
+        verdict_before = _replay_verdict(reply)
+        stripped, removed = strip_reasoning_boundary_markers(reply, _declared_markers(episode))
+        verdict_after = _replay_verdict(stripped)
+        before[verdict_before] = before.get(verdict_before, 0) + 1
+        after[verdict_after] = after.get(verdict_after, 0) + 1
+        if not removed:
+            assert stripped == reply, episode
+            assert verdict_after == verdict_before, episode
+            continue
+        assert verdict_before == "leading-delimiter", episode
+        moved = f"{verdict_before} -> {verdict_after}"
+        transitions[moved] = transitions.get(moved, 0) + 1
+
+    assert set(after) - {_ACCEPTED_SHAPE} <= set(before), sorted(after)
+    recovered = transitions.get(f"leading-delimiter -> {_ACCEPTED_SHAPE}", 0)
+    assert recovered > 0, sorted(transitions)
+
+    with capsys.disabled():
+        print(f"\nsealed reply replay ({len(published)} published replies):")
+        for label, histogram in (("before", before), ("after", after)):
+            print(f"  {label}: " + ", ".join(f"{k}={v}" for k, v in sorted(histogram.items())))
+        for label, count in sorted(transitions.items()):
+            print(f"  {count:4d}  {label}")
+        print(f"  {recovered:4d}  recovered to the accepted shape")

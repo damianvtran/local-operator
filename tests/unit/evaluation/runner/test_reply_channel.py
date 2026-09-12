@@ -673,8 +673,12 @@ async def test_an_empty_channel_call_is_rejected_like_an_empty_prose_body() -> N
     message = str(info.value)
     assert "no tool call and no text" not in message
     # The reply is reported as what it is: a reply that did not come through as
-    # one JSON object, bucketed as that class. The wording moved when the
-    # model-facing text became a shape hint instead of the decoder's prose; the
-    # distinction this test draws -- malformed, NOT silent -- is unchanged.
-    assert "not one complete JSON object" in message
-    assert info.value.class_key == "malformed-json"
+    # one JSON object, bucketed as that class -- and specifically as the
+    # OFFSET-ZERO half of it, because an empty reply has no first byte to read.
+    # The wording moved when the model-facing text became a shape hint instead
+    # of the decoder's prose, and the key moved when the old ``malformed-json``
+    # class was split into the half that cannot start and the half that starts
+    # and breaks; the distinction this test draws -- not silent, but unreadable
+    # -- is unchanged.
+    assert "did not begin with the JSON object" in message
+    assert info.value.class_key == "leading-delimiter"

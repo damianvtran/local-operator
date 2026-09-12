@@ -981,6 +981,12 @@ class EpisodeRunner:
                 cache_read_tokens=decision.usage.cache_read_tokens,
                 cache_write_tokens=decision.usage.cache_write_tokens,
                 tool_call_count=decision.tool_call_count,
+                # Read with a default because ``decision`` is a
+                # ``ModelDecision`` only on the accepted path: a rejected or
+                # aborted attempt carries its own count (or none), and a
+                # scripted client -- which has no reply assembly to speak of --
+                # must record 0 rather than claim a strip that never ran.
+                stripped_reply_markers=getattr(decision, "stripped_reply_markers", 0),
                 redacted_response=response_artifact,
             ),
         )
@@ -2351,7 +2357,10 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
     rejection class from Pydantic prose after the fact is guesswork, and the
     prose used to be the only thing recorded. The stream shape answers the one
     question the reply cannot: a refusal whose reply is empty may have been
-    EMPTY or DISCARDED, and the delta counts tell those apart.
+    EMPTY or DISCARDED, and the delta counts tell those apart. The same line
+    carries ``stripped_reply_markers``, which answers the other question the
+    reply cannot: whether the reply it shows was the reply that arrived, or one
+    with a provider's boundary token already removed from its head.
 
     The reply is redaction-scanned and bounded by
     :func:`rejected_reply_evidence`, which fails closed and WHOLE -- so a reply
@@ -2370,12 +2379,21 @@ def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
         sections.append(f"class: {_header_value(class_key)}")
     shape = getattr(rejected, "stream_shape", None)
     if shape is not None:
+        # ``stripped_reply_markers`` is not a provider event count, and it rides
+        # on this line anyway: the line is the artifact's one per-ATTEMPT record,
+        # and the reader needs it beside the counts because it explains them.
+        # Without it, a refusal whose reply lost a provider boundary token reads
+        # exactly like one that arrived broken -- the reply section shows the
+        # version already judged (marker gone), so the artifact would have no
+        # evidence that anything was removed, which is the "quietly mangling a
+        # reply" failure the tally exists to prevent.
         sections.append(
             "stream: "
             f"content_deltas={shape.content_deltas} "
             f"reasoning_deltas={shape.reasoning_deltas} "
             f"tool_call_deltas={shape.tool_call_deltas} "
-            f"stop={_header_value(shape.stop)}"
+            f"stop={_header_value(shape.stop)} "
+            f"stripped_reply_markers={getattr(rejected, 'stripped_reply_markers', 0)}"
         )
     # ``evidence_reply`` is the boundary that may carry the reply into evidence;
     # ``reply`` is the history rendering and is the fallback for a client that
