@@ -1462,11 +1462,147 @@ async def test_an_effort_only_external_edit_names_the_effort(tmp_path, monkeypat
         events = [e for e in _EVENTS[id(session)] if e.type == "notice"]
         assert len(events) == 1, events
         assert events[0].headline == "Effort default changed"
+        # No `keeping <label>` clause: the pair MATCHES this session's model by
+        # construction on this branch, so the label restated the band and the 24
+        # cells it cost are what pushed this row over budget (U7).
         assert events[0].text == (
-            "keeping test/m; reasoning effort default changed for new sessions (medium); "
+            "reasoning effort default changed for new sessions (medium); "
             "/model saved adopts it here"
         )
         # The birth default moved; the running session did not.
         assert session.model.reasoning_effort == "high"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_model_default_notice_is_change_based(tmp_path, monkeypatch) -> None:
+    """The round-3 ruling: announce iff the pair still matches AND
+    ``model_effort`` is one of the keys that MOVED.
+
+    A value comparison cannot express that, which is what three rounds of
+    findings on this predicate amount to. It has to decide what the session's
+    "own" level is, and every version of that rule mis-fires in one direction:
+    comparing against the raw spec field announced for every seed-carrying model
+    (M2); normalising the seed to ``""`` announced for a session holding a
+    DELIBERATE level (Q2); and it made a genuine move to ``""`` silent for a
+    session on the seeded level (Q3) — the one member of this section the effort
+    term exists to keep audible. ``ConfigChange.changed_keys`` states which
+    registry key really moved, which is a fact about the writer rather than a
+    guess about the reader.
+
+    Every row below is driven through a real ``Session`` on the real
+    config-directory watcher, with a fresh config dir per case. The disk rows
+    write a key whose value is genuinely new (a matching pair that was not on
+    disk before), so each delivery is real rather than an unchanged-file no-op.
+    """
+
+    async def drive(
+        name: str,
+        *,
+        config: dict[str, Any],
+        spec: ModelSpec,
+        write: tuple[str, Any],
+        local: bool = False,
+    ) -> tuple[Any, list[str]]:
+        case = tmp_path / name
+        config_dir = case / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        manager = ConfigManager(config_dir)
+        for key, value in config.items():
+            manager.set_config_value(key, value)
+        session = make_session(
+            case, RebindableStream({}), model=spec, compaction_settings=CompactionSettings()
+        )
+        _capture_events(session)
+        watcher = process_watcher(config_dir)
+        subscribe(session, watcher)
+        try:
+            await _settle(session)
+            _EVENTS[id(session)].clear()
+            key, value = write
+            change = None
+            if local:
+                setting = settings_io.resolve_key(key)
+                assert setting is not None, key
+                settings_io.write_setting(manager, setting, value)
+            else:
+                write_from_another_process(config_dir, key, value)
+                change = watcher.poll_now()
+            await _settle(session)
+            return change, _notices(session)
+        finally:
+            await session.dispose()
+
+    pair = {"hosting": MODEL.provider, "model_name": MODEL.model_id}
+    #: A spec in the M2/Q2 shape: the level it CARRIES is not the one it was
+    #: seeded with, i.e. the session holds a deliberate pick.
+    deliberate = MODEL.model_copy(
+        update={
+            "reasoning_effort": "low",
+            "reasoning_default_effort": "high",
+            "reasoning_efforts": ("low", "medium", "high"),
+        }
+    )
+
+    # 1. An unrelated write: the pair is re-stated (the key was not on disk
+    #    before) and no effort key moved. Silent.
+    change, notices = await drive(
+        "unrelated", config={"hosting": MODEL.provider}, spec=MODEL, write=("model_name", "m")
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_name"})
+    assert notices == [], notices
+
+    # 2. The same write against a session holding a DELIBERATE level: still
+    #    silent. This is Q2 exactly — the round-1 rule compared values and
+    #    announced here because "low" != "".
+    change, notices = await drive(
+        "deliberate",
+        config={"hosting": MODEL.provider},
+        spec=deliberate,
+        write=("model_name", "m"),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_name"})
+    assert notices == [], notices
+
+    # 3. Effort-only, to a rung: announced, naming the member and the value.
+    change, notices = await drive(
+        "rung",
+        config={**pair, "model_effort": ""},
+        spec=MODEL,
+        write=("model_effort", "medium"),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_effort"})
+    assert notices == [
+        "reasoning effort default changed for new sessions (medium); /model saved adopts it here"
+    ], notices
+
+    # 4. Effort-only, to auto (the stored empty string), on a session sitting on
+    #    the SEEDED level: announced, and named `auto`. This is Q3 — the round-1
+    #    rule was silent here, which is the direction that loses a change.
+    change, notices = await drive(
+        "auto",
+        config={**pair, "model_effort": "medium"},
+        spec=MODEL,
+        write=("model_effort", ""),
+    )
+    assert change is not None and change.changed_keys == frozenset({"model_effort"})
+    assert notices == [
+        "reasoning effort default changed for new sessions (auto); /model saved adopts it here"
+    ], notices
+
+    # 5. The same change written by THIS process's facade: silent, because the
+    #    surface that wrote it printed its own receipt (#785's source gate).
+    _change, notices = await drive(
+        "local", config=pair, spec=MODEL, write=("model_effort", "high"), local=True
+    )
+    assert notices == [], notices
+
+    # 6. The model pair itself moved: the #785 notice, unchanged — the session
+    #    keeps its model and hears that new conversations will not.
+    change, notices = await drive("pair", config=pair, spec=MODEL, write=("model_name", "other"))
+    assert change is not None
+    assert notices == [
+        "keeping test/m; default changed for new sessions. /model saved adopts it here"
+    ], notices

@@ -9175,11 +9175,11 @@ async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
             await pilot.pause()
             await pilot.pause()
             notices = [block.text() or "" for block in app.query(NoticeBlock)]
-        receipts = [n for n in notices if "boot default:" in n]
+        receipts = [n for n in notices if "default:" in n]
         assert len(receipts) == 1, notices
         assert not [n for n in notices if "config.yml changed" in n], notices
         # The receipt is the LAST row: nothing followed it.
-        assert "boot default:" in notices[-1], notices
+        assert "default:" in notices[-1], notices
     finally:
         _reset_for_tests()
 
@@ -10085,7 +10085,7 @@ async def test_model_default_on_a_cold_viewer_still_saves(
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default:") in text, text
+    assert _unwrapped("default:") in text, text
     assert _unwrapped("no runtime is running") not in text, text
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
@@ -10134,7 +10134,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used by new sessions") in text, text
+    assert _unwrapped("(new sessions)") in text, text
 
 
 @pytest.mark.asyncio

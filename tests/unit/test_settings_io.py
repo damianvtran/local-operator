@@ -1417,4 +1417,17 @@ class TestTheModelRowsHelpBudget:
     def test_the_effort_help_says_what_the_resting_cell_means(self) -> None:
         setting = settings_io.resolve_key("model_effort")
         assert setting is not None
-        assert "Unset" in setting.help and "model's own default" in setting.help, setting.help
+        assert "Unset" in setting.help and "model's default" in setting.help, setting.help
+
+    def test_the_effort_help_keeps_headroom_for_another_word(self) -> None:
+        """D10: the first cut sat EXACTLY on the 74-cell detail budget, so one
+        more word anywhere — in the help, in the ladder's ` · default: —`
+        suffix — would shed the whole sentence in the state the sentence exists
+        for, with no warning on the frame.
+
+        Three cells of margin is the floor this pins: enough that a later edit
+        has to notice, not so much that the sentence has to lose a word it needs.
+        """
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert len(f"{setting.help} · default: —") <= 71, setting.help

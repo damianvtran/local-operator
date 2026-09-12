@@ -25863,12 +25863,17 @@ class OperatorApp(App[None]):
         provider = provider.lower()  # build_model_spec is case-insensitive
         if self._providers is None:
             # An ARMED effort override goes with the dispatch that failed (B2):
-            # `_cmd_model_saved` arms one for exactly this call, and the two
-            # guards here are the only ways it can end without reaching
-            # `_activate_resolved_model`. Dropping it at the entry guard alone
-            # would leave the field reading `(True, 'none')` after the refusal
-            # below — harmless to the user, but a state that outlives the command
-            # it belonged to is what made the original leak hard to see.
+            # `_cmd_model_saved` arms one for exactly this call, and this guard
+            # plus the unknown-provider check below are the ways THAT dispatch
+            # ends without reaching `_activate_resolved_model`. (It is not the
+            # only way the pair can end un-consumed: `_run_slash_command` has an
+            # early return of its own, ABOVE this method entirely. That path is
+            # closed where it opens — in `_cmd_model_saved`, after the dispatch
+            # returns — because nothing in here runs on it at all; see NEW-1.)
+            # Dropping it at the entry guard alone would leave the field reading
+            # `(True, 'none')` after the refusal below — harmless to the user,
+            # but a state that outlives the command it belonged to is what made
+            # the original leak hard to see.
             self._pending_effort_override = (False, None)
             self._system_notice(
                 "provider controller unavailable — cannot infer model spec", "warning"
@@ -26292,16 +26297,32 @@ class OperatorApp(App[None]):
             # is named — so the cells come out of the preamble and the pair, which
             # carry the same information the file path and the label already show.
             #
-            # "used by new sessions", the noun PERSIST_HINT already uses, not
-            # "from the next launch" (design review D3): a user who ran this
-            # after reading the footer met three phrasings of "when" within two
-            # rows. "New sessions" is also the fuller claim — `/new` reloads
-            # `hosting`/`model_name` before it builds, so the default applies
-            # there as well as at relaunch. The settings page keeps its own
-            # "new launch" vocabulary; it is a different surface.
+            # "for new sessions", the noun PERSIST_HINT already uses ("… saves
+            # this for new sessions"), not "from the next launch" (design review
+            # D3): a user who ran this after reading the footer met three
+            # phrasings of "when" within two rows. "New sessions" is also the
+            # fuller claim — `/new` reloads `hosting`/`model_name` before it
+            # builds, so the default applies there as well as at relaunch. The
+            # settings page keeps its own "new launch" vocabulary; it is a
+            # different surface.
+            #
+            # The 110-cell budget at 120 columns is measured against the path a
+            # DEFAULT install renders — `~/.local-operator/config.yml` (28 cells
+            # home-relative), not the 19-cell `~/config/config.yml` a redirected
+            # test home produces, which is the 9 cells that took this row to 111
+            # and widowed the qualifier (U8). Two words bought the room back:
+            # `boot ` (5 cells) and `used by` (4). "new sessions" is the noun
+            # PERSIST_HINT itself uses, so the shorter qualifier keeps the
+            # vocabulary the sibling receipt already prints, and the row now fits
+            # every shipped direct label INCLUDING the longest rung the shared
+            # vocabulary can carry. What it cannot fit is a selector long enough
+            # to spend the whole budget by itself — see NEW-3 in the round-3
+            # comment: `openrouter/deepseek/deepseek-chat-v3.1-terminus` is 47
+            # cells of model id against a 110-cell row that also carries a 28-cell
+            # path, and no copy of this receipt holds that.
             notice(
-                f"boot default: {saved_to} — {provider}/{model_id}, "
-                f"model_effort {saved_effort or 'auto'} (used by new sessions){suffix}"
+                f"default: {saved_to} — {provider}/{model_id}, "
+                f"model_effort {saved_effort or 'auto'} (new sessions){suffix}"
             )
             if requested_effort and saved_effort and saved_effort != requested_effort:
                 # The clamp dropped a rung on the way to durable (U4). On its own
@@ -26310,9 +26331,19 @@ class OperatorApp(App[None]):
                 # true. README documents the rule; this names the instance the
                 # user just created, where the stored level silently differs from
                 # the one they were running.
+                #
+                # `reasoning effort:` rather than `model_effort` (U9): every
+                # other row in this feature opens with the user-facing name of
+                # the dial, and `model_effort` is the config KEY — the spelling a
+                # user only meets on the settings page's detail line. "to the
+                # nearest rung" rather than "to this model's nearest rung": the
+                # model is on the band one row above, and the 2 shorter words are
+                # what keep the row inside the 70-cell budget for the longest
+                # level words the vocabulary can carry (U9's own suggested
+                # wording measures 71 for a 7-cell rung).
                 notice(
-                    f"model_effort {saved_effort} ({requested_effort} clamps to this "
-                    "model's nearest rung)",
+                    f"reasoning effort: {saved_effort} "
+                    f"({requested_effort} clamps to the nearest rung)",
                     "info",
                 )
         else:
@@ -26476,10 +26507,33 @@ class OperatorApp(App[None]):
         # The handoff marker travels WITH it: `_cmd_model` clears an armed
         # override at every entry except the dispatch this marker tags, so the
         # override survives exactly the one hop below and cannot outlive it (B2).
+        #
+        # The cleanup below is the OTHER half of that invariant, and it is what
+        # makes it an invariant rather than a property of the happy path
+        # (NEW-1). The dispatch is a string through the general slash
+        # dispatcher, which has an early return of its own ABOVE `_cmd_model`:
+        # when the source is not ready and the command is not in
+        # `_SAVED_LOCAL_COMMANDS` (and `/model` is not) it answers
+        # `_allow_source_command()` and returns without entering the handler at
+        # all. Nothing in there would then clear either field, and the stranded
+        # marker would EAT the next entry's clear — so a later, unrelated
+        # `/model` switch would land on the stored level. That window is
+        # reachable: `_cmd_model_saved` has a caller that does not
+        # readiness-check first (the `local_setup` login continuation), and a
+        # mid-retry/cold-bind source can be un-ready at this instant.
+        #
+        # So: armed, dispatched, and whatever is still armed afterwards belonged
+        # to no dispatch. The marker is the record of "the handler consumed it",
+        # and only `_cmd_model` clears it — an asynchronous activation (a local
+        # provider's capacity check) leaves it consumed while the override is
+        # still in flight, which is why this checks the MARKER and not the pair.
         if not callable(getattr(session, "route_shared_slash", None)):
             self._pending_effort_override = (True, saved_effort)
             self._effort_override_handoff = True
         self._run_slash_command(f"/model {provider}/{model_id}")
+        if self._effort_override_handoff:
+            self._effort_override_handoff = False
+            self._pending_effort_override = (False, None)
 
     def _recover_from_missing_model(self, target: str, notice: NoticeFn) -> None:
         """Write a model into config from the setup state, then BOOT the session.
@@ -27154,12 +27208,19 @@ class OperatorApp(App[None]):
         # (`_effort_label`), so the receipt and the band name one state one way.
         # The old `provider default` was a second spelling of it and 12 cells
         # longer, which is the whole budget the pointer gets (design review D2:
-        # a notice row holds 70 cells at 80 columns). `; /model default keeps it`
-        # rather than ` — /model default to keep it` is the 3 cells that fit.
-        notice(
-            f"reasoning effort: {current or 'auto'} → {wanted} "
-            f"(this session); /model default keeps it"
-        )
+        # a notice row holds 70 cells at 80 columns).
+        #
+        # `(session)` rather than `(this session)` is what makes that budget
+        # INVARIANT rather than spot-checked (round-2 D9/NEW-2/Q1). The row's size
+        # is a function of two rung words, and both vary: `high → xhigh` (the pair
+        # D2 was measured on) is 70, but `medium → xhigh` is 71 and
+        # `minimal → medium` — reachable through a provider's own ladder — is 73.
+        # Dropping the one word buys 5 cells, so every ordered pair the shared
+        # vocabulary can form now fits. The scope is still named — that half is
+        # load-bearing, or the pointer reads as if the level were already durable.
+        # The string lives in `EFFORT_SET_RECEIPT` so its budget can be tested
+        # against the shipped copy rather than a copy of it.
+        notice(EFFORT_SET_RECEIPT.format(current=current or "auto", wanted=wanted))
 
     # -- theme --------------------------------------------------------------
     def _cmd_theme(self, arg: str, notice: NoticeFn) -> None:
@@ -33122,7 +33183,7 @@ class OperatorApp(App[None]):
             )
         return SlashResult(
             kind="notice",
-            text=f"reasoning effort: {current or 'auto'} → {wanted} (this session)",
+            text=EFFORT_SET_RECEIPT.format(current=current or "auto", wanted=wanted),
             style="info",
         )
 
@@ -36715,6 +36776,18 @@ def mode_word(auto: bool) -> str:
     describing the same setting.
     """
     return "auto" if auto else "ask"
+
+
+#: The `/effort <level>` set receipt: the level that was in force (or ``auto``)
+#: and the one now applied. A module constant because its width is a PROPERTY of
+#: the copy rather than of the pair it was last measured on — every ordered pair
+#: of rungs the shared vocabulary can form has to fit one 70-cell notice row at
+#: 80 columns (design review round 2, D9 / review NEW-2 / QA Q1) — and the test
+#: that proves that has to measure the SHIPPED string rather than a copy of it
+#: kept in the test file. `(session)`, one word shorter than the sibling
+#: receipts' `(this session)`, is the 5 cells that buy the invariant: 18 + 3 +
+#: rungs + 30 ≤ 70 holds for the longest two words in the vocabulary.
+EFFORT_SET_RECEIPT = "reasoning effort: {current} → {wanted} (session); /model default keeps it"
 
 
 def _effort_unavailable(label: str) -> str:
