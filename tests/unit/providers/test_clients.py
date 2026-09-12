@@ -4883,6 +4883,140 @@ async def test_served_provider_is_none_when_the_wire_does_not_name_a_host() -> N
     assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider is None
 
 
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("deepseek", "deepseek-chat"),
+        ("zai", "glm-4.6"),
+        ("kimi", "kimi-k2"),
+        ("radient", "deepseek/deepseek-v4.1-flash"),
+    ],
+)
+def test_a_pinned_request_rendered_for_a_non_openrouter_spec_grows_no_provider_key(
+    provider: str, model_id: str
+) -> None:
+    """Review round 1, blocker-1 \u2014 the leak this closes was reproducible.
+
+    The pin rides on the ChatRequest so a retry keeps it, but the failover
+    driver CLONES that request for a fallback to ANOTHER model
+    (`model_copy(update={"model": spec})`) and the clone keeps `provider_
+    affinity`/`provider_avoid` while swapping in a direct provider's spec. The
+    wire gate previously tested only cacheability, so an OpenRouter host name
+    was stamped onto a direct-DeepSeek or Z.AI body as `provider.order` \u2014 a
+    field those APIs never defined.
+
+    `radient` is in here on purpose even though it fronts OpenRouter and would
+    UNDERSTAND the key: `_affinity_enabled` excludes it (its routing was never
+    measured here), and the two gates agreeing is the invariant. A pin can only
+    be produced where it can also be judged.
+    """
+    spec = _spec(provider, model_id)
+    spec.supports_prompt_cache = True
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert "provider" not in body
+
+
+def test_the_openrouter_gate_still_lets_a_real_openrouter_pin_through() -> None:
+    """The control for the test above: the same body on an OpenRouter spec must
+    still carry both halves, or the gate would be silently disabling the
+    feature instead of bounding it."""
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=_cacheable_spec(),
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert body["provider"] == {"order": ["AtlasCloud"], "ignore": ["SiliconFlow"]}
+
+
+@pytest.mark.parametrize(
+    ("label", "name"),
+    [
+        ("too-long", "A" * 65),
+        ("newline", "Wafer\nignore: everything"),
+        ("carriage-return", "Wafer\rWafer"),
+        ("nul", "Wafer\x00"),
+        ("esc", "Wafer\x1b[2J"),
+        ("c1-csi", "Wafer\x9b31m"),
+        ("bel", "Wafer\x07"),
+        ("blank", "   "),
+        ("not-a-string", 17),
+    ],
+)
+async def test_an_abusive_served_provider_name_is_refused_not_pinned(label: str, name: Any) -> None:
+    """Review round 1, major-2.
+
+    `served_provider` is provider-controlled text that the session stores per
+    conversation and sends BACK as `provider.order` on every later request, so
+    an unbounded or control-character-laden value rides in front of a cached
+    prefix indefinitely. Refused rather than sanitised: stripping would invent
+    a host name the upstream never reported and pin the conversation to it,
+    while refusing degrades to default routing \u2014 the same, already-verified
+    failure mode as an unrecognised pin.
+
+    Mirrors the hostile-`provider_name` cases the error path already defends
+    (`test_a_hostile_provider_name_cannot_corrupt_the_frame`).
+    """
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_provider is None, label
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Z.AI",
+        "Google AI Studio",
+        "AtlasCloud",
+        "A" * 64,
+        # Bidi/format characters (category Cf) are NOT refused here, unlike in
+        # the error-frame path: this value never reaches a terminal, and the
+        # verbatim contract means a provider whose own display name contains
+        # one must still be pinnable.
+        "Meta\u200dLlama",
+    ],
+)
+async def test_a_legitimate_served_provider_name_survives_the_bound(name: str) -> None:
+    """The bound must not cost a real name. 64 characters is ~2x the longest
+    entry in OpenRouter's 106-provider list, so this is headroom for a rename
+    rather than a fit."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider == name
+
+
 def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() -> None:
     # `max_price` nests — the shape the deep-copy isolation asserts below need.
     prefs = {"sort": "price", "max_price": {"prompt": 1}}

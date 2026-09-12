@@ -54,20 +54,48 @@ unpinned baseline parks on one host by itself and both arms measure the same
 thing. An earlier sequential run (3×30 turns) recorded only 3 switches in 87
 transitions and, correctly, showed no difference between arms.
 
-| pooled | switches / transitions | cache share | avoidable loss | pin honoured |
-| --- | ---: | ---: | ---: | ---: |
-| affinity **off** | 23/168 (**13.7%**) | 49.2% | 44.1% | — |
-| affinity **on** | 7/168 (**4.2%**) | 47.0% | 46.3% | 161/168 (95.8%) |
+### The invariant: staying put caches, moving does not
 
-**Host switching drops 3.3×, which is the thing the change controls.** The
-conditional split shows why that matters:
+This is the part that reproduced in every window measured, and it is the
+mechanism the change acts on:
 
 | transition | n | any cache hit | cache share |
 | --- | ---: | ---: | ---: |
 | host **same** | 306 | 56% | 55.5% |
 | host **changed** | 30 | 10% | 9.9% |
 
-A turn that stays on its host caches; a turn that moves does not.
+A turn that stays on its host caches; a turn that moves does not. An
+independent QA window reproduced the same split more sharply still (same-host
+**88.1%** against changed **14.2%**), and both windows agree the pin is
+actually honoured: **95.8%** and **95.1%** of pinned turns were served by the
+host named. The guard's before/after also held in both (**38.0% → 77.3%** here,
+**45.7% → 68.5%** in QA's window).
+
+### Switch rate is window-specific, and this is one window
+
+| ONE measured window (baseline switching 13.7%) | switches / transitions | cache share | avoidable loss | pin honoured |
+| --- | ---: | ---: | ---: | ---: |
+| affinity **off** | 23/168 (**13.7%**) | 49.2% | 44.1% | — |
+| affinity **on** | 7/168 (**4.2%**) | 47.0% | 46.3% | 161/168 (95.8%) |
+
+Read that as a measurement of a 13.7%-pressure window, **not as a general 3.3×
+reduction** — an independent QA run in a calm window (2.4% baseline switching)
+measured the raw counts the other way round, **ON 14/168 (8.3%) against OFF
+4/168 (2.4%)**, Fisher p=0.027.
+
+The decomposition explains it and is the reason raw switch totals are the wrong
+headline. Retirements are *counted as switches* while being deliberate moves off
+a host that does not cache. Netting them out of QA's window leaves involuntary
+switching at **8/168 against 4/168, p=0.379 — indistinguishable**: with a 2.4%
+baseline there was almost nothing for the pin to prevent, while the guard still
+fired 6 times. A calm window can therefore show ON switching *more* than OFF,
+and that is the guard working, not the pin failing (ON was also slightly cheaper
+end to end in that run, $1.199 against $1.276).
+
+So the honest claim is: **the pin reduces switching in windows that have
+switching to reduce**, and the conditional split plus the pin-honour rate are
+what hold across windows. See "When there is nothing to win" below for the
+regime that makes this worth shipping.
 
 ### The cache-quality guard
 
@@ -97,6 +125,14 @@ deliberate move off a dead host from a forced re-route:
 **Involuntary switching is identical in both arms in that window** (a
 low-pressure window — see the caveat below); the nine extra ON switches are all
 the guard deliberately leaving a host that was billing full price for nothing.
+
+The discovery is not free, and the cost is bounded but real: a conversation
+spends roughly **2-3 full-price turns** finding out its first host does not
+cache before the guard retires it (one warm miss is ordinary, the second
+retires, and the first turn on the replacement host is cold by definition).
+Closing that gap means preferring known-good hosts up front rather than only
+leaving the worst after it proves itself — the cache-aware host *selection*
+work deliberately deferred out of this change.
 
 ### Why aggregate cache share did not move
 
@@ -145,20 +181,29 @@ hosts on the user's behalf is a routing opinion this change does not take.
 
 Stated plainly, because the aggregate is easy to oversell:
 
-- **Proven.** The pin reaches the wire and is honoured ~90-96% of the time.
-  Switch transitions cost ~3.8-5× a same-host transition, so switching is the
-  loss. Under pressure the pin cut switching 3.3× (13.7% → 4.2%). The guard
-  fires only on a genuinely cache-dead host and lifts those conversations from
-  38.0% to 77.3%.
+- **Proven.** The pin reaches the wire and is honoured ~90-96% of the time
+  (95.8% here, 95.1% in an independent QA window). Switch transitions cost
+  ~3.8-5× a same-host transition, so switching is the loss, and the conditional
+  split holds in every window measured (same-host 55-88% cache share against
+  10-14% when the host changes). The guard fires only on a genuinely cache-dead
+  host and lifts those conversations from 38.0% to 77.3% (45.7% → 68.5% in QA's
+  window).
 - **Not proven.** A pooled aggregate cache-share win. In both pressure windows
   the ON arm's raw share landed 2-3 points BELOW the OFF arm, because the pin
   concentrates traffic on whichever host it acquired and the acquisition is
   luck. Mix-standardised the pin is +1.9 to +4.2 points, but that is an
   adjustment, not a measured end-to-end improvement.
-- **Window-dependent.** Switch pressure varies hour to hour. The second
-  pressure window was calmer (9.5% baseline switching against 13.7% in the
-  first), and in calm windows there is little for the pin to win — an unpinned
-  conversation mostly stays put on its own.
+- **Window-dependent, and this is the claim to be careful with.** A **3.3×
+  switch reduction is one window's measurement, not a general result.** Switch
+  pressure varies hour to hour (13.7% baseline in the first window, 9.5% in the
+  second, 2.4% in an independent QA window), and in a calm window there is
+  little for the pin to win — an unpinned conversation mostly stays put on its
+  own. In QA's calm window the raw counts inverted (ON 8.3% against OFF 2.4%),
+  which nets out to **8 against 4 involuntary switches, p=0.379** once the
+  guard's deliberate retirements are separated from switches it did not choose.
+- **Costed.** A conversation pays roughly **2-3 full-price turns** to discover
+  its first host does not cache before the guard retires it. Bounded, but it is
+  the concrete price of not selecting hosts up front.
 
 The operator's real traffic is the regime this targets: live sessions measured
 17.8-19.3% switching with hosts that cache well (86-100% hit-turns), which is

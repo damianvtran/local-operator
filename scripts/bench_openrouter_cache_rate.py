@@ -40,12 +40,26 @@ turns) estimates well under $1; the hard ceiling is ``--budget`` (default
 $5.00), checked after every turn against the provider's OWN reported cost, and
 the run aborts the moment the estimate would cross it.
 
+THE GUARD'S WORST CASE (``--compact-at``): the cache-quality guard retires a
+host after two consecutive warm-but-uncached turns, and the most dangerous
+place for that heuristic is a COMPACTION — a cold-by-design provider call
+immediately followed by a first turn on a rebuilt prefix that is also cold, for
+the honest reason that the prefix is new. Two adjacent cold events, two strikes,
+and a host that caches at 99.6% is retired for the rest of the conversation with
+no removal path. Unit tests cover the logic, but only the live bench can show
+that the sequence a real session actually produces does not retire its host, so
+``--compact-at N`` performs a real compaction at turn N (a ``purpose=
+"compaction"`` call, then a rebuilt prefix) and FAILS the lane if the host
+serving the remainder ends up retired.
+
 Examples:
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --dry-run
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --live
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --live --arm on
     .venv/bin/python scripts/bench_openrouter_cache_rate.py --live \
         --runs 3 --output evidence.jsonl   # alternates arm order per run
+    .venv/bin/python scripts/bench_openrouter_cache_rate.py --live --arm on \
+        --turns 8 --compact-at 4          # the guard's worst case, end to end
 """
 
 from __future__ import annotations
@@ -62,11 +76,19 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    # Annotation-only: every `local_operator` import in this script is deferred
+    # into the function that needs it so `--dry-run` prints a plan without
+    # loading the harness, and `from __future__ import annotations` above makes
+    # the signature below cost nothing at runtime.
+    from local_operator.harness.types import Message
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -104,6 +126,13 @@ class TurnRecord:
     retired: list[str] = field(default_factory=list)
     #: Which concurrent conversation within the arm produced this turn.
     lane: int = 0
+    #: ``"compaction"`` for the deliberately cold summary call `--compact-at`
+    #: injects, ``"turn"`` otherwise. A compaction's counters must be read
+    #: separately: it is a fresh write-once prefix, so its ~0% reuse is the
+    #: design and pooling it into the lane's cache share would understate the
+    #: feature. Also the marker for "this turn is the first on a REBUILT
+    #: prefix", which is cold for the same honest reason.
+    purpose: str = "turn"
     #: Wall seconds since this lane's previous turn STARTED. Recorded because
     #: a host-side cache entry expires on a timer (~10 min documented), so a
     #: bench whose natural spacing is far wider than a real session's cannot
@@ -157,6 +186,10 @@ class ArmResult:
         """Host changes between consecutive turns; each one is a cold prefix."""
         names = [t.provider for t in self.turns if t.provider]
         return sum(1 for a, b in zip(names, names[1:]) if a != b)
+
+    @property
+    def compaction_turns(self) -> list[TurnRecord]:
+        return [t for t in self.turns if t.purpose == "compaction"]
 
     @property
     def transitions(self) -> int:
@@ -276,6 +309,33 @@ def _guard_openrouter_credential(auth_db: Path) -> None:
         )
 
 
+#: System prompt for the injected compaction call. Short and DELIBERATELY
+#: unrelated to `_system_blocks`: a real compaction sends a summariser prompt,
+#: not the session's frozen prefix, which is a large part of why its request
+#: cannot match anything the host has cached.
+COMPACTION_SYSTEM = (
+    "You compact conversations. Summarise the exchange below in two sentences. "
+    "No preamble, no lists."
+)
+
+
+def _compaction_prompt(history: Sequence[Message]) -> str:
+    """Flatten the transcript into the single user prompt a compaction sends."""
+    # Imported here, not at module scope, for the reason the rest of this script
+    # defers its `local_operator` imports: `--dry-run` must print a plan without
+    # loading the harness.
+    from local_operator.harness.types import TextContent
+
+    lines: list[str] = []
+    for message in history:
+        text = " ".join(
+            part.text for part in message.content if isinstance(part, TextContent)
+        ).strip()
+        if text:
+            lines.append(f"{message.role}: {text}")
+    return "\n".join(lines) or "user: (nothing yet)"
+
+
 def _system_blocks(namespace: str, rows: int) -> list[str]:
     """A stable synthetic prefix per arm; never private context.
 
@@ -374,20 +434,44 @@ async def _run_lane(
 
     history: list[Message] = []
     last_start: float | None = None
+    # Turn indices that send a `purpose="compaction"` request instead of an
+    # ordinary turn. Nothing is injected unless --compact-at asks for it, so
+    # the default run is byte-identical to the measured A/B.
+    compaction_turns = {args.compact_at} if args.compact_at is not None else set()
     try:
         for index in range(args.turns):
+            compacting = index in compaction_turns
             prompt = TURN_PROMPTS[index % len(TURN_PROMPTS)] + TERSE
-            request = ChatRequest(
-                model=spec,
-                system_blocks=blocks,
-                messages=[*history, Message.user(prompt)],
-            )
+            if compacting:
+                # Shaped like the real thing (`ChatCompaction._one_shot_
+                # complete`): the transcript arrives as ONE user prompt to be
+                # summarised, no tools, `context_tokens_hint=0` because this is
+                # a fresh write-once prefix rather than the turn's cached one.
+                # That shape is exactly why it cannot cache, and why scoring it
+                # as cache evidence retired hosts that cache fine.
+                request = ChatRequest(
+                    model=spec,
+                    system_blocks=[COMPACTION_SYSTEM],
+                    messages=[Message.user(_compaction_prompt(history))],
+                    tools=[],
+                    tool_choice="none",
+                    replayable=True,
+                    purpose="compaction",
+                    context_tokens_hint=0,
+                )
+            else:
+                request = ChatRequest(
+                    model=spec,
+                    system_blocks=blocks,
+                    messages=[*history, Message.user(prompt)],
+                )
             started = time.monotonic()
             record = TurnRecord(
                 turn=index,
                 arm=arm,
                 run=run,
                 lane=lane,
+                purpose="compaction" if compacting else "turn",
                 gap_s=round(started - last_start, 2) if last_start is not None else 0.0,
             )
             last_start = started
@@ -421,11 +505,27 @@ async def _run_lane(
                 # happens on THIS turn is only visible on the next request, and
                 # the run has to be able to show that the guard fired at all.
                 record.retired = sorted(stream._provider_retired.get(spec.model_id, ()))
-                history = [
-                    *history,
-                    Message.user(prompt),
-                    Message(role="assistant", content=[TextContent(text=text or "(empty)")]),
-                ]
+                if compacting:
+                    # REPLACE the transcript with the summary, which is what a
+                    # real compaction does to the prefix and the reason the next
+                    # turn cannot hit the host's cache: from token 0 onward the
+                    # request no longer matches anything the host holds. The
+                    # guard must survive that cold turn without retiring a host
+                    # whose only failing is that the prefix changed underneath
+                    # it.
+                    history = [
+                        Message.user("Summary of the conversation so far:"),
+                        Message(
+                            role="assistant",
+                            content=[TextContent(text=text or "(empty)")],
+                        ),
+                    ]
+                else:
+                    history = [
+                        *history,
+                        Message.user(prompt),
+                        Message(role="assistant", content=[TextContent(text=text or "(empty)")]),
+                    ]
                 result.turns.append(record)
                 line = json.dumps(
                     {
@@ -444,6 +544,7 @@ async def _run_lane(
                         "pin_on_wire": record.pin_on_wire,
                         "avoid_on_wire": record.avoid_on_wire,
                         "retired": record.retired,
+                        "purpose": record.purpose,
                         "gap_s": record.gap_s,
                     }
                 )
@@ -476,7 +577,70 @@ async def _run_lane(
         result.error = result.error or (
             f"OFF arm sent provider.order {len(pinned)}x: the switch is not honoured"
         )
+    if args.compact_at is not None:
+        result.error = result.error or _compaction_guard_verdict(result, args.compact_at)
     return result
+
+
+def _compaction_guard_verdict(result: ArmResult, compact_at: int) -> str | None:
+    """The guard's worst case, asserted on real turns: can a compaction retire a
+    host on evidence the compaction itself manufactured?
+
+    The failure this catches is not hypothetical. A compaction is a cold-by-
+    design call and the first turn on the rebuilt prefix is cold for the honest
+    reason that the prefix is NEW; two adjacent cold events used to be two
+    strikes, and a host measured at 99.6% same-host cache share was retired for
+    the rest of the conversation with no removal path (review round 1,
+    blocker-2). Unit tests pin the logic, but only a live run shows that the
+    sequence a real session produces stays clean.
+
+    What this does NOT assert is that no host is ever retired after a
+    compaction. That would be a stricter claim than the fix makes, and it would
+    fail on the guard doing its job: a host that misses the rebuilt prefix AND
+    then misses its own write is a host that does not cache, and leaving it is
+    the whole point (observed live: a lane retired such a host and its
+    replacement immediately cached at 99.8%). So the invariants are:
+
+    1. every post-boundary retirement is backed by at least
+       ``PROVIDER_STRIKES_TO_RETIRE`` cold TURNS served by that host after the
+       boundary — the compaction call cannot be one of them, and neither can a
+       single unavoidable cold turn on the rebuilt prefix; and
+    2. the boundary CLEARED whatever was retired before it, since those
+       retirements were recorded against a prefix that no longer exists.
+    """
+    from local_operator.model.configure import SessionStreamFn
+
+    after = [t for t in result.turns if t.turn > compact_at and t.purpose == "turn"]
+    if not after:
+        return f"--compact-at {compact_at} left no post-boundary turns to judge"
+
+    def cold(turn: TurnRecord) -> bool:
+        # The guard's own "no meaningful reuse" floor, read off the class rather
+        # than restated, so the bench cannot drift from the code it checks.
+        floor = max(
+            SessionStreamFn.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
+            int(turn.prompt_tokens * SessionStreamFn.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
+        )
+        return turn.cached_tokens < floor
+
+    for host in sorted(set(after[-1].retired)):
+        backing = [t for t in after if t.provider == host and cold(t)]
+        if len(backing) < SessionStreamFn.PROVIDER_STRIKES_TO_RETIRE:
+            return (
+                f"compaction guard: {host} was retired after the turn-{compact_at} "
+                f"compaction on only {len(backing)} cold turn(s) of its own "
+                f"({SessionStreamFn.PROVIDER_STRIKES_TO_RETIRE} required) — the "
+                "compaction and the first turn on a rebuilt prefix are cold by "
+                "design and must not count as cache evidence"
+            )
+    before = [t for t in result.turns if t.turn < compact_at]
+    if before and before[-1].retired and after[0].retired:
+        return (
+            f"compaction guard: retirements {before[-1].retired} survived the "
+            f"turn-{compact_at} compaction; the prefix they were recorded against "
+            "no longer exists, and `provider.ignore` has no other removal path"
+        )
+    return None
 
 
 async def _run_arm(
@@ -666,6 +830,16 @@ def main(argv: list[str] | None = None) -> int:
         "for longer than this; observed gaps are reported so an eviction can "
         "be told apart from a re-route.",
     )
+    parser.add_argument(
+        "--compact-at",
+        type=int,
+        default=None,
+        metavar="N",
+        help='Send a real purpose="compaction" call at turn N and REPLACE the '
+        "transcript with its summary, then keep going. This is the cache-quality "
+        "guard's worst case (two adjacent cold-by-design events), and the lane "
+        "FAILS if the host serving the turns after the boundary ends up retired.",
+    )
     parser.add_argument("--budget", type=float, default=5.0, help="Hard USD ceiling.")
     parser.add_argument("--seed", default=uuid.uuid4().hex[:8])
     parser.add_argument(
@@ -686,6 +860,11 @@ def main(argv: list[str] | None = None) -> int:
                     "plan": (
                         f"{args.runs} run(s) x {args.arm} x {args.concurrency} "
                         f"concurrent conversations x {args.turns} turns"
+                        + (
+                            f", compaction injected at turn {args.compact_at}"
+                            if args.compact_at is not None
+                            else ""
+                        )
                     ),
                     "model": args.model,
                     "seed": args.seed,
