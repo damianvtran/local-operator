@@ -6317,8 +6317,19 @@ class Session:
             # Replay-changing commits precede their public events. Publish the
             # scalar first so retained viewers cannot select a stale tail after
             # compaction, pruning, or a fold; unchanged events do no extra work.
+            #
+            # The read is `read_field`, NOT `store.state.history_generation`:
+            # the `state` property deep-copies every job, usage row and
+            # trajectory (it exists so no caller can mutate the store's own
+            # instance), so asking it for one int charged that clone on EVERY
+            # emitted event — every streaming delta — for every session with
+            # any subscriber. `history_generation` is in the store's
+            # ``_SHAREABLE_STATE_FIELDS`` allow-list precisely so this read
+            # can hand back the int itself. Symptom it caused: a parked
+            # sidebar source is a subscriber, so opening the sidebar re-armed
+            # the clone on sessions whose own terminal was elsewhere.
             replay_generation = self._transcript._history_generation
-            if store.state.history_generation != replay_generation:
+            if store.read_field("history_generation") != replay_generation:
                 store.mutate(history_generation=replay_generation)
             store.observe_event(self, event)
         for handler in list(self._handlers):
