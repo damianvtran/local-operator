@@ -164,6 +164,7 @@ falling back to the parent of the config root when no cwd was retained.
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | runtime receipt; stale runtime/request/question409 |
 | GET `.../{id}/events` | optional `epoch`, `after_seq` | authenticated SSE, `data: <DesktopSessionFrame>` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 |
+| POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
 
 Create/message/command `request_id` is a canonical lowercase UUID string, reused
 for a retry of the **same** operation. Answer `request_id` is instead the pending
@@ -224,6 +225,74 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
+5. `notification` carries one bridge-composed banner:
+   `{contract,kind,title,status,body,body_is_snippet,body_is_failure,`
+   `title_is_session_name,dedupe_key,completion_token,session_name,`
+   `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
+   transcript; a renderer that does not know the type ignores it and still
+   advances its receipt cursor.
+
+### The `notification` frame
+
+Emitted **if and only if** the bridge observes a newly published, unseen
+`completions` row whose kind is `complete` or `error`, on a bridge that has
+already taken a baseline attention reading. No engine event triggers one —
+in particular `turn_end` is ONE MODEL CALL and `agent_end` routinely arrives
+while `task` children still run, so neither is the turn-over signal. The
+authority is `Session._publish_attention_outcome`, which makes that decision
+inside the process owning the job manager; the bridge observes it rather than
+re-deriving it, which is why a frontend cannot disagree with the TUI.
+
+`ask`/`approval` never travel as `notification`: they already reach the app as
+`pending_gate` in the snapshot and update frames, and a second channel for the
+same card would duplicate it. `interrupted` is suppressed (the user pressed the
+key themselves).
+
+The frame is **live-only, never replayed**. An edge whose whole value is
+timeliness must not arrive hours after a reconnect, and a retained notification
+would push a real transcript event out of the 256-frame budget. Its `seq` still
+advances, which keeps `seq` monotonic across both publish paths; the gap
+arithmetic is unaffected because `gap` is computed against the oldest RETAINED
+frame. The durable signal for a missed completion is `attention` plus the
+sidebar's unseen mark, both of which survive a reconnect.
+
+`body` says what happened rather than that something happened. For `complete`
+it is the last assistant line (`body_is_snippet:true`); for `error` it is the
+session's own recorded failure text (`body_is_failure:true`), read from the
+`session_incident` record's unrendered `raw` so the banner names a cause the
+user can act on instead of only "Stopped with an error". Both degrade to the
+house sentence when unavailable, and BOTH are suppressed entirely when
+`display.notification_session_name` is off — one flag over every
+session-derived fact, decided in the backend. The two flags are never both
+true. An `interrupted` or `complete` body is never the failure text and an
+`error` body is never the last assistant line: a failing turn's last sentence
+routinely reads as a success.
+
+Parked gates do **not** travel as `notification`. They keep using
+`pending_gate` in the snapshot and `frontend.update` frames, which the app
+already receives; a second channel for one question is how one gate becomes
+two banners. `pending_gate` gained an **additive, optional** `session_name` so
+a gate banner can be triaged — "Waiting for approval" with several sessions
+open names none of them. It is `""` when
+`display.notification_session_name` is off, and absent/empty on an older
+backend, so it is additive in both skew directions and an unchanged renderer
+keeps drawing the anonymous card it draws today.
+
+`payload.contract` (`1` today) is advertised as `features.notification_contract`
+in `/v1/capabilities`. Additive fields do not bump it. A renderer seeing the
+capability owns every completion banner and must stop toasting on `agent_end`,
+or one turn produces two banners; a renderer not seeing it is talking to a
+backend that composes nothing.
+
+`POST .../{id}/notified` claims the right to raise ONE banner for a completion,
+through `AttentionStore.claim_delivery(..., backend="desktop")`. Exactly one
+surface wins per `completion_token`, so a TUI observer and the desktop watching
+the same idle session produce one toast between them. Claim-then-deliver means
+the claimant must BE the deliverer: call it immediately before constructing the
+OS notification and never before the focus gate, because a claim taken for a
+banner that is then suppressed is delivered to nobody, permanently. It is cold
+(no bridge acquire, no runtime spawn) and it **never** advances the read
+watermark: `unseen` and the sidebar mark survive it untouched.
 
 A cold reconnect, HTTP restart, detached interval, expired replay cursor or future
 cursor requires a gap snapshot. One live shared bridge retains at most256frames
@@ -240,8 +309,15 @@ heartbeat automatically grants presence. Expiry clears runtime presence, and ASG
 disconnect cleanup is shielded from the cancelled request scope so lease revoke
 and detach actually reach the runtime. A stream alone means neither visible nor
 notification-capable. Electron must set can_notify=false until native delivery
-really exists; its gate/turn notification dedupe/click behavior is not implemented
-by these backend routes.
+really exists.
+
+Notification CONTENT and cross-surface arbitration are now backend concerns: the
+`notification` frame above carries composed `{title,status,body}` and
+`/notified` arbitrates who may raise the banner. What remains outside these
+routes is the renderer's own business — its local TTL dedupe map (keyed on the
+backend-minted `dedupe_key`), its focus gate, and notification-click behaviour.
+The backend still never DELIVERS an OS toast for a leased desktop surface; it
+composes for a frontend that does.
 
 ### Verification
 
@@ -249,7 +325,14 @@ by these backend routes.
 Session/ServingSessionHandle/RuntimeServer/AttachClient with only the provider
 stream scripted: same-session terminal controls, consumed team prompt, durable
 single admission, actual runtime ask/approval futures, invalid/stale answers,
-ordered replay, session isolation, disconnect/watch cleanup and reopen.
+ordered replay, session isolation, disconnect/watch cleanup and reopen. Two of
+its cases assert the `notification` contract on the ordered frame log, which is
+the only shape in which a COUNT is checkable: a real multi-step turn (a tool
+call, then an answer) emits several `turn_end` frames, one `agent_end` and
+exactly one `notification`; and a turn that ends with a registered `task` child
+still running emits none at all until the child settles and its re-entry turn
+completes. `tests/unit/server/test_desktop_notifications.py` covers the frame's
+gating, the replay exemption, the gap arithmetic and the `/notified` claim.
 `tests/e2e/test_desktop_spawn.py` additionally executes the real detached process
 launcher using the built-in test provider, then recreates the HTTP lifespan and
 checks stable identity/title, persisted receipts, authoritative history and epoch

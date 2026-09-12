@@ -3409,7 +3409,16 @@ class RuntimeServer:
         frontend = getattr(self._handle, "_frontend", None)
         mutate = getattr(frontend, "mutate", None)
         if callable(mutate):
-            mutate(pending_gate=pending.to_json() if pending is not None else None)
+            payload = pending.to_json() if pending is not None else None
+            if payload is not None:
+                # Same stamp as `ServingSessionHandle._publish_pending_gate`,
+                # through the handle's own helper so the privacy gate cannot
+                # hold on one publication site and not the other. Reduced hosts
+                # reach the gate contract through here, and a desktop banner
+                # raised from one of them must be as triageable as any other.
+                namer = getattr(self._handle, "_notifiable_session_name", None)
+                payload["session_name"] = namer() if callable(namer) else ""
+            mutate(pending_gate=payload)
         self._schedule_push()
 
 

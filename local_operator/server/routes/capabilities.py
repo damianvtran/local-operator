@@ -34,6 +34,14 @@ async def capabilities():
                 # runtime record's capability LIST is a different namespace and
                 # keeps its versioned `completion-ack-v1` string.
                 "completion_ack": 1,
+                # The `notification` frame's payload shape. A renderer that
+                # sees this owns every completion banner and must stop toasting
+                # on `agent_end`, or the user gets two for one turn; a renderer
+                # that does not see it is talking to a backend that composes
+                # nothing and keeps its legacy path. Absent is therefore a
+                # meaningful answer, which is why this is a plain integer
+                # rather than a boolean with a default.
+                "notification_contract": 1,
                 "mcp": 1,
                 "radient": 1,
             },

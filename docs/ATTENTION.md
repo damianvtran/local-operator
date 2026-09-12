@@ -51,6 +51,27 @@ authenticated and source-fenced SSE connection starts with an authoritative
 snapshot; its first projection may have a lower counter after daemon restart.
 Retired sources cannot publish callbacks or close the current connection.
 
+The desktop app is a `claim_delivery` claimant like any other, with
+`backend="desktop"`. It reaches the primitive through `POST
+/v1/desktop/sessions/{id}/notified` (`{completion_token}` →`{claimed}`), which
+is cold: no bridge is acquired and no runtime is started, because a completion
+worth announcing usually has no owner alive. With the desktop window unfocused
+a session's `live_state` is `idle`, so a TUI observer and the desktop are both
+eligible for one completion and the watermark picks exactly one — a losing claim
+is the arbitration working, not a fault. The `backend` column is diagnostics
+only; no decision reads it, since a claim consulting anything beyond the
+monotonic sequence would stop being clock-free.
+
+**The claim never advances the read watermark.** `claim_delivery` writes
+`deliveries` alone, so `unseen` and the sidebar's mark survive a banner
+untouched and a conversation can be delivered-and-unread indefinitely. The
+desktop route therefore does not reuse `/seen` and must not be routed through
+any foreground-receipt guard: that guard demands a focused window, which is the
+exact opposite of when a notification fires. Claim-then-deliver also means the
+claimant must BE the deliverer — the app claims immediately before constructing
+the OS notification and after its focus gate, because a claim taken for a banner
+it then suppresses would mark the completion delivered to nobody, for good.
+
 ## What a frontend can acknowledge
 
 The selected result must actually be rendered, uncovered, and visible in a
