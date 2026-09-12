@@ -38,6 +38,7 @@ import math
 import os
 import platform
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -3731,6 +3732,34 @@ def login_status_command() -> int:
 _QWENCLOUD_TICKET_AUGMENTS = "alibaba-token-plan"
 
 
+def _qwencloud_credential_row_exists(store: Any) -> bool:
+    """Whether a Token Plan credential the ticket can augment is stored.
+
+    `status` warns on this rather than `status` fixing it, because the fix is
+    not available: `/usage` gates on `can_report_usage` -> `is_usable`, and a
+    ticket row that satisfied those is exactly the blast radius the separate
+    `qwencloud-console` namespace exists to prevent.
+
+    Soft-deleted rows are NOT included, which is the point: `lop logout
+    alibaba-token-plan` marks the row `logged-out`, and that is precisely the
+    moment the window goes silently missing and the warning has to appear.
+
+    An unreadable store returns True — no warning. This is a HINT, not a
+    security gate, so the honest failure is silence rather than telling the
+    user a credential is missing when the store could not be read at all.
+    `sqlite3.ProgrammingError` still propagates, following the rule
+    controller.py:268-278 records: a caller bug must not dress itself as a
+    plausible degraded state.
+    """
+    try:
+        rows = store.list_credentials(_QWENCLOUD_TICKET_AUGMENTS)
+    except sqlite3.ProgrammingError:
+        raise
+    except Exception:  # noqa: BLE001 — an unreadable store is not a missing credential
+        return True
+    return bool(rows)
+
+
 def qwencloud_ticket_command(args: argparse.Namespace) -> int:
     """Store / inspect / remove the QwenCloud console session cookie.
 
@@ -3863,6 +3892,25 @@ def _qwencloud_ticket_action(command: str | None, store: Any) -> int:
                 "  WARNING: this build has no QwenCloud console fetcher, so the stored "
                 "ticket is not read by anything. Reinstall local-operator from a build "
                 "that includes it."
+            )
+        # The precondition that actually GATES the feature, and the only one
+        # `status` did not name. `/usage` asks `can_report_usage`, which
+        # requires `is_usable` -- and the ticket deliberately cannot satisfy
+        # that: it lives in its own namespace precisely so lop never concludes
+        # it can CHAT through alibaba-token-plan on a read-only console cookie.
+        # So the ticket AUGMENTS a Token Plan credential, it does not replace
+        # one, and with no such row `/usage` renders nothing at all for a
+        # perfectly valid ticket. Making the precondition visible is the fix
+        # available here; satisfying it would be the blast radius the separate
+        # namespace exists to avoid.
+        if not _qwencloud_credential_row_exists(store):
+            print(
+                f"  WARNING: no {_QWENCLOUD_TICKET_AUGMENTS} credential is stored, so "
+                "/usage will not show the 7 Day Credits window. This ticket AUGMENTS "
+                "an existing Token Plan credential rather than replacing one — it "
+                "reports usage but cannot authenticate the provider. Run "
+                f"'lop login {_QWENCLOUD_TICKET_AUGMENTS}' (or restore the API key) "
+                "to make the window visible."
             )
         return 0
 

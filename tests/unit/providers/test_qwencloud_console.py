@@ -509,6 +509,32 @@ def test_status_warns_when_the_ticket_is_stale(
     assert FAKE_TICKET not in out
 
 
+def test_status_warns_when_no_token_plan_credential_exists(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The one precondition that actually gates the feature (QA D3).
+
+    `/usage` asks `can_report_usage` -> `is_usable`, which the ticket cannot
+    satisfy by design. With no `alibaba-token-plan` row the panel renders
+    NOTHING for a valid ticket, and nothing said so.
+    """
+    store_ticket(store, FAKE_TICKET)
+    assert _run(monkeypatch, store, "status") == 0
+    out = capsys.readouterr().out
+    assert "no alibaba-token-plan credential is stored" in out
+    assert "AUGMENTS" in out
+
+
+def test_status_does_not_warn_when_a_token_plan_credential_exists(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The warning must not cry wolf on the configuration that works."""
+    store.upsert_credential("alibaba-token-plan", {"key": "fake-inference-key", "type": "api_key"})
+    store_ticket(store, FAKE_TICKET)
+    assert _run(monkeypatch, store, "status") == 0
+    assert "no alibaba-token-plan credential is stored" not in capsys.readouterr().out
+
+
 def test_status_does_not_warn_on_a_fresh_ticket(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
