@@ -590,3 +590,144 @@ async def test_a_watched_runtime_killed_mid_turn_ends_with_a_named_cut_off(
                 pass
         if child.poll() is None:
             _reap(child, config)
+
+
+# --- UX round 2, U7 and U6: what the operator's flow does AFTER the verdict ----
+
+
+@pytest.mark.asyncio
+async def test_the_message_typed_after_a_watched_cut_off_is_served(
+    headless_tui_env: Path,
+) -> None:
+    """Cell E (UX round 2, U7) — the reported flow has to end usable.
+
+    A watched cut-off used to be terminal for the whole process: `lop`'s viewer
+    wires a takeover factory that raises BY CONSTRUCTION, so the no-record arm
+    retried it forever, `_recovering` stayed latched, and the next message was
+    accepted and never served — measured at 242 s with the band spinning, no
+    error, no timeout and no advice. `/reload` is a binary relaunch and changed
+    nothing.
+
+    This drives the real flow with real processes: park a turn, SIGKILL the
+    runtime, let the named verdict land, then TYPE AGAIN and require the fresh
+    runtime the give-up releases the viewer to start to actually answer.
+    """
+    config = headless_tui_env
+    session_id = "cutoffserve1"
+    directory = _seed(config, session_id)
+    child = _spawn(config, session_id)
+    viewer = None
+    try:
+        with bounded(240, "cut-off: the next message is served"):
+            viewer = await _attach(config, session_id)
+            await _park_a_turn(viewer, directory)
+            killed_pid = child.pid
+            child.kill()
+            child.wait(timeout=10)
+
+            # The named verdict (U1) is the LAST thing the user hears before
+            # typing, so wait for it before typing.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and viewer._streaming:
+                await asyncio.sleep(0.1)
+            assert viewer._streaming is False, "the cut-off verdict never landed"
+            # No assertion that recovery is still RUNNING here: the verdict and
+            # the give-up are the same pass now, which is the fix. On the broken
+            # tree this would still be True and stay True forever.
+            typed_at = time.monotonic()
+            await asyncio.wait_for(viewer.prompt("are you there? [bash:2]"), timeout=90)
+            bound = time.monotonic()
+
+            # SERVED means the turn's own output lands, not merely that
+            # `prompt` returned: the defect was a message accepted and never
+            # served, and durable admission is exactly what was granted anyway.
+            text = ""
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                text = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+                if "from the mock provider" in text:
+                    break
+                await asyncio.sleep(0.2)
+            assert "from the mock provider" in text, (
+                "the message was accepted and never served; "
+                f"recovering={viewer._recovering} streaming={viewer._streaming}"
+            )
+            # A FRESH runtime, not the killed one: the give-up releases the
+            # viewer to engage, and engaging must not resurrect the dead pid.
+            owners = [record.pid for record, _ in registry.scan(config)]
+            assert owners and killed_pid not in owners, (owners, killed_pid)
+            assert viewer._recovering is False, "the facade is still latched"
+            assert (
+                bound - typed_at < RECOVERY_GIVE_UP_S
+            ), f"the wait took {bound - typed_at:.1f}s, which is the give-up path"
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001 — teardown of a killed owner
+                pass
+        if child.poll() is None:
+            _reap(child, config)
+
+
+@pytest.mark.asyncio
+async def test_a_watched_cut_off_reads_as_errored_without_being_opened(
+    headless_tui_env: Path,
+) -> None:
+    """Cell F (UX round 2, U6) — the operator's "see it in active sessions".
+
+    Nothing opens this session and no successor boots: the runtime dies under a
+    watching viewer, and the SIDEBAR has to say so. It read ``Working`` at t=2 s
+    and then ``Recent`` through t=60 s, because the durable outcome was written
+    only by an open (``bootstrap_transcript``) and nothing had run it. The
+    viewer that delivered the verdict now journals it, and this reads the row
+    through the same catalog the sidebar reads — never through the store
+    directly, which would pass even if the row's precedence still hid it.
+    """
+    from local_operator.session.catalog import load_catalog
+
+    config = headless_tui_env
+    session_id = "cutoffsidebar1"
+    directory = _seed(config, session_id)
+    child = _spawn(config, session_id)
+    viewer = None
+    try:
+        with bounded(180, "cut-off: errored in active sessions"):
+            viewer = await _attach(config, session_id)
+            await _park_a_turn(viewer, directory)
+            child.kill()
+            child.wait(timeout=10)
+
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and viewer._streaming:
+                await asyncio.sleep(0.1)
+            assert viewer._streaming is False, "the cut-off verdict never landed"
+
+            # The journal lands on a worker thread and the row also has to stop
+            # describing the (dead) record, so wait on the ROW, never the clock.
+            status = ""
+            rows: dict[str, Any] = {}
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                registry.scan(config)  # reaps the killed owner's record
+                rows = {entry.id: entry for entry in load_catalog(config)}
+                status = rows[session_id].status
+                if status.startswith("Unseen error"):
+                    break
+                await asyncio.sleep(0.2)
+            assert status.startswith(
+                "Unseen error"
+            ), f"a session nobody opened reads {status!r}, not errored"
+            # The reason, not only the verdict: the row names the cause.
+            assert status.split(" — ", 1)[-1], status
+            # ...and the same row is what ACTIVE membership uses, so it is in
+            # the section the operator scans rather than buried in Recent.
+            assert rows[session_id].active, rows[session_id]
+    finally:
+        if viewer is not None:
+            try:
+                await viewer.dispose()
+            except Exception:  # noqa: BLE001 — teardown of a killed owner
+                pass
+        if child.poll() is None:
+            _reap(child, config)

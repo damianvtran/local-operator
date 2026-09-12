@@ -330,6 +330,13 @@ class _Job:
         # — so a test that does not think about them gets the common case.
         self.agent_role: str | None = "task"
         self.effort: str | None = None
+        # Mirrors ``AsyncJob.cut_off_cause``: a token from
+        # ``incidents.CUT_OFF_CAUSES`` when a runtime death cut this child's run
+        # off, ``""`` when it ended any other way. Declared rather than set ad
+        # hoc because the dock ROW reads it to choose its word (design round 2,
+        # D8), so a fixture that forgets it would be answering "no cut-off"
+        # through a ``getattr`` default instead of through the model's own.
+        self.cut_off_cause: str = ""
 
 
 @pytest.fixture(autouse=True)
@@ -2438,6 +2445,74 @@ def test_the_paused_word_matches_the_state_the_phone_already_shows() -> None:
 
     assert "parked" in get_args(SubagentStatus)
     assert status_glyph("cancelled", paused=True)[1] != status_glyph("cancelled")[1]
+
+
+@pytest.mark.asyncio
+async def test_the_dock_names_a_cut_off_child_as_cut_off() -> None:
+    """Design round 2, D8: two rows that differ in fact must not be identical.
+
+    A restored child whose run a runtime death cut off carries
+    ``status == "interrupted"`` — that is the only word the ROSTER has for a run
+    that never settled — so the dock painted it exactly like a child the user
+    stopped on purpose, while the cause that had just reached the wire
+    (``AsyncJob.cut_off_cause``) rendered nowhere. The row now says ``cut off``,
+    the word the live notice and the stranded tool card already use;
+    ``interrupted`` stays reserved for a recorded deliberate stop, which is why
+    the control below must keep it.
+    """
+    from local_operator.tui.widgets.subagent_panel import (
+        GLYPH_INTERRUPTED,
+        status_glyph,
+    )
+
+    session = FakeSession()
+    now = time.time()
+    cut = _Job("cut", "draft the memo", status="interrupted")
+    cut.cut_off_cause = "owner-lost"
+    cut.restored = True
+    cut.settled_at = now
+    stopped = _Job("stopped", "rank the leads", status="interrupted")
+    stopped.restored = True
+    stopped.settled_at = now
+    jobs = [cut, stopped]
+    session.jobs = _fake_jobs(*jobs)
+
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        panel = await _boot_with_jobs(app, pilot)
+        for _ in range(4):
+            await pilot.pause()
+        rendered = {
+            job_id: compose_row(
+                facts=row_facts(
+                    panel._jobs_by_id[job_id],
+                    fallback_id=job_id,
+                    current=False,
+                    paused=job_id in panel._paused_ids,
+                ),
+                stats=JobStats(),
+                spinner_glyph="⣾",
+                width=100,
+                rung=0,
+                column=40,
+                clock=6,
+                role_column=0,
+            ).plain
+            for job_id in panel._rows
+        }
+
+    assert "cut off" in rendered["cut"], rendered["cut"]
+    assert "interrupted" not in rendered["cut"], (
+        f"a cut-off child is still named by the word reserved for a deliberate "
+        f"stop: {rendered['cut']}"
+    )
+    assert "interrupted" in rendered["stopped"], rendered["stopped"]
+    # The GLYPH and the INK are shared, and that is the design round's placement
+    # call: ``↺`` already means "rehydrated and resumable", which is true of
+    # both, and the tone is carried by the notice that named the cause. Only the
+    # word splits.
+    assert status_glyph("interrupted", cut_off=True)[0] == GLYPH_INTERRUPTED
+    assert status_glyph("interrupted", cut_off=True)[2] == status_glyph("interrupted")[2] == "muted"
 
 
 @pytest.mark.asyncio
