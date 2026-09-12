@@ -288,7 +288,13 @@ def test_concurrent_searches_do_not_answer_from_each_others_corpus(tmp_path: Pat
     the server calls this module from worker threads. A search built from
     another store's corpus returns the WRONG rows, so the shared path is
     serialized and this pins that two stores searched at once each answer
-    about themselves."""
+    about themselves.
+
+    This is the WEAK half of the pair below: it is a smoke test that the lock
+    does not deadlock or corrupt anything, and it passes with the lock removed.
+    The falsifiable version — which fails when the lock is removed — is
+    :func:`test_the_lock_is_what_keeps_the_shared_memo_from_crossing_stores`.
+    """
     for letter in ("aaa", "bbb"):
         _write(
             tmp_path / letter / "sessions" / f"{letter}1111",
@@ -315,6 +321,72 @@ def test_concurrent_searches_do_not_answer_from_each_others_corpus(tmp_path: Pat
 
     assert errors == []
     assert results == {"aaa": ["aaa1111"], "bbb": ["bbb1111"]}
+
+
+def test_the_lock_is_what_keeps_the_shared_memo_from_crossing_stores(tmp_path: Path, monkeypatch):
+    """The falsifier for the lock, and the reason it is not decoration.
+
+    A smoke test of two concurrent searches (the test above) passes whether or
+    not the lock exists: the race needs a switch point INSIDE
+    ``search_index._lowered``'s window — after it has put this thread's corpus
+    into the process-wide memo and before it returns it — and that window is a
+    few bytecodes wide, so ordinary scheduling almost never lands in it.
+    Measured on the reviewer's machine: 12 wrong (cross-store) answers in 4000
+    concurrent calls with the switch point forced, 0 in 120000 without.
+
+    So the switch point is forced here, exactly as the reviewer forced it: the
+    memo is wrapped to sleep where the race lives and then return whatever is in
+    it NOW. What is exercised is ``_search_shared`` itself — the locked unit —
+    rather than ``search_store``, because the store scan between searches
+    (tens of milliseconds) buries the half-millisecond window: driving the
+    public entry point this way measured 0/80 wrong with the lock REMOVED, a
+    test that cannot fail. With ``_search_shared``'s lock in place each call is
+    atomic over that memo and every answer is about its own store; with the lock
+    removed, each thread intermittently answers with the other store's ids.
+
+    Verified both ways: this passes with the lock, and fails with it removed
+    (``with _SHARED_LOCK:`` replaced by a bare block) — 1 failed, cross-store
+    answers named in the assertion.
+    """
+    import time
+
+    import local_operator.session.search_index as index_mod
+    import local_operator.session.session_search as search_mod
+
+    for letter in ("aaa", "bbb"):
+        _write(
+            tmp_path / letter / "sessions" / f"{letter}1111",
+            ("user", f"the {letter} keyword appears only here"),
+        )
+
+    real_lowered = index_mod._lowered
+
+    def switched(digests: dict[str, str]) -> dict[str, str]:
+        real_lowered(digests)
+        # The switch point. Another thread entering here replaces the global.
+        time.sleep(0.0005)
+        return index_mod._LOWERED
+
+    monkeypatch.setattr(index_mod, "_lowered", switched)
+
+    wrong: list[str] = []
+
+    def run(letter: str) -> None:
+        other = "bbb" if letter == "aaa" else "aaa"
+        for _ in range(40):
+            digests = index_mod.build_index(tmp_path / letter, [f"{letter}1111"])
+            # ``soft=None`` is the SHARED path — the one the server uses.
+            exact, _soft = search_mod._search_shared(digests, f"{letter} keyword", None, False)
+            if exact != {f"{letter}1111"}:
+                wrong.append(f"{letter} answered {sorted(exact)} (other store: {other})")
+
+    threads = [threading.Thread(target=run, args=(letter,)) for letter in ("aaa", "bbb")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert wrong == [], f"cross-store answers: {wrong[:5]}"
 
 
 def test_a_ranked_row_is_the_same_row_the_filter_admitted(tmp_path: Path):

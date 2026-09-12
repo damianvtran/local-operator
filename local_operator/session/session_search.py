@@ -374,6 +374,15 @@ def search_store(
     limit-independent and each row costs one bounded head read — measured at
     12.8 ms for the whole of a 235-session store on the reporting machine, plus
     ~3.3 ms for the warm index and single-digit milliseconds for the query.
+
+    **An empty answer is not proof of an empty store.** The scan underneath
+    (``resume._scan_sessions``) catches the ``OSError`` from an unreadable
+    ``sessions/`` directory and returns no candidates, deliberately: every
+    listing surface would otherwise fail on a store it cannot read, and a
+    listing that fails is worse than one that is empty. So a store that cannot
+    be walked reports zero matches rather than raising, and this function does
+    not pretend otherwise — a caller that must distinguish the two has to ask
+    the filesystem itself.
     """
     if rows is None:
         rows = recent_session_rows(config_dir, limit=None)
