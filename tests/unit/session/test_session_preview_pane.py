@@ -9,9 +9,12 @@ rewrite would silently break.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from local_operator.session.preview import (
     CHECKPOINT_CUSTOM_TYPE,
@@ -254,7 +257,16 @@ def test_a_fuzzy_only_match_returns_no_context() -> None:
 
 
 def test_created_at_and_verbose_read_the_same_bounded_window(tmp_path: Path) -> None:
-    """``verbose`` keeps ``role == "tool"`` and custom entries the condense drops."""
+    """``verbose`` keeps ``role == "tool"`` and custom entries the condense drops.
+
+    ``created_at`` is asserted through the ``created_at.json`` SIDECAR rather
+    than through whatever the filesystem happens to record. That is the
+    canonical path — ``session_created_at`` reads the sidecar first, and a real
+    store writes one — and it is the only one that means the same thing on
+    every platform. Asserting a non-zero birth time from a bare directory tests
+    the filesystem instead of this code: ``st_birthtime`` exists on macOS/APFS
+    and not on Linux ext4, so that assertion passed locally and failed on CI.
+    """
     _write(
         tmp_path,
         "dd44ee55ff66",
@@ -264,6 +276,11 @@ def test_created_at_and_verbose_read_the_same_bounded_window(tmp_path: Path) -> 
             _message("assistant", "answer", ts=3.0),
         ],
     )
+    born = 1_700_000_000.5
+    (tmp_path / "sessions" / "dd44ee55ff66" / "created_at.json").write_text(
+        json.dumps(born), encoding="utf-8"
+    )
+
     previews = SessionPreviews(tmp_path / "sessions")
     assert [turn.role for turn in previews.condensed("dd44ee55ff66")] == ["user", "assistant"]
     assert [turn.role for turn in previews.verbose("dd44ee55ff66")] == [
@@ -271,7 +288,71 @@ def test_created_at_and_verbose_read_the_same_bounded_window(tmp_path: Path) -> 
         "tool",
         "assistant",
     ]
-    created = previews.created_at("dd44ee55ff66")
+    assert previews.created_at("dd44ee55ff66") == born
+
+
+def test_a_session_with_no_recorded_birth_degrades_to_zero_without_raising(
+    tmp_path: Path,
+) -> None:
+    """``0.0`` is the documented "unknown", and the picker must survive it.
+
+    A store can legitimately have no birth time to give: no sidecar, no fork
+    provenance, and a filesystem that does not record creation time — which is
+    every ext4 box, i.e. CI and most Linux users. The row then renders without
+    its ``started X ago`` clock, and that degradation is the contract. Pinned
+    here so a later change cannot decide to synthesise a date instead.
+    """
+    _write(tmp_path, "ee55ff66aa11", [_message("user", "no sidecar here")])
+    session = tmp_path / "sessions" / "ee55ff66aa11"
+    assert not (session / "created_at.json").exists()
+    assert not (session / "origin.json").exists()
+
+    real_stat = Path.stat
+
+    class _NoBirthStat:
+        """A ``stat_result`` view with ``st_birthtime`` absent, as on ext4.
+
+        Simulated rather than skipped, so the Linux branch is exercised on
+        every platform: the bug this pins was invisible on macOS precisely
+        because the attribute was always there.
+        """
+
+        def __init__(self, stat_result: object) -> None:
+            self._stat = stat_result
+
+        def __getattr__(self, name: str) -> object:
+            if name == "st_birthtime":
+                raise AttributeError(name)
+            return getattr(self._stat, name)
+
+    def no_birthtime(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return _NoBirthStat(real_stat(self, *args, **kwargs))
+
+    Path.stat = no_birthtime  # type: ignore[method-assign]
+    try:
+        assert SessionPreviews(tmp_path / "sessions").created_at("ee55ff66aa11") == 0.0
+    finally:
+        Path.stat = real_stat  # type: ignore[method-assign]
+
+
+@pytest.mark.skipif(
+    not hasattr(os.stat(os.curdir), "st_birthtime"),
+    reason="filesystem does not record a creation time (ext4 and friends)",
+)
+def test_a_filesystem_that_records_birth_time_is_used_when_there_is_no_sidecar(
+    tmp_path: Path,
+) -> None:
+    """The last-resort branch, gated on the ATTRIBUTE rather than the platform.
+
+    Gated on ``hasattr(..., "st_birthtime")`` and not on ``sys.platform``
+    because the property that matters is what the filesystem records, not what
+    the OS is called: macOS is the common case but not the definition, and a
+    platform check would both over- and under-claim. Where the attribute is
+    missing the branch cannot run at all, and the degradation above is what
+    holds instead.
+    """
+    _write(tmp_path, "ff66aa11bb22", [_message("user", "born on disk")])
+    created = SessionPreviews(tmp_path / "sessions").created_at("ff66aa11bb22")
     assert 0.0 < created <= time.time() + 1
 
 
