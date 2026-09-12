@@ -55,3 +55,15 @@ evidence is the text. `is_harness_chrome` has always traded the same way for the
 three continuation prompts, which a person can equally paste; the limit is now
 pinned by tests on all three surfaces (`test_a_pasted_notice_is_hidden_on_display_
 but_kept_in_the_transcript`, the D12 phone case, the panel case).
+
+## The legacy pair, re-anchored (design round 2's D1)
+
+`frames/legacy-before-anchored.png` and `frames/legacy-after-anchored.png` replace
+the round-2 legacy pair, which had been landed at the same NUMERIC content offset
+in two differently-anchored windows: after the notices were removed, that offset
+pointed at the rows that used to sit above them, so the pair compared positions
+rather than the change. Both frames now land on the same ROW — the operator's
+own "Ok in that case then, let's continue. Fix the reported image issue…" prompt,
+immediately above the batch — found by text in each tree, at content offsets 108
+and 138 respectively. Same window, same anchor; the notices are the only
+difference.

@@ -1,0 +1,6994 @@
+{
+  "grid": [
+    120,
+    44
+  ],
+  "native_pixels": [
+    960.0,
+    748.0
+  ],
+  "profile": {
+    "cell_width": 8.0,
+    "cell_height": 17.0,
+    "font_size": 13.0,
+    "font_family": "Menlo, DejaVu Sans Mono, monospace"
+  },
+  "font": {
+    "requested": "Menlo, DejaVu Sans Mono, monospace",
+    "scope": "fontconfig/librsvg",
+    "status": "resolved",
+    "faces": [
+      {
+        "requested_style": "Regular",
+        "family": "Menlo",
+        "style": "Regular",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "0",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Bold",
+        "family": "Menlo",
+        "style": "Bold",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "1",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      },
+      {
+        "requested_style": "Italic",
+        "family": "Menlo",
+        "style": "Italic",
+        "file": "/System/Library/Fonts/Menlo.ttc",
+        "index": "2",
+        "ascii_advances": {
+          "i": 8.0,
+          "W": 8.0,
+          "0": 8.0,
+          "1": 8.0
+        },
+        "ascent_descent": [
+          13,
+          4
+        ],
+        "monospace_ascii": true,
+        "measurement": "Pillow/FreeType; rasterizer hinting may differ"
+      }
+    ]
+  },
+  "font_note": "Local fallback; rasterizer/font versions affect glyphs, not cells",
+  "css_path": [
+    "local_operator.tcss"
+  ],
+  "screen": {
+    "size": [
+      118,
+      42
+    ],
+    "virtual_size": [
+      118,
+      42
+    ],
+    "region": [
+      0,
+      0,
+      120,
+      44
+    ],
+    "scrollbar": [
+      false,
+      false
+    ]
+  },
+  "widgets": [
+    {
+      "widget": "SessionWorkspace",
+      "id": "session-workspace",
+      "region": [
+        1,
+        1,
+        118,
+        42
+      ],
+      "content_region": [
+        1,
+        1,
+        118,
+        42
+      ],
+      "size": [
+        118,
+        42
+      ],
+      "virtual_size": [
+        118,
+        42
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "session-conversation",
+      "region": [
+        1,
+        1,
+        118,
+        42
+      ],
+      "content_region": [
+        1,
+        1,
+        118,
+        42
+      ],
+      "size": [
+        118,
+        42
+      ],
+      "virtual_size": [
+        118,
+        42
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "TranscriptView",
+      "id": "transcript",
+      "region": [
+        1,
+        1,
+        118,
+        22
+      ],
+      "content_region": [
+        2,
+        2,
+        117,
+        20
+      ],
+      "size": [
+        117,
+        20
+      ],
+      "virtual_size": [
+        116,
+        565
+      ],
+      "scrollbar": [
+        false,
+        true
+      ]
+    },
+    {
+      "widget": "OlderHistoryNotice",
+      "id": null,
+      "region": [
+        2,
+        -136,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -136,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -134,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -134,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -132,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -132,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -128,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -128,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -126,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -126,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -123,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -123,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -121,
+        116,
+        10
+      ],
+      "content_region": [
+        2,
+        -121,
+        116,
+        10
+      ],
+      "size": [
+        116,
+        10
+      ],
+      "virtual_size": [
+        116,
+        10
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -110,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -110,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -106,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -106,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -104,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -104,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -102,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -102,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -98,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -98,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -96,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -96,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -92,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -92,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -90,
+        116,
+        5
+      ],
+      "content_region": [
+        2,
+        -90,
+        116,
+        5
+      ],
+      "size": [
+        116,
+        5
+      ],
+      "virtual_size": [
+        116,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -84,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -84,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -80,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -80,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -78,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -78,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -76,
+        116,
+        4
+      ],
+      "content_region": [
+        2,
+        -76,
+        116,
+        4
+      ],
+      "size": [
+        116,
+        4
+      ],
+      "virtual_size": [
+        116,
+        4
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -71,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -71,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -69,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -69,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -67,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -67,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -64,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -64,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -60,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -60,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -58,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -58,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -55,
+        116,
+        5
+      ],
+      "content_region": [
+        2,
+        -55,
+        116,
+        5
+      ],
+      "size": [
+        116,
+        5
+      ],
+      "virtual_size": [
+        116,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -49,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -49,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -47,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -47,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -44,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -44,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -41,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -41,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -39,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -39,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -37,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -37,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -35,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -35,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -31,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -31,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -27,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -27,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -23,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -23,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -21,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -21,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -18,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -18,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -16,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        -16,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -14,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -14,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -11,
+        116,
+        5
+      ],
+      "content_region": [
+        2,
+        -11,
+        116,
+        5
+      ],
+      "size": [
+        116,
+        5
+      ],
+      "virtual_size": [
+        116,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -5,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        -5,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        -1,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        -1,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        2,
+        116,
+        7
+      ],
+      "content_region": [
+        2,
+        2,
+        116,
+        7
+      ],
+      "size": [
+        116,
+        7
+      ],
+      "virtual_size": [
+        116,
+        7
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        10,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        10,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        12,
+        116,
+        7
+      ],
+      "content_region": [
+        2,
+        12,
+        116,
+        7
+      ],
+      "size": [
+        116,
+        7
+      ],
+      "virtual_size": [
+        116,
+        7
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        20,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        20,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        22,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        22,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        26,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        26,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        29,
+        116,
+        5
+      ],
+      "content_region": [
+        2,
+        29,
+        116,
+        5
+      ],
+      "size": [
+        116,
+        5
+      ],
+      "virtual_size": [
+        116,
+        5
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        35,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        35,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        38,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        38,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        40,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        40,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        42,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        42,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        44,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        44,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        47,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        47,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        49,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        49,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        51,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        51,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        53,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        53,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        56,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        56,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        58,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        58,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        60,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        60,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        62,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        62,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        64,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        64,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        66,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        66,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        68,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        68,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        70,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        70,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        72,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        72,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        74,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        74,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        76,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        76,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        78,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        78,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        80,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        80,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        82,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        82,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        84,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        84,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        86,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        86,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        88,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        88,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        90,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        90,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        92,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        92,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        94,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        94,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        96,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        96,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        98,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        98,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        100,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        100,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        102,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        102,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        104,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        104,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        106,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        106,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        108,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        108,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        110,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        110,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        112,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        112,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        114,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        114,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        116,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        116,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        118,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        118,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        120,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        120,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        122,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        122,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        124,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        124,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        126,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        126,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        128,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        128,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        130,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        130,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        132,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        132,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        134,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        134,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        136,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        136,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        138,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        138,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        140,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        140,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        142,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        142,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        144,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        144,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        146,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        146,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        148,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        148,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        150,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        150,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        152,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        152,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        154,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        154,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        156,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        156,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        158,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        158,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        160,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        160,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        162,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        162,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        164,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        164,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        166,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        166,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        168,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        168,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        170,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        170,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        173,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        173,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        175,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        175,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        177,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        177,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        179,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        179,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        181,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        181,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        183,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        183,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        185,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        185,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        187,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        187,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        189,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        189,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        191,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        191,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        193,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        193,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        195,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        195,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        197,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        197,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        199,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        199,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        201,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        201,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        203,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        203,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        205,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        205,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        207,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        207,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        209,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        209,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        211,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        211,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "UserBlock",
+      "id": null,
+      "region": [
+        2,
+        213,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        213,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        215,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        215,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        218,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        218,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        220,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        220,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        222,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        222,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        224,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        224,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        227,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        227,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        229,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        229,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        231,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        231,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        233,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        233,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        235,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        235,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        237,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        237,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        239,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        239,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        241,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        241,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        243,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        243,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        245,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        245,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        247,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        247,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        249,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        249,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        251,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        251,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        253,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        253,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        257,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        257,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        259,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        259,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        261,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        261,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        263,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        263,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        267,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        267,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        269,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        269,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        272,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        272,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        274,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        274,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        276,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        276,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        278,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        278,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        280,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        280,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        282,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        282,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        284,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        284,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        286,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        286,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        288,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        288,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        290,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        290,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        292,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        292,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        294,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        294,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        296,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        296,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        299,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        299,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        301,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        301,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        303,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        303,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        305,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        305,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        307,
+        116,
+        11
+      ],
+      "content_region": [
+        2,
+        307,
+        116,
+        11
+      ],
+      "size": [
+        116,
+        11
+      ],
+      "virtual_size": [
+        116,
+        11
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        319,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        319,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        321,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        321,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        324,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        324,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        326,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        326,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        329,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        329,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        331,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        331,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        333,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        333,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        335,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        335,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        337,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        337,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        340,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        340,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        342,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        342,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        344,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        344,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        347,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        347,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        349,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        349,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "PeerMessageBlock",
+      "id": null,
+      "region": [
+        2,
+        351,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        351,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        353,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        353,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        355,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        355,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        357,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        357,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        359,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        359,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        361,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        361,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        363,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        363,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        366,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        366,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        368,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        368,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        372,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        372,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        374,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        374,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        376,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        376,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        379,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        379,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        381,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        381,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        383,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        383,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        385,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        385,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        387,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        387,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        391,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        391,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        393,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        393,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        395,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        395,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        399,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        399,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        401,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        401,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        404,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        404,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        406,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        406,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        408,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        408,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        410,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        410,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        413,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        413,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        415,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        415,
+        116,
+        2
+      ],
+      "size": [
+        116,
+        2
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        418,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        418,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        420,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        420,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        422,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        422,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "AssistantBlock",
+      "id": null,
+      "region": [
+        2,
+        424,
+        116,
+        3
+      ],
+      "content_region": [
+        2,
+        424,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        428,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        428,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-dock",
+      "region": [
+        1,
+        23,
+        118,
+        20
+      ],
+      "content_region": [
+        1,
+        23,
+        118,
+        20
+      ],
+      "size": [
+        118,
+        20
+      ],
+      "virtual_size": [
+        118,
+        20
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Container",
+      "id": "band",
+      "region": [
+        1,
+        23,
+        118,
+        15
+      ],
+      "content_region": [
+        1,
+        24,
+        118,
+        14
+      ],
+      "size": [
+        118,
+        14
+      ],
+      "virtual_size": [
+        118,
+        14
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "SubagentPanel",
+      "id": "subagent-panel",
+      "region": [
+        1,
+        24,
+        118,
+        3
+      ],
+      "content_region": [
+        1,
+        24,
+        118,
+        2
+      ],
+      "size": [
+        118,
+        2
+      ],
+      "virtual_size": [
+        118,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "SubagentHeader",
+      "id": "subagent-header",
+      "region": [
+        1,
+        24,
+        118,
+        1
+      ],
+      "content_region": [
+        2,
+        24,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        118,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "VerticalScroll",
+      "id": "subagent-rows",
+      "region": [
+        1,
+        25,
+        118,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "SubagentRow",
+      "id": null,
+      "region": [
+        2,
+        25,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        25,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "TodoPanel",
+      "id": "todo-panel",
+      "region": [
+        1,
+        27,
+        118,
+        11
+      ],
+      "content_region": [
+        1,
+        27,
+        118,
+        10
+      ],
+      "size": [
+        118,
+        10
+      ],
+      "virtual_size": [
+        118,
+        10
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "VerticalScroll",
+      "id": "todo-scroll",
+      "region": [
+        1,
+        27,
+        118,
+        9
+      ],
+      "content_region": [
+        2,
+        27,
+        116,
+        9
+      ],
+      "size": [
+        116,
+        9
+      ],
+      "virtual_size": [
+        116,
+        9
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Static",
+      "id": "todo-body",
+      "region": [
+        2,
+        27,
+        116,
+        9
+      ],
+      "content_region": [
+        2,
+        27,
+        116,
+        9
+      ],
+      "size": [
+        116,
+        9
+      ],
+      "virtual_size": [
+        116,
+        9
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "TodoAffordance",
+      "id": "todo-affordance",
+      "region": [
+        1,
+        36,
+        118,
+        1
+      ],
+      "content_region": [
+        2,
+        36,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        118,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ComposerDock",
+      "id": "input-shell",
+      "region": [
+        1,
+        38,
+        118,
+        5
+      ],
+      "content_region": [
+        2,
+        39,
+        116,
+        3
+      ],
+      "size": [
+        116,
+        3
+      ],
+      "virtual_size": [
+        116,
+        3
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Band",
+      "id": "status-band",
+      "region": [
+        2,
+        40,
+        116,
+        2
+      ],
+      "content_region": [
+        2,
+        41,
+        115,
+        1
+      ],
+      "size": [
+        115,
+        1
+      ],
+      "virtual_size": [
+        116,
+        2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Horizontal",
+      "id": "input-row",
+      "region": [
+        2,
+        39,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        39,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Chrome",
+      "id": "prompt-chevron",
+      "region": [
+        2,
+        39,
+        2,
+        1
+      ],
+      "content_region": [
+        2,
+        39,
+        2,
+        1
+      ],
+      "size": [
+        2,
+        1
+      ],
+      "virtual_size": [
+        2,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "Editor",
+      "id": null,
+      "region": [
+        4,
+        39,
+        114,
+        1
+      ],
+      "content_region": [
+        5,
+        39,
+        112,
+        1
+      ],
+      "size": [
+        112,
+        1
+      ],
+      "virtual_size": [
+        0,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    }
+  ]
+}
