@@ -659,9 +659,16 @@ test("the pin follows the card that was rendered, in both directions (D1/D3-1)",
       false,
       "precondition: the wedge state really does render the unresponsive card",
     );
+    // 402px, re-measured after this card gained its one-click "Reload the
+    // extension" action: pin = card height - 121px of constant card chrome,
+    // solved by sweeping the pin in a real headless Chrome at 300x600 dpr=2
+    // (86->207, 219->340, 254->375, 402->523) and verified at 0.27px of first-
+    // paint reflow. The number is asserted here rather than imported from
+    // popup.ts on purpose — a test that reads the constant it is checking
+    // cannot fail when the constant drifts from the measured card.
     assert.equal(
       globalThis.localStorage.getItem("lop:pin-hint"),
-      "254px",
+      "402px",
       "the wedge card must record ITS OWN pin, or every reopen grows into it (D3-1)",
     );
   } finally {

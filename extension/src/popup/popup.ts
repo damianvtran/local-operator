@@ -10,6 +10,7 @@ import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
   noticeForRejectedDecision,
+  noticeForUnreachableWorker,
   originPromptView,
   repeatAskNotice,
   preselectedScope,
@@ -172,6 +173,20 @@ let pairingShown = false;
 // because renders are serialised — see daemonHealth().
 const HEALTH_TIMEOUT_MS = 3000;
 
+// How long a decision may wait on the WORKER before the popup concludes it is
+// not answering. Generous next to a healthy round-trip (single-digit ms over
+// chrome.runtime), because overshooting costs only a slower honest message
+// while undershooting would accuse a merely-busy worker of being wedged. The
+// bound exists at all because a stale MV3 worker answers a sendMessage with
+// silence rather than a rejection, and an unbounded await there is what left
+// Allow/Deny permanently disabled — see decide().
+const DECISION_TIMEOUT_MS = 5000;
+
+// How long a notice is held before render() paints over it. Same value the
+// pairing success hold uses: long enough to read a two-line card, short enough
+// that the popup is not lying about the current state for long.
+const NOTICE_HOLD_MS = 1500;
+
 // The pinned #pending height this browser last settled on, mirrored into
 // localStorage so the FIRST PAINT can size itself.
 //
@@ -211,9 +226,18 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // (padding, the driven-URL trough, the actions row) is the constant between
 // them, so a pin is the state's total card height minus that chrome:
 //
-//   connected card      211.2px  ->  86px
-//   pairing form        344.0px  -> 219px
-//   unresponsive card   378.8px  -> 254px
+//   connected card      207.2px  ->  86px
+//   pairing form        340.2px  -> 219px
+//   unresponsive card   523.3px  -> 402px
+//
+// The unresponsive pin moved 254 -> 402 when that card gained its one-click
+// "Reload the extension" action and the manual fallback became its own
+// paragraph. SOLVED, not derived: the card's own chrome is a constant 121px
+// over the pin, measured by sweeping the pin across 86/219/254/300/350/380/
+// 398/400/402/410 in a real headless Chrome at 300x600 dpr=2 and reading the
+// card back (86->207, 219->340, 254->375, 402->523). Re-measure the same way
+// if this card's copy or controls change; an eyeballed pin IS the 167.8px
+// reflow this block exists to prevent.
 //
 // A state with no entry keeps the last hint. That is deliberate: only these
 // three were measured in a real render, and a pin for the rest would be a pixel
@@ -234,7 +258,7 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // present will therefore read ~257px and is not a contradiction of this table.
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
-const PIN_UNRESPONSIVE = "254px";
+const PIN_UNRESPONSIVE = "402px";
 const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
@@ -754,6 +778,27 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
 document.getElementById("retry-unresponsive")?.addEventListener("click", () => void render());
+// The one-click remedy for a wedged worker, and it lives ONLY on the
+// `unresponsive` card — which renderOnce() paints from the daemon's
+// `extension_unresponsive`, never from the worker's own `connState` (a dead
+// worker's last write reads "connected" forever). So a healthy worker is never
+// offered a reload: the button is in a section that is `hidden` unless the
+// daemon itself reports the extension is not answering.
+//
+// chrome.runtime.reload() is allowed from an extension page and needs no
+// permission. It tears down this very extension, so THE POPUP CLOSES as a side
+// effect — there is no post-reload state to render here, which is why the card
+// tells the user what to check next instead of promising a result.
+document.getElementById("reload-extension")?.addEventListener("click", () => {
+  try {
+    chrome.runtime.reload();
+  } catch (error) {
+    // Nothing to fall back TO in the UI: the manual chrome://extensions
+    // instruction is already on the card as the certain remedy, and this popup
+    // is about to be gone if the call did work.
+    console.warn("extension reload failed", error);
+  }
+});
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {
@@ -912,6 +957,22 @@ function showOriginAck(decision: OriginDecision): void {
 
 async function decide(decision: OriginDecision): Promise<void> {
   setOriginBusy(true);
+  try {
+    await decideOnce(decision);
+  } finally {
+    // The controls are re-enabled on EVERY exit, including one nobody
+    // predicted. The branches inside clear it at the point they know what to
+    // say, but `setOriginBusy(true)` fires before any of them and the failure
+    // this PR is about is precisely a path that never reaches its re-enable:
+    // an unhandled throw here (a render() failure, a DOM shape this popup did
+    // not expect) would otherwise leave Allow and Deny dead for the life of
+    // the popup, which reads as "I clicked and nothing happened". Clearing a
+    // flag twice is free; leaving it set is the bug.
+    setOriginBusy(false);
+  }
+}
+
+async function decideOnce(decision: OriginDecision): Promise<void> {
   // The click answers what the user SAW — shownPromptOrigin/shownPromptId
   // captured at render — never a re-read of current state: re-reading was
   // round-2 B1's consent hole, where a prompt replaced after render made the
@@ -932,13 +993,55 @@ async function decide(decision: OriginDecision): Promise<void> {
     // once the echo clears.
     decidedOrigin = { origin, decision, entryId: promptId, decidedAt: Date.now() };
     showOriginAck(decision);
-    const response = (await chrome.runtime.sendMessage({
-      event: "origin_decision",
-      origin,
-      decision,
-      entryId: promptId,
-    })) as { applied?: boolean } | undefined;
-    if (!response?.applied) {
+    // The worker round-trip is BOUNDED and its failure is contained, because a
+    // wedged worker turns this click into the user's "I clicked and nothing
+    // happened": `setOriginBusy(true)` above disabled Allow/Deny, and before
+    // this every path out of a rejected or never-answered sendMessage skipped
+    // the re-enable, leaving the controls dead for the life of the popup. A
+    // stale MV3 worker produces both halves — it rejects immediately ("Could
+    // not establish connection") when it is gone, and answers nothing at all
+    // when it is loaded but mute, which is the state the operator hit.
+    //
+    // `chrome.runtime.sendMessage` has no timeout option, so the bound is a
+    // race. The loser is not cancellable, which is harmless: an answer arriving
+    // late resolves a promise nobody reads, and render() below re-reads the
+    // real state from storage and /health either way.
+    let response: { applied?: boolean } | undefined;
+    let reachedWorker = true;
+    try {
+      response = (await Promise.race([
+        chrome.runtime.sendMessage({
+          event: "origin_decision",
+          origin,
+          decision,
+          entryId: promptId,
+        }),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), DECISION_TIMEOUT_MS)).then(
+          () => {
+            reachedWorker = false;
+            return undefined;
+          },
+        ),
+      ])) as { applied?: boolean } | undefined;
+    } catch {
+      // The send itself rejected: no receiver, or the worker died mid-flight.
+      // Not rethrown — the click handler is `() => void decide(...)`, so a
+      // rejection here would be an uncaught rejection on the popup page for a
+      // failure the user is about to be told about honestly.
+      reachedWorker = false;
+    }
+    if (!reachedWorker) {
+      // Nothing answered, so the decision's fate is unknown to this popup: do
+      // NOT leave the optimistic ack latched claiming it was applied.
+      decidedOrigin = null;
+      setOriginBusy(false);
+      const notice = noticeForUnreachableWorker();
+      showOriginNotice(notice.title, notice.sub);
+      // The same read-hold the other notices take, then fall through to
+      // render(), which re-probes /health — and paints the unresponsive card
+      // when the daemon confirms the worker is the thing that is wedged.
+      await new Promise((resolve) => setTimeout(resolve, NOTICE_HOLD_MS));
+    } else if (!response?.applied) {
       decidedOrigin = null;
       // A rejection with an EMPTY prompt id came from a /health-fallback
       // render (no generation to aim at) — the request was not replaced, and
@@ -958,7 +1061,7 @@ async function decide(decision: OriginDecision): Promise<void> {
         // Hold the notice long enough to read (same shape as the pairing
         // success hold), then fall through to render(), which draws the
         // CURRENT prompt with live buttons.
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, NOTICE_HOLD_MS));
       }
     }
   }

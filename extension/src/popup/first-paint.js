@@ -43,7 +43,7 @@
   var LEGACY_KEY = "lop:paired-hint";
   var PIN_CONNECTED = "86px";
   var PIN_PAIRING = "219px";
-  var PIN_UNRESPONSIVE = "254px";
+  var PIN_UNRESPONSIVE = "402px";
   var PINS = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
   var pin = null;
   try {

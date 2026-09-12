@@ -741,3 +741,131 @@ test("A3 a snapshot stalled on one tab does not hold another tab's lane (D1)", a
     delete globalThis.chrome;
   }
 });
+
+// --- X3/X4: the worker's remaining uncaught paths (popup-stale-worker lane) --
+//
+// X2 above covers the fire-and-forget `sendMessage` broadcast. These two cover
+// the paths that were still able to throw OUT of a Chrome event handler on that
+// fix's head — which is the same defect with a different origin: an uncaught
+// error in an MV3 worker is the state Chrome's worker is poisoned into, and a
+// poisoned worker is what made the operator's toolbar clicks do nothing.
+
+test("X3 an unparseable daemon frame does not throw out of the socket handler", async () => {
+  const rejections = [];
+  const uncaught = [];
+  const onRejection = (error) => rejections.push(error);
+  const onUncaught = (error) => uncaught.push(error);
+  process.on("unhandledRejection", onRejection);
+  process.on("uncaughtException", onUncaught);
+  const worker = await loadWorker();
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
+  try {
+    // A truncated write, a proxy injecting a body, a future protocol version:
+    // whatever the cause, it reaches onmessage as a string JSON.parse rejects.
+    // The old handler let that throw, taking the whole event handler with it.
+    worker.socket.onmessage?.({ data: "{not json" });
+    await tick(40);
+
+    // The observation is the harness's, not a string grep: nothing escaped.
+    assert.deepEqual(rejections, [], "a bad frame escaped as an unhandled rejection");
+    assert.deepEqual(uncaught, [], "a bad frame escaped as an uncaught exception");
+    assert.ok(
+      warnings.some((line) => line.includes("unparseable frame")),
+      `expected the drop to be recorded, got ${JSON.stringify(warnings)}`,
+    );
+
+    // And the SOCKET survives it: the next good frame is still answered, which
+    // is the whole point of dropping the frame rather than the connection.
+    worker.deliver({ event: "ping" });
+    await tick(40);
+    assert.deepEqual(
+      worker.sent.filter((frame) => frame.event === "pong"),
+      [{ event: "pong" }],
+      "one bad byte on the wire must not cost the live socket",
+    );
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    process.off("uncaughtException", onUncaught);
+    console.warn = realWarn;
+    await worker.close();
+    delete globalThis.chrome;
+  }
+});
+
+test("X4 a socket constructor that throws leaves the worker able to dial again", async () => {
+  // `new WebSocket()` throws synchronously on a malformed URL, and the port it
+  // is built from comes out of chrome.storage — so a corrupted stored value
+  // reaches that constructor. Every caller is a fire-and-forget from an event
+  // handler, so the throw surfaced as an uncaught worker error instead of a
+  // failed dial.
+  const rejections = [];
+  const uncaught = [];
+  const onRejection = (error) => rejections.push(error);
+  const onUncaught = (error) => uncaught.push(error);
+  process.on("unhandledRejection", onRejection);
+  process.on("uncaughtException", onUncaught);
+  installChrome({
+    overrides: {
+      runtime: {
+        getURL: (path) => `chrome-extension://test/${path}`,
+        getManifest: () => ({ version: "0.1.12" }),
+        onStartup: { addListener: () => {} },
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: () => {} },
+        sendMessage: async () => {},
+      },
+    },
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    value: { userAgent: "node-test" },
+    configurable: true,
+    writable: true,
+  });
+  let constructed = 0;
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    readyState = 1;
+    constructor() {
+      constructed += 1;
+      // Only the FIRST dial throws. A worker that could never dial again would
+      // pass a "no uncaught error" assertion while being exactly as dead as the
+      // one this fix is about, so recovery is what is actually asserted below.
+      if (constructed === 1) throw new SyntaxError("'ws://127.0.0.1:NaN/extension' is invalid.");
+      queueMicrotask(() => this.onopen?.());
+    }
+    send() {}
+    close() {}
+  };
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
+  let worker;
+  try {
+    worker = await load(`export * from ${JSON.stringify(join(SRC, "worker.ts"))};`);
+    await tick(40);
+    assert.deepEqual(rejections, [], "the constructor throw escaped as an unhandled rejection");
+    assert.deepEqual(uncaught, [], "the constructor throw escaped as an uncaught exception");
+    assert.ok(
+      warnings.some((line) => line.includes("dial failed to open a socket")),
+      `expected the failed dial to be recorded, got ${JSON.stringify(warnings)}`,
+    );
+    assert.equal(constructed, 1, "precondition: exactly the first dial threw");
+
+    // RECOVERY is the assertion that matters. A worker that swallowed the throw
+    // and then never dialled again would satisfy every check above while being
+    // exactly as dead as the wedge this PR is about. The fast-path backoff for
+    // attempt 0 is 1s (reconnect.ts), so wait past it and require a SECOND
+    // socket — which also drains the armed timer, leaving no live handle behind
+    // for the next test in this file.
+    for (let i = 0; i < 40 && constructed < 2; i++) await tick(50);
+    assert.equal(constructed, 2, "a failed dial must be retried, not abandoned");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    process.off("uncaughtException", onUncaught);
+    console.warn = realWarn;
+    if (worker) await worker.close();
+    delete globalThis.chrome;
+  }
+});
