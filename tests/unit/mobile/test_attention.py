@@ -293,3 +293,94 @@ def test_the_phone_notice_carries_the_tier_the_row_deserves(
     row = _projection_frame(projection)["transcript"][-1]
     assert row["text"] == expected_text
     assert row["details"] == {"severity": expected_severity}
+
+
+def _end_frame(
+    *,
+    kind: str | None,
+    cause: str = "",
+    stop_reason: str = "",
+    cut_off: bool = False,
+    streaming: bool = False,
+) -> dict[str, Any]:
+    """One frame through the daemon's real serialization boundary."""
+    attention: dict[str, Any] = {
+        "conversation_id": "session/end-session",
+        "completion_token": str(uuid.uuid4()),
+        "anchor_id": "completion-t",
+        "kind": kind,
+        "reason": "the session's runtime stopped answering while this turn was running",
+        "cause": cause,
+        "unseen": True,
+        "revision": [1, 0],
+    }
+    projection = SessionProjection(
+        session_id="end-session",
+        pid=0,
+        attention=attention,
+        stop_reason=stop_reason,
+        cut_off=cut_off,
+        streaming=streaming,
+    )
+    return _projection_frame(projection)
+
+
+@pytest.mark.parametrize(
+    "kind,cause,expected_cut_off",
+    [
+        # A cut-off: the taxonomy's `error` kind. The cause is what tells the
+        # button which WORD to use, never whether the affordance is offered.
+        ("error", "runtime-killed", True),
+        ("error", "owner-lost", True),
+        # No cause at all is still a cut-off: that is the row whose notice
+        # already says the cause could not be determined.
+        ("error", "", True),
+        # ...and the ONE deliberate token stays deliberate even when a writer
+        # mismatches it onto `error`, so the button cannot call a stop a cut-off.
+        ("error", "user-stop", False),
+        # A deliberate stop from the phone: no button-less dead end either.
+        ("interrupted", "user-stop", False),
+    ],
+)
+def test_the_phone_frame_fills_the_end_the_runtime_could_not_send(
+    kind: str, cause: str, expected_cut_off: bool
+) -> None:
+    """U1: the resume affordance needs the field, and only the fold wrote it.
+
+    ``ProjectionFold`` sets ``stop_reason``/``cut_off`` from a folded
+    ``AgentEndEvent``, and a runtime that stops mid-turn never emits one — the
+    follower's socket just closes. So D7's word was unreachable on a real phone:
+    ``composer.tsx`` gates the whole button on ``stop_reason === "aborted"``.
+    The durable outcome is where the end DOES exist for those arms, so the frame
+    fills the missing field from the same record its notice is built from.
+    """
+    frame = _end_frame(kind=kind, cause=cause)
+    assert frame["stop_reason"] == "aborted"
+    assert frame["cut_off"] is expected_cut_off
+    # One record decides both, so the button and the sentence above it agree.
+    assert frame["transcript"][-1]["text"].startswith(
+        "Stopped with an error" if kind == "error" else "Interrupted"
+    )
+
+
+def test_the_phone_frame_never_overrides_an_end_the_fold_saw() -> None:
+    """FILL, never override — the completed-turn case is the one at stake.
+
+    A durable record describes the LAST turn the store knows about, which may be
+    older than the end the fold folded; a completed turn carries
+    ``stop_reason='completed'`` and must keep offering no button at all.
+    """
+    completed = _end_frame(kind="error", cause="runtime-killed", stop_reason="completed")
+    assert completed["stop_reason"] == "completed"
+    assert completed["cut_off"] is False
+    # A live turn banners nothing either: the suppression the notice already
+    # applies is the same condition, so the field cannot fill ahead of it.
+    live = _end_frame(kind="error", cause="runtime-killed", streaming=True)
+    assert live["stop_reason"] == ""
+    # ...and a store with no outcome at all has no end to offer.
+    empty = _end_frame(kind=None)
+    assert empty["stop_reason"] == ""
+    # A completion is not a dead end either: no resume affordance is claimed
+    # for a turn that finished.
+    done = _end_frame(kind="complete")
+    assert done["stop_reason"] == ""

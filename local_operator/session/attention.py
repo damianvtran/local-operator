@@ -186,7 +186,10 @@ def _supersedes_provisional(
 
 
 def bootstrap_transcript(
-    transcript: Any, store: AttentionStore | None = None
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Import a conversation's durable outcome; NEVER fatal to the caller.
 
@@ -207,9 +210,13 @@ def bootstrap_transcript(
     orphaned run (or ``None``), so the caller that owns a ``Session`` can
     journal the cut-off once. A failure also returns ``None``: a swallowed
     problem journals nothing rather than half-narrating one.
+
+    ``witnessed_cut_off`` is passed straight through; see
+    :func:`_import_transcript_outcome` for the one caller that uses it and why
+    the record it writes is provisional.
     """
     try:
-        return _import_transcript_outcome(transcript, store)
+        return _import_transcript_outcome(transcript, store, witnessed_cut_off=witnessed_cut_off)
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
         # `getattr` so the handler cannot itself raise on a transcript that
         # never grew a `.directory` (a stub, a partially constructed instance)
@@ -386,7 +393,10 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
 
 
 def _import_transcript_outcome(
-    transcript: Any, store: AttentionStore | None = None
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
 
@@ -403,6 +413,14 @@ def _import_transcript_outcome(
     written for a healthy run would be a wrong ``error`` row that every
     surface's ``busy`` suppression HIDES rather than corrects, so the guard
     removes the class instead of relying on every front end's suppression.
+    ``witnessed_cut_off`` is the ONE caller that may override that guard, and
+    only a caller holding POSITIVE evidence the owner is gone: a ``(cause,
+    reason)`` pair from a viewer that has just DELIVERED a cut-off verdict after
+    the whole cold window of failed dials and syncs. It publishes a PROVISIONAL
+    record for the run's token, so the live owner's real outcome supersedes it
+    when it lands (``_supersedes_provisional``) — which is what lets a
+    live-but-silent stop reach the sidebar without inventing a second, permanent
+    verdict (review round 1, MINOR-2).
 
     Old baselines were memory-only. Unknown historical work keeps that no-flood
     baseline, while a persisted seen stamp older than the actual final assistant
@@ -413,7 +431,7 @@ def _import_transcript_outcome(
     # Imported here rather than at module scope for the same reason
     # ``_classify_orphaned_run`` does it: a broken ``incidents`` import must not
     # stop a session from booting (see the guard around the bootstrap call).
-    from local_operator.incidents import CUT_OFF_CAUSES, DELIBERATE_CUT_OFF_CAUSE
+    from local_operator.incidents import is_cut_off_cause
 
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
     started = transcript.latest_custom("attention_started")
@@ -425,12 +443,31 @@ def _import_transcript_outcome(
         token = started["token"]
         live_owner, _ = _run_record_evidence(transcript.directory)
         if live_owner is not None:
-            # In flight. Publish NOTHING: the live runtime will publish the real
-            # outcome when the turn ends, and a marker written here would be a
-            # provisional row it then has to supersede — or, worse, a row no
-            # later writer ever corrects if the turn completes with an anchor
-            # this classifier did not predict.
-            return None
+            if witnessed_cut_off is None:
+                # In flight. Publish NOTHING: the live runtime will publish the real
+                # outcome when the turn ends, and a marker written here would be a
+                # provisional row it then has to supersede — or, worse, a row no
+                # later writer ever corrects if the turn completes with an anchor
+                # this classifier did not predict.
+                return None
+            # A WITNESSED death the classifier cannot classify. The record on disk
+            # points at a pid that is still alive (or unverifiable), so the branch
+            # above has to assume a live run — and a viewer that already told the
+            # user the turn was cut off is the one party that KNOWS otherwise. The
+            # record is written PROVISIONALLY for exactly that reason: the live
+            # owner's own outcome for the same token replaces it with the real
+            # anchor and kind, so the worst case is a row that corrects itself
+            # (review round 1, MINOR-2).
+            cause, reason = witnessed_cut_off
+            store.publish(
+                identity,
+                token,
+                provisional_anchor(token),
+                "error",
+                reason=reason,
+                cause=cause,
+            )
+            return "error", cause, reason, str(token)
         kind, cause, reason = _classify_orphaned_run(transcript.directory)
         store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
         return kind, cause, reason, str(token)
@@ -451,7 +488,7 @@ def _import_transcript_outcome(
                 reason=reason,
                 cause=cause,
             )
-            if kind == "error" and cause in CUT_OFF_CAUSES and cause != DELIBERATE_CUT_OFF_CAUSE:
+            if kind == "error" and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
                 # `_journal_cut_off_once` is refused by `journal_incident`'s
                 # `_disposed` guard — the dispose rung sets that flag before
@@ -463,16 +500,20 @@ def _import_transcript_outcome(
                 # `[session incident]` rather than a model re-guessing what its
                 # last half-delivered request did.
                 #
-                # MEMBERSHIP, not the presence of a cause (review round 2, Q3).
-                # The guard used to be `cause` truthiness, which narrates a
-                # marker carrying ANY string into the model's history — measured
-                # on a hand-written marker with `cause='not-a-real-cause'`: one
-                # `session_incident` card, and the malformed token imported as
-                # the durable outcome. So the vocabulary decides, and the
-                # deliberate token is excluded on top of it because the reader
-                # meant to repair the taxonomy must not itself commit its
-                # misclassification by narrating a user's own `/stop` as a
-                # cut-off. `kind` is still READ rather than re-derived: the dying
+                # MEMBERSHIP, not the presence of a cause (review round 2, Q3),
+                # AND not one token's identity (review round 1, NIT-1). The guard
+                # used to be `cause` truthiness, which narrates a marker carrying
+                # ANY string into the model's history — measured on a hand-written
+                # marker with `cause='not-a-real-cause'`: one `session_incident`
+                # card, and the malformed token imported as the durable outcome.
+                # So `is_cut_off_cause` decides: the VOCABULARY says this build
+                # can render the token, and `DELIBERATE_CUT_OFF_CAUSES` says
+                # understanding a token is not enough to call the turn a cut-off.
+                # Both halves are sets, so a future DELIBERATE cause joins a set
+                # instead of becoming a second comparison nobody remembers to
+                # write — which is how a user's own `/stop` would have been
+                # narrated as a cut-off the moment its token was coined.
+                # `kind` is still READ rather than re-derived: the dying
                 # runtime's marker is replayed verbatim.
                 #
                 # The cost is stated rather than hidden: a NEWER runtime's cause

@@ -1695,34 +1695,34 @@ def _sidebar_connect_attempts() -> int:
 #: t=9.9 s. Deriving keeps that relationship true when either constant moves. A
 #: bare literal would silently stop healing the moment `COLD_FALLBACK_S` grew,
 #: with no failing test and no symptom except the original bug returning — so
-#: `tests/unit/tui/test_sidebar_connect_retry.py` pins the RELATIONSHIP (total
-#: span > `COLD_FALLBACK_S`) rather than either number. Same shape as #849's
-#: `RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S`, for the same reason.
+#: ``tests/unit/tui/test_sidebar_connect_retry.py`` pins the RELATIONSHIP (total
+#: span > `COLD_FALLBACK_S`) rather than either number, so the derivation
+#: survives either constant moving.
 #:
-#: DERIVED FROM `COLD_FALLBACK_S` AND NOT FROM `RECOVERY_GIVE_UP_S`, which is
-#: the other bound in the same neighbourhood and the wrong one to track here.
-#: The two apply to different facades, selected by `_can_go_cold`, and the
-#: sidebar's own two lease branches land on opposite sides of that split —
-#: verified by execution, because the natural assumption ("a parked source can
-#: never go cold") is false:
-#:
-#:   click / `saved_preview`  -> `_can_go_cold=True`  -> `COLD_FALLBACK_S` (8 s)
-#:   prewarm / `connect`      -> `_can_go_cold=False` -> `RECOVERY_GIVE_UP_S` (90 s)
+#: THE TWO BOUNDS IN THIS NEIGHBOURHOOD ARE NOW ONE, which is why this budget
+#: tracks `COLD_FALLBACK_S` and has nothing else to track: a viewer that cannot
+#: reach its owner is released at that bound whichever arm it is stuck in — no
+#: record, an unusable record, a record that never answers, or a takeover that
+#: cannot run (see `_give_up_recovery` in `session/attached.py`). Both of the
+#: sidebar's lease branches therefore land on the same window, which the old
+#: comment could not say: the CLICK path (`_can_go_cold=True`) went cold at
+#: `COLD_FALLBACK_S` and the PREWARM/`connect` path
+#: (`_can_go_cold=False`) waited out a 90 s second bound.
 #:
 #: The CLICK path is what this budget is for, and measurement matches the
 #: derivation: `_recovering` cleared at t=8.3 s against a `COLD_FALLBACK_S` of
-#: 8.0. Sizing to 90 s instead would make the user watch "Connecting…" for a
-#: minute and a half on the common path, which is worse than the honest failure
-#: it replaced.
+#: 8.0. Sizing to a minute and a half made the user watch "Connecting…" for the
+#: whole of it on the common path, which is worse than the honest failure it
+#: replaced.
 #:
-#: On a source the PREWARM branch created, the budget deliberately expires
-#: inside the 90 s window and the user gets the terminal message. That is a
-#: smaller, honest failure rather than a regression: `_ensure_bound`'s first
-#: guard is `if not self._can_go_cold ... return`, so it is a NO-OP on that
-#: facade — no retry count can make it bind, and a measured such facade did not
-#: self-heal within 20 s either. The fix still converts that case from 15 s of
-#: false-connected transcript into a prompt failure. Widening the budget to
-#: cover it would buy nothing and cost every click path a longer wait.
+#: On a source the PREWARM branch created, the budget can still expire around
+#: the bound and the user gets the terminal message. That is a smaller, honest
+#: failure rather than a regression: `_ensure_bound`'s first guard is
+#: `if not self._can_go_cold ... return`, so until the give-up flips that flag
+#: it is a NO-OP on that facade, and a measured such facade did not self-heal
+#: within 20 s either. The fix still converts that case from 15 s of
+#: false-connected transcript into a prompt failure. Widening the budget buys
+#: nothing and costs every click path a longer wait.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
 
@@ -27381,7 +27381,7 @@ class OperatorApp(App[None]):
                 )
             else:
                 # NO give-up-specific arm here, and that is deliberate — see
-                # `RECOVERY_GIVE_UP_S` in `session/attached.py`. A viewer that
+                # `_give_up_recovery` in `session/attached.py`. A viewer that
                 # gave up on a
                 # live-but-silent owner is cold with a callable `_ensure_bound`,
                 # which is exactly the shape `_needs_runtime_first` diverts into

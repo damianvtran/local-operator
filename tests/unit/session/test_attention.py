@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -970,3 +971,103 @@ def test_reason_and_cause_round_trip_and_an_old_database_migrates(
     with sqlite3.connect(old) as conn:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
     assert {"reason", "cause"} <= columns
+
+
+@pytest.mark.asyncio
+async def test_a_witnessed_cut_off_reaches_the_row_the_daemon_cannot_classify(
+    tmp_path: Path,
+) -> None:
+    """MINOR-2: the live-but-silent give-up must land the row the terminal names.
+
+    The classifier's in-flight arm publishes nothing while a record on disk
+    points at a pid that is still alive (or unverifiable) — it cannot tell a dead
+    owner behind a RECYCLED pid from a healthy run. So a viewer that ended the
+    turn with a named ``owner-lost`` verdict in the terminal left the sidebar row
+    reading ``Working``/``Recent``, un-errored, while its own screen said the
+    run was cut off.
+
+    ``witnessed_cut_off`` is the one caller allowed past that guard, and this
+    test pins the two properties that make it safe: the record it writes is
+    PROVISIONAL (so the live owner's real outcome replaces it rather than
+    competing with it), and a bootstrap WITHOUT it still publishes nothing.
+    """
+    import subprocess
+
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import (
+        bootstrap_transcript,
+        provisional_anchor,
+    )
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    store = AttentionStore(tmp_path / "attention.db")
+    transcript = Transcript(tmp_path / "sessions" / "witnessed")
+    token = str(uuid.uuid4())
+    await transcript.append_custom(
+        "attention_started", {"conversation_id": "session/witnessed", "token": token}
+    )
+    # A record pointing at a LIVE pid that is not this process: the shape a
+    # recycled pid produces, and the one the classifier must refuse to judge.
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        run = tmp_path / RUN_DIRNAME
+        run.mkdir(parents=True, exist_ok=True)
+        (run / f"{owner.pid}.json").write_text(
+            json.dumps(
+                SessionRecord(
+                    pid=owner.pid,
+                    kind="tui",
+                    session_id="witnessed",
+                    conversation_name="witnessed",
+                    cwd=str(transcript.directory),
+                    model_label="m",
+                    control_port=1,
+                    control_key="k",
+                    protocol=5,
+                    capabilities=["tui_state_v1"],
+                ).to_json()
+            ),
+            encoding="utf-8",
+        )
+
+        # Without the witness: nothing, exactly as before.
+        assert bootstrap_transcript(transcript, store) is None
+        assert store.state("session/witnessed")["completion_token"] is None
+
+        # With it: the viewer's own verdict, written provisionally.
+        reason = render_cut_off_reason("owner-lost")
+        published = bootstrap_transcript(
+            transcript, store, witnessed_cut_off=("owner-lost", reason)
+        )
+        assert published == ("error", "owner-lost", reason, token)
+        state = store.state("session/witnessed")
+        assert state["kind"] == "error", state
+        assert state["cause"] == "owner-lost", state
+        assert state["reason"] == reason, state
+        assert state["anchor_id"] == provisional_anchor(token), state
+        assert state["unseen"] is True, state
+
+        # ...and the live owner's REAL outcome supersedes it rather than being
+        # refused: same token, real anchor, the turn it actually had.
+        result = Message(role="assistant", content=[TextContent(text="done")])
+        await transcript.append_message(result)
+        store.publish(
+            "session/witnessed",
+            token,
+            str(result.id),
+            "complete",
+            reason="",
+        )
+        healed = store.state("session/witnessed")
+        assert healed["kind"] == "complete", healed
+        assert healed["anchor_id"] == str(result.id), healed
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)

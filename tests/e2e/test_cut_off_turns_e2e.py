@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.attached import RECOVERY_GIVE_UP_S
+from local_operator.session.attached import COLD_FALLBACK_S
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import Transcript
 from tests.e2e.harness import ScriptedStream, build_session, text_turn
@@ -578,9 +579,12 @@ async def test_a_watched_runtime_killed_mid_turn_ends_with_a_named_cut_off(
             assert end.aborted is False, end
             assert end.error, "a cut-off must carry the notice"
             assert end.cut_off_cause == "owner-lost", end
+            # The END has to arrive on the cold bound, not on some longer one:
+            # this assertion used to be against a second, 90 s deadline that
+            # bounded only some of the arms (review round 1, U2).
             assert (
-                elapsed < RECOVERY_GIVE_UP_S
-            ), f"the cut-off waited {elapsed:.1f}s, which is the give-up path"
+                elapsed < COLD_FALLBACK_S + 5
+            ), f"the cut-off waited {elapsed:.1f}s, which is not the cold bound"
             assert "cut off" in str(end.error)
     finally:
         if viewer is not None:
@@ -657,9 +661,12 @@ async def test_the_message_typed_after_a_watched_cut_off_is_served(
             owners = [record.pid for record, _ in registry.scan(config)]
             assert owners and killed_pid not in owners, (owners, killed_pid)
             assert viewer._recovering is False, "the facade is still latched"
+            # The rebind is what makes the release a repair, and it happens on
+            # the same bound the release did — the wait must not be another
+            # give-up window's worth of silence (UX round 1, U2).
             assert (
-                bound - typed_at < RECOVERY_GIVE_UP_S
-            ), f"the wait took {bound - typed_at:.1f}s, which is the give-up path"
+                bound - typed_at < COLD_FALLBACK_S + 5
+            ), f"the wait took {bound - typed_at:.1f}s, which is not the cold bound"
     finally:
         if viewer is not None:
             try:
@@ -731,3 +738,255 @@ async def test_a_watched_cut_off_reads_as_errored_without_being_opened(
                 pass
         if child.poll() is None:
             _reap(child, config)
+
+
+# --- UX round 1, U1: the frame the PHONE renders has to carry the end ----------
+
+
+#: The daemon's own password for this cell. Only its cookie signature matters:
+#: the requests below are built as ASGI scopes and handed straight to the real
+#: endpoint functions, so no socket and no tunnel is involved.
+PHONE_PASSWORD = "e2e-phone-pw"
+
+
+def _phone_request(
+    path: str,
+    *,
+    method: str = "GET",
+    session_id: str = "",
+    body: dict[str, Any] | None = None,
+) -> Any:
+    """An authenticated ASGI request for one of the daemon's own routes.
+
+    The daemon's SSE and command endpoints are driven through their REAL
+    registered endpoints (``build_app``), not through a re-implementation: the
+    frame under test is the one ``_projection_frame`` serialises for a socket.
+    """
+    from starlette.requests import Request
+
+    from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
+
+    payload = json.dumps(body).encode("utf-8") if body is not None else b""
+    headers = [
+        (b"host", b"fixture"),
+        (b"cookie", f"{COOKIE_NAME}={sign_cookie(PHONE_PASSWORD)}".encode()),
+        (b"content-length", str(len(payload)).encode()),
+    ]
+    if body is not None:
+        headers.append((b"content-type", b"application/json"))
+    scope: dict[str, Any] = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "path_params": {"session_id": session_id} if session_id else {},
+        "query_string": b"",
+        "headers": headers,
+        "scheme": "http",
+        "server": ("fixture", 80),
+        "client": ("127.0.0.1", 1),
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    return Request(scope, receive)
+
+
+def _endpoint(app: Any, path: str) -> Any:
+    return next(route.endpoint for route in app.routes if route.path == path)
+
+
+async def _phone_json(app: Any, path: str, body: dict[str, Any], session_id: str = "") -> Any:
+    response = await _endpoint(app, path)(
+        _phone_request(
+            path.replace("{session_id:str}", session_id),
+            method="POST",
+            session_id=session_id,
+            body=body,
+        )
+    )
+    return json.loads(bytes(response.body))
+
+
+async def _phone_frames(app: Any, session_id: str) -> Any:
+    """Open the phone's own session stream and return its frame iterator."""
+    path = "/api/sessions/{session_id:str}/events"
+    response = await _endpoint(app, path)(
+        _phone_request(f"/api/sessions/{session_id}/events", session_id=session_id)
+    )
+    return response.body_iterator
+
+
+async def _frames_until(iterator: Any, predicate: Any, *, timeout: float) -> list[dict[str, Any]]:
+    """Every projection frame until ``predicate(frame)`` holds, then stop.
+
+    Frames are the daemon's real SSE payloads (``event: projection``), so this
+    reads exactly what the phone's ``EventSource`` would parse.
+    """
+    seen: list[dict[str, Any]] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            chunk = await asyncio.wait_for(anext(iterator), timeout=remaining)
+        except (StopAsyncIteration, TimeoutError):
+            break
+        for line in str(chunk).splitlines():
+            if not line.startswith("data: "):
+                continue
+            frame = json.loads(line[len("data: ") :])
+            seen.append(frame)
+            if predicate(frame):
+                return seen
+    return seen
+
+
+def _strip_child_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every inherited family a spawned runtime could read.
+
+    LOAD-BEARING, not hygiene: the daemon spawns with ``dict(os.environ)``, so a
+    test process that inherited ``LOP_RUNTIME_ADOPT_SESSION`` or
+    ``CMUX_WORKSPACE_ID`` from the harness it runs inside would spawn a child
+    that adopts the OPERATOR'S session. The three families are stripped here for
+    the same reason the older cells rebuild their child env by hand.
+    """
+    for name in list(os.environ):
+        if (
+            name.startswith("CMUX_")
+            or name.startswith("LOP_MOBILE_CHILD_")
+            or name.startswith("LOP_RUNTIME_")
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_the_phone_frame_carries_the_end_the_daemon_saw(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U1: ``stop_reason``/``cut_off`` have to ARRIVE, or D7's word is invisible.
+
+    ``ProjectionFold`` sets those fields only from a folded ``AgentEndEvent``,
+    and a runtime that stops mid-turn never emits one — the follower's socket
+    just closes. Measured on the real phone path before this: ``stop_reason=''
+    cut_off=False`` at every sample to t+40 s for a daemon-owned session killed
+    under the phone, while the danger notice and the list mark both arrived. The
+    COMPONENT test passed because it hand-fed the payload; ``composer.tsx`` gates
+    its whole resume affordance on ``stop_reason === "aborted"``, so on a real
+    phone a cut-off (and a deliberate stop issued from it) had no way back in.
+
+    This drives one daemon-owned session twice: killed while the phone watches
+    (a cut-off), and then stopped from the phone itself (a deliberate stop). The
+    assertion is on the FRAME the phone receives, and on the rule that matters —
+    the field arrives without the notice that accompanies it being lost.
+    """
+    import signal
+
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+
+    _strip_child_env(monkeypatch)
+    config = headless_tui_env
+    (config / "config.yml").write_text(
+        "values:\n  hosting: test\n  model_name: mock\n  tool_approval_mode: auto\n",
+        encoding="utf-8",
+    )
+    daemon = MobileDaemon(password=PHONE_PASSWORD)
+    app = build_app(daemon)
+    scanner = asyncio.create_task(daemon.scan_loop())
+    child_pids: list[int] = []
+
+    async def start_session() -> tuple[str, int]:
+        reply = await _phone_json(app, "/api/sessions/start", {"cwd": str(Path.home())})
+        assert reply.get("ok"), reply
+        child_pids.append(int(reply["pid"]))
+        return str(reply["session_id"]), int(reply["pid"])
+
+    async def park_a_turn(session_id: str) -> None:
+        """A real turn parked in the real ``bash`` tool, prompted AS the phone.
+
+        ``command_id`` is mandatory on the HTTP boundary, so the phone's own
+        continuation identity rides the request exactly as the web composer
+        sends it.
+        """
+        import uuid as _uuid
+
+        reply = await _phone_json(
+            app,
+            "/api/sessions/{session_id:str}/command",
+            {
+                "op": "prompt",
+                "text": f"please [bash:{PARK_S}]",
+                "command_id": str(_uuid.uuid4()),
+                "images": [],
+            },
+            session_id=session_id,
+        )
+        assert reply.get("ok"), reply
+
+    try:
+        with bounded(300, "phone: the frame carries the cut-off end"):
+            # --- a CUT-OFF, watched from the phone -----------------------
+            session_id, pid = await start_session()
+            stream = await _phone_frames(app, session_id)
+            await park_a_turn(session_id)
+            await _frames_until(stream, lambda f: bool(f.get("streaming")), timeout=60)
+            started = time.monotonic()
+            os.kill(pid, signal.SIGKILL)
+            frames = await _frames_until(stream, lambda f: bool(f.get("stop_reason")), timeout=60)
+            cut_off_frame = frames[-1] if frames else {}
+            assert cut_off_frame.get("stop_reason") == "aborted", (
+                "the phone never received the cut-off's end: "
+                f"stop_reason={cut_off_frame.get('stop_reason')!r} "
+                f"cut_off={cut_off_frame.get('cut_off')!r} "
+                f"streaming={cut_off_frame.get('streaming')!r}"
+            )
+            assert cut_off_frame.get("cut_off") is True, cut_off_frame.get("cut_off")
+            assert cut_off_frame.get("attention", {}).get("kind") == "error", cut_off_frame
+            cut_off_elapsed = time.monotonic() - started
+            # The notice and the button come from ONE record, so a frame that
+            # carries the end must carry the sentence it words.
+            assert any(
+                "cut off" in str(row.get("text") or "")
+                for row in cut_off_frame.get("transcript") or []
+            ), cut_off_frame.get("transcript")
+
+            # --- a DELIBERATE STOP, issued from the phone ----------------
+            session_id, pid = await start_session()
+            stream = await _phone_frames(app, session_id)
+            await park_a_turn(session_id)
+            await _frames_until(stream, lambda f: bool(f.get("streaming")), timeout=60)
+            stop_reply = await _phone_json(
+                app,
+                "/api/sessions/{session_id:str}/command",
+                {"op": "stop"},
+                session_id=session_id,
+            )
+            assert stop_reply.get("ok"), stop_reply
+            frames = await _frames_until(stream, lambda f: bool(f.get("stop_reason")), timeout=60)
+            stop_frame = frames[-1] if frames else {}
+            assert stop_frame.get("stop_reason") == "aborted", (
+                "the same blindness hit a deliberate stop: "
+                f"stop_reason={stop_frame.get('stop_reason')!r}"
+            )
+            # ...and the two acts stay distinguishable in the field the WORD
+            # reads, so the button cannot call a stop a cut-off.
+            assert stop_frame.get("cut_off") is False, stop_frame.get("cut_off")
+            assert stop_frame.get("attention", {}).get("kind") == "interrupted", stop_frame
+            # Printed rather than asserted: how long the end takes to ARRIVE is
+            # a measurement for the reviewer, not a contract. The bind this cell
+            # cares about is that the field arrives at all, and that the two acts
+            # stay distinguishable in it.
+            print(
+                f"[u1] cut-off frame in {cut_off_elapsed:.1f}s; "
+                f"deliberate-stop frame in {time.monotonic() - started - cut_off_elapsed:.1f}s"
+            )
+    finally:
+        scanner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await scanner
+        await daemon.close_phone_views()
+        for task in daemon._dial_tasks.values():
+            task.cancel()
+        await asyncio.gather(*daemon._dial_tasks.values(), return_exceptions=True)
+        for child_pid in child_pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
