@@ -1,0 +1,77 @@
+
+=== 390x844 ===
+  [FAIL] R2 390x844 approve visible on arrival: 0/44px visible (height 44px)
+  [FAIL] R2 390x844 deny visible on arrival: 0/44px visible (height 44px)
+  [PASS] R2 390x844 card within column: card (242, 748) column clientH=844
+  [PASS] R1 390x844 kb=260 card inside pinned column: card bottom 563 vs column 584 (dvh still 844, cap 506.4px)
+  [FAIL] R1 390x844 kb=260 approve reachable: 0/44px visible
+  [FAIL] R1 390x844 kb=260 deny reachable: 0/44px visible
+  [FAIL] R1 390x844 kb=300 card inside pinned column: card bottom 563 vs column 544 (dvh still 844, cap 506.4px)
+  [FAIL] R1 390x844 kb=300 approve reachable: 0/44px visible
+  [FAIL] R1 390x844 kb=300 deny reachable: 0/44px visible
+  [FAIL] R1 390x844 kb=336 card inside pinned column: card bottom 563 vs column 508 (dvh still 844, cap 506.4px)
+  [FAIL] R1 390x844 kb=336 approve reachable: 0/44px visible
+  [FAIL] R1 390x844 kb=336 deny reachable: 0/44px visible
+  [PASS] R1 390x844 kb=260 send reachable (secret variant): 44/44px visible; column 584, dvh 844, cap 506.4px
+  [PASS] R1 390x844 kb=300 send reachable (secret variant): 44/44px visible; column 544, dvh 844, cap 506.4px
+  [PASS] R1 390x844 kb=336 send reachable (secret variant): 44/44px visible; column 508, dvh 844, cap 506.4px
+  [PASS] R3 390x844 option-10 reachable by gesture: last option fully visible=True (was False on arrival); scrollers still stranded: 0
+  [PASS] R5 390x844 stacked column not clipped: column clientH=844 scrollH=844 clipped=0px; panels aria-expanded=['false', 'false']
+  [FAIL] R5 390x844 stacked first option visible on arrival: first option None/44px; card (223, 729)
+  [PASS] R5 390x844 stacked option tail reachable by gesture: last option fully visible=True; scrollers still stranded: 0
+  [PASS] R5 390x844 stacked-approval column not clipped: column clientH=844 scrollH=844 clipped=0px; panels aria-expanded=['false', 'false']
+  [FAIL] R5 390x844 stacked-approval decision visible on arrival: approve 0/44px; card (223, 729)
+  [PASS] R4 390x844 stale-tap error visible: error 'The terminal session went away — reopen it to answer.' visible=20px fully=True
+
+=== 360x780 ===
+  [FAIL] R2 360x780 approve visible on arrival: 0/44px visible (height 44px)
+  [FAIL] R2 360x780 deny visible on arrival: 0/44px visible (height 44px)
+  [PASS] R2 360x780 card within column: card (216, 684) column clientH=780
+  [FAIL] R1 360x780 kb=260 card inside pinned column: card bottom 525 vs column 520 (dvh still 780, cap 468px)
+  [FAIL] R1 360x780 kb=260 approve reachable: 0/44px visible
+  [FAIL] R1 360x780 kb=260 deny reachable: 0/44px visible
+  [FAIL] R1 360x780 kb=300 card inside pinned column: card bottom 525 vs column 480 (dvh still 780, cap 468px)
+  [FAIL] R1 360x780 kb=300 approve reachable: 0/44px visible
+  [FAIL] R1 360x780 kb=300 deny reachable: 0/44px visible
+  [FAIL] R1 360x780 kb=336 card inside pinned column: card bottom 525 vs column 444 (dvh still 780, cap 468px)
+  [FAIL] R1 360x780 kb=336 approve reachable: 0/44px visible
+  [FAIL] R1 360x780 kb=336 deny reachable: 0/44px visible
+  [PASS] R1 360x780 kb=260 send reachable (secret variant): 44/44px visible; column 520, dvh 780, cap 468px
+  [PASS] R1 360x780 kb=300 send reachable (secret variant): 44/44px visible; column 480, dvh 780, cap 468px
+  [PASS] R1 360x780 kb=336 send reachable (secret variant): 44/44px visible; column 444, dvh 780, cap 468px
+  [PASS] R3 360x780 option-10 reachable by gesture: last option fully visible=True (was False on arrival); scrollers still stranded: 0
+  [PASS] R5 360x780 stacked column not clipped: column clientH=780 scrollH=780 clipped=0px; panels aria-expanded=['false', 'false']
+  [FAIL] R5 360x780 stacked first option visible on arrival: first option None/44px; card (197, 665)
+  [PASS] R5 360x780 stacked option tail reachable by gesture: last option fully visible=True; scrollers still stranded: 0
+  [PASS] R5 360x780 stacked-approval column not clipped: column clientH=780 scrollH=780 clipped=0px; panels aria-expanded=['false', 'false']
+  [FAIL] R5 360x780 stacked-approval decision visible on arrival: approve 0/44px; card (197, 665)
+  [PASS] R4 360x780 stale-tap error visible: error 'The terminal session went away — reopen it to answer.' visible=39px fully=True
+
+19/44 checks passed
+
+FAILURES:
+  - R2 390x844 approve visible on arrival: 0/44px visible (height 44px)
+  - R2 390x844 deny visible on arrival: 0/44px visible (height 44px)
+  - R1 390x844 kb=260 approve reachable: 0/44px visible
+  - R1 390x844 kb=260 deny reachable: 0/44px visible
+  - R1 390x844 kb=300 card inside pinned column: card bottom 563 vs column 544 (dvh still 844, cap 506.4px)
+  - R1 390x844 kb=300 approve reachable: 0/44px visible
+  - R1 390x844 kb=300 deny reachable: 0/44px visible
+  - R1 390x844 kb=336 card inside pinned column: card bottom 563 vs column 508 (dvh still 844, cap 506.4px)
+  - R1 390x844 kb=336 approve reachable: 0/44px visible
+  - R1 390x844 kb=336 deny reachable: 0/44px visible
+  - R5 390x844 stacked first option visible on arrival: first option None/44px; card (223, 729)
+  - R5 390x844 stacked-approval decision visible on arrival: approve 0/44px; card (223, 729)
+  - R2 360x780 approve visible on arrival: 0/44px visible (height 44px)
+  - R2 360x780 deny visible on arrival: 0/44px visible (height 44px)
+  - R1 360x780 kb=260 card inside pinned column: card bottom 525 vs column 520 (dvh still 780, cap 468px)
+  - R1 360x780 kb=260 approve reachable: 0/44px visible
+  - R1 360x780 kb=260 deny reachable: 0/44px visible
+  - R1 360x780 kb=300 card inside pinned column: card bottom 525 vs column 480 (dvh still 780, cap 468px)
+  - R1 360x780 kb=300 approve reachable: 0/44px visible
+  - R1 360x780 kb=300 deny reachable: 0/44px visible
+  - R1 360x780 kb=336 card inside pinned column: card bottom 525 vs column 444 (dvh still 780, cap 468px)
+  - R1 360x780 kb=336 approve reachable: 0/44px visible
+  - R1 360x780 kb=336 deny reachable: 0/44px visible
+  - R5 360x780 stacked first option visible on arrival: first option None/44px; card (197, 665)
+  - R5 360x780 stacked-approval decision visible on arrival: approve 0/44px; card (197, 665)

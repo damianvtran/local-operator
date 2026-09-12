@@ -1,0 +1,602 @@
+{
+  "390x844-approval-arrival": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": {
+      "top": 242,
+      "bottom": 748,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": true
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "390x844-approval-keyboard-300": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 544,
+      "scrollH": 659,
+      "clipped": 115,
+      "styleH": "544px"
+    },
+    "card": {
+      "top": 57,
+      "bottom": 563,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": false
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "390x844-secret-keyboard-300": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 544,
+      "scrollH": 659,
+      "clipped": 115,
+      "styleH": "544px"
+    },
+    "card": {
+      "top": 57,
+      "bottom": 563,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": false
+    },
+    "approve": null,
+    "deny": null,
+    "send": {
+      "h": 44,
+      "visible": 44,
+      "fully": true
+    },
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "390x844-ask10-arrival": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": {
+      "top": 242,
+      "bottom": 748,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 116,
+      "visible": 0,
+      "fully": false
+    },
+    "optionCount": 10,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "390x844-ask10-after-gestures": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": {
+      "top": 242,
+      "bottom": 748,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 116,
+      "visible": 116,
+      "fully": true
+    },
+    "optionCount": 10,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "390x844-stacked-approval-arrival": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": {
+      "top": 223,
+      "bottom": 729,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": true
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 45,
+      "visible": 45,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": [
+      "false",
+      "false"
+    ]
+  },
+  "390x844-stale-error": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": {
+      "top": 242,
+      "bottom": 748,
+      "h": 506,
+      "capResolved": "506.4px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 116,
+      "visible": 116,
+      "fully": true
+    },
+    "optionCount": 10,
+    "error": {
+      "h": 20,
+      "visible": 20,
+      "fully": true,
+      "text": "The terminal session went away \u2014 reopen it to answer."
+    },
+    "panelsExpanded": []
+  },
+  "390x844-roster-collapsed-failures": {
+    "viewport": [
+      390,
+      844
+    ],
+    "visualViewport": 844,
+    "column": {
+      "clientH": 844,
+      "scrollH": 844,
+      "clipped": 0,
+      "styleH": "844px"
+    },
+    "card": null,
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 45,
+      "visible": 45,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": [
+      "false"
+    ]
+  },
+  "360x780-approval-arrival": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": {
+      "top": 216,
+      "bottom": 684,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": true
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "360x780-approval-keyboard-300": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 480,
+      "scrollH": 621,
+      "clipped": 141,
+      "styleH": "480px"
+    },
+    "card": {
+      "top": 57,
+      "bottom": 525,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": false
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "360x780-secret-keyboard-300": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 480,
+      "scrollH": 621,
+      "clipped": 141,
+      "styleH": "480px"
+    },
+    "card": {
+      "top": 57,
+      "bottom": 525,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": false
+    },
+    "approve": null,
+    "deny": null,
+    "send": {
+      "h": 44,
+      "visible": 44,
+      "fully": true
+    },
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "360x780-ask10-arrival": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": {
+      "top": 216,
+      "bottom": 684,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 135,
+      "visible": 0,
+      "fully": false
+    },
+    "optionCount": 10,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "360x780-ask10-after-gestures": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": {
+      "top": 216,
+      "bottom": 684,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 135,
+      "visible": 135,
+      "fully": true
+    },
+    "optionCount": 10,
+    "error": null,
+    "panelsExpanded": []
+  },
+  "360x780-stacked-approval-arrival": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": {
+      "top": 197,
+      "bottom": 665,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": true
+    },
+    "approve": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "deny": {
+      "h": 44,
+      "visible": 0,
+      "fully": false
+    },
+    "send": null,
+    "composer": {
+      "h": 45,
+      "visible": 45,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": [
+      "false",
+      "false"
+    ]
+  },
+  "360x780-stale-error": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": {
+      "top": 216,
+      "bottom": 684,
+      "h": 468,
+      "capResolved": "468px",
+      "withinColumn": true
+    },
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 24,
+      "visible": 24,
+      "fully": true
+    },
+    "lastOption": {
+      "h": 135,
+      "visible": 135,
+      "fully": true
+    },
+    "optionCount": 10,
+    "error": {
+      "h": 39,
+      "visible": 39,
+      "fully": true,
+      "text": "The terminal session went away \u2014 reopen it to answer."
+    },
+    "panelsExpanded": []
+  },
+  "360x780-roster-collapsed-failures": {
+    "viewport": [
+      360,
+      780
+    ],
+    "visualViewport": 780,
+    "column": {
+      "clientH": 780,
+      "scrollH": 780,
+      "clipped": 0,
+      "styleH": "780px"
+    },
+    "card": null,
+    "approve": null,
+    "deny": null,
+    "send": null,
+    "composer": {
+      "h": 45,
+      "visible": 45,
+      "fully": true
+    },
+    "lastOption": null,
+    "optionCount": 0,
+    "error": null,
+    "panelsExpanded": [
+      "false"
+    ]
+  }
+}
