@@ -1,7 +1,35 @@
 # Design: `web_fetch` robustness — transient failures, bot-blocks, and honest diagnostics
 
-Status: proposal (architect). Do not implement from this without the manager's
-go-ahead on the decisions in §12.
+Status: **implemented**. The manager ratified §12 as: `blocked_retry` default on
+(1), the 0.6 stall fraction ships fixed with no knob (2), no card hint row and
+no UI parity PR (3), the empty-`str(exc)` fix folded in (4), ship (5).
+
+Three things the implementation had to settle that this document did not, each
+recorded here rather than only in the PR so the next reader of the design sees
+the shipped contract:
+
+1. **Enrichment probes get a bounded SLICE of the deadline** (25 %), not the
+   whole budget. §6.2 made the probes share the call's deadline, which is
+   correct, but §3.3 did not say what stops a stalling `.md` probe from spending
+   the budget the real fetch — and its escalation — needs. Measured during
+   implementation: a 3 s fetch of a silent origin spent 1.8 s on the probe and
+   had nothing left to escalate with. `_ENRICHMENT_BUDGET_FRACTION` is the fix.
+2. **The `blocked` lead drops the "(The body below is the error response…)"
+   note.** §5.2 replaces the challenge body with our own statement, so that note
+   would describe the wrong thing. Other non-2xx classes keep it unchanged.
+3. **§6.6 case 5's literal assertion is wrong and was implemented as its
+   intent.** It asks that an unmatched 403's `describe()` "does not contain the
+   word 'bot'", but §2.2's own prescribed wording for that case is "No anti-bot
+   vendor signature was found … rather than bot protection" — which contains the
+   word precisely in order to *deny* the claim. The test asserts the claim is
+   absent (`"blocked by"` never appears, the denial does), which is the property
+   §2.2 is actually about.
+
+A fourth, smaller one: `describe()` pre-wraps its prose to the TUI card's row
+width. The card paints one body row per LINE and clips the overflow with an
+ellipsis (pre-existing behaviour, visible on the `Fetched:` row in both the
+before and after frames), so an unwrapped 150-column sentence would have lost
+the name of the escalation tool off the right edge.
 
 Companion to `docs/design/web_fetch.md`, which remains the contract for the
 pipeline, SSRF policy, caching and card. This document extends it; it does not
