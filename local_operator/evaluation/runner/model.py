@@ -96,6 +96,10 @@ class ModelDecision(ProtocolModel):
     #: changing its chat template looks like from here. See
     #: ``ModelSpec.reasoning_boundary_markers`` for the declaration and
     #: ``strip_reasoning_boundary_markers`` for what removal is licensed to do.
+    #: Counts strips on the attempt's assembled PROSE channel. A model that
+    #: answered on the reply channel instead was judged on that text, and the
+    #: count still refers to the channel the token arrived on -- it is a record
+    #: of what the assembly did, not a claim about the reply that won.
     stripped_reply_markers: SafeCount = 0
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
