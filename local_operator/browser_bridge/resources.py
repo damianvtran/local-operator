@@ -241,10 +241,21 @@ class BrowserResource:
             #     a perfectly current extension from inside the incident.
             #
             # Only a genuinely old extension returns `internal` with NEITHER
-            # key (its HANDLERS fallthrough), so only that gets the message the
-            # reasoning above was written for. Keying on the absence of both
-            # discriminators is what keeps a future third producer from
-            # silently re-creating the misdiagnosis; a new `data` key belongs
+            # key — and even that is a guess rather than proof, which is why this
+            # branch is worth reading carefully before adding to it. `worker.ts`'s
+            # catch-all emits `internal` with an EMPTY `data` for any non-
+            # BridgeCommandError thrown inside a handler, and `deadline()`
+            # rethrows the underlying rejection verbatim, so a current extension
+            # can produce this exact shape too (review R2-4 reproduced one: a
+            # genuine `chrome.storage` rejection with the message "Access to
+            # storage is not allowed from this context."). The two are
+            # indistinguishable on the wire, so this branch is a best-effort
+            # mapping of the LEGACY case and the message it renders is the least
+            # wrong answer available, not a diagnosis.
+            #
+            # Keying on the absence of both discriminators is still right: it is
+            # what keeps a future third producer of `data`-carrying INTERNAL from
+            # silently re-creating the misdiagnosis, and a new `data` key belongs
             # in this predicate.
             if exc.code is ErrorCode.PROTO_MISMATCH or (
                 exc.code is ErrorCode.INTERNAL

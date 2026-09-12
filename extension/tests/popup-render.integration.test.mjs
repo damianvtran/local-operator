@@ -468,6 +468,29 @@ test("a wedged worker is not painted as connected (D4)", async () => {
     await tick(20);
     assert.equal(nodes.get("connected").classList.contains("hidden"), false, "must recover to the connected card");
     assert.equal(nodes.get("unresponsive").classList.contains("hidden"), true);
+
+    // THE OTHER HALF OF THE WINDOW, and the reason this card exists at all: the
+    // post-drop cooling-off period, where the daemon has severed the link so
+    // `/health` reports `paired: false` (it is link-derived) while the pairing on
+    // disk — and the daemon's own `paired:` line — are still true. The card used
+    // to be gated on `paired`, so this exact payload rendered the PAIRING FORM
+    // for a paired browser that is about to re-dial (QA Q2-3 / review R2-5).
+    health = {
+      ...health,
+      paired: false,
+      extension_connected: false,
+      extension_unresponsive: true,
+      link_attached: false,
+    };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      false,
+      "the latched half of the window must show the honest card, not the pairing form",
+    );
+    assert.equal(nodes.get("pairing").classList.contains("hidden"), true, "a paired browser must not be asked for a code");
+    assert.equal(nodes.get("connected").classList.contains("hidden"), true);
   } finally {
     await bundle.close();
   }

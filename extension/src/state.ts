@@ -166,6 +166,45 @@ export function withSessionMutation<T>(op: () => Promise<T>): Promise<T> {
   return withStore(op);
 }
 
+/**
+ * POOL ADMISSION: the read-modify-write boundary for the eight-surface cap.
+ *
+ * The cap is a READ of the surfaces map (`liveSurfaces` + `atSurfaceCap`, both
+ * in the `open` handler) followed by a WRITE to it (`putSurface` after
+ * `chrome.tabs.create`), so two owners admitted concurrently both observe the
+ * last free slot and both take it — nine tabs against a cap of eight. This lane
+ * makes that pair atomic, exactly as `storeQueue` does for individual map
+ * entries, and it lives here because this module owns `MAX_SURFACES`, the map
+ * and `storeQueue`.
+ *
+ * It is deliberately NARROWER than the lane it replaces. The old lane was in
+ * ownership.ts and spanned the ENTIRE `open` handler — attach, log capture,
+ * grouping, and `navigate()` including a redirect that parks on a human
+ * origin-approval prompt — for the global `allocations` chain. One owner's slow
+ * or human-blocked navigation therefore delayed a DIFFERENT owner's admission
+ * (audit A4). Admission is now one `chrome.tabs.create` plus one storage write
+ * (worst case 2 x CHROME_API_DEADLINE_MS, versus the old whole-handler hold),
+ * and everything after `putSurface` runs outside it.
+ *
+ * NESTING IS ACYCLIC and must stay so: `withAdmission` -> `withStore` (via
+ * `putSurface`), never the reverse. A `withStore` op that reached for admission
+ * would deadlock against its own lane.
+ *
+ * Known cost, flagged rather than hidden (addendum D5): the cap read calls
+ * `liveSurfaces`, which loops up to MAX_SURFACES x `chrome.tabs.get` at
+ * CHROME_API_DEADLINE_MS each — so a pathological browser can hold admission for
+ * ~40 s, and a concurrent `open` waits that long before its own budget starts.
+ * The loop cannot move outside the lane without reintroducing the race, and
+ * bounding it is a separate change with pruning-semantics questions (a stalled
+ * get must NOT prune a live surface).
+ */
+let admissionQueue: Promise<unknown> = Promise.resolve();
+export function withAdmission<T>(op: () => Promise<T>): Promise<T> {
+  const run = admissionQueue.catch(() => {}).then(op);
+  admissionQueue = run;
+  return run;
+}
+
 export function putSurface(surface: StoredSurface): Promise<void> {
   return withStore(async () => {
     const surfaces = await getSurfaces();

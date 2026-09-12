@@ -10,8 +10,13 @@ export async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "lop-ownership-"));
   let store = {}; let next = 100;
   const tabs = new Map(); const removed = [];
-  const faults = { navigation: false, remove: false, attach: false, capture: false };
+  const faults = { navigation: false, remove: false, attach: false, capture: false, navigationGate: null };
   globalThis.ownershipFaults = faults;
+  // Counts `chrome.tabs.update` calls so `navigationGate` can park exactly ONE
+  // navigation — the first one, i.e. whichever owner was admitted first. The
+  // admission tests need the first owner parked indefinitely while a second
+  // owner runs to completion, so "holds every navigation" would prove nothing.
+  let navigations = 0;
   globalThis.chrome = {
     storage: { session: {
       get: async () => structuredClone(store),
@@ -20,7 +25,12 @@ export async function fixture() {
     tabs: {
       create: async options => { const tab = { id: next++, ...options }; tabs.set(tab.id, tab); return tab; },
       get: async id => { if (!tabs.has(id)) throw Error(`No tab with id: ${id}`); return tabs.get(id); },
-      update: async (id, options) => { if (faults.navigation) throw Error("net::ERR_CONNECTION_REFUSED"); Object.assign(tabs.get(id), options); return tabs.get(id); },
+      update: async (id, options) => {
+        if (faults.navigation) throw Error("net::ERR_CONNECTION_REFUSED");
+        navigations += 1;
+        if (faults.navigationGate && navigations === 1) await faults.navigationGate;
+        Object.assign(tabs.get(id), options); return tabs.get(id);
+      },
       remove: async id => { if (faults.remove) throw Error("policy denied removal"); removed.push(id); tabs.delete(id); },
     },
   };

@@ -506,8 +506,11 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   "(browser attached but not answering; the bridge dropped the link and is
   re-dialling it — retry once in a few seconds)" after the drop. A browser that
   is genuinely closed prints "(browser not currently attached; it reconnects
-  when opened)" instead — if THAT is what you see, the toggle step below is not
-  your remedy.
+  when opened)" instead — if THAT is what you see *inside the 60 s window the
+  latch covers*, the toggle step below is not your remedy. Past the window the
+  daemon genuinely cannot tell a closed browser from a wedged one — memory is
+  the only alternative to honesty, and `LINK_DROP_TTL_S` records the trade — so
+  read the 60 s window as the span that distinction is promised for.
 
   If it repeats, the worker is WEDGED rather than merely restarting, and the
   recovery is a reload — but use the one that works:

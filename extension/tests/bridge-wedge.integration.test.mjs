@@ -642,3 +642,102 @@ test("E7 a hung chrome.storage.LOCAL read in the grant lane drains like any othe
     delete globalThis.chrome;
   }
 });
+
+// --- Audit A3 / scoping D1: the AX lane is per target -----------------------
+
+test("A3 a snapshot stalled on one tab does not hold another tab's lane (D1)", async () => {
+  // The lane exists because two snapshots of the SAME tab could interleave an
+  // enable/read/disable window against one a11y engine. It was module-global, so
+  // a stalled `getFullAXTree` (plus the `finally` disable, both inside `run`)
+  // also held a DIFFERENT owner's unrelated tab: that owner could not issue even
+  // `Accessibility.enable` before its own 20 s daemon budget expired. The hazard
+  // is one engine, and the CDP `Accessibility` domain is per debuggee (`cdp()` is
+  // addressed by tabId), so per-target is the correct scope — not merely a
+  // smaller one.
+  //
+  // The assertion is ORDERING, not a duration: with a per-tab lane owner B's
+  // first CDP call must fall INSIDE owner A's stalled window (A's enable and its
+  // `finally` disable bracket one another around B's work); with a global lane
+  // every one of A's calls completes first and B's can only start after A's
+  // chain drains. Neither a timeout nor a stopwatch is involved, so the row is
+  // not sensitive to how long the aliased ceilings are.
+  const calls = [];
+  const { store } = installChrome({
+    overrides: {
+      debugger: {
+        sendCommand: async (target, method) => {
+          calls.push([target.tabId, method]);
+          // Owner A's AX READ answers nothing, so A's chain is stalled inside
+          // its window: `Accessibility.getFullAXTree` never resolves and the
+          // `finally` disable is therefore still ahead of it. (Parking the
+          // enable instead would abort `run` before the window even opens, and
+          // then there would be no window for B to interleave with — which is
+          // exactly what made an earlier version of this row pass against the
+          // defective build.)
+          if (target.tabId === SURFACE_A.tabId && method === "Accessibility.getFullAXTree") {
+            await new Promise(() => {});
+          }
+          return { nodes: [] };
+        },
+      },
+    },
+  });
+  store.surfaces = {
+    "bridge:101:aaaa": clone(SURFACE_A),
+    "bridge:102:bbbb": clone(SURFACE_B),
+  };
+  const snap = await load(`export * from ${JSON.stringify(join(SRC, "commands", "snapshot.ts"))};`);
+  try {
+    const parked = snap.loaded.snapshot({ tab: "bridge:101:aaaa" });
+    const parkedSettled = parked.then(
+      () => "resolved",
+      () => "stalled",
+    );
+    for (let i = 0; i < 40 && !calls.some(([tab, method]) => tab === SURFACE_A.tabId && method === "Accessibility.getFullAXTree"); i++) {
+      await tick(5);
+    }
+    assert.ok(
+      calls.some(([tab, method]) => tab === SURFACE_A.tabId && method === "Accessibility.getFullAXTree"),
+      "precondition: owner A's AX read is in flight",
+    );
+
+    const other = await within(
+      snap.loaded.snapshot({ tab: "bridge:102:bbbb" }),
+      2_000,
+      "owner B's snapshot behind owner A's stalled one",
+    );
+    assert.ok(other.snapshot !== undefined, "owner B's snapshot answered");
+    // Snapshot the CDP trace at the INSTANT B answered. Under a global lane B's
+    // chain cannot start until A's whole chain drains — and A's chain includes
+    // its `finally` `Accessibility.disable` — so A's disable appears here only
+    // if B waited for it. No stopwatch: the presence of that one call IS the
+    // ordering.
+    const whileBAnswered = [...calls];
+    assert.ok(
+      whileBAnswered.some(
+        ([tab, method]) => tab === SURFACE_A.tabId && method === "Accessibility.getFullAXTree",
+      ),
+      "precondition: owner A's stalled AX read is still in flight while B answers",
+    );
+    assert.equal(
+      whileBAnswered.some(([tab, method]) => tab === SURFACE_A.tabId && method === "Accessibility.disable"),
+      false,
+      `owner B's CDP work must interleave with owner A's stalled window, not queue behind its chain (calls: ${JSON.stringify(whileBAnswered)})`,
+    );
+    // A's own snapshot is bounded and typed — the stall settles rather than
+    // parking its lane forever, which is what lets the LAST assertion below
+    // finish.
+    assert.equal(await parkedSettled, "stalled");
+
+    // A drained lane leaves nothing behind: a fresh snapshot runs.
+    const third = await within(
+      snap.loaded.snapshot({ tab: "bridge:102:bbbb" }),
+      2_000,
+      "a later snapshot after the stalled chain drained",
+    );
+    assert.ok(third.snapshot !== undefined);
+  } finally {
+    await snap.close();
+    delete globalThis.chrome;
+  }
+});

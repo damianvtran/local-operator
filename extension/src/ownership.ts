@@ -18,8 +18,22 @@ export interface Scope {
   unknownReservations?: number;
 }
 type Params = Record<string, unknown>;
+// Per-OWNER command lanes, keyed by `owner_proof`.
+//
+// This lane spans a handler deliberately: it is what stops a same-owner
+// `owner_finish` overtaking its own in-flight `open` and letting a late
+// navigation resurrect the tab. It is per proof, so it starves nobody else.
+//
+// It is NOT the pool-admission lane any more. That lane used to live here as a
+// module-global `allocations` chain wrapped around the whole `open` handler —
+// including attach, log capture, grouping and `navigate()` with its redirect /
+// human origin-approval wait — so one owner's slow navigation delayed a
+// DIFFERENT owner's admission (audit A4). Admission is a read-modify-write of
+// the SURFACES map, and that map's own module (`state.ts`) now guards it, as
+// `withAdmission`, in the `open` handler around cap-check → create → putSurface.
+// See the addendum D3 for why the journal writes are NOT the window: nothing
+// counts `ownerScopes.allocations` against MAX_SURFACES; the surfaces map does.
 const queues = new Map<string, Promise<unknown>>();
-let allocations: Promise<unknown> = Promise.resolve();
 
 async function scopes(): Promise<Record<string, Scope>> {
   return (
@@ -67,17 +81,17 @@ export async function recordAllocation(params: Params, tab: string, state: strin
   });
 }
 
-/** Serialize owner commands through the entire side effect, not just the map
- * write. A finish cannot overtake an in-flight allocation and then let its late
- * navigation resurrect the tab. The daemon's deadlines remain bounded; a lost
- * response is replayed by allocation id rather than creating a second tab.
+/** Serialize owner commands per owner through the entire side effect, not just
+ * the map write. A finish cannot overtake an in-flight allocation and then let
+ * its late navigation resurrect the tab. The daemon's deadlines remain bounded;
+ * a lost response is replayed by allocation id rather than creating a second
+ * tab. POOL ADMISSION IS NOT THIS LANE — see the map's declaration above.
  *
- * `queues` is keyed by `owner_proof` and `allocations` is global, and both are
- * module-level, so a HUNG op here parked `owner_recover` — the recovery path
- * itself — for every session on that proof. The chains swallow a predecessor's
- * rejection but not its hang (`.catch()` never runs on a promise that never
- * settles); every chrome await inside the ops is bounded by `deadline` so the
- * link always settles.
+ * `queues` is keyed by `owner_proof` and is module-level, so a HUNG op here
+ * parked `owner_recover` — the recovery path itself — for every session on that
+ * proof. The chain swallows a predecessor's rejection but not its hang
+ * (`.catch()` never runs on a promise that never settles); every chrome await
+ * inside the ops is bounded by `deadline` so the link always settles.
  */
 export function withOwnership(
   method: string, params: Params, handler: () => Promise<Record<string, unknown>>,
@@ -196,14 +210,7 @@ export function withOwnership(
     }
     return handler();
   };
-  const run = previous.catch(() => {}).then(() => {
-    if (method !== "open") return operate();
-    // Pool admission spans create+persist, including legacy callers. Sharing
-    // the allocation lane avoids two owners both observing the last free slot.
-    const allocation = allocations.catch(() => {}).then(operate);
-    allocations = allocation;
-    return allocation;
-  });
+  const run = previous.catch(() => {}).then(operate);
   queues.set(key, run);
   void run.finally(() => { if (queues.get(key) === run) queues.delete(key); }).catch(() => {});
   return run;

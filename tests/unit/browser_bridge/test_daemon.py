@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -172,7 +173,7 @@ async def test_await_access_does_not_block_request_access(tmp_path: Path) -> Non
 
     service = BridgeService(root=tmp_path)
 
-    async def serve(payload: dict[str, object]) -> None:
+    async def serve(payload: dict[str, object], *, wire: Any = None) -> None:
         request = Request.model_validate(payload)
 
         async def respond() -> None:
@@ -218,7 +219,7 @@ async def test_cancelled_await_evicts_its_lock_key(tmp_path: Path) -> None:
 
     service = BridgeService(root=tmp_path)
 
-    async def park_forever(payload: dict[str, object]) -> None:
+    async def park_forever(payload: dict[str, object], *, wire: Any = None) -> None:
         await asyncio.sleep(3600)
 
     service.link.send = park_forever  # type: ignore[method-assign]
@@ -252,7 +253,7 @@ async def test_await_lock_key_evicted_on_normal_and_error_exits(
     service = BridgeService(root=tmp_path)
 
     # Normal exit: the fake extension answers immediately.
-    async def answer(payload: dict[str, object]) -> None:
+    async def answer(payload: dict[str, object], *, wire: Any = None) -> None:
         request = Request.model_validate(payload)
         future = service.link.pending.get(request.id)
         if future and not future.done():
@@ -268,7 +269,7 @@ async def test_await_lock_key_evicted_on_normal_and_error_exits(
 
     # Error exit (timeout): the extension never answers; the daemon's command
     # timeout fires inside _dispatch_locked.
-    async def silent(payload: dict[str, object]) -> None:
+    async def silent(payload: dict[str, object], *, wire: Any = None) -> None:
         await asyncio.sleep(daemon_mod.COMMAND_TIMEOUTS["await_access"] + 0.5)
 
     service.link.send = silent  # type: ignore[method-assign]
@@ -463,3 +464,174 @@ def test_tab_closed_event_clears_driven_state_over_the_socket(tmp_path: Path) ->
             cleared = client.get("/health").json()
             assert cleared["current_url"] == ""
             assert cleared["driven_tabs"] == []
+
+
+# --- Audit A4 / scoping D2: the daemon's lock topology ----------------------
+
+
+def test_no_tab_commands_key_on_their_owner_not_the_daemon() -> None:
+    """A4: one owner's no-tab command must not spend another owner's budget.
+
+    `open`, `owner_recover`, `owner_finish`, `owner_retain` and `owner_release`
+    all carry no `tab`, so under the old rule every one of them keyed
+    `__global__` — and the lock was held for the WHOLE command, across a 30 s
+    navigation or a +65 s origin-approval wait. A parked `open` therefore blocked
+    a different owner's `open`, and the `owner_recover` whose entire job is
+    recovering from exactly that. The key is now the owner.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request
+
+    key_of = BridgeService.lock_key_for
+    proof_a = "a" * 40
+    proof_b = "b" * 40
+
+    assert (
+        key_of(Request(id="r-1", method="open", params={"owner_proof": proof_a}))
+        == f"__owner__:{proof_a}"
+    )
+    assert (
+        key_of(Request(id="r-2", method="owner_recover", params={"owner_proof": proof_a}))
+        == f"__owner__:{proof_a}"
+    )
+    # Same owner, same key: its own ordering guarantee is what recovery needs.
+    assert key_of(Request(id="r-1", method="open", params={"owner_proof": proof_a})) == key_of(
+        Request(id="r-3", method="owner_finish", params={"owner_proof": proof_a})
+    )
+    # Different owners, different keys: independent progress.
+    assert key_of(Request(id="r-4", method="open", params={"owner_proof": proof_b})) != key_of(
+        Request(id="r-5", method="open", params={"owner_proof": proof_a})
+    )
+    # Proof-less commands keep the shared key (they read global state).
+    assert key_of(Request(id="r-6", method="tabs", params={})) == "__global__"
+    assert key_of(Request(id="r-7", method="status", params={})) == "__global__"
+    # A per-tab command is still per tab, and an empty/absent proof is not a key.
+    assert key_of(Request(id="r-8", method="goto", params={"tab": "bridge:1:n"})) == "bridge:1:n"
+    assert key_of(Request(id="r-9", method="open", params={"owner_proof": ""})) == "__global__"
+
+
+def test_only_the_owner_and_global_keys_release_after_admission() -> None:
+    """The duration half of D2, pinned structurally.
+
+    Per-tab keys MUST keep the whole-command span (that span is the CDP
+    interleave guard), and `await_access`/`__access__` keep their own spans.
+    Only the two keys the scoping change is about may be released at admission.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+
+    admission_only = BridgeService._admission_only
+    assert admission_only("__global__") is True
+    assert admission_only("__owner__:" + "a" * 40) is True
+    assert admission_only("bridge:1:n") is False
+    assert admission_only("__access__") is False
+    assert admission_only("__await__:r-1") is False
+
+
+@pytest.mark.asyncio
+async def test_a_parked_open_does_not_block_another_owners_open(tmp_path: Path) -> None:
+    """The audit's repro inverted into a regression test.
+
+    Owner A's `open` is parked (standing in for a slow navigation or an approval
+    wait the extension is blocked on); owner B's `open` must be ADMITTED and
+    answered without waiting for it. Under the old `__global__` key B queued
+    behind A's whole command, so this test fails pre-fix.
+    """
+    import asyncio
+
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request, Response
+
+    service = BridgeService(root=tmp_path)
+
+    class _Socket:
+        def __init__(self) -> None:
+            self.closed: list[int | None] = []
+
+        async def send_json(self, payload: object) -> None:
+            return None
+
+        async def close(self, code: int | None = None) -> None:
+            self.closed.append(code)
+
+    service.link.websocket = _Socket()  # type: ignore[assignment]
+    service.link.last_frame_at = time.monotonic()
+    proof_a, proof_b = "a" * 40, "b" * 40
+    parked = asyncio.Event()
+
+    async def serve(payload: dict[str, Any], *, wire: Any = None) -> None:
+        request = Request.model_validate(payload)
+        if request.params.get("owner_proof") == proof_a:
+            parked.set()
+            return  # never answers, and never will
+        future = service.link.pending.get(request.id)
+        if future and not future.done():
+            future.set_result(Response(id=request.id, ok=True, result={"tab": "bridge:2:b"}))
+
+    service.link.send = serve  # type: ignore[method-assign]
+
+    def _params(proof: str) -> dict[str, Any]:
+        return {
+            "url": "https://slow.example",
+            "owner_proof": proof,
+            "requester": "session:s1",
+            "owner_generation": "g1",
+            "allocation_id": "a1",
+        }
+
+    first = asyncio.create_task(
+        service._dispatch_serialized(Request(id="r-a", method="open", params=_params(proof_a)))
+    )
+    await asyncio.wait_for(parked.wait(), timeout=2.0)
+    try:
+        second = await asyncio.wait_for(
+            service._dispatch_serialized(Request(id="r-b", method="open", params=_params(proof_b))),
+            timeout=2.0,
+        )
+        assert '"ok":true' in bytes(second.body).decode().replace(" ", "")
+    finally:
+        first.cancel()
+        with suppress(asyncio.CancelledError):
+            await first
+
+
+@pytest.mark.asyncio
+async def test_owner_keys_are_evicted_so_the_lock_map_cannot_grow(tmp_path: Path) -> None:
+    """Round-3 M1's defect class, reopened by the per-owner key.
+
+    A per-owner key is minted per session-resource, so without eviction
+    `_tab_locks` grows for the daemon's lifetime exactly as the `__await__` keys
+    did. N distinct owners must leave NO proof keys behind.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request, Response
+
+    service = BridgeService(root=tmp_path)
+
+    class _Socket:
+        async def send_json(self, payload: object) -> None:
+            return None
+
+        async def close(self, code: int | None = None) -> None:
+            return None
+
+    service.link.websocket = _Socket()  # type: ignore[assignment]
+    service.link.last_frame_at = time.monotonic()
+
+    async def serve(payload: dict[str, Any], *, wire: Any = None) -> None:
+        request = Request.model_validate(payload)
+        future = service.link.pending.get(request.id)
+        if future and not future.done():
+            future.set_result(Response(id=request.id, ok=True, result={"state": "allocated"}))
+
+    service.link.send = serve  # type: ignore[method-assign]
+
+    for index in range(5):
+        proof = f"{index:040d}"
+        await service._dispatch_serialized(
+            Request(
+                id=f"r-{index}",
+                method="owner_recover",
+                params={"owner_proof": proof, "requester": "session:s1", "owner_generation": "g1"},
+            )
+        )
+    assert service._tab_locks == {}, f"proof keys retained: {sorted(service._tab_locks)}"

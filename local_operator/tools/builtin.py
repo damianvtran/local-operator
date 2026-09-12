@@ -8537,6 +8537,32 @@ def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> 
     return identity
 
 
+def _bridge_failure_result(tool_call_id: str, exc: BaseException, *, action: str) -> ToolResult:
+    """Render one bridge failure so every site answers with the same voice.
+
+    `str(exc)` on a `BridgeError` is the RAW daemon message. For a recovery
+    timeout that is literally `owner_recover timed out`: an internal verb, no
+    remedy, and no typed code for the agent to branch on — while the identical
+    wedge in a session that had already recovered got `format_error`'s full copy
+    ("…ask the user to toggle the Local Operator extension OFF then ON in
+    chrome://extensions (pairing is preserved)"). The recovery command is the
+    one that must never be the useless one (design D5/D2-1, review R2-2).
+
+    `BridgeUnreachable` and `BrowserOwnershipError` already carry complete
+    human sentences written for exactly this audience, so they keep `str(exc)`;
+    only the typed wire error is re-rendered.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+
+    if isinstance(exc, BridgeError):
+        problem = _error(tool_call_id, "browser", format_error(exc, action=action))
+        # The same typed code `_bridge_call` carries, so callers can branch on
+        # `extension_unresponsive` rather than substring-matching prose.
+        problem.details = {"error_code": exc.code.value}
+        return problem
+    return _error(tool_call_id, "browser", str(exc))
+
+
 async def _bridge_call(
     tool_call_id: str,
     action: str,
@@ -9217,7 +9243,14 @@ async def execute_browser(
                 await resource.recover()
                 state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
-            return _error(tool_call_id, "browser", str(exc))
+            # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
+            # here used to render a recovery timeout as the bare daemon message
+            # `owner_recover timed out` — an internal verb name, no remedy, and
+            # no typed code — while the SAME wedge in an already-recovered
+            # session got `format_error`'s full, actionable copy. Two qualities
+            # of answer for one fault, on the command whose whole job is
+            # recovery (design D2-1, mechanism added by review R2-2).
+            return _bridge_failure_result(tool_call_id, exc, action="the browser tab recovery")
         action = str(args.get("action", "")).strip().lower()
         try:
             if action == "recover":
@@ -9267,7 +9300,16 @@ async def execute_browser(
             # Same containment the initialize/recover block above already has:
             # an expected ownership or bridge refusal is a sentence, never a
             # stack trace spent in the model's context.
-            return _error(tool_call_id, "browser", str(exc))
+            #
+            # `format_error` for the bridge errors, with the tool's own action
+            # name — except for `recover`, which is phrased the same way as the
+            # preamble above so the two render sites cannot drift into naming
+            # the wire verb (design D2-1).
+            return _bridge_failure_result(
+                tool_call_id,
+                exc,
+                action="the browser tab recovery" if action == "recover" else action,
+            )
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
