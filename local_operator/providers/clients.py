@@ -26,6 +26,7 @@ import logging
 import math
 import re
 import time
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import timezone
@@ -185,6 +186,49 @@ def _stream_id(value: Any) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+#: Longest provider display name we will carry back as a cache pin.
+#:
+#: OpenRouter's own names are short ("Google AI Studio" is 16 characters, the
+#: longest in the 106-provider list sits well under 30), so 64 is roughly 2x
+#: headroom for a rename rather than a tight fit. The bound exists because the
+#: value is provider-controlled text that this harness stores per conversation
+#: and then sends BACK as `provider.order` on every subsequent request: an
+#: unbounded string rides in front of a cached prefix forever, for a field
+#: whose only legitimate content is a short label.
+_MAX_SERVED_PROVIDER_CHARS = 64
+
+
+def _served_provider_name(value: Any) -> str | None:
+    """Validate the host name an aggregator reports, or refuse it.
+
+    Review round 1, major-2. The previous form accepted any non-empty string,
+    which meant a hostile or broken upstream could put arbitrary text into
+    ``StreamEndEvent.served_provider`` and, through the session's pin, into
+    every later request body.
+
+    NOT normalised, deliberately — the display name is what an ``order`` entry
+    accepts and slug-normalising it is wrong for 13 of 106 providers (``Z.AI``
+    is ``z-ai``). So this is a gate, never a transform: a name either comes
+    back byte-for-byte or is refused outright and the conversation simply does
+    not pin this turn (degrading to today's default routing, which is the same
+    failure mode as an unrecognised pin).
+
+    Control characters are refused rather than stripped for the same reason:
+    stripping would invent a name the host never reported and pin to it. The
+    repo already refuses to trust provider-supplied text elsewhere (see
+    ``_attributed_relay_message`` and its hostile-``provider_name`` tests).
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    if not trimmed or len(trimmed) > _MAX_SERVED_PROVIDER_CHARS:
+        return None
+    # ``Cc`` covers NUL, ESC, both newline forms and the C1 8-bit range.
+    if any(unicodedata.category(char) == "Cc" for char in trimmed):
+        return None
+    return trimmed
 
 
 def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int, int]:
@@ -2181,19 +2225,64 @@ class OpenAICompatClient:
             # intentionally inherit the parent's key (`cache_lineage_id`) so a
             # fork replays into the parent's warm prefix.
             body["prompt_cache_key"] = request.prompt_cache_key
-        if self._openrouter_provider_preferences:
-            # ASSIGNS one top-level key onto the existing body dict — not a
-            # merge into an existing `body["provider"]` (there is none). The
-            # `prompt_cache_key` stamp above writes a SIBLING key on this same
-            # dict, and the two must coexist rather than clobber: the cache
-            # key asks for sticky routing while a `provider` object expresses
-            # routing preferences that may override it, so a body can carry
-            # both and OpenRouter reconciles them. The dict() copy keeps a
-            # caller mutating its preferences mapping after construction from
-            # leaking into later request bodies. None (the constructor
-            # default) means this branch is skipped entirely — OpenRouter
-            # sticky routing stays on.
-            body["provider"] = dict(self._openrouter_provider_preferences)
+        # Builds ONE top-level `provider` key from two independent sources —
+        # the user's configured routing preferences and the session's cache
+        # affinity pin. The `prompt_cache_key` stamp above writes a SIBLING key
+        # on this same dict, and the two must coexist rather than clobber: the
+        # cache key asks for sticky routing while a `provider` object expresses
+        # routing preferences that may override it, so a body can carry both
+        # and OpenRouter reconciles them. An empty dict is never assigned —
+        # no preference and no pin means NO `provider` key at all, which is
+        # OpenRouter's own sticky routing left untouched.
+        #
+        # DEEPCOPY, not `dict(...)`: the preferences object nests (`max_price`
+        # is a mapping), and a shallow copy shared that nested dict, so a
+        # caller mutating its own `max_price` after construction reached later
+        # request bodies. Same bug class the constructor fixed at
+        # `_openrouter_provider_preferences` (review round 1, m1); the copy
+        # also keeps the `order` list we may append below from being a live
+        # alias of the caller's configuration.
+        provider_obj: dict[str, Any] = (
+            copy.deepcopy(dict(self._openrouter_provider_preferences))
+            if self._openrouter_provider_preferences
+            else {}
+        )
+        if (
+            (request.provider_affinity or request.provider_avoid)
+            # OPENROUTER ONLY, and this gate is load-bearing rather than
+            # cosmetic (review round 1, blocker-1). The pin rides on the
+            # ChatRequest so a retry keeps it, but that is also what the
+            # failover driver CLONES for a fallback to another model
+            # (`model_copy(update={"model": spec})`), and the clone keeps the
+            # affinity fields while swapping in a direct-DeepSeek/Z.AI spec.
+            # Without this check an OpenRouter host name is stamped onto a
+            # direct provider's body as `provider.order`, which is a field
+            # that provider never defined. Matching `_affinity_enabled`
+            # exactly — deliberately NOT radient, whose routing was never
+            # measured here — so the two gates cannot drift into disagreeing.
+            and request.model.provider == "openrouter"
+            and request.model.supports_prompt_cache
+            # USER CONFIGURATION WINS, and this is defence in depth: the
+            # session-level gate already refuses to pin when any of these keys
+            # is configured. An explicit `order`/`only`/`ignore`/`sort` is a
+            # routing opinion the user typed, and silently prepending a host to
+            # it — or fighting a `sort` — would make their setting mean
+            # something other than what the settings page says it means.
+            and not provider_obj.keys() & {"order", "only", "ignore", "sort"}
+        ):
+            # The served DISPLAY NAME verbatim (see `StreamEndEvent.served_
+            # provider`). OpenRouter accepts it as an `order` entry and
+            # silently ignores an entry it does not recognize, so a stale or
+            # renamed host degrades to default routing rather than erroring.
+            if request.provider_affinity:
+                provider_obj["order"] = [request.provider_affinity]
+            # Verified live that the two compose: with `order` naming one host
+            # and `ignore` another, the ordered host serves every call and the
+            # ignored one is never attempted. Sorted for a byte-stable body.
+            if request.provider_avoid:
+                provider_obj["ignore"] = sorted(request.provider_avoid)
+        if provider_obj:
+            body["provider"] = provider_obj
         return body
 
     @staticmethod
@@ -2412,6 +2501,13 @@ class OpenAICompatClient:
         #: than none at all.
         started = False
         response_id: str | None = None
+        #: The upstream host an aggregator routed to, read off the chunk's
+        #: ``provider`` field (OpenRouter sends it on chunk 1 and every chunk
+        #: after). Reported on the END event so a session can pin the next turn
+        #: to the same host and keep its prompt cache warm; see
+        #: ``StreamEndEvent.served_provider`` for why the display name is kept
+        #: verbatim and why this is not part of ``provider_payload``.
+        served_provider: str | None = None
 
         headers = self._headers(api_key, oauth_access)
         headers.update(self._grok_conv_headers(request, url))
@@ -2533,6 +2629,17 @@ class OpenAICompatClient:
                     }
                     if not response_id:
                         response_id = _stream_id(chunk.get("id"))
+                # Overwritten by every chunk that carries it rather than being
+                # read once: the field is repeated on every chunk, and the LAST
+                # one is the host that finished the turn. Non-aggregator wires
+                # simply never send it, so this stays None and nothing pins.
+                # Bounded and control-character-free or not taken at all — see
+                # ``_served_provider_name``. A refused name leaves the previous
+                # chunk's value standing rather than clearing it: the turn was
+                # still served by whoever the earlier chunks named.
+                candidate = _served_provider_name(chunk.get("provider"))
+                if candidate:
+                    served_provider = candidate
 
         stop_reason = _FINISH_TO_STOP_REASON.get(finish_reason or "", finish_reason or "stop")
         # A refusal delta with a non-filter finish (OpenAI sends
@@ -2592,6 +2699,7 @@ class OpenAICompatClient:
             usage=usage,
             provider_payload=provider_payload,
             error=error,
+            served_provider=served_provider,
         )
 
     async def _stream_responses(

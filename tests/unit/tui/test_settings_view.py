@@ -2653,9 +2653,13 @@ async def test_selecting_a_row_keeps_its_attached_explanation_on_screen(
         # (the OpenRouter routing section, design round 1 D1) push the
         # discovered height up, and the contract being pinned is about the
         # scroll model, not about any one era's row count. It is the range END
-        # that a new row above the cascade moves, so it has to move WITH one:
-        # `model_effort` (the effort default) added a third `model` row and took
-        # the discovered height from 48 to 49, one past the old ceiling of 48.
+        # that a new row above the cascade moves, so it has to move WITH one,
+        # and it has now moved twice for that reason: `model_effort` (the effort
+        # default) added a third `model` row, and
+        # `providers.openrouter.provider_affinity` added a routing row, each
+        # taking the discovered height to 49 and one past the old ceiling of 48.
+        # Raised to 64 once, with headroom, because the search failing is the
+        # intended signal that a row moved — not a reason to pin a number.
         for height in range(64, 8, -1):
             await pilot.resize_terminal(120, height)
             await pilot.pause()

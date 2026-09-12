@@ -2621,6 +2621,55 @@ class SessionStreamFn:
     """
 
     USAGE_CHECK_TTL_S = 60.0
+
+    # -- cache affinity retirement ------------------------------------------
+    #: Consecutive warm turns with no prefix reuse before a host is retired.
+    #: TWO, not one: a single miss is ordinary (a host restarts, an entry is
+    #: evicted early under load), and retiring on it would churn the pin as
+    #: badly as having none. Two CONSECUTIVE misses on a host that is still
+    #: being handed a warm prefix is a pattern rather than an accident.
+    PROVIDER_STRIKES_TO_RETIRE = 2
+    #: A gap longer than this is charged to the CLOCK, not to the host.
+    #: Host-side cache entries expire on a documented ~10-minute timer, so a
+    #: miss after a long pause says nothing about whether the host caches; 300s
+    #: sits well inside that window so an expiry can never be mistaken for
+    #: deadness.
+    PROVIDER_STRIKE_MAX_GAP_S = 300.0
+    #: Below this the prefix is too small for "no reuse" to mean anything —
+    #: a short prompt may sit under the host's minimum cacheable block.
+    PROVIDER_STRIKE_MIN_PROMPT_TOKENS = 8192
+    #: Reuse below max(this, 2% of the previous prompt) counts as no reuse.
+    PROVIDER_STRIKE_MIN_CACHED_TOKENS = 1024
+    PROVIDER_STRIKE_MIN_CACHED_FRACTION = 0.02
+    #: Two strikes only pair into a retirement if they are this close in time.
+    #:
+    #: Separate from ``PROVIDER_STRIKE_MAX_GAP_S`` above, which bounds the gap
+    #: between a turn and ITS PREDECESSOR (was the prefix still plausibly warm
+    #: when we sent it?). This one bounds the gap between the two STRIKES, and
+    #: without it strike bookkeeping had no clock at all: a cold turn at 09:00
+    #: and another at 17:00 paired into a retirement as if they were
+    #: consecutive evidence about the same warm prefix (review round 1,
+    #: blocker-2). They are not — eight hours apart they are two independent
+    #: first misses, each of which the "one miss is ordinary" reasoning behind
+    #: ``PROVIDER_STRIKES_TO_RETIRE`` already forgives.
+    #:
+    #: Sized at twice the per-turn gap so a genuinely consecutive pair (two
+    #: turns each inside the warm window) always counts, while anything that
+    #: needed an idle stretch in between does not.
+    #:
+    #: Residual window, noted so it is not re-derived (review round 2,
+    #: MINOR-2): turns served by OTHER hosts neither strike nor clear, so a
+    #: strike can sit for up to this long while the conversation is busy
+    #: elsewhere and then pair with a later miss. Kept anyway — two misses
+    #: inside ten minutes are fair evidence about a host regardless of what ran
+    #: between them, and tightening it would start forgiving real cache death.
+    PROVIDER_STRIKE_PAIR_MAX_GAP_S = 600.0
+    #: Hard ceiling on retirements per (conversation, model). ``ignore`` is a
+    #: HARD filter on OpenRouter's side, so an unbounded set walks a
+    #: conversation toward "no eligible endpoints" — a routing optimisation
+    #: must never be able to make a model unreachable. At the cap the harness
+    #: stops retiring and keeps serving on whatever remains.
+    MAX_RETIRED_PROVIDERS = 3
     DEFAULT_USAGE_BLOCK_MS = 5 * 60 * 1000
 
     #: How many blocked accounts the recovery walk may probe at once.
@@ -2696,6 +2745,50 @@ class SessionStreamFn:
             on_settle=self._on_route_settle,
             on_fast_refused=self._on_fast_refused,
         )
+        # model_id -> the aggregator display name that served this
+        # conversation's last turn on that model. Read by ``__call__`` to pin
+        # the next request (``ChatRequest.provider_affinity``) and written by
+        # ``_record_stream`` from ``StreamEndEvent.served_provider``.
+        #
+        # Deliberately NOT folded into ``_route_state``: that state is about
+        # harness routes and quotas and is CLEARED on a model switch, whereas a
+        # cache pin must survive a detour to another model and back — the host
+        # still holds this conversation's prefix when we return to it. Keyed by
+        # model id for the same reason: two models on one provider are two
+        # different prefixes on two different hosts.
+        #
+        # Memory-only by design: a resumed session re-acquires its pin after a
+        # single cold call, which is cheaper than persisting a hint that a
+        # 10-minute host-side expiry may already have invalidated.
+        self._provider_affinity: dict[str, str] = {}
+        # model_id -> {host: consecutive warm turns that returned no prefix
+        # reuse}. A pin is only worth holding if the host actually caches, and
+        # upstreams differ enormously: one measured 38% of same-host turns
+        # cached while its peers managed 99%, and its misses billed at full
+        # input price (33x a cache read). Without this the pin would loyally
+        # hold a conversation on a cache-dead host, which is worse than the
+        # churn it replaces.
+        self._provider_strikes: dict[str, dict[str, int]] = {}
+        # model_id -> {host: monotonic time of its most recent strike}. Strikes
+        # only pair into a retirement when they are close together (see
+        # ``PROVIDER_STRIKE_PAIR_MAX_GAP_S``): without a clock on the counter,
+        # a cold turn in the morning and another in the afternoon added up to
+        # a retirement as though they were consecutive evidence about one warm
+        # prefix (review round 1, blocker-2).
+        self._provider_strike_at: dict[str, dict[str, float]] = {}
+        # model_id -> hosts retired for THIS conversation, sent as
+        # `provider.ignore`. Per conversation and per model because cache
+        # deadness is observed per prefix, not globally — another session's
+        # experience of the same host is not evidence about this one's.
+        self._provider_retired: dict[str, set[str]] = {}
+        # The last turn's wall clock per model, so an IDLE gap is not charged
+        # to the host: a cache entry expires on a timer (~10 min documented),
+        # and a miss after a long pause is an expiry, not evidence of a host
+        # that does not cache.
+        self._provider_last_turn_at: dict[str, float] = {}
+        # model_id -> whether the "at the retirement cap" line has been logged
+        # already, so it is said once rather than on every later strike.
+        self._provider_retire_capped: dict[str, bool] = {}
         self._message_boundary_pending = True
         # Frozen for one user-message tool loop: choosing a new effort between
         # tool calls would bust the provider cache and make one task reason at
@@ -2778,6 +2871,250 @@ class SessionStreamFn:
             openrouter_provider_preferences=_openrouter_provider_preferences(self._settings),
         )
 
+    def _affinity_enabled(self, request: ChatRequest) -> bool:
+        """Whether this request may read or write the cache affinity pin.
+
+        Pinning a conversation to the host that served its last turn is what
+        keeps an OpenRouter prompt cache warm — the default route is
+        price-weighted load balancing across many upstream hosts and every
+        switch bills the whole prefix uncached. It is also, by construction, a
+        REFUSAL to let OpenRouter re-shop the call, so each condition below is
+        a place where that trade is not ours to make.
+        """
+        model = request.model
+        # OpenRouter only. Radient aggregates too, but its routing was never
+        # measured here and shipping an unmeasured pin on it would be guessing
+        # on someone else's latency and availability.
+        if model.provider != "openrouter":
+            return False
+        # No server-side prompt cache means nothing to keep warm, so the pin
+        # would buy a narrowed host pool and nothing at all.
+        if not model.supports_prompt_cache:
+            return False
+        # A ``:nitro``/``:floor`` variant asks OpenRouter to sort by throughput
+        # or price BY DEFINITION. Honouring a sticky pin on top of that would
+        # quietly defeat the suffix the user typed. Cheap insurance — the gate
+        # below also refuses when `sort` is configured — but the suffix is a
+        # per-model opinion that never appears in the settings mapping.
+        if ":" in model.model_id:
+            return False
+        # A naming errand or other isolated one-shot has no warm prefix of its
+        # own, so it gains nothing; more importantly, letting one MOVE the pin
+        # would drag the real conversation onto whatever host answered an
+        # unrelated question.
+        if request.isolated:
+            return False
+        providers = self._settings.get("providers") if isinstance(self._settings, Mapping) else None
+        openrouter = providers.get("openrouter") if isinstance(providers, Mapping) else None
+        if isinstance(openrouter, Mapping) and openrouter.get("provider_affinity") is False:
+            return False
+        # The user's own routing opinion wins outright. Any of these four keys
+        # expresses a host preference, and `order` disables sticky routing on
+        # OpenRouter's side anyway — so a pin would either fight the setting or
+        # be silently overridden by it. `_build_body` repeats this check as
+        # defence in depth; this one keeps the pin from being WRITTEN at all.
+        prefs = _openrouter_provider_preferences(self._settings) or {}
+        if prefs.keys() & {"order", "only", "ignore", "sort"}:
+            return False
+        return True
+
+    def _clear_cache_affinity_evidence(self, reason: str) -> None:
+        """Void every strike and retirement this conversation has recorded.
+
+        Called when a compaction REPLACES the conversation's prefix (review
+        round 1, blocker-2). Every strike and retirement is a claim about one
+        specific prefix — "this host was given these exact tokens and returned
+        no reuse". A compaction rewrites the transcript into a summary, so the
+        prefix those claims were made about no longer exists and the evidence
+        is void: a host barred on the old prefix has never been asked about the
+        new one, and `provider.ignore` has no removal path of its own, so
+        without this a good host stays barred for the rest of the conversation
+        (and for every fork of it) on evidence that expired.
+
+        Cleared for EVERY model, not just the compacting request's: the prefix
+        is the conversation's, and a sibling model's retirements were learned
+        against that same replaced transcript. Over-clearing costs at most two
+        turns of re-discovery; under-clearing permanently bars a host that
+        caches, which is the failure this fixes.
+
+        The pins themselves are deliberately LEFT standing. A pin is a
+        statement about which host is holding this conversation, and the
+        compaction summary is sent to that same host — keeping the conversation
+        there across the boundary is the whole point of the feature.
+
+        KNOWN ASYMMETRY, recorded so the next reader does not re-derive it
+        (review round 2, MINOR-1): because this wipes the slate, the first cold
+        turn after a compaction is strike 1, so a host that then suffers ONE
+        ordinary eviction is retired on what is effectively a single genuine
+        miss rather than two. Left as is on evidence that cuts against the
+        pessimistic reading: the first post-boundary turn is usually WARM, not
+        cold — its prefix is the system blocks the host still holds plus the new
+        summary, and the floor is ``max(1024, 2%)``, so above a ~1-2k system
+        prefix that turn clears the floor and CLEARS the record instead of
+        striking it. The blast radius is bounded by ``MAX_RETIRED_PROVIDERS``
+        and the next compaction lifts the bar again, so this is strictly better
+        than not clearing at all — which is the failure that made the clear
+        necessary.
+        """
+        if not (self._provider_strikes or self._provider_retired):
+            return
+        logger.debug(
+            "cache affinity: clearing %d strike record(s) and %d retirement set(s) — %s",
+            len(self._provider_strikes),
+            len(self._provider_retired),
+            reason,
+        )
+        self._provider_strikes.clear()
+        self._provider_strike_at.clear()
+        self._provider_retired.clear()
+        self._provider_retire_capped.clear()
+
+    def _apply_cache_affinity(self, request: ChatRequest) -> ChatRequest:
+        """Stamp this conversation's host pin and retirements onto a request.
+
+        The pin sits beside ``prompt_cache_key`` because the two are the same
+        idea at two levels: the key asks the AGGREGATOR to route stickily, and
+        this names the host it actually chose last time. Measured on
+        ``deepseek-v4.1-flash``, the key alone does not hold under load (7-9
+        host switches over 18 turns, ~57-64% cached share); naming the host cut
+        that to 4 switches and ~77%.
+
+        Applied per MODEL, so a mid-turn fallback to another model carries no
+        pin from the model it left. The gate refuses isolated requests in BOTH
+        directions — see ``_affinity_enabled``.
+        """
+        if request.purpose == "compaction":
+            # A compaction REPLACES this conversation's prefix, which voids
+            # every strike and retirement recorded against the old one (review
+            # round 1, blocker-2). Done on the REQUEST rather than after the
+            # summary lands because this is the harness's only sighting of the
+            # boundary; a compaction that then fails costs at most the two
+            # turns of re-discovery, while a missed one bars a good host
+            # permanently — `provider.ignore` has no removal path of its own.
+            self._clear_cache_affinity_evidence("compaction replaces the cached prefix")
+        pin = self._provider_affinity.get(request.model.model_id)
+        retired = self._provider_retired.get(request.model.model_id)
+        if not (pin or retired) or not self._affinity_enabled(request):
+            return request
+        update: dict[str, Any] = {}
+        if pin:
+            update["provider_affinity"] = pin
+        # The retired set outlives the pin it replaced: after a host is retired
+        # the conversation has no pin until another host serves it, and it must
+        # not be routed straight back onto the host it just left.
+        if retired:
+            update["provider_avoid"] = sorted(retired)
+        return request.model_copy(update=update)
+
+    def _score_cache_affinity(
+        self,
+        request: ChatRequest,
+        served: str,
+        usage: "Usage | None",
+        *,
+        now: float,
+        model_id: str | None = None,
+    ) -> None:
+        """Judge whether the host we PINNED is actually caching, and retire it.
+
+        The pin assumes a held host keeps the prefix warm. Measured against
+        real endpoints that assumption does not hold uniformly: same-host cache
+        share ran 99% on some upstreams and 38% on another, whose misses billed
+        at full input price. Holding a conversation on a host like that is
+        strictly worse than the load balancing the pin replaced, so affinity
+        needs a way to notice and leave.
+
+        Only a turn we ASKED FOR and RECEIVED can strike. A fallback to some
+        other host is expected-cold (it was never given this prefix) and says
+        nothing about the host we wanted, so charging it a strike would retire
+        innocent hosts during exactly the load that caused the fallback.
+
+        ``model_id`` names the model that ACTUALLY served, which on a mid-turn
+        failover is not ``request.model`` (review round 1, major-1); the caller
+        reads it off the stamped ``Usage``. Defaulted for the direct-call path
+        and for tests that score one request in isolation.
+        """
+        # ONLY a real conversation turn carries evidence about the turn's warm
+        # prefix (review round 1, blocker-2). A `compaction` request is a
+        # fresh write-once prefix by construction — its own `context_tokens_
+        # hint=0` says so — and a `compaction_advisor` call is a cold-ish
+        # aside; both MISS by design. Scoring them charged the conversation's
+        # host for being cold on prompts it was never given the prefix for,
+        # and two adjacent cold-by-design calls retired a host measured at
+        # 99.6% cache share. A miss here has to mean "this host does not
+        # cache", and outside a turn it does not.
+        if request.purpose != "turn":
+            return
+        model_id = model_id or request.model.model_id
+        previous_at = self._provider_last_turn_at.get(model_id)
+        self._provider_last_turn_at[model_id] = now
+        # Only the host we asked for is on trial (see docstring).
+        if request.provider_affinity != served:
+            return
+        if previous_at is None or (now - previous_at) >= self.PROVIDER_STRIKE_MAX_GAP_S:
+            # An idle gap: the entry may simply have expired on the clock.
+            return
+        prompt_tokens = usage.input_tokens if usage else 0
+        if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
+            return
+        cached = usage.cache_read_tokens if usage else 0
+        floor = max(
+            self.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
+            int(prompt_tokens * self.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
+        )
+        strikes = self._provider_strikes.setdefault(model_id, {})
+        strike_at = self._provider_strike_at.setdefault(model_id, {})
+        if cached >= floor:
+            # Any real reuse clears the record: the host is caching, and past
+            # misses under load must not accumulate toward a later retirement.
+            strikes.pop(served, None)
+            strike_at.pop(served, None)
+            return
+        count = strikes.get(served, 0) + 1
+        previous_strike_at = strike_at.get(served)
+        if (
+            previous_strike_at is not None
+            and (now - previous_strike_at) > self.PROVIDER_STRIKE_PAIR_MAX_GAP_S
+        ):
+            # The earlier strike is too old to pair with this one, so this is a
+            # FIRST strike rather than the second (review round 1, blocker-2).
+            # "Two consecutive misses" is only evidence when the two are about
+            # the same stretch of conversation; hours apart they are two
+            # independent single misses, and a single miss is ordinary.
+            count = 1
+        strikes[served] = count
+        strike_at[served] = now
+        if count < self.PROVIDER_STRIKES_TO_RETIRE:
+            return
+        retired = self._provider_retired.setdefault(model_id, set())
+        if served in retired:
+            return
+        if len(retired) >= self.MAX_RETIRED_PROVIDERS:
+            # Logged once per model, not per turn: at the cap this branch is
+            # reached on every subsequent strike and would otherwise repeat.
+            if not self._provider_retire_capped.get(model_id):
+                self._provider_retire_capped[model_id] = True
+                logger.debug(
+                    "cache affinity: not retiring %s for %s — already at the "
+                    "%d-host cap; `ignore` is a hard filter and an unbounded "
+                    "set risks leaving no eligible endpoint",
+                    served,
+                    model_id,
+                    self.MAX_RETIRED_PROVIDERS,
+                )
+            return
+        retired.add(served)
+        strikes.pop(served, None)
+        strike_at.pop(served, None)
+        if self._provider_affinity.get(model_id) == served:
+            del self._provider_affinity[model_id]
+        logger.debug(
+            "cache affinity: retiring %s for %s — %d warm turns with no prefix reuse",
+            served,
+            model_id,
+            count,
+        )
+
     def fork(self, session_id: str, *, cache_lineage_id: str | None = None) -> "SessionStreamFn":
         """Create a conversation owner sharing only auth and HTTP transport.
 
@@ -2796,6 +3133,24 @@ class SessionStreamFn:
         )
         self._transport.owners += 1
         child._parent_session_id = self._session_id
+        if cache_lineage_id:
+            # A TRUE transcript fork replays a byte-identical prefix, so the
+            # parent's host is genuinely warm for it — the same reasoning that
+            # makes the fork inherit ``cache_lineage_id`` in the first place. A
+            # fresh delegated prompt (no lineage) shares no prefix and must not
+            # inherit a pin that would only narrow its host pool.
+            #
+            # A COPY, never the parent's dict: the child re-pins on its own
+            # ends, and letting that move the parent's pin would hand the
+            # parent a host chosen for a conversation it is not having.
+            child._provider_affinity = dict(self._provider_affinity)
+            # The retirements travel with it, deep-copied for the same reason:
+            # they were learned against THIS prefix, which the fork replays, so
+            # the child would otherwise re-discover each dead host the
+            # expensive way.
+            child._provider_retired = {
+                model: set(hosts) for model, hosts in self._provider_retired.items()
+            }
         return child
 
     @property
@@ -4761,6 +5116,8 @@ class SessionStreamFn:
             # alone and is unaffected either way.
             request = request.model_copy(update={"prompt_cache_key": self._cache_lineage_id})
 
+        request = self._apply_cache_affinity(request)
+
         # Helpers may run before the user's first generation. They inherit the
         # established hard-fallback route but must not spend the user-message
         # boundary (which owns quota recovery and auto-effort classification).
@@ -4835,6 +5192,55 @@ class SessionStreamFn:
                     outcome = str(stop_reason)
                 if stop_reason in ("error", "aborted") or getattr(event, "error", None):
                     ok = False
+                served = getattr(event, "served_provider", None)
+                if served and stop_reason is not None and stop_reason not in ("error", "aborted"):
+                    # Re-pin IMMEDIATELY when the served host differs from the
+                    # current pin, with no hysteresis: that host is the one
+                    # that now holds this conversation's prefix, while the old
+                    # host's entry is already decaying (OpenRouter documents a
+                    # ~10-minute sticky expiry, and DeepSeek needs a full
+                    # prefix match from token 0). Keeping the older pin would
+                    # aim at the colder cache.
+                    #
+                    # Only on a SUCCESSFUL end: a host that errored or was
+                    # aborted mid-stream did not necessarily ingest the prefix.
+                    # Wrapped because a routing optimisation must never be able
+                    # to break a turn — the same contract as the analytics
+                    # recording this loop already does.
+                    try:
+                        if not request.isolated and self._affinity_enabled(request):
+                            event_usage = getattr(event, "usage", None) or final_usage
+                            # Key on the model that ACTUALLY served, not the
+                            # one the request named (review round 1, major-1).
+                            # ``stream_with_failover`` rewrites the request to
+                            # a fallback and stamps the serving spec onto
+                            # ``Usage.model_id`` for exactly this bug class
+                            # (see ``failover._stamped``): reading
+                            # ``request.model`` here filed the pin under the
+                            # PRIMARY while the host it names belongs to the
+                            # fallback, so the primary was later asked for a
+                            # host that never served it and the fallback's own
+                            # cache evidence was lost. ``None`` means "not
+                            # stamped" \u2014 a primary success or a direct call \u2014
+                            # and then the request is the honest answer.
+                            served_model_id = (
+                                getattr(event_usage, "model_id", None) or request.model.model_id
+                            )
+                            # Score BEFORE re-pinning: the judgement is about
+                            # the host this request ASKED for, and the pin is
+                            # about to be overwritten with the host that
+                            # answered.
+                            self._score_cache_affinity(
+                                request,
+                                str(served),
+                                event_usage,
+                                now=time.monotonic(),
+                                model_id=served_model_id,
+                            )
+                            if str(served) not in self._provider_retired.get(served_model_id, ()):
+                                self._provider_affinity[served_model_id] = str(served)
+                    except Exception:  # noqa: BLE001 — routing hints never break a turn
+                        pass
                 yield event
         except BaseException as exc:
             ok = False
