@@ -363,6 +363,19 @@ class AuthStore:
         self._usage_cache_probed = usage_cache is not None
         self._conn = self._connect()
 
+    @property
+    def db_path(self) -> Path:
+        """The SQLite file backing this store.
+
+        Public because a caller about to write a SECRET must be able to check
+        the permissions of the file that will hold it, and only the store
+        knows which file that is. Resolving it caller-side instead (via
+        ``default_db_path()``) gives two sources of truth: a store built on an
+        explicit path would have the WRONG file checked, so the check could
+        pass while the real store was world-readable.
+        """
+        return self._db_path
+
     # -- connection ----------------------------------------------------------
 
     def _connect(self) -> _SerializedConnection:
