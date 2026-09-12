@@ -448,6 +448,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.allow_private": (True, lambda s, w: _fetch_settings(w).allow_private),
     "web_fetch.render_backend": ("stdlib", lambda s, w: _fetch_settings(w).render_backend),
     "web_fetch.enrich": (False, lambda s, w: _fetch_settings(w).enrich),
+    # Both retry knobs are read per fetch (the service resolves settings on every
+    # call), so a change takes effect on the NEXT fetch with no reload — which is
+    # what LIVE means here.
+    "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
+    "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
     # -- web_tools: the inventory after the next turn boundary -----------------
     # Observed through the SAME reconcile the turn start runs, on a session
