@@ -41,7 +41,7 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
@@ -49,7 +49,54 @@ from typing import Any, Literal
 #: wider ``NoticeKind`` (which adds ``note``/``success`` for live receipts)
 #: accepts every one of them, so a value produced here is always renderable
 #: on both sides.
+#: Message heads the harness mints for its own notices, each with the producer
+#: that writes it. Read ONLY against rows a compaction pass carried forward (see
+#: :func:`is_harness_notice_row`), because that is the one shape where the text is
+#: the last surviving evidence of provenance.
+#:
+#: Why an enumeration is acceptable HERE, when the guard it feeds replaced one:
+#: these are message heads, not a policy. A head that is missed degrades to the
+#: pre-fix behaviour — a notice painted as the user's words, which the operator
+#: can see and report — and never to losing their own text, because the check is
+#: scoped to carried copies. The stamp (:func:`is_harness_injection`) remains the
+#: primary test for everything minted since it existed.
+#:
+#: ``[`` + the elision notice is NOT here: that row has a fixed id
+#: (``PRESERVED_TURN_ELISION_ID``, ``compaction-elision``), which is provenance
+#: rather than wording, so the id prefix is checked instead.
+_HARNESS_NOTICE_HEADS: tuple[str, ...] = (
+    "[model switch] ",  # incidents.format_model_switch_message
+    "[session incident",  # incidents.Incident.render
+    "[session credential] ",  # incidents.format_credential_message
+    "[mcp recovery] ",  # incidents.format_mcp_recovery_message
+    "[session-state]\n",  # Session._system_state_message
+    "[system] ",  # the unattended-gate timeout, in _default_convert_to_llm
+    "<system-reminder>",  # Session._todo_reminder_text
+    "(alarm) Scheduled wake ",  # harness.wake.format_wake_delivery_text
+    "<parent-message>",  # harness.comms._format_to_child
+    "<subagent-message ",  # SubagentComms._journal_communication
+    "<peer-session-message ",  # Session._peer_custom_message
+)
+
+
 NoticeSeverity = Literal["info", "warning", "error"]
+
+
+def is_harness_notice_text(text: str) -> bool:
+    """Whether ``text`` is one of the notice shapes the harness itself mints.
+
+    Used where a row's PROVENANCE is no longer readable — a notice a compaction
+    pass lifted into a marker's preserved block before the ``harness_injected``
+    stamp existed (a 2026-09-08-era transcript carries eight such switch-notice
+    copies with no ``provider_payload`` at all). At the copy sites such text is
+    sufficient evidence on its own: the harness wrote these heads, and a stored
+    turn that opens with one is not the operator's words.
+
+    Deliberately NOT applied to every user row on a display surface: a person
+    who pastes a failover notice to ask about it keeps their own row (see
+    :func:`is_harness_notice_row`, which scopes this to carried copies).
+    """
+    return text.lstrip().startswith(_HARNESS_NOTICE_HEADS)
 
 
 def harness_chrome_prompts() -> tuple[str, ...]:
@@ -125,16 +172,87 @@ def is_harness_injection(row: Any) -> bool:
     """
     from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 
-    payload: Any
-    if isinstance(row, Mapping):
-        payload = row.get("provider_payload")
-    else:
-        payload = getattr(row, "provider_payload", None)
-    if not isinstance(payload, Mapping):
+    payload = _row_provider_payload(row)
+    if not payload:
         # A replayed row can carry a malformed payload (an older writer, a
         # hand-edited journal). Absent proof of injection is not proof of it.
         return False
     return bool(payload.get(RENDERED_INJECTION_KEY))
+
+
+def _row_provider_payload(row: Any) -> Mapping[str, Any]:
+    """The ``provider_payload`` of a message or of a raw transcript payload."""
+    payload = (
+        row.get("provider_payload")
+        if isinstance(row, Mapping)
+        else getattr(row, "provider_payload", None)
+    )
+    # A malformed payload (an older writer, a hand-edited journal) reads as
+    # empty: absent proof of provenance is not proof of it.
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _row_text(row: Any) -> str:
+    """The text of a message, or of a raw transcript payload's content blocks.
+
+    The payload arm is what the subagents panel holds; its ``content`` is the
+    same list of ``{"type": "text", "text": ...}`` blocks the message type
+    flattens into ``.text`` on the wire, so reading it here keeps the decision
+    in one place rather than asking each raw-payload caller to pre-flatten.
+    """
+    if isinstance(row, Mapping):
+        blocks = row.get("content") or ()
+        if not isinstance(blocks, Sequence):
+            return ""
+        return "".join(
+            str(block.get("text") or "") for block in blocks if isinstance(block, Mapping)
+        )
+    text = getattr(row, "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def _row_id(row: Any) -> str:
+    value = row.get("id") if isinstance(row, Mapping) else getattr(row, "id", None)
+    return value if isinstance(value, str) else ""
+
+
+def is_harness_notice_row(row: Any) -> bool:
+    """Whether this row is harness-authored and must not paint as the user's words.
+
+    The decision every human-facing surface and every title/tail scan makes,
+    in one place. Two shapes answer it, and they need different evidence:
+
+    * **the stamp** (:func:`is_harness_injection`) — the renderer minted the row
+      from a ``CustomMessage`` in this process. This is the primary test and
+      the only provenance a live or freshly rendered row carries.
+    * **a CARRIED-FORWARD NOTICE** — a row a compaction pass lifted into a
+      marker's preserved block. Those copies are re-seated from the marker with
+      ``compaction_preserved`` and no stamp, so for the ones written before the
+      stamp existed (a real session carries eight switch-notice copies with no
+      ``provider_payload`` at all) the text is the last surviving evidence.
+      Scoped to carried copies deliberately: a person who pastes a notice to
+      ask about it keeps their own row, and the harvest/shed sites that mint a
+      carried copy refuse such a row before it is stored.
+
+    The elision notice is identified by ID rather than wording — it has a fixed
+    one (``compaction-elision``), and its number-carrying prose is not stable
+    enough to match on.
+
+    Accepts a message-like object or a raw payload mapping, for the reason
+    :func:`is_harness_injection` documents.
+    """
+    from local_operator.compaction.cutpoint import (
+        PRESERVED_TURN_ELISION_ID_PREFIX,
+        PRESERVED_USER_TURN_KEY,
+    )
+
+    if is_harness_injection(row):
+        return True
+    if _row_id(row).startswith(PRESERVED_TURN_ELISION_ID_PREFIX):
+        return True
+    if not _row_provider_payload(row).get(PRESERVED_USER_TURN_KEY):
+        return False
+    return is_harness_notice_text(_row_text(row))
 
 
 def typed_line_of(text: str) -> str | None:
