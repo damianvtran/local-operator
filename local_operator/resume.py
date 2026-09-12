@@ -377,6 +377,20 @@ PREVIEW_SCAN_BYTES = 64_000
 #: every row in the list is pure weight.
 PREVIEW_MAX_CHARS = 200
 
+#: ``incidents.SESSION_INCIDENT_MESSAGE_TYPE``, spelled out rather than
+#: imported. This module's contract (see the module docstring, and
+#: ``tests/unit/test_import_graph.py``) is that importing it drags in nothing —
+#: not the engine, not the providers, not ``asyncio`` — because it is on the
+#: path of ``local-operator --help`` and of every picker row. ``incidents`` is
+#: a cheap module today, but the guard is about the GRAPH, not about today's
+#: cost, and a literal keeps this module's import list empty.
+#:
+#: The duplication is pinned by a test that imports both and asserts they are
+#: equal, so a rename cannot silently turn this scan into one that matches
+#: nothing (which would degrade to the house sentence and look like "this
+#: session had no failure" rather than like a bug).
+_SESSION_INCIDENT_TYPE = "session_incident"
+
 #: The marker that says a fragment is a user message, and the first COMPLETE
 #: JSON string value of a ``text`` key. Both tolerate whitespace around the
 #: colon: the session writer emits compact JSON, but a transcript written by
@@ -1949,6 +1963,69 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
     missing, unreadable, or contains no assistant text, and the caller renders
     its own empty state.
     """
+    for entry in _tail_entries(session_dir):
+        if entry.get("type") != "message":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        text = _first_text(payload.get("content"))
+        if text.strip():
+            return _condense(text, max_chars)
+    return ""
+
+
+def session_failure_summary(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) -> str:
+    """The raw text of this session's most recent failure, or ``""``.
+
+    The conversation-list preview answers "where did it get to"; this answers
+    "what went wrong", for the one banner where the first question has no
+    honest answer. A notification that says only "Stopped with an error" tells
+    the user a thing they must act on while withholding the only fact that
+    would let them act — whether to top up a quota, fix a credential, or simply
+    retry (design round 1, D4).
+
+    Read from the ``session_incident`` record's ``details.raw``, which is the
+    UNRENDERED provider text. Deliberately not ``details.text``: that is the
+    formatted model-facing block, several lines long and tailed with "This is
+    why the previous turn ended. Take it into account before repeating the same
+    request." — an instruction addressed to the model, which on a lock screen
+    reads as nonsense. ``raw`` is the sentence a human wants.
+
+    No new durable path is introduced. ``incidents.py`` already journals this
+    record on every classified failure, precisely so a resumed session can
+    explain itself, and it is persisted for the same reason this needs it.
+
+    Bounded and tolerant exactly like :func:`session_preview`, and for the same
+    reasons — it shares that function's tail window, so the cost is the same
+    single bounded read and is independent of transcript size. Returns ``""``
+    for a missing, unreadable or incident-free transcript, and the caller falls
+    back to the house sentence.
+    """
+    for entry in _tail_entries(session_dir):
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("custom_type") != _SESSION_INCIDENT_TYPE:
+            continue
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            continue
+        raw = details.get("raw")
+        if isinstance(raw, str) and raw.strip():
+            return _condense(raw, max_chars)
+    return ""
+
+
+def _tail_entries(session_dir: Path) -> list[dict[str, Any]]:
+    """Parsed entries from the transcript's tail window, NEWEST FIRST.
+
+    Factored out of :func:`session_preview` when
+    :func:`session_failure_summary` needed the identical scan: one bounded
+    seek, the first (fragment) line dropped, newest-first iteration, and every
+    unparseable line skipped because a live writer may be mid-append. Two
+    copies of that would be two places for the window arithmetic to drift.
+    """
     transcript = session_dir / TRANSCRIPT_NAME
     try:
         size = transcript.stat().st_size
@@ -1963,7 +2040,8 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
             else:
                 window = handle.read()
     except OSError:
-        return ""
+        return []
+    entries: list[dict[str, Any]] = []
     for line in reversed(window.decode("utf-8", "replace").splitlines()):
         line = line.strip()
         if not line:
@@ -1974,15 +2052,9 @@ def session_preview(session_dir: Path, *, max_chars: int = PREVIEW_MAX_CHARS) ->
             # Normal for a live session: the writer appends and we may read
             # mid-write, so the final line can be half-written.
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "message":
-            continue
-        payload = entry.get("payload")
-        if not isinstance(payload, dict) or payload.get("role") != "assistant":
-            continue
-        text = _first_text(payload.get("content"))
-        if text.strip():
-            return _condense(text, max_chars)
-    return ""
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
 
 
 def _first_text(content: object) -> str:

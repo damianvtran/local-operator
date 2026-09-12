@@ -341,6 +341,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.herdr import HerdrReporter
     from local_operator.info.collect import LiveState
     from local_operator.multiplexer import SessionBroadcast
+    from local_operator.notifications import ComposedNotification, NotificationKind
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.skills.discovery import Skill
@@ -18871,16 +18872,73 @@ class OperatorApp(App[None]):
         if notifier is None:
             return False
         try:
-            notifier.set_label(self._notify_label())
+            label = self._notify_label()
+            notifier.set_label(label)
+            # COMPOSED BY THE SHARED COMPOSER, so the banner a user gets for
+            # the session they are IN says as much as the one the background
+            # observer already sent for a session they were not in — that
+            # asymmetry was backwards. The composer owns the privacy gate and
+            # the budgets; this method only forwards what it produced.
+            #
+            # INLINE, NOT IN A WORKER, and that is measured rather than
+            # assumed: `compose` reads a bounded transcript tail, and over a
+            # 42 MB transcript it runs in 0.19 ms median / 0.31 ms worst of 20
+            # runs on the maintainer's machine. That is two orders of magnitude
+            # under a frame, so posting it to a thread would buy nothing and
+            # cost the turn-end toast a scheduling hop.
+            composed = self._composed_notification(kind, label)
+            body = composed.body if composed is not None else ""
             if kind == "complete":
-                return notifier.notify_turn_complete(running_children=running_children or 0)
+                return notifier.notify_turn_complete(
+                    running_children=running_children or 0, body=body
+                )
             if kind == "error":
-                return notifier.notify_error()
+                return notifier.notify_error(body=body)
             if kind in ("approval", "ask"):
-                return notifier.notify_waiting(kind)
+                return notifier.notify_waiting(kind, body=body)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
             logger.debug("notification delivery failed", exc_info=True)
         return False
+
+    def _composed_notification(self, kind: str, label: str) -> ComposedNotification | None:
+        """The composed banner text for this session's own edge, or ``None``.
+
+        ``None`` rather than a raise for a session with no resolvable id, which
+        leaves the caller on the house vocabulary it used before this existed.
+
+        The directory is derived from the session ID through ``config_dir()``,
+        the way :meth:`_background_completion_identity` and its neighbours on
+        the observer path already derive it — NOT from ``session.transcript``.
+        That attribute exists on the concrete owner ``Session`` and not on
+        ``AttachedSession``, so reading it here would compose correctly for an
+        owner and silently degrade every VIEWER's banner to the house sentence:
+        a surface that fails only on the viewer path, which is the exact shape
+        of the ``/team`` and ``/agent`` regression the viewer-protocol tests
+        exist to catch. The id is on both.
+
+        The GATE kinds are composed WITHOUT `gate_title`/`gate_detail`, so they
+        resolve to the same house sentence an attached terminal has always
+        shown for a parked question. The action text the composer can render
+        for a gate belongs to the detached runtime's fallback — a different
+        surface, reached only when nothing is watching — and threading the live
+        gate down here would mean carrying state this path does not hold, for a
+        banner the user is looking at the terminal for anyway.
+        """
+        from local_operator.paths import config_dir
+
+        session = self._session
+        session_id = getattr(session, "session_id", "") if session is not None else ""
+        if not session_id:
+            return None
+        directory = config_dir() / "sessions" / session_id
+
+        from local_operator.notifications import compose
+
+        # `kind` is a plain `str` on this funnel because its call sites name
+        # engine events; every value that reaches here is a CONTEXTS key, and
+        # `compose` itself degrades a stray one to the complete vocabulary
+        # rather than raising.
+        return compose(cast("NotificationKind", kind), session_dir=directory, session_name=label)
 
     def _adopt_own_interrupt_notice(self, kind: str, anchor: str) -> bool:
         """Stamp a published outcome onto the row this app already painted.

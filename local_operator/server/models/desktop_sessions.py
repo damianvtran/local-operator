@@ -112,6 +112,21 @@ class WatchReceipt(BaseModel):
     lease_seconds: Literal[45]
 
 
+class NotificationClaim(BaseModel):
+    """Whether THIS surface may raise the banner for one completion.
+
+    ``false`` is an ordinary answer, not an error: another observer on this
+    machine (a TUI watching the same session) claimed it first, or the token is
+    unknown to the store. Either way the caller's correct behaviour is the
+    same — stay quiet — so the distinction is deliberately not reported.
+
+    Says nothing about whether the user READ anything: the claim writes the
+    delivery watermark only, and the sidebar's unseen mark survives it.
+    """
+
+    claimed: bool
+
+
 class AttentionState(BaseModel):
     """The shared read watermark, mirrored by the UI's `CompletionAttention`.
 

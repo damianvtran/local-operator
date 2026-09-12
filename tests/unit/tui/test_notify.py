@@ -704,10 +704,11 @@ def test_the_privacy_flag_governs_the_attached_session_toast_too(
     Review round 1, M2: the flag governed only the observer path, while the
     attached session's own toasts title themselves from ``set_label`` and
     ignored it — and those are the majority of a user's toasts. The settings
-    copy ("A session's name appears on banners, including the lock screen.") is
-    unqualified, so a flag that covered one leg made its own promise false. A
-    privacy control that half works is worse than one that is clearly scoped,
-    because the copy reads as a guarantee.
+    copy ("A session's name, last line and error causes appear on banners,
+    including the lock screen.") is unqualified, so a flag that covered one
+    leg made its own promise false. A privacy control that half works is
+    worse than one that is clearly scoped, because the copy reads as a
+    guarantee.
     """
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default: False)
     notifier, sink = unfocused()
