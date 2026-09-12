@@ -33,6 +33,7 @@ from local_operator.server.models.desktop_sessions import (
     MessageAdmission,
     NotificationClaim,
     SessionList,
+    SessionSearch,
     SessionSnapshot,
     WatchReceipt,
 )
@@ -47,6 +48,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.session.frontend_state import SlashResult
+from local_operator.session.session_search import search_store
 from local_operator.slash_commands import slash_command_for
 
 router = APIRouter(tags=["Desktop sessions"], dependencies=[Depends(require_desktop)])
@@ -253,6 +255,55 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
     async with errors():
         rows = await host(request).list(limit + 1)
         return reply({"sessions": rows[:limit], "truncated": len(rows) > limit, "limit": limit})
+
+
+@router.get("/v1/desktop/sessions/search", response_model=CRUDResponse[SessionSearch])
+async def search_sessions(
+    request: Request,
+    q: str = Query(default="", max_length=256),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Past conversations matching ``q`` by name, id, or what was SAID in them.
+
+    The same search the CLI's ``/resume`` picker runs, through the one
+    implementation the picker and the phone daemon share
+    (``session_search.search_store``): name and id as exact case-insensitive
+    substrings over the haystack the row is RENDERED with, plus the cached body
+    digest index for an exact conversation match, plus a bounded soft tier
+    (prefix, word-order, edit distance <= 2 on words of 4+ characters) when the
+    query is not already precisely answered. Results come back best-first with
+    the tier and the reason attached.
+
+    **Declared BEFORE ``/v1/desktop/sessions/{session_id}``** and that order is
+    load-bearing: FastAPI matches routes in declaration order, so a parent route
+    declared first would swallow this path and the client would get the
+    snapshot of a session literally named "search" (a 404, in practice) instead
+    of an answer.
+
+    The scan and the index build run off the event loop — they read every
+    session directory's head and one cache file — while ``q`` is bounded at 256
+    characters because the query is only ever a user's typing, and an unbounded
+    one would be projected into every digest comparison.
+    """
+    async with errors():
+        matches = await asyncio.to_thread(search_store, host(request).root, q, limit=limit)
+        return reply(
+            {
+                "sessions": [
+                    {
+                        "id": match.row.id,
+                        "name": match.row.name,
+                        "mtime": match.row.mtime,
+                        "forked": match.row.forked,
+                        "rank": match.rank,
+                        "body_match": match.body_match,
+                    }
+                    for match in matches
+                ],
+                "query": q,
+                "limit": limit,
+            }
+        )
 
 
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])

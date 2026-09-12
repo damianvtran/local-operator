@@ -208,6 +208,11 @@ async def test_catalogue_is_authenticated_and_never_allocates(api):
     assert not list((root / "sessions").glob("*"))
     features = (await client.get("/v1/capabilities")).json()["result"]["features"]
     assert features["session_catalogue"] == 2
+    # Content search is advertised as its OWN version rather than a bump of the
+    # catalogue: a client can render a catalogue perfectly well against a
+    # backend without the search route, so gating the list on it would hide a
+    # working surface because a newer one is missing.
+    assert features["session_search"] == 1
 
 
 async def test_install_edit_preserves_policy_and_provenance(api):

@@ -156,6 +156,7 @@ falling back to the parent of the config root when no cwd was retained.
 | Endpoint | Request | Result inside `CRUDResponse.result` |
 | --- | --- | --- |
 | GET `/v1/desktop/sessions` | `limit` 1..500, default100 | `{sessions: [...]}` canonical rows plus explicit desktop drafts |
+| GET `/v1/desktop/sessions/search` | `q` (<=256 chars), `limit` 1..500, default100 | `{sessions:[{id,name,mtime,forked,rank,body_match}],query,limit}`, best match first |
 | POST `/v1/desktop/sessions` | `{request_id, cwd}` | `{session_id}`; cwd must exist |
 | GET `/v1/desktop/sessions/{id}` | — | snapshot frame below |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` |
@@ -171,6 +172,21 @@ for a retry of the **same** operation. Answer `request_id` is instead the pendin
 gate's opaque ID, and answer `epoch` is the **runtime** epoch from frontend state,
 not the HTTP stream epoch. Approval booleans and question indices are strict.
 Answer bodies are never retained in the HTTP receipt journal or echoed back.
+
+`GET /v1/desktop/sessions/search` is the CLI's `/resume` search over HTTP: the
+same `local_operator.session.session_search` implementation the TUI picker and
+the phone daemon run, so a query that finds a conversation on one surface finds
+it on the others. It matches the session's displayed name, its id, an exact
+case-insensitive substring of the conversation body (from the cached digest
+index, re-digested only for transcripts that changed), and — when the query is
+not already answered precisely — a bounded soft tier (prefix, word-order, edit
+distance <= 2 on words of 4+ characters). `rank` is the relevance tier
+(0 name, 1 id, 2 body, 3 soft) and `body_match` says the conversation is why the
+row surfaced, so a client can label a row it would otherwise show with no
+visible reason. A client that already holds the catalogue should merge these
+results into the rows it has rather than replacing the list, and must skip the
+whole call when `/v1/capabilities` does not advertise `features.session_search`
+— an older backend answers 404 there.
 
 Images use the runtime's `{data_b64,mime_type}` shape (png/jpeg/gif/webp), at most8;
 the encoded message/command body must fit900,000bytes. Empty prompts without an
