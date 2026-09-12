@@ -209,7 +209,26 @@ def store_ticket(store: Any, ticket: str, *, now_ms: int | None = None) -> None:
     # short-circuit to None (api_key rows get no identity key) and INSERT a
     # duplicate instead of updating in place. No `source="login"` either,
     # for the same reason -- it is the other short-circuit in that function.
-    store.upsert_credential(QWENCLOUD_CONSOLE_PROVIDER, payload)
+    #
+    # Caught the same NARROW way as `read_ticket_record` and `delete_ticket`
+    # below, and for the reason this module already states: a locked, busy or
+    # corrupt store is an ENVIRONMENT fact to be reported, not a crash. Left
+    # uncaught, a store held under BEGIN EXCLUSIVE printed a raw traceback
+    # carrying absolute local paths, while `status` and `rm` on the same
+    # locked store reported it cleanly -- inconsistent within one command.
+    #
+    # The clause ORDER is load-bearing: `sqlite3.ProgrammingError` subclasses
+    # `DatabaseError` subclasses `Error`, so a bare `except sqlite3.Error`
+    # would swallow a caller bug (a connection used across threads, a closed
+    # handle) and dress it as a plausible degraded state.
+    try:
+        store.upsert_credential(QWENCLOUD_CONSOLE_PROVIDER, payload)
+    except sqlite3.ProgrammingError:
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        raise TicketStoreError(
+            f"the ticket could not be stored ({type(exc).__name__}); " "nothing was written"
+        ) from exc
 
 
 def read_ticket_record(store: Any) -> dict[str, Any] | None:
