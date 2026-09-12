@@ -18,10 +18,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** The popup's markup, reduced to the ids and classes popup.ts touches.
  * Kept as a literal id list rather than parsing popup.html: a test that
@@ -33,7 +35,8 @@ const IDS = [
   "origin-host", "origin-again", "origin-scope", "origin-scope-detail", "origin-position",
   "origin-waiting", "origin-allow", "origin-deny", "origin-previous", "origin-next",
   "origin-ack-title", "origin-ack-sub", "origin-ack-check", "card", "retry",
-  "retry-incompatible", "retry-unresponsive", "connected-all-sites", "connected-all-sites-off",
+  "retry-incompatible", "retry-unresponsive", "reload-extension",
+  "connected-all-sites", "connected-all-sites-off",
   "pair-form",
   "pair-code", "pair-error", "port", "port-row",
 ];
@@ -102,10 +105,14 @@ function installDomStub() {
   return nodes;
 }
 
-function installChromeStub() {
+function installChromeStub({ sendMessage } = {}) {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
   const sent = [];
+  // Every chrome.runtime.reload() the popup made. Counted rather than flagged:
+  // "the popup reloaded the extension twice" is a real defect (the second call
+  // races the teardown of the first) and a boolean cannot see it.
+  const reloads = [];
   const makeArea = (name) => ({
     get: async (keys) => {
       const out = {};
@@ -140,8 +147,13 @@ function installChromeStub() {
     // The worker resolves the decided entry and writes the queue back. Modelled
     // faithfully, because the ordering under test IS the storage ordering.
     runtime: {
+      reload: () => reloads.push(Date.now()),
       sendMessage: async (message) => {
         sent.push(message);
+        // A test-supplied worker replaces the faithful one below: an
+        // unresponsive worker is the whole subject of the decide() tests, and
+        // it is expressed as what sendMessage DOES, not as a flag.
+        if (sendMessage) return sendMessage(message);
         if (message?.event !== "origin_decision") return { applied: true };
         const queue = areas.session.get("accessQueue") ?? [];
         const rest = queue.filter((e) => e.entryId !== message.entryId);
@@ -153,7 +165,7 @@ function installChromeStub() {
     },
     tabs: { query: async () => [] },
   };
-  return { areas, sent };
+  return { areas, sent, reloads };
 }
 
 const entry = (entryId, origin = "https://app.example.com", broad = { scope: "domain", key: "example.com" }) => ({
@@ -491,6 +503,179 @@ test("a wedged worker is not painted as connected (D4)", async () => {
     );
     assert.equal(nodes.get("pairing").classList.contains("hidden"), true, "a paired browser must not be asked for a code");
     assert.equal(nodes.get("connected").classList.contains("hidden"), true);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* --- The stale/unresponsive worker, from the popup's seat -------------------
+ *
+ * The operator's complaint was "I click the toolbar icon and nothing happens,
+ * it takes 2-3 tries". Chrome owns opening the popup, so a click that shows
+ * NOTHING means the MV3 worker never started; but a click that shows a popup
+ * whose buttons then do nothing is this module's fault, and that is what these
+ * cover: decide() awaited the worker with no bound and no catch, so a stale
+ * worker left Allow/Deny disabled for the life of the popup with no message.
+ *
+ * Assertions are on what the user can SEE and DO — the buttons' disabled state
+ * and the text in the ack slot — never on the presence of a call.
+ */
+
+/** A live daemon whose /health payload the test controls per render. */
+function installHealth(get) {
+  globalThis.fetch = async () => ({ ok: true, json: async () => get() });
+}
+
+const pendingEntry = (entryId = "gen-1") => ({
+  entryId,
+  origin: "https://app.example.com",
+  displayAuthority: "app.example.com",
+  requester: "req-1",
+  kind: "async",
+  requestedAt: Date.now(),
+  expiresAt: Date.now() + 600_000,
+  sequence: 1,
+  broad: { scope: "domain", key: "example.com" },
+});
+
+test("a decision whose worker REJECTS leaves the controls usable and says so", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({
+    // Exactly what MV3 throws when the worker is gone and nothing receives the
+    // message — captured from the operator's own console.
+    sendMessage: async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const rejections = [];
+  const onRejection = (error) => rejections.push(error);
+  process.on("unhandledRejection", onRejection);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "precondition: the prompt is up");
+    assert.equal(nodes.get("origin-allow").disabled, false, "precondition: Allow is clickable");
+
+    nodes.get("origin-allow").click();
+    // Past the notice hold (1500ms), so the settled state is what is asserted.
+    await tick(1800);
+
+    // THE DEFECT: setOriginBusy(true) ran, the await rejected, and nothing ever
+    // re-enabled these. From the user's seat the popup stopped responding.
+    assert.equal(nodes.get("origin-allow").disabled, false, "Allow must not be left disabled by an unreachable worker");
+    assert.equal(nodes.get("origin-deny").disabled, false, "Deny must not be left disabled by an unreachable worker");
+
+    // And the click must be ACKNOWLEDGED honestly rather than silently dropped.
+    const title = nodes.get("origin-ack-title").textContent;
+    const sub = nodes.get("origin-ack-sub").textContent;
+    assert.match(title, /didn't|did not|no answer/i, `the user must be told the extension did not answer, got ${JSON.stringify(title)}`);
+    assert.doesNotMatch(
+      title + " " + sub,
+      /request changed/i,
+      "'Request changed.' means a REPLACED generation — a live worker's answer — and must not be reused for an unreachable one",
+    );
+    assert.deepEqual(rejections, [], "the failed round-trip escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    await bundle.close();
+  }
+});
+
+test("a decision whose worker NEVER ANSWERS is bounded and ends the same way", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({
+    // The nastier half, and the one the operator actually hit: the worker is
+    // loaded but mute, so the send neither resolves nor rejects — ever. Without
+    // a bound this await is permanent and the popup is dead until it closes.
+    sendMessage: () => new Promise(() => {}),
+  });
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const rejections = [];
+  const onRejection = (error) => rejections.push(error);
+  process.on("unhandledRejection", onRejection);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin-allow").disabled, false, "precondition: Allow is clickable");
+
+    nodes.get("origin-allow").click();
+    // Still inside the 5s bound: the popup is legitimately waiting, and saying
+    // "no answer" here would libel a merely-slow worker.
+    await tick(300);
+    assert.equal(nodes.get("origin-allow").disabled, true, "while the round-trip is in flight the controls stay busy");
+
+    // Past the bound plus the notice hold.
+    await tick(7000);
+    assert.equal(nodes.get("origin-allow").disabled, false, "the timeout path must re-enable Allow");
+    assert.equal(nodes.get("origin-deny").disabled, false, "the timeout path must re-enable Deny");
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /didn't|did not|no answer/i,
+      "a click that timed out must still be acknowledged",
+    );
+    assert.deepEqual(rejections, [], "the timed-out round-trip escaped as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+    await bundle.close();
+  }
+});
+
+test("the wedged-worker card offers a one-click reload, and a healthy one never does", async () => {
+  const nodes = installDomStub();
+  const { reloads } = installChromeStub();
+  // The daemon is the authority here, deliberately: the worker's own
+  // `connState` reads "connected" long after the worker is dead (it is that
+  // worker's last write), so a reload offered from it would appear on a healthy
+  // popup and disappear on a wedged one — backwards.
+  let health = { paired: true, extension_connected: true, protocol_version: 1 };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    await bundle.import();
+    await tick(20);
+
+    // HEALTHY: the remedy is not on offer. A reload discards open tab handles,
+    // snapshot refs and pending site decisions, so offering it to a working
+    // browser invites a user to pay that for nothing.
+    assert.equal(nodes.get("connected").classList.contains("hidden"), false, "precondition: the healthy card is up");
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      true,
+      "a healthy worker must not be offered a reload",
+    );
+    // "Hidden section" is only the same thing as "no reload on offer" because
+    // the control lives INSIDE that section. This harness's DOM is flat (every
+    // id is a sibling), so it cannot express containment and a click on it here
+    // would fire in a state a real user cannot reach. Assert the containment
+    // against the real markup instead, which is what makes the line above a
+    // statement about what the user can do rather than about a CSS class.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const section = markup.slice(markup.indexOf('<section id="unresponsive"'));
+    const body = section.slice(0, section.indexOf("</section>"));
+    assert.ok(
+      body.includes('id="reload-extension"'),
+      "the reload control must live inside #unresponsive, or hiding that card does not withdraw the offer",
+    );
+    assert.deepEqual(reloads, [], "nothing on the healthy path may reload the extension");
+
+    // WEDGED: the daemon says the extension is not answering.
+    health = { ...health, extension_connected: false, extension_unresponsive: true, link_attached: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(nodes.get("unresponsive").classList.contains("hidden"), false, "precondition: the wedge card is up");
+
+    nodes.get("reload-extension").click();
+    await tick(20);
+    assert.equal(reloads.length, 1, "the wedge card's primary action must reload the extension exactly once");
   } finally {
     await bundle.close();
   }

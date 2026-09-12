@@ -425,9 +425,9 @@ input:disabled {
  * The pin is therefore chosen per state, from a synchronous localStorage hint
  * holding the pin show() recorded for the card it last rendered:
  *
- *   86px  -> the connected card (211.2px)
- *   219px -> the pairing form (344.0px)
- *   254px -> the unresponsive card (378.8px)
+ *   86px  -> the connected card (207.2px)
+ *   219px -> the pairing form (340.2px)
+ *   402px -> the unresponsive card (523.3px)
  *
  * Three values rather than a paired/unpaired boolean (design D3-1): a boolean
  * cannot name the third state, and the one it has to collapse — the wedged but

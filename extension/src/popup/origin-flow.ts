@@ -308,3 +308,23 @@ export function noticeForRejectedDecision(
     sub: "It timed out or was cancelled, so nothing was granted or denied.",
   };
 }
+
+/** The notice for a decision whose round-trip to the WORKER never completed —
+ * it rejected, or it never answered inside the popup's bound.
+ *
+ * Deliberately NOT `noticeForRejectedDecision`'s "Request changed." copy. That
+ * one means a live worker replaced the generation, which is a statement about
+ * the REQUEST; this one means nothing answered at all, so the popup knows
+ * nothing about the request's fate. Reusing it here would tell the user their
+ * request was superseded when in truth it may have been applied, may not, and
+ * the extension cannot say which.
+ *
+ * The consequence line is what the user needs: reopening re-reads /health, so
+ * the popup will show the real state — including the wedged-worker card, whose
+ * own copy carries the remedy. */
+export function noticeForUnreachableWorker(): OriginNotice {
+  return {
+    title: "No answer from the extension.",
+    sub: "Your click was received, but the extension didn't respond, so this may not have been applied. Reopen this popup to see the current state.",
+  };
+}

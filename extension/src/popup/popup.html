@@ -172,14 +172,37 @@
           <h1 class="title">Extension stopped answering.</h1>
           <p class="sub">
             This browser is paired, but the Local Operator extension has stopped responding, so
-            the agent can't drive it. Toggle the extension OFF then ON in
-            <code>chrome://extensions</code> to reload it — pairing is kept, so there is no new
-            code to enter, but open tab handles, snapshot refs and pending site decisions are
-            lost, so re-open and re-snapshot afterwards.
+            the agent can't drive it. Reloading the extension usually clears it — pairing is
+            kept, so there is no new code to enter, but open tab handles, snapshot refs and
+            pending site decisions are lost, so re-open and re-snapshot afterwards.
           </p>
+          <!-- Primary = the one-click remedy, because the manual instruction
+               below is four steps through a page this popup cannot even link to
+               (an extension page may not open a chrome:// URL). chrome.runtime
+               .reload() restarts the worker from here, and the popup CLOSES as
+               a side effect of its own extension being torn down — expected,
+               and why the copy below tells the user what to do next rather than
+               promising them a result on this card. -->
           <div class="actions">
+            <button id="reload-extension" class="btn primary block">Reload the extension</button>
             <button id="retry-unresponsive" class="btn block">Check again</button>
           </div>
+          <!-- The FALLBACK, and it is not a softer restatement of the button: a
+               reload demonstrably did NOT clear the stale worker on 2026-09-11
+               20:23 (the bridge log took no /extension dial for a whole session
+               and a reload did not wake it) — only disable→enable did. So the
+               certain remedy stays on the card, named by URL rather than linked
+               because an extension page may not open a chrome:// URL.
+               It does NOT repeat the loss list above: both remedies discard the
+               same worker, so the paragraph above states that cost once for
+               both. Restating it here read as a second, larger price for the
+               fallback and cost the card 164px of height it has no room for at
+               600px (measured). -->
+          <p class="sub">
+            Still not answering? Toggle the extension OFF then ON in
+            <code>chrome://extensions</code> — that clears a stale registration a reload can't,
+            at the same cost.
+          </p>
         </section>
 
         <!-- Origin-decision acknowledgement, shown from the click alone
