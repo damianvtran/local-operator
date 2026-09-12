@@ -354,6 +354,7 @@ def test_route_response_models_publish_the_real_canonical_contract():
         ("/v1/desktop/sessions/{session_id}/commands", "post"): "CommandReceipt",
         ("/v1/desktop/sessions/{session_id}/answers", "post"): "AnswerReceipt",
         ("/v1/desktop/sessions/{session_id}/watch", "post"): "WatchReceipt",
+        ("/v1/desktop/sessions/{session_id}/warm", "post"): "WarmReceipt",
     }
     for (path, method), name in expected.items():
         response = schema["paths"][path][method]["responses"]["200"]
@@ -885,3 +886,297 @@ async def test_an_oversized_or_invalid_query_is_refused_without_echoing_it(tmp_p
     assert too_long.status_code == 422
     assert secret_looking not in too_long.text
     assert bad_limit.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_warm_whose_engage_fails_is_still_a_success_for_the_caller(tmp_path, monkeypatch):
+    """R3: an engage failure must never reach a user who has only typed.
+
+    The warm is fired speculatively from the renderer's composer, so any
+    non-2xx it can produce becomes an error banner triggered BY TYPING. The
+    state at return time is honestly "an engage was started"; whether that
+    engage then dies of a missing provider or a refused dial is the SEND's
+    problem to report, and the send still reports it through its own
+    ConnectionError ladder.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "warm-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    failures: list[BaseException] = []
+
+    async def exploding_bind(*, foreground: bool = True) -> None:
+        error = ConnectionError("no runtime for this test")
+        failures.append(error)
+        raise error
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer warm-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            monkeypatch.setattr(bridge.remote, "_ensure_bound", exploding_bind)
+            response = await client.post(f"/v1/desktop/sessions/{sid}/warm", json={})
+            assert response.status_code == 200, response.text
+            assert response.json()["result"]["state"] == "warming"
+            task = bridge.warm_task
+            assert task is not None
+            # The task must SWALLOW it, not merely fail out of band: an
+            # unretrieved exception would also surface as a warning the
+            # operator has to read.
+            await task
+            assert task.exception() is None
+    assert failures, "the engage was never actually attempted"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_detaching_a_bridge_cancels_the_warm_it_started(tmp_path):
+    """R5: a warm must not outlive the facade it was started against.
+
+    An engage landing after `dispose()` holds a freshly spawned runtime
+    resident with no viewer left to release it — the TUI shipped exactly this
+    leak once, where a session swap's engage kept the old runtime up for the
+    process's life.
+    """
+    entered = asyncio.Event()
+
+    async def never_finishes(*, foreground: bool = True) -> None:
+        entered.set()
+        await asyncio.sleep(3600)
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._ensure_bound = never_finishes  # type: ignore[method-assign]
+        assert await bridge.warm() == "warming"
+        task = bridge.warm_task
+        assert task is not None
+        await asyncio.wait_for(entered.wait(), timeout=10)
+    # Leaving the context detaches the last user, which must take the warm with
+    # it rather than leaving it parked on the loop.
+    assert task.cancelled() or task.done()
+    assert bridge.warm_task is None
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_on_an_already_engaged_session_starts_nothing(tmp_path):
+    """The cheap path: an engaged viewer answers `warm` without a task at all.
+
+    Pins the short-circuit rather than the lock behind it, because this is the
+    common case once a session is live and the renderer keeps firing warms.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        # `is_cold` is three field reads; making the viewer look bound is
+        # enough to exercise the branch without a real runtime. A plain class
+        # rather than SimpleNamespace because `dispose()` tests the client for
+        # set membership, and SimpleNamespace defines __eq__ and so is
+        # unhashable.
+
+        class BoundClient:
+            connected = True
+
+            def close(self) -> None:
+                pass
+
+        bridge.remote._client = BoundClient()  # type: ignore[assignment]
+        bridge.remote._ready_for_events = True
+        assert await bridge.warm() == "warm"
+        assert bridge.warm_task is None
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_session_is_a_404_rather_than_a_warm(tmp_path, monkeypatch):
+    """The two refusals the route DOES keep, so the 200 rule is not read as
+    "this route can never fail". An id that names nothing is not an engage
+    that failed, it is a call that was never admissible."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "warm-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    app.state.desktop_sessions = DesktopSessions(tmp_path)
+    app.include_router(routes.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer warm-token"},
+    ) as client:
+        missing = await client.post("/v1/desktop/sessions/aaaaaaaaaaaa/warm", json={})
+        # `extra="forbid"` is what makes an invented option a named 422 rather
+        # than a silently ignored field (R12's backend half).
+        extra = await client.post("/v1/desktop/sessions/aaaaaaaaaaaa/warm", json={"eager": True})
+    assert missing.status_code == 404, missing.text
+    assert extra.status_code == 422, extra.text
+    await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_the_warm_route_returns_while_the_engage_is_still_running(tmp_path, monkeypatch):
+    """R2: the whole point — the response must NOT wait for the spawn.
+
+    Awaiting the engage inside the handler would not remove the ~1.15 s cold
+    cost, it would relocate it from the send onto a request the renderer fires
+    while the user is still typing. Pinned structurally: the engage is parked
+    on an event this test controls, so a handler that awaited it could not
+    return at all, and the assertion is that the response arrived anyway with
+    the bind lock still held.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "warm-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_bind(*, foreground: bool = True) -> None:
+        entered.set()
+        await release.wait()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer warm-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            monkeypatch.setattr(bridge.remote, "_ensure_bound", parked_bind)
+            response = await asyncio.wait_for(
+                client.post(f"/v1/desktop/sessions/{sid}/warm", json={}), timeout=10
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["result"]["state"] == "warming"
+            # The engage is demonstrably still running at the moment the
+            # caller already has its answer.
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            task = bridge.warm_task
+            assert task is not None and not task.done()
+            release.set()
+            await task
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_second_warm_during_an_engage_starts_no_second_task(tmp_path):
+    """Idempotence at the bridge: a renderer firing repeatedly costs one task.
+
+    The lock is what makes a duplicate SAFE; this check is what makes it free.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    binds = 0
+
+    # Parked INSIDE the lock rather than replacing `_ensure_bound` wholesale:
+    # `engage_in_flight` reads `_bind_lock`, so a stub that skipped the real
+    # acquisition would make the predicate answer False and the test would
+    # pass for the wrong reason.
+    async def parked_bind(*, foreground: bool) -> None:
+        nonlocal binds
+        binds += 1
+        entered.set()
+        await release.wait()
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._bind_under_lock = parked_bind  # type: ignore[method-assign]
+        assert await bridge.warm() == "warming"
+        first = bridge.warm_task
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # `engage_in_flight` reads the bind lock, which `_ensure_bound` is
+        # holding while parked, so the second call must recognise it.
+        assert bridge.remote.engage_in_flight
+        assert await bridge.warm() == "warming"
+        assert bridge.warm_task is first, "a second warm must not replace the task"
+        release.set()
+        await first  # type: ignore[arg-type]
+    assert binds == 1
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_survives_its_own_request_while_a_subscriber_holds_the_bridge(tmp_path):
+    """The lifetime rule, stated both ways, because it surprised the design.
+
+    A bridge is reference-counted and `_detach()` cancels an in-flight warm, so
+    a warm issued while NOBODY else holds the bridge is cancelled the moment
+    its own request releases -- the warm request is itself the last user. That
+    is correct: a spawn must not outlive the facade it was started against.
+
+    It is also exactly why the cancel is not a bug in the feature. The renderer
+    warms from a composer that lives inside a mounted `SessionPanel`, which
+    holds an events subscription, so the real caller always has a second user
+    on the bridge and the engage survives to be found by the send.
+
+    Pinned in BOTH directions because the two halves argue with each other: a
+    future reader who sees only the first half deletes the cancel and
+    reintroduces the leak; one who sees only the second assumes the warm is
+    unconditionally durable and moves the renderer's warm outside the panel.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_bind(*, foreground: bool = True) -> None:
+        entered.set()
+        await release.wait()
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+
+    # WITHOUT another holder: the warm dies with its request.
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._ensure_bound = parked_bind  # type: ignore[method-assign]
+        assert await bridge.warm() == "warming"
+        alone = bridge.warm_task
+        assert alone is not None
+        await asyncio.wait_for(entered.wait(), timeout=10)
+    assert alone.cancelled() or alone.done()
+
+    entered.clear()
+    # WITH a holder, as a subscribed panel always is: the warm outlives it.
+    holder = pool.session(sid)
+    held = await holder.__aenter__()
+    try:
+        assert held.remote is not None
+        held.remote._ensure_bound = parked_bind  # type: ignore[method-assign]
+        async with pool.session(sid) as requester:
+            assert await requester.warm() == "warming"
+            survivor = requester.warm_task
+            assert survivor is not None
+            await asyncio.wait_for(entered.wait(), timeout=10)
+        assert not survivor.done(), "a held bridge must not cancel the warm"
+    finally:
+        release.set()
+        await holder.__aexit__(None, None, None)
+    await pool.close()

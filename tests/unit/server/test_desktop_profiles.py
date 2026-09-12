@@ -207,7 +207,10 @@ async def test_catalogue_is_authenticated_and_never_allocates(api):
     assert all("instructions" not in row for row in rows)
     assert not list((root / "sessions").glob("*"))
     features = (await client.get("/v1/capabilities")).json()["result"]["features"]
-    assert features["session_catalogue"] == 2
+    # 3 advertises the /warm route. The renderer reads this exact number to
+    # decide whether to warm at all, so a bump that forgets to land here is a
+    # feature no client can ever discover.
+    assert features["session_catalogue"] == 3
     # Content search is advertised as its OWN version rather than a bump of the
     # catalogue: a client can render a catalogue perfectly well against a
     # backend without the search route, so gating the list on it would hide a
