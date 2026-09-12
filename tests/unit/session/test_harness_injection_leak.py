@@ -39,17 +39,32 @@ from local_operator.compaction.api import CompactionSettings
 from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.compaction.marker import build_compaction_marker
 from local_operator.harness.comms import SubagentComms
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import (
     AgentMessage,
     CustomMessage,
     Message,
     ModelSpec,
     StreamEndEvent,
+    TextContent,
 )
+from local_operator.mobile.projection import fold_messages_to_entries
+from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.session import Session, _is_persistable_message
 from local_operator.session.transcript import Transcript
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
+
+#: The legacy shape QA measured on the operator's own session: a switch notice
+#: written before the ``harness_injected`` stamp existed — a plain user row with
+#: NO ``provider_payload`` at all, which a later pass harvested as a user turn.
+LEGACY_NOTICE = (
+    "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+    "Reason: provider failure\n"
+    "This is a temporary fallback for the current request; the session may return to its "
+    "primary model at a later turn. Capabilities and context window may differ from the "
+    "primary."
+)
 
 #: Small enough that a few short turns leave history outside the kept window,
 #: so a real pass has something to summarize and the notice — appended last —
@@ -284,3 +299,137 @@ async def test_the_predicate_is_id_based_not_type_based(tmp_path) -> None:
 
     assert rendered_texts(session._render_for_compaction()) == []
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_in_the_kept_window_keeps_its_receipt_across_a_pass(tmp_path) -> None:
+    """M1: the commit must re-seat the SOURCE, not an anonymous stamped copy.
+
+    The rebuild commits the RENDERED history, and a rendered delivery is a plain
+    stamped user message. Without ``_restore_custom_sources`` a peer delivery in
+    the kept window would come back as an injection-shaped row — which the folds
+    hide, because a stamped row is never the operator's words — while a RESUME of
+    the same session replays the persisted custom entry and paints the peer
+    receipt. The receipt would vanish from the live session and reappear on the
+    next restart, which is the opposite of live/replay parity.
+    """
+    session = make_session(tmp_path, ScriptedStream())
+    for index in range(3):
+        await session.prompt(f"question {index} " + "detail " * 30)
+    # The real inbound path: persisted durably AND appended to the live context.
+    await session.receive_peer_message(
+        "rebasing now — expect a redirect",
+        mode="mailbox",
+        wake=False,
+        sender={"pid": 4242, "conversation_name": "peer", "model_label": "test/m"},
+    )
+    delivered = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == PEER_MESSAGE_MESSAGE_TYPE
+    ]
+    assert delivered, "the peer delivery never reached the live context"
+    assert session._transcript.has_entry(delivered[-1].id)
+
+    outcome = await session.compact_now()
+    assert outcome.ran is True, outcome.reason
+
+    # Identity survived the pass…
+    survivors = [
+        message
+        for message in session._context.messages
+        if isinstance(message, CustomMessage) and message.custom_type == PEER_MESSAGE_MESSAGE_TYPE
+    ]
+    assert [message.id for message in survivors] == [delivered[-1].id]
+    # …so nothing in the kept window is an anonymous stamped row, and the row
+    # the fold sees is therefore one it PAINTS (a receipt, not a suppressed
+    # injection).
+    assert leaked_user_rows(session._context.messages) == []
+    assert not any(is_harness_notice_row(message) for message in session._context.messages)
+
+    # Live equals resume, on the request render AND row for row through the
+    # phone fold — the two claims a receipt depends on.
+    live_texts = rendered_texts(session._render_for_compaction())
+    resumed = make_session(tmp_path, ScriptedStream())
+    assert rendered_texts(resumed._render_for_compaction()) == live_texts
+    live_rows = [
+        (row.kind, row.text) for row in fold_messages_to_entries(list(session._context.messages))
+    ]
+    resume_rows = [
+        (row.kind, row.text) for row in fold_messages_to_entries(list(resumed._context.messages))
+    ]
+    assert live_rows == resume_rows
+    assert any("rebasing now — expect a redirect" in text for _, text in live_rows)
+    await resumed.dispose()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_notice_is_not_harvested_into_the_marker(tmp_path) -> None:
+    """Q1: an unstamped notice row must not be lifted as a user turn.
+
+    The harvest refuses stamped rows already; this is the legacy shape it could
+    not see (the operator's session carries eight switch notices with no
+    ``provider_payload`` at all), and lifting one re-seats the harness's words
+    as a user row on every replay of the marker.
+    """
+    session = make_session(tmp_path, ScriptedStream())
+    legacy = Message(role="user", content=[TextContent(text=LEGACY_NOTICE)])
+    session._context.messages.append(legacy)
+    await session._transcript.append_message(legacy)
+    for index in range(3):
+        await session.prompt(f"question {index} " + "detail " * 30)
+
+    outcome = await session.compact_now()
+    assert outcome.ran is True, outcome.reason
+
+    marker = session._transcript.latest_entry("compaction")
+    assert marker is not None
+    stored = marker.payload.get("preserved_user_turns") or []
+    assert not [
+        turn for turn in stored if str(turn.get("text", "")).startswith("[model switch]")
+    ], stored
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_marker_carrying_a_legacy_notice_replays_without_it(tmp_path) -> None:
+    """Q1: the heal for a block an older build already wrote, end to end.
+
+    A real session's latest marker holds eight notice copies from before the
+    stamp existed. Replay must not re-seat them (they are the harness's words,
+    not the operator's), must still re-seat the operator's own preserved turn
+    verbatim, and must account the shed copies as INJECTIONS — the elision
+    notice's "not authored by the user" bucket — rather than as turns the
+    operator wrote and lost.
+    """
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    rows = [Message.user(f"row {index}") for index in range(4)]
+    await transcript.append_messages(rows)
+    await transcript.append_compaction(
+        "summary",
+        rows[-1].id,
+        500,
+        preserved_user_turns=[
+            {"id": "legacy-notice-1", "text": LEGACY_NOTICE},
+            {"id": "legacy-notice-2", "text": LEGACY_NOTICE},
+            {"id": rows[0].id, "text": "the operator's own constraint"},
+        ],
+        preserved_turns_cap=100_000,
+    )
+
+    replayed = [
+        message
+        for message in Transcript(directory).build_llm_history()
+        if isinstance(message, Message)
+    ]
+    texts = [message.text for message in replayed]
+    assert "[model switch]" not in "\n".join(texts)
+    assert "the operator's own constraint" in texts
+    assert not leaked_user_rows(replayed)
+    # The shed copies are reported as injections, and the genuine turn was not
+    # miscounted as one.
+    elision = "\n".join(texts)
+    assert "2 harness-injected message(s)" in elision
+    assert "older user message(s) you wrote were dropped" not in elision
