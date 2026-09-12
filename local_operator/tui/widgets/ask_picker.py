@@ -170,15 +170,36 @@ MIN_TRANSCRIPT_ROWS = 4
 #: R9-R11, measured on the composited screen rather than the card's own text).
 MIN_BODY_ROWS = 3
 
-#: Max wrapped lines the QUESTION header may occupy, mirroring OMP's
-#: ``MAX_HEADER_ROWS`` (ask-dialog.ts:62). A question longer than this is
-#: truncated to ``cap - 1`` whole lines plus a ``…``-marked line, so a long
-#: question cannot starve the option list of its budget and leave a cut
-#: description unreachable by any gesture (GAP D7). The ordering "question
-#: outranks options" (the safety property, ``_layout`` steps 1-2) is unchanged;
-#: this only bounds how many rows the question may TAKE before the options
-#: start competing for what is left.
-MAX_QUESTION_ROWS = 4
+#: Option lines the card refuses to let the QUESTION go below.
+#:
+#: This is what enforces GAP D7 — a long question must not consume the whole
+#: body and leave the option list a 1-2 line viewport in which a cut description
+#: is unreachable by any gesture. It replaces a blind ``MAX_QUESTION_ROWS = 4``
+#: that mirrored OMP's ``MAX_HEADER_ROWS`` (ask-dialog.ts:62) and bounded the
+#: question by a CONSTANT regardless of how much room the terminal had: measured
+#: at 100x46, 100x40 and 80x40, the constant cut the fifth line of a 429-cell
+#: question while the card still had a spare body row, and no gesture reached
+#: the cut text.
+#:
+#: Four lines, for the reason :data:`MIN_TRANSCRIPT_ROWS` gives at the other end
+#: of the card: it is the smallest reserve that keeps two 2-line option rows, so
+#: options can be COMPARED rather than merely listed. One 2-line row shows a
+#: choice with nothing beside it, which is the state the question already has
+#: the user in.
+#:
+#: The ordering "question outranks options" (the safety property, ``_layout``
+#: steps 1-2) is unchanged. This bounds how many rows the question may TAKE
+#: before the options start competing for what is left, not whether it is shown
+#: first.
+QUESTION_LIST_RESERVE = 4
+
+#: The floor the question's adaptive bound never goes below.
+#:
+#: One, because ``_allocate`` already charges the question's first line ahead of
+#: the option rows (``_allocate`` step 1), so one line is the guaranteed minimum
+#: the card draws whenever it draws anything at all. A bound that promised fewer
+#: would be describing a card that does not exist.
+MIN_QUESTION_ROWS = 1
 
 #: The cursor glyph, matching the ``/resume`` and command pickers. A caret plus
 #: a tinted label rather than a reversed row: an inverted block reads as a
@@ -469,10 +490,42 @@ class _CardLayout:
     #: whenever any OPTION has real prose (the free-text row's hint and the
     #: recommended badge do not count). Independent of the budget — descriptions
     #: now COEXIST with scroll rather than being dropped when the list windows
-    #: (§3.4, C5 retired). Read by :meth:`_row_text` to place the recommendation
-    #: badge: inline on the label when there is no column, in the column when
-    #: there is.
+    #: (§3.4, C5 retired).
+    #:
+    #: It says what it says again, now that the badge no longer reserves cells
+    #: in :meth:`_description_lines`: "some option has real prose", rather than
+    #: being permanently True whenever ``recommended`` was set. Nothing places
+    #: the badge off it any more — :meth:`_row_text` asks
+    #: :meth:`row_draws_badge_line` instead, which is a fact about the FRAME.
     show_descriptions: bool
+
+    def row_draws_badge_line(self, index: int) -> bool:
+        """Does this plan give row ``index`` a second line for the badge?
+
+        The recommendation badge owns a line of its own
+        (:meth:`AskPickerScreen._build_line_list`), and this is the one question
+        that decides where it is drawn: on that line when the frame affords the
+        row two lines, on the LABEL when it affords one (the budget-1 band,
+        :meth:`AskPickerScreen._row_text`). Exactly one of the two draws it, so
+        the predicate lives in one place and both call sites read it.
+
+        A fact about the PLAN, deliberately: it is answered from
+        ``body_line_budget`` and ``line_start_by_row`` and never from
+        ``_offset`` or the live reveal state, because ``_allocate`` trials the
+        other reveal state on the paint path and a branch keyed on live state
+        sizes the trial wrong — the same reason ``_cap_for_row`` takes
+        ``revealed``/``selected`` as parameters.
+
+        A row whose second line falls past the viewport's bottom edge is a
+        CLIP, not a degradation: the badge is drawn and the window cuts it,
+        exactly as it cuts prose. This asks what the plan bought, not what the
+        scroll offset reveals.
+        """
+        if self.body_line_budget < 2:
+            return False
+        if not 0 <= index < len(self.line_start_by_row) - 1:
+            return False
+        return self.line_start_by_row[index + 1] - self.line_start_by_row[index] >= 2
 
 
 class AskPickerScreen(Container):
@@ -1373,8 +1426,8 @@ class AskPickerScreen(Container):
         width, _ = self._screen_size()
         return max(1, width - ASK_PADDING_CELLS * 2)
 
-    def _question_lines(self, width: int) -> list[str]:
-        """The question, wrapped and bounded to :data:`MAX_QUESTION_ROWS`.
+    def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
+        """The question, wrapped and bounded by what the BODY can spare.
 
         Wrapping makes the header's height depend on content, which is why the
         row budget below is computed from this rather than from a constant.
@@ -1390,14 +1443,98 @@ class AskPickerScreen(Container):
         first. The mark matches the budget-cut idiom ``_allocate`` already uses
         for a question the body cannot fit, so the two truncation paths read
         identically.
+
+        The bound is DERIVED from the body rather than fixed at four. A constant
+        cannot know how much room the terminal has, so it cut the fifth line of
+        a long question at 100x46 while the card had a spare row — the question
+        abbreviated to protect an option list that was not under threat. What
+        the options actually need is :data:`QUESTION_LIST_RESERVE`, and what the
+        question may have is whatever is left above :data:`MIN_QUESTION_ROWS`.
+
+        The bound is :meth:`_question_bound`, a search rather than an
+        expression: the largest question height whose resulting option viewport
+        still meets :data:`QUESTION_LIST_RESERVE`. Subtracting the reserve from
+        ``_body_rows(1)`` instead is the arithmetic that was tried first and is
+        wrong — that subtracts the reserve from the BODY, while ``_allocate``
+        spends most of the body on chrome before the option viewport is sized,
+        so a nominal reserve of 4 delivered 2 at 100x30/26/24/22/20 and 80x24:
+        the very starvation the constant exists to prevent.
+
+        ``reveal`` LIFTS the bound — it does not promise the whole question.
+        Past the point where the body cannot hold the text, ``_allocate`` step 5
+        clips it and marks the cut, which is the card's existing discipline and
+        the honest answer on a terminal with nothing left to give.
         """
         lines = wrap_cells(self.question.question, width) or [""]
-        if len(lines) <= MAX_QUESTION_ROWS:
+        if reveal:
             return lines
-        kept = lines[: MAX_QUESTION_ROWS - 1]
-        tail = truncate_cells(lines[MAX_QUESTION_ROWS - 1], max(1, width - 2))
+        cap = self._question_bound(width, len(lines))
+        if len(lines) <= cap:
+            return lines
+        kept = lines[: cap - 1]
+        tail = truncate_cells(lines[cap - 1], max(1, width - 2))
         tail = tail[:-1].rstrip() if tail.endswith("…") else tail
         return [*kept, f"{tail} …"]
+
+    def _question_bound(self, width: int, full_len: int) -> int:
+        """The most question lines that still leave the options their reserve.
+
+        A SCAN over candidate heights, not an expression, because the cost of a
+        question line is not a constant the card can subtract: ``_allocate``
+        spends the body on the footer, the first question line, an option row
+        and possibly the position row before the option viewport is sized, and
+        the rest of the question competes with the options for what is left.
+        The only honest way to ask "does a question this tall still leave the
+        options four lines" is to plan it and look.
+
+        **This is not the circularity a budget-derived bound has to avoid.**
+        The hazard is feeding the LIVE budget back in — ``q -> budget -> q`` over
+        the real question — which is a fixed-point iteration and was measured
+        diverging (13<->23 at 100x50). Each probe here is a SYNTHETIC question,
+        ``[""] * candidate``, so nothing reads :meth:`_question_lines` and no
+        cycle exists: this is a scan over a fixed domain, which has no fixed
+        point to find. It is a pure function of ``candidate`` and the terminal's
+        geometry, so it cannot flicker across repaints.
+
+        It terminates by construction: the domain is bounded above by the
+        question's own wrap length, computed before the loop.
+
+        The ``break`` on first crossing is sound because the predicate does not
+        recover — swept across 72 sizes x 2 reveal states x every cursor row,
+        ``body_line_budget`` never returned to >= the reserve once it had
+        dropped below, so first-crossing equals the exhaustive largest answer.
+
+        Where the reserve is UNPURCHASABLE — even a one-line question leaves the
+        viewport below it, at 100x24 and below and at 80x24 — this returns
+        :data:`MIN_QUESTION_ROWS` rather than the full wrap, and that is a
+        decision with evidence rather than a fallback of convenience. Drawing
+        the question in full there means it is not CUT, so the reveal's question
+        disjunct (:meth:`_reveal_is_useful`) has nothing to offer and ``^e``
+        leaves the footer entirely — measured at 100x24, 100x22, 100x20 and
+        80x24. Yielding to the floor keeps the question visibly cut, which keeps
+        the gesture that shows the rest on screen.
+        """
+        cap = MIN_QUESTION_ROWS
+        for candidate in range(MIN_QUESTION_ROWS, full_len + 1):
+            probe = [""] * candidate
+            plan = self._allocate(
+                width, probe, self._body_rows(candidate), position=False, reveal=False
+            )
+            total = plan.line_start_by_row[-1] if plan.line_start_by_row else 0
+            if plan.body_line_budget > 0 and total > plan.body_line_budget:
+                # The list would window, and the position row is bought on that
+                # retry — which costs a line the first pass did not charge. Ask
+                # the plan the card would actually draw, for the same reason
+                # ``_layout`` does.
+                windowed = self._allocate(
+                    width, probe, self._body_rows(candidate), position=True, reveal=False
+                )
+                if windowed.question or not plan.question:
+                    plan = windowed
+            if plan.body_line_budget < QUESTION_LIST_RESERVE:
+                break
+            cap = candidate
+        return cap
 
     def _description_indent(self) -> int:
         """Cells a description line is inset by, so it sits under the LABEL.
@@ -1432,54 +1569,22 @@ class AskPickerScreen(Container):
         one it had abandoned. A cut is a decision about a FRAME; this is the
         text.
 
-        Returns the PROSE only. The recommendation tag is charged to the FIRST
-        line, and this reserves its cells there by wrapping with a hanging
-        indent — so the tag introduces the paragraph without narrowing the rest
-        of it. Billed against every line instead, the same paragraph would wrap
-        into a column fourteen cells short of the one it is drawn in, and the
-        promoted option would be the one row on the card with a ragged edge.
+        Returns the PROSE only, wrapped at the full prose column for EVERY row.
+        The recommendation tag no longer shares this line: it is charged its own
+        line ahead of the prose (:meth:`_build_line_list`), so there is nothing
+        to reserve here and the promoted row wraps exactly like its siblings. A
+        recommended row with no description returns ``[]`` — the badge is not a
+        description line and is not invented here.
         """
         cached = self._description_wraps.get((index, width))
         if cached is not None:
             return cached
         room = max(1, width - self._description_indent())
         description = self._row_description(index)
-        tag_cells = 0
-        if self.question.recommended == index:
-            # The tag plus its ` · ` separator, exactly as `_description_text`
-            # spends them, so what is reserved here is what is drawn there.
-            tag_cells = cell_len(RECOMMENDED_TAG) + 3
-            if not description or room - tag_cells <= 0:
-                # No room beside the tag for prose, or no prose to put there.
-                # The tag still earns its line: it is the only thing marking the
-                # row the model is pointing at once the badge has moved off the
-                # label (D6).
-                self._description_wraps[(index, width)] = [""]
-                return [""]
         if not description:
             self._description_wraps[(index, width)] = []
             return []
-        if tag_cells:
-            # The tag's line is wrapped NARROW and the rest wide, both through
-            # `wrap_cells` so it keeps owning the word-breaking for over-long
-            # words (URLs, paths) and no second wrapper drifts from it.
-            #
-            # Not a placeholder word wrapped in one pass, which is what this
-            # was: a first token longer than `room - tag_cells` does not fit
-            # beside a filler either, so `wrap_cells` put the filler on a line
-            # of its own and slicing it off left line 0 EMPTY. At a grant of one
-            # the row then drew `recommended` alone and lost every cell of its
-            # prose — worse than the single truncated line the pre-wrap card
-            # drew, and reached by exactly the descriptions a model writes
-            # (measured at 70x22 on a description opening with a URL). The head
-            # is a character prefix of the description, so the remainder is a
-            # slice of it rather than a rejoin, and nothing is invented at the
-            # seam.
-            head = wrap_cells(description, room - tag_cells)[0]
-            rest = description[len(head) :].lstrip(" ")
-            lines = [head, *wrap_cells(rest, room)] if rest else [head]
-        else:
-            lines = wrap_cells(description, room)
+        lines = wrap_cells(description, room)
         self._description_wraps[(index, width)] = lines
         return lines
 
@@ -1720,9 +1825,12 @@ class AskPickerScreen(Container):
         away from being stuck in a mode nobody selected.
         """
         width = self._card_width()
-        question = self._question_lines(width)
-        budget = self._body_rows(len(question))
+        # ``revealed`` is resolved FIRST because the question's bound now
+        # depends on it: ``ctrl+e`` lifts that bound, so the wrap cannot be
+        # computed before the card knows which state it is drawing.
         revealed = self.state.revealed if reveal is None else reveal
+        question = self._question_lines(width, reveal=revealed)
+        budget = self._body_rows(len(question))
         plan = self._allocate(width, question, budget, position=False, reveal=revealed)
         # Would the line list overflow the first pass's viewport? The first pass
         # never buys the position row (``position=False`` forces ``show_position``
@@ -1800,8 +1908,10 @@ class AskPickerScreen(Container):
         """The OMP-style line list and its ``lineStartByRow`` map.
 
         Every row contributes, in order, its LABEL line (one — labels are
-        truncated here, never wrapped, §2.5) then up to :meth:`_cap_for_row`
-        description lines. This is ``renderRowLabel``'s output shape
+        truncated here, never wrapped, §2.5), then the RECOMMENDATION badge's
+        own line where the row is the recommended one, then up to
+        :meth:`_cap_for_row` description lines. This is ``renderRowLabel``'s
+        output shape
         (``ask-dialog.ts:329-341``) in this card's cell model: a flat list of
         ``(row_index, kind)`` pairs whose length is the list's full visual
         height, plus ``line_start_by_row[i]`` = the first line index of row
@@ -1813,15 +1923,31 @@ class AskPickerScreen(Container):
         resolution. Cheap: :meth:`_description_lines` is memoised, so this is
         ``O(row_count)`` slicing over cached wraps.
 
-        ``kind`` is ``"label"`` or ``"desc"`` \u2014 the paint reads it to draw a
-        row line versus a description line, and a partial row at a viewport edge
-        keeps whichever of its lines fall inside the window.
+        ``kind`` is ``"label"``, ``"badge"`` or ``"desc"`` \u2014 the paint reads it
+        to draw a row line, the badge line, or a description line, and a partial
+        row at a viewport edge keeps whichever of its lines fall inside the
+        window.
+
+        The badge is charged BEFORE the row's prose, and that ordering is the
+        whole of the fix it belongs to. Under viewport clipping line order IS
+        priority: the last line of a row is the first one lost at a tight
+        budget, so a badge billed after the description vanishes on exactly the
+        frames where it is the only thing marking the row the model points at
+        (measured gone at 100x22 and below). Charged first, it survives every
+        budget that grants the row two visible lines.
+
+        Emitted unconditionally on the budget. This list is what the card
+        WANTS — :meth:`_body_rows` reads its length to size the ask — and the
+        viewport decides what is drawn; gating it here would make the card
+        stop asking for the line it is trying to keep.
         """
         line_list: list[tuple[int, str]] = []
         line_start_by_row: list[int] = []
         for index in rows:
             line_start_by_row.append(len(line_list))
             line_list.append((index, "label"))
+            if self.question.recommended == index:
+                line_list.append((index, "badge"))
             row_cap = self._cap_for_row(index, revealed, selected, cap)
             desc = self._description_lines(index, width)
             for _ in desc[:row_cap]:
@@ -2524,25 +2650,76 @@ class AskPickerScreen(Container):
         # appends the glyph; it never truncates real text or marks a spurious
         # ``…`` on a padded line (the R11/R15/D5 defect QA caught).
         cwidth = layout.content_width
-        rendered: list[tuple[int, Text]] = []
+        # ``(row_index, kind, text)`` — the same ``"label"``/``"badge"``/``"desc"``
+        # vocabulary :meth:`_build_line_list` emits, so the allocator side and
+        # the paint side name a line the same way and the clip guard below can
+        # ask what a line IS rather than inferring it from position.
+        rendered: list[tuple[int, str, Text]] = []
         for index in range(self.row_count):
             ground = self._row_ground(index)
-            rendered.append((index, self._row_text(index, cwidth, ground, fg, dim, faint, layout)))
+            rendered.append(
+                (index, "label", self._row_text(index, cwidth, ground, fg, dim, faint, layout))
+            )
             granted = layout.description_rows.get(index, 0)
-            if granted:
+            # The badge line is emitted on exactly the condition
+            # :meth:`_build_line_list` emits it on — the row is the recommended
+            # one — and NOT on whether the frame will show it.
+            #
+            # This list must mirror the line list ENTRY FOR ENTRY. ``_offset``
+            # and the viewport slice are computed from ``line_start_by_row``,
+            # which counts the line list, and applied here; skip a line the
+            # allocator charged and every row below it slides up by one, so a
+            # cursor move scrolls to a DESCRIPTION line and the answer's label
+            # is never drawn (measured at 100x20: the offset pinned to row 1
+            # landed on row 0's last prose line and no label was reachable).
+            # A row with no prose is absent from ``description_rows`` and still
+            # charges a badge line, which is the other half of the same rule.
+            #
+            # Whether the badge is VISIBLE is the viewport's decision, exactly
+            # as it is for prose: at the budget-1 band the badge line is clipped
+            # and :meth:`_row_text` rides the tag on the label instead, so the
+            # badge is drawn once either way.
+            draws_badge = self.question.recommended == index
+            if granted or draws_badge:
                 # `fg` for the TAG and `muted` for the separator and the prose.
                 # Passed `muted` for both, the badge was the identical style to
                 # the text beside it and had neither weight nor hue to win on
                 # (D4); the tag carries the label's own ink and the prose keeps
                 # the ramp step it was walked up to.
-                for line in self._description_text(
-                    index, cwidth, ground, fg, muted, granted, layout
-                ):
-                    rendered.append((index, line))
+                below = self._description_text(index, cwidth, ground, fg, muted, granted, layout)
+                if draws_badge and below:
+                    rendered.append((index, "badge", below[0]))
+                    below = below[1:]
+                for line in below:
+                    rendered.append((index, "desc", line))
         body = layout.body_line_budget
         total = len(rendered)
         offset = max(0, min(self._offset, max(0, total - body)))
         self._offset = offset
+        # A badge whose LABEL has scrolled off the top is a pointer with nothing
+        # to point at, so it is not drawn: advance past it and let the row's
+        # prose have the line.
+        #
+        # The badge names a row, and it says so by sitting under that row's
+        # label. Scrolled to just below the label, the frame draws
+        # ``▸ RECOMMENDED`` with no name, no number and no cursor beneath it,
+        # directly above a DIFFERENT option's label — so the badge reads as
+        # marking the option BELOW it, which is the one thing it must never do.
+        # A badge that points at the wrong row is worse than the missing badge
+        # this line exists to fix (design round, D1: reproduced at 130x30,
+        # 120x30, 110x30, 100x30 and 80x30, on every recommended index).
+        #
+        # Prose cannot have this defect and that is why the rule is specific to
+        # the badge: a description whose label is off-screen still reads as a
+        # continuation of something above, which is exactly what it is.
+        #
+        # The row stays reachable and still reports itself in ``window`` through
+        # its prose; only the orphaned ASSERTION is dropped. Suppressing it here
+        # rather than in ``_scroll_offset_for_cursor`` keeps the scroll maths
+        # shared by every row untouched.
+        if offset < total and rendered[offset][1] == "badge":
+            offset += 1
+            self._offset = offset
         viewport = rendered[offset : offset + body]
         # The last VISIBLE line of the viewport may belong to a row whose prose
         # continues BELOW the bottom edge — the row is clipped by the viewport,
@@ -2555,27 +2732,31 @@ class AskPickerScreen(Container):
         # user can actually SEE being cut, not what the grant would have drawn.
         #
         # ONLY when that last visible line is a DESCRIPTION line, never the row's
-        # LABEL. ``_mark_clipped`` assumes a description line — it slices off the
-        # indent and recolours to ``muted`` — so run on a label it would strip
-        # the cursor glyph and the number gutter and repaint the label as if it
-        # were unselected prose, on the very row ``_scroll_offset_for_cursor``
-        # pins to the top for the user to answer (the D8-fix's own false-cut, one
-        # view over). When only the label fits (``body_line_budget`` of 1 leaves
-        # no room for even one description line), the row's truncation is already
-        # told by the thumb and the position row; the label is left intact. The
-        # label is the row's FIRST rendered line, so restamp only when the last
-        # visible line sits PAST it.
+        # LABEL and never its BADGE. ``_mark_clipped`` assumes a description line
+        # — it slices off the indent and recolours to ``muted`` — so run on a
+        # label it would strip the cursor glyph and the number gutter and repaint
+        # the label as if it were unselected prose, on the very row
+        # ``_scroll_offset_for_cursor`` pins to the top for the user to answer
+        # (the D8-fix's own false-cut, one view over). Run on the BADGE line it
+        # strips the ``▸`` glyph off ``RECOMMENDED_TAG``, repaints the word as
+        # muted prose and appends a ``…`` — the badge turned into a sentence
+        # fragment, for the same reason and with the same fix.
+        #
+        # When only the label fits (``body_line_budget`` of 1 leaves no room for
+        # even one description line), the row's truncation is already told by the
+        # thumb and the position row; the label is left intact.
+        #
+        # Asked as the KIND of the last visible line rather than as its position
+        # past the label. ``label, badge, desc*`` broke the old positional
+        # derivation: "past the label" stopped meaning "is prose" the moment a
+        # row could have a second non-prose line.
         if viewport and offset + body < total:
-            last_index, last_row = viewport[-1]
-            next_index, _ = rendered[offset + body]
-            label_pos = next(
-                (pos for pos, (idx, _) in enumerate(rendered) if idx == last_index), None
-            )
-            last_visible_pos = offset + body - 1
-            on_description = label_pos is not None and last_visible_pos > label_pos
+            last_index, last_kind, last_row = viewport[-1]
+            next_index, _, _ = rendered[offset + body]
+            on_description = last_kind == "desc"
             if next_index == last_index and last_index != self.other_row and on_description:
                 marked = self._mark_clipped(last_row, cwidth, last_index)
-                viewport = viewport[:-1] + [(last_index, marked)]
+                viewport = viewport[:-1] + [(last_index, last_kind, marked)]
         # The scrollbar thumb spans the full body height, one cell per VISUAL
         # LINE (not per option row), keyed on ``show_position`` — the
         # allocator's overflow decision (``len(line_list) > body_line_budget``).
@@ -2587,7 +2768,7 @@ class AskPickerScreen(Container):
         thumb_top, thumb_len = (
             self._scrollbar_thumb(total, body) if layout.show_position else (0, 0)
         )
-        for line_pos, (index, row) in enumerate(viewport):
+        for line_pos, (index, _kind, row) in enumerate(viewport):
             # ``_line_rows`` maps every DRAWN body line back to the row it
             # belongs to (label OR description line), which the hit-test reads
             # (:meth:`_index_at`). A partial row's visible lines still map to it.
@@ -2620,7 +2801,7 @@ class AskPickerScreen(Container):
         # The rows at least partially in the viewport — the position row's range
         # (§7) and the footer's "any option drawn" test read this, in OPTION
         # units, from the same offset the viewport used.
-        window = sorted({idx for idx, _ in viewport})
+        window = sorted({idx for idx, _, _ in viewport})
         # Both rows are drawn only where the plan BOUGHT them. The position line
         # is gated on ``show_position`` (the overflow decision), never on
         # `len(window) < row_count` alone: at 1 or 2 rows the allocator never
@@ -2866,8 +3047,8 @@ class AskPickerScreen(Container):
             row.append(FIELD_CARET, style=accent if taken else ground + dim)
         else:
             row.append(truncate_cells(text, budget), style=accent if taken else ground + fg)
-        if self.question.recommended == index and not layout.show_descriptions:
-            # No description line to carry the tag, so it rides here — but only
+        if self.question.recommended == index and not layout.row_draws_badge_line(index):
+            # No SECOND line to carry the tag, so it rides here — but only
             # when it fits AFTER the label, rather than out of the label's own
             # budget. Charged to the budget it made the promoted option the
             # shortest label on the card, and on a 28-cell screen the label
@@ -2876,6 +3057,16 @@ class AskPickerScreen(Container):
             # (D2/D6). A badge that truncates what it promotes, or that
             # overflows the screen to fit, is worth less than no badge: the
             # recommendation is PRESELECTED too, so the cursor is already there.
+            #
+            # This is the budget-1 degradation, and it is keyed on the FRAME
+            # rather than on the question. The old guard asked
+            # ``not layout.show_descriptions`` — a property of the QUESTION,
+            # and unreachable in practice, because the badge used to reserve
+            # cells in :meth:`_description_lines` and so forced that flag True
+            # for itself. What actually decides whether the tag has a line of
+            # its own is whether the plan bought the row a second line, which is
+            # what ``row_draws_badge_line`` answers, from the plan and not from
+            # live state (see there).
             #
             # Drawn exactly as :meth:`_description_text` draws it: the separator
             # at ``muted`` and the tag at ``fg`` + bold, the label's own ink.
@@ -2908,7 +3099,7 @@ class AskPickerScreen(Container):
         granted: int,
         layout: _CardLayout,
     ) -> list[Text]:
-        """The row's description lines: the recommendation tag, then the consequence.
+        """The row's lines: the recommendation badge on its own, then the consequence.
 
         Drawn at ``muted``, which measures 6.51:1 on this card's ``overlay``
         ground. It has been walked up this ramp twice for the same reason: the
@@ -2932,6 +3123,22 @@ class AskPickerScreen(Container):
         the label line it was paid for out of the label, so the one row the
         model is pointing at carried the shortest text on the card (D6).
 
+        And it owns its line rather than heading the first prose line. Sharing
+        line 0 made the badge the row's SECOND claim on a line the viewport may
+        not grant, so it vanished wherever the budget gave the row one line —
+        measured gone at 100x22 and below, which is exactly where the badge is
+        the only mark on the promoted row. Charged its own line ahead of the
+        prose it survives every budget that grants the row two lines; below
+        that, :meth:`_row_text` rides it on the label instead.
+
+        The line is produced whenever the row is the recommended one, matching
+        :meth:`_build_line_list` entry for entry — the paint list and the line
+        list must not disagree about how many lines a row has, or the viewport
+        offset lands on the wrong one. The VIEWPORT then decides whether it is
+        seen, and ``layout.row_draws_badge_line`` is what :meth:`_row_text`
+        reads to know whether it was, so the tag is drawn exactly once per row
+        on every frame.
+
         It is drawn at ``tag_ink`` — ``fg`` + bold, the label's own ink — and
         NOT at the ``ink`` its prose uses. It sat at ``muted`` for a release,
         which is the same style as the prose it introduces: the docstring here
@@ -2945,8 +3152,9 @@ class AskPickerScreen(Container):
         from weight, case and a glyph rather than from hue — see
         :data:`RECOMMENDED_TAG` for why colour is not available here.
 
-        ``granted`` lines, not one. Where the wrap is longer than the grant the
-        LAST KEPT line is marked ``…`` — the same "say that it continues"
+        ``granted`` PROSE lines, not one — the badge line is charged separately
+        and is never counted against the grant. Where the wrap is longer than
+        the grant the LAST KEPT line is marked ``…`` — the same "say that it continues"
         discipline the question uses when its own tail is cut. Marking every
         line would say each of them was cut when only the last one is, which is
         the reading a wrapped paragraph must not invite.
@@ -2972,25 +3180,29 @@ class AskPickerScreen(Container):
         # ``_prose_line`` marks the cut, exactly the "say that it continues"
         # discipline every other row follows.
         continued = False
-        # An option with a description draws its ``granted`` lines. A row with
-        # no prose contributes no line here at all (the caller only enters this
-        # method for rows in ``description_rows``, which are exactly the rows
-        # with ``granted >= 1``), so ``or [""]`` guards only the recommended row
-        # whose sole "line" is the badge.
-        kept = wrapped[:granted] or [""]
+        # An option draws its ``granted`` prose lines, and nothing is invented
+        # where there are none: a recommended row with no description yields
+        # ``[]`` from :meth:`_description_lines` and contributes the badge line
+        # alone. The old ``or [""]`` guarded the badge's sole line back when the
+        # tag shared line 0 with prose; the badge has its own line now, so there
+        # is no empty prose line left to invent.
+        kept = wrapped[:granted]
         rows: list[Text] = []
+        if self.question.recommended == index:
+            # The badge's OWN line, ahead of the prose — the order
+            # :meth:`_build_line_list` charges it in, because under viewport
+            # clipping line order is priority (see there). The ink is unchanged
+            # from when it shared line 0 with the prose: ``fg`` + bold. The
+            # weakness this fixes was positional, not chromatic, and hue is not
+            # available here (see :data:`RECOMMENDED_TAG`).
+            badge = Text(no_wrap=True, overflow="ellipsis")
+            badge.append(" " * indent, style=ground)
+            badge.append(RECOMMENDED_TAG, style=ground + tag_ink + Style(bold=True))
+            rows.append(_fit_row(badge, width, ground))
         for position, text in enumerate(kept):
             body = Text(no_wrap=True, overflow="ellipsis")
             body.append(" " * indent, style=ground)
             room = max(1, width - indent)
-            if position == 0 and self.question.recommended == index:
-                body.append(RECOMMENDED_TAG, style=ground + tag_ink + Style(bold=True))
-                room -= cell_len(RECOMMENDED_TAG)
-                if text and room > 3:
-                    body.append(" · ", style=ground + ink)
-                    room -= 3
-                else:
-                    text = ""
             if text:
                 body.append(
                     truncate_cells(
@@ -3281,18 +3493,43 @@ class AskPickerScreen(Container):
         Answered against the two PLANS the card would draw, not against the
         descriptions alone: "is there more on screen" is a question about the
         viewport, not about the text.
+
+        A SECOND disjunct: or the QUESTION is bounded below its full wrap and
+        lifting that bound would put a new line of it in the frame. The adaptive
+        bound cuts a long question wherever the body cannot spare the lines, and
+        without this the user has no gesture that reaches the cut text — which
+        is the complaint the bound was meant to answer, surviving at 100x24.
+        Measured: with the bound alone, ``^e`` was offered at NO size where the
+        question was cut.
+
+        The rule is TOTAL and ADDITIVE: ``ctrl+e`` lifts BOTH the question's
+        bound and the selected row's cap, and this returns True when either has
+        something to show. The two targets are disjoint at every swept size
+        today, so the key expands exactly one thing in practice; written
+        additively, a future size where they overlap degrades to "both expand"
+        rather than to "the wrong one expands".
+
+        This disjunct lives HERE and nowhere else. :meth:`_offers_reveal` asks
+        the FOOTER whether ``^e`` is on screen before letting the key fire, and
+        ``action_toggle_reveal`` refuses a gesture the card does not advertise;
+        that guard only holds if there is one predicate to guard.
         """
         selected = self.state.selected
         width = self._card_width()
+        default = self._layout(reveal=False)
+        revealed = self._layout(reveal=True)
+        # Would lifting the QUESTION's bound put a new line of it on screen?
+        # Asked of the two plans' drawn question text, for the same reason the
+        # row disjunct is: what matters is the FRAME, not the wrap.
+        if len(revealed.question) > len(default.question):
+            return True
         # More of the selected row's OWN prose than the default clamp shows?
         if len(self._reveal_wrap(selected, width)) <= DEFAULT_DESC_CAP:
             return False
-        default = self._layout(reveal=False)
         if selected not in self._window(default):
             # The cursor's row is not even partially drawn. Nothing on screen
             # would change in a way the user can attribute.
             return False
-        revealed = self._layout(reveal=True)
         # How many of the selected row's lines each plan actually draws in its
         # viewport — the lift is useful iff the revealed frame shows strictly
         # more of THIS row than the default one.

@@ -745,12 +745,16 @@ class AskOption(BaseModel):
 # Once the index is known good the recommended option is MOVED to the top and
 # `recommended` becomes 0. Normalising in the model rather than in the picker is
 # what makes it an invariant instead of one host's habit: the mobile wire
-# (`local_operator/mobile/types.py`) carries the option labels and nothing else
-# — there is no `recommended` field on the card at all — so on the phone
-# POSITION is the only channel the recommendation has. A surface that renders
-# options in authored order would silently drop it. And even where the marker
-# does render, a recommendation the user has to hunt for three rows down is a
-# weaker recommendation than the same words at the top.
+# (`local_operator/mobile/types.py`) now carries the marker alongside the option
+# labels, so a surface that REBUILDS the question can draw a badge — but the
+# PHONE still has no `recommended` concept and ignores the key, so there
+# POSITION remains the only channel the recommendation has and the hoist stays.
+# A surface that renders options in authored order would silently drop it. And
+# even where the marker does render, a recommendation the user has to hunt for
+# three rows down is a weaker recommendation than the same words at the top.
+#
+# The marker indexes `options` AS CARRIED, never the authored order: a consumer
+# that re-sorts the list and keeps the index moves the badge to the wrong row.
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 

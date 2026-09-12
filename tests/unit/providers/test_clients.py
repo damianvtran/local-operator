@@ -5464,3 +5464,31 @@ def test_fast_mode_on_openrouter_uses_the_aggregator_dialect() -> None:
     )
     assert body["service_tier"] == "priority"
     assert "speed" not in body
+
+
+async def test_router_model_request_carries_the_sticky_routing_key_and_cache_marker():
+    """The router route must reach the wire with both cache emissions, built from
+    the real registry rather than a hand-set spec.
+
+    This is the consequence test for the router row: `aggregator_router_model_info`
+    used to report `supports_prompt_cache=False`, and the effect was not a missing
+    capability badge — it was a router conversation sent with no `prompt_cache_key`
+    (OpenRouter's sticky-routing key) and no `cache_control` marker, so every turn
+    after the first bought the whole prefix again at full input price. The unit
+    tests above set the spec by hand, which is exactly how that stayed invisible.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.model.registry import get_model_info
+    from local_operator.providers.clients import OpenAICompatClient
+
+    spec = build_model_spec("radient", "auto", get_model_info("radient", "auto"))
+    body = OpenAICompatClient("https://api.radienthq.com/v1")._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("a"), Message.user("b")],
+            prompt_cache_key="lineage-123",
+        )
+    )
+
+    assert body["prompt_cache_key"] == "lineage-123"
+    assert body["messages"][-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}

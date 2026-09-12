@@ -2587,6 +2587,26 @@ class SubagentView(Vertical):
                 # the insert even mounted) makes the window match
                 # `_resume_paging`'s on the parent view, which is held by the
                 # same callback.
+                # RAISED BEFORE THE INSERT, not after it. `insert_blocks`
+                # keeps its `on_settled` promise even when the pump refuses
+                # the callback it would normally schedule, in which case the
+                # callback runs INLINE, before this call returns. Setting the
+                # flag afterwards therefore re-raised it on top of
+                # `_finish_history_mount`'s clear and left the page wedged on
+                # "loading earlier…" with no read in flight and no gesture
+                # able to re-open it (`_history_loading` gates both
+                # `_maybe_load_history` and `_note_history_gesture`).
+                #
+                # Hoisting is order-preserving for every other reader: the
+                # flag was already True on entry from `_maybe_load_history`
+                # and is cleared by `_apply_history_page` a few frames above,
+                # so the only window this moves is the synchronous span
+                # between here and the insert — during which nothing repaints.
+                # The ordering constraint in `_finish_history_mount`'s
+                # docstring still holds: the flag is continuously True from
+                # before the insert until the settle clears it, so
+                # `_history_state_text` can never observe it down mid-mount.
+                self._history_loading = True
                 self._body.insert_blocks(
                     prefix,
                     new_blocks,
@@ -2611,15 +2631,19 @@ class SubagentView(Vertical):
                         )
                     ),
                 )
-                # Re-raised for the duration of the insert: see the comment
-                # above. Cleared again by `_finish_history_mount`.
-                # NOTE: this MUST NOT be visible to `_history_state_text`
-                # before the reconcile below has run — `show()` repaints the
-                # hint from `_history_loading` and a True here paints
-                # "loading earlier…" over the just-settled "transcript
-                # start". `_finish_history_mount` re-paints on clear, so the
-                # hint always ends at the settled text.
-                self._history_loading = True
+                # The flag is raised ABOVE the insert (see there). It must not
+                # be re-raised here: on the inline-settle path
+                # `_finish_history_mount` has already run and cleared it, and
+                # writing True back over that clear is the wedge this ordering
+                # exists to avoid.
+                #
+                # The constraint the old comment recorded is unchanged and
+                # still satisfied: the flag MUST NOT be visible to
+                # `_history_state_text` before the reconcile below has run —
+                # `show()` repaints the hint from `_history_loading` and a
+                # True here paints "loading earlier…" over the just-settled
+                # "transcript start". `_finish_history_mount` re-paints on
+                # clear, so the hint always ends at the settled text.
                 self._blocks[prefix:prefix] = new_blocks
                 self._entries[prefix:prefix] = new_entries
                 self._pending = entries

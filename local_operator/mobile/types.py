@@ -517,6 +517,25 @@ class PendingRequest:
     # single-question ask.
     question_index: int = 0
     question_total: int = 1
+    # Index of the preselected option in the ALREADY-HOISTED ``options`` above.
+    # ``AskQuestion._shape`` rotates the recommended option to index 0 and sets
+    # this to 0, so on a normalised question it is ``0`` or ``None``. It indexes
+    # ``options`` AS CARRIED, not the model's authored order — a consumer must
+    # not re-sort ``options`` and keep this value. The phone has no
+    # ``recommended`` concept yet and ignores the key; position is still its
+    # only channel, which is why the hoist stays.
+    #
+    # The DEFAULT is load-bearing, not style: inbound reconstruction below
+    # filters to known field names and calls ``PendingRequest(**pending_kwargs)``,
+    # so a NEW viewer reading an OLD payload gets a dict with neither key. A
+    # field without a default would raise TypeError there and turn a cosmetic
+    # version skew into a crashed ask card.
+    recommended: int | None = None
+    # The ``AskQuestion.persist`` intent for a ``secret=True`` ask: save the
+    # credential to the operator's encrypted long-term store, not only session
+    # memory. The flag rides; the credential VALUE never does, same rule as
+    # ``secret``. Defaulted for the same version-skew reason as ``recommended``.
+    persist: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -541,8 +560,11 @@ def ask_pending_request(
 
     Carries the option consequence lines (U3), the ``secret`` flag so the card
     can mask the paste field (D1/U2) — never the secret value, which lives only
-    in the picker's future — and the question position for the "N of M" header
-    (U1)."""
+    in the picker's future — the question position for the "N of M" header
+    (U1), the ``recommended`` marker so a viewer that rebuilds the question can
+    draw the badge (an index into ``options`` AS CARRIED, already hoisted by
+    ``AskQuestion._shape``, never into the model's authored order), and the
+    ``persist`` intent so a rebuilt secret question stays a faithful copy."""
     options = [
         AskOptionWire(
             label=str(getattr(option, "label", "")),
@@ -550,6 +572,7 @@ def ask_pending_request(
         )
         for option in (getattr(question, "options", []) or [])
     ]
+    raw_recommended = getattr(question, "recommended", None)
     return PendingRequest(
         request_id=request_id,
         kind="ask",
@@ -559,6 +582,10 @@ def ask_pending_request(
         secret=bool(getattr(question, "secret", False)),
         question_index=question_index,
         question_total=question_total,
+        # ``isinstance`` rather than a truth test: ``recommended=0`` is the
+        # COMMON case after the validator's hoist, and it is falsy.
+        recommended=(raw_recommended if isinstance(raw_recommended, int) else None),
+        persist=bool(getattr(question, "persist", False)),
     )
 
 
