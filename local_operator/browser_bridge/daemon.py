@@ -95,6 +95,29 @@ LINK_DROP_TTL_S = 60.0
 #: Note `wait_for` cancels the waiter, not the holder — the teardown that
 #: follows is what deals with the holder.
 LINK_SEND_TIMEOUT_S = 5.0
+#: Ceiling on one `websocket.close()` during a TEARDOWN. A close is a send, so
+#: it carries the send's hazard: a peer that has stopped draining can leave it
+#: pending forever, and every teardown path here runs INSIDE the recovery the
+#: teardown exists to perform. Bounded with the send's own reasoning — a
+#: loopback close frame is sub-millisecond and seconds mean a dead peer — and
+#: kept separate from `LINK_SEND_TIMEOUT_S` only so the two call sites can be
+#: shortened independently in tests.
+LINK_CLOSE_TIMEOUT_S = LINK_SEND_TIMEOUT_S
+#: How long a direct liveness PROBE waits for the peer to say anything back.
+#:
+#: The promotion rule used to infer liveness from elapsed silence alone, which
+#: is why it needed a slack above one ping interval — the daemon is the only
+#: party that solicits speech, so daemon-side tick delay is indistinguishable
+#: from peer death (review R1-2). That slack (1.5 x 20 s = 30 s) then exceeded
+#: the 20 s budget of `read`/`snapshot`/`screenshot`, making the rule inert for
+#: exactly the methods the record added it for (review R2-3 / QA Q2-4). A probe
+#: asks the peer directly instead of inferring: a healthy worker answers a ping
+#: within one event-loop turn whatever it is doing (§2.2), and the daemon is
+#: demonstrably live at the moment it probes — it is running the timeout path.
+#: So a silence is no longer ambiguous by construction, and the window only has
+#: to cover a pathologically slow loop turn, which is the same generosity
+#: argument `LINK_SEND_TIMEOUT_S` already makes.
+PING_PROBE_TIMEOUT_S = 5.0
 #: How often the daemon re-reads the pairing file to notice an out-of-process
 #: revoke. Short enough that "Unpair" feels immediate, cheap enough to poll.
 REVOKE_WATCH_S = 3.0
@@ -223,6 +246,21 @@ class ExtensionLink:
 
     def __init__(self) -> None:
         self.websocket: WebSocket | None = None
+        # Monotonic id of the authoritative socket, bumped by every accept.
+        #
+        # Socket IDENTITY alone cannot fence a decision that spans an await: a
+        # caller captures `self.websocket`, awaits, and a replacement connection
+        # can arrive inside that window — at which point the captured socket is
+        # a closed object and the CURRENT one is a fresh healthy peer. Pairing
+        # the id with the object lets every check say "the link I decided about
+        # is still the link" in one expression, and keeps saying it when the
+        # socket has since been nulled (which identity-with-None cannot: a
+        # never-connected daemon and a dropped link would look alike).
+        self.generation = 0
+        # Set by the receive loop on EVERY frame, so an await can wait for the
+        # peer to speak instead of polling `last_frame_at`. Used only by the
+        # liveness probe (`_peer_answers_a_solicited_ping`).
+        self.frame_event = asyncio.Event()
         self.extension_id = ""
         self.browser = ""
         self.paired = False
@@ -426,8 +464,32 @@ class ExtensionLink:
         else:
             self.driven.clear()
 
-    async def send(self, payload: dict[str, Any]) -> None:
-        websocket = self.websocket
+    def attach(self, websocket: WebSocket) -> int:
+        """Make ``websocket`` the authoritative link and return its generation."""
+        self.generation += 1
+        self.websocket = websocket
+        return self.generation
+
+    def is_authoritative(self, websocket: WebSocket | None, generation: int) -> bool:
+        """Whether ``(websocket, generation)`` is still the live link.
+
+        The one predicate every deferred decision and every teardown re-checks
+        across its awaits (audit A1). Deliberately an identity check on the
+        socket OBJECT rather than a comparison of close codes or states: a
+        later connection replaces the object, so identity is the only thing
+        that cannot be spoofed by a peer that reconnects quickly.
+        """
+        return self.websocket is websocket and self.generation == generation
+
+    async def send(self, payload: dict[str, Any], *, wire: WebSocket | None = None) -> None:
+        """Write one frame to ``wire``, defaulting to the current link.
+
+        A caller that captured its socket before an await must PASS it here.
+        Defaulting to ``self.websocket`` at call time is how a command from a
+        superseded connection was delivered to its replacement — a request the
+        new peer never received, for a tab it does not own (audit A1).
+        """
+        websocket = wire if wire is not None else self.websocket
         if websocket is None:
             raise RuntimeError("extension disconnected")
         async with self.send_lock:
@@ -435,6 +497,17 @@ class ExtensionLink:
 
     def disconnect(self) -> None:
         self.websocket = None
+        self.forget_link_state()
+
+    def forget_link_state(self) -> None:
+        """Drop everything scoped to the CURRENT link, keeping the socket field.
+
+        A replacement connection needs exactly this and not `disconnect()`: the
+        superseded link's pending futures can never be answered by its
+        replacement, so they must fail NOW rather than at their own deadlines —
+        but nulling `websocket` here would then wipe the socket that is about to
+        be installed (audit A1).
+        """
         self.paired = False
         self.last_frame_at = 0.0
         for future in self.pending.values():
@@ -585,6 +658,12 @@ class BridgeService:
         await asyncio.sleep(PING_INTERVAL_S)
         if self.link.websocket is None:
             return
+        # Capture the wire this tick is ABOUT before its first await. The ping
+        # below can be suspended across a reconnect, and the teardown it then
+        # triggers must sever the socket it was pinging — never the healthy
+        # replacement that arrived in the meantime, which would fail every new
+        # session's futures for a socket that is answering perfectly (audit A1).
+        wire = (self.link.websocket, self.link.generation)
         if not self.link.proven:
             # Total silence for two ping intervals: not a slow peer, a dead
             # one. The check lives HERE because this loop already ticks every
@@ -592,20 +671,75 @@ class BridgeService:
             # bridge still notices instead of waiting for the next command.
             await self._drop_unproven_link(
                 f"no frame for {self.link.silent_for():.0f}s "
-                f"(deadline {LINK_SILENCE_TIMEOUT_S:.0f}s)"
+                f"(deadline {LINK_SILENCE_TIMEOUT_S:.0f}s)",
+                expected=wire,
             )
             return
         try:
             # Bounded for the same reason as every other send: a ping that
             # parks silently disarms the very detector this design rests on.
-            await asyncio.wait_for(self.link.send({"event": "ping"}), timeout=LINK_SEND_TIMEOUT_S)
+            await asyncio.wait_for(
+                self.link.send({"event": "ping"}, wire=wire[0]), timeout=LINK_SEND_TIMEOUT_S
+            )
         except asyncio.TimeoutError:
-            await self._drop_unproven_link("ping send exceeded its deadline")
+            await self._drop_unproven_link("ping send exceeded its deadline", expected=wire)
         except Exception:  # noqa: BLE001 - receive loop owns teardown
             logger.debug("browser extension ping failed", exc_info=True)
 
-    async def _drop_unproven_link(self, reason: str) -> None:
+    async def _peer_answers_a_solicited_ping(self) -> bool:
+        """Ask the peer directly whether it is still listening.
+
+        The promotion rule used to decide this from ELAPSED SILENCE alone, which
+        forced a threshold above the healthy sawtooth (1.5 x PING_INTERVAL_S) —
+        and that exceeded the 20 s budget of `read`/`snapshot`/`screenshot`, so
+        the rule could not fire for precisely the methods the record added it
+        for (review R2-3 / QA Q2-4). Lowering the number instead would re-open
+        review R1-2 (a delayed ping tick torn down as a dead peer), because the
+        DAEMON is the only party that solicits speech.
+
+        A probe removes the ambiguity rather than re-tuning it: the daemon is
+        demonstrably alive at the moment it asks (it is running the timeout
+        path), and a healthy worker answers a ping within one event-loop turn
+        no matter what a command is doing (record §2.2). An unanswered
+        solicitation is therefore direct evidence rather than an inference, and
+        ANY frame counts as the answer — the same "any frame" rule the silence
+        detector uses. It also fits inside every method's budget by
+        construction: it is bounded by PING_PROBE_TIMEOUT_S, not by a multiple
+        of PING_INTERVAL_S.
+
+        Deliberately bounded TWICE: the solicitation itself can hang, and the
+        answer can fail to come. Returns False when either does, which the
+        caller treats exactly as it treats the elapsed-silence corroboration.
+        """
+        websocket = self.link.websocket
+        if websocket is None:
+            return False
+        self.link.frame_event.clear()
+        try:
+            await asyncio.wait_for(
+                self.link.send({"event": "ping"}, wire=websocket), timeout=LINK_SEND_TIMEOUT_S
+            )
+        except Exception:  # noqa: BLE001 - an undeliverable solicitation is not an answer
+            return False
+        try:
+            await asyncio.wait_for(self.link.frame_event.wait(), PING_PROBE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    async def _drop_unproven_link(
+        self,
+        reason: str,
+        *,
+        expected: tuple[WebSocket | None, int] | None = None,
+    ) -> bool:
         """Sever a link the daemon no longer trusts, and say why ONCE.
+
+        Returns whether the teardown was performed: False means the fence refused
+        it because the wire this decision was about is no longer authoritative.
+        Callers that answer the session must distinguish the two — "the extension
+        stopped answering" and "the connection this command was on was replaced"
+        are different facts, and the fence is exactly what tells them apart.
 
         Deliberately the SAME teardown the ordinary disconnect path uses
         (``link.disconnect()``), with a new trigger rather than a new mechanism:
@@ -620,8 +754,24 @@ class BridgeService:
         close as a lost pairing. A code the old worker does not understand
         would be treated as an ordinary close (which is why 4000, already
         meaningful to every released build, is the right one).
+
+        ``expected`` is the wire the CALLER decided about, captured before the
+        caller's own await. Teardown is fenced to it (audit A1): a decision that
+        spans an await can otherwise land after a replacement connection is
+        installed, at which point ``self.link.websocket`` is a fresh healthy peer
+        and this method would close it with 4000 and fail every new session's
+        futures. The close below also goes to the CAPTURED object, never to
+        whatever is current, so even a replacement arriving during the close
+        cannot be touched.
         """
-        websocket = self.link.websocket
+        current = (self.link.websocket, self.link.generation)
+        if expected is not None and current != expected:
+            # Nothing of OURS is left to sever: the socket this decision was
+            # about has been superseded (or already torn down). The latch is
+            # left alone, because the live replacement owns the link's state.
+            logger.debug("browser bridge skipped a stale teardown: %s", reason)
+            return False
+        websocket = current[0]
         logger.warning("browser bridge dropped an unresponsive extension: %s", reason)
         # Latch WHY, and how long the peer had been quiet, BEFORE the teardown
         # nulls the socket: this is the answer `_drop_unproven_link` is about to
@@ -639,8 +789,16 @@ class BridgeService:
         self.link.disconnect()
         self.publish_safely()
         if websocket is not None:
+            # BOUNDED, and scoped to the captured socket (audit A2). The caller
+            # is the RPC gate, the command-timeout path or the ping supervisor,
+            # so an unbounded close here parks the recovery that this teardown
+            # IS — a send-stalled peer would hang the initiating RPC and stall
+            # the liveness loop inside its own recovery. The state above is
+            # already cleared and every sibling future already failed, so the
+            # only thing this deadline bounds is the courtesy frame.
             with suppress(Exception):
-                await websocket.close(code=4000)
+                await asyncio.wait_for(websocket.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        return True
 
     async def _heartbeat(self) -> None:
         await self._supervise("heartbeat", self._heartbeat_tick)
@@ -678,17 +836,28 @@ class BridgeService:
             with suppress(Exception):
                 # 4003 = unpaired, the same code the handshake uses so the
                 # popup renders \"waiting to pair\" rather than a mystery drop.
-                await websocket.close(code=4003)
+                await asyncio.wait_for(websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S)
         self.link.disconnect()
         self.publish_safely()
 
     async def _revocation_tick(self) -> None:
         await asyncio.sleep(REVOKE_WATCH_S)
-        if (
-            self.link.websocket is not None
-            and self.link.paired
-            and not self._live_pairing_matches()
-        ):
+        if not self.link.extension_id or self._live_pairing_matches():
+            return
+        # The pairing is gone ON DISK. Clear the latched drop reason HERE, before
+        # any socket test, because `revoke()` is unreachable once a drop has
+        # happened: `disconnect()` nulls the socket AND `paired`, so the guard
+        # below is false forever exactly while the latch is live (review R2-1,
+        # confirming QA Q2-1). Clearing it only in `revoke()` therefore left a
+        # deliberately unpaired bridge answering "attached and paired … pairing
+        # is preserved" for the rest of LINK_DROP_TTL_S — a claim about a pairing
+        # that no longer exists.
+        #
+        # The bound is one watch period: a revoke is reflected within
+        # REVOKE_WATCH_S of the file changing, the same order as the `/health`
+        # and RPC answers that read it.
+        self.link.clear_unproven_drop()
+        if self.link.websocket is not None and self.link.paired:
             logger.info("pairing revoked on disk; closing the live extension socket")
             await self.revoke()
 
@@ -852,11 +1021,26 @@ class BridgeService:
 
         # A later extension wins. This prevents two browser profiles from both
         # receiving commands while preserving reconnect after worker death.
-        if self.link.websocket is not None:
+        #
+        # The replacement is INSTALLED before the old socket is closed, so the
+        # supersession is atomic: from here every frame the old socket is still
+        # draining is ignored (the receive-loop fence below), and the close is a
+        # bounded courtesy to a peer that is no longer authoritative. Doing it
+        # the other way round left the old socket authoritative across the close
+        # await — precisely the window in which a superseded frame could stamp
+        # liveness or publish into the new connection's driven record (audit A1).
+        previous = self.link.websocket
+        if previous is not None:
+            # The superseded link's work is abandoned NOW: its futures can never
+            # be answered by the connection replacing it, so the waiters get the
+            # typed disconnect instead of burning their budgets. Its OWN socket
+            # is left in place for the bounded close below — clearing the field
+            # here would wipe the replacement this same block installs.
+            self.link.forget_link_state()
+        generation = self.link.attach(websocket)
+        if previous is not None:
             with suppress(Exception):
-                await self.link.websocket.close(code=4000)
-            self.link.disconnect()
-        self.link.websocket = websocket
+                await asyncio.wait_for(previous.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
         self.link.extension_id = extension_id
         self.link.browser = hello.browser
         # A fresh authoritative socket supersedes any latched drop reason from
@@ -871,22 +1055,55 @@ class BridgeService:
         if not self.link.paired:
             self._ensure_pending(extension_id)
         self.publish_safely()
-        await self.link.send(HelloAck(paired=self.link.paired).model_dump(mode="json"))
+        try:
+            # Bounded and wire-scoped like every other send on this socket: the
+            # handshake answer is the first thing a superseded write would
+            # misdeliver, and a peer that stopped draining must not park the
+            # accept path (audit A1/A2).
+            await asyncio.wait_for(
+                self.link.send(
+                    HelloAck(paired=self.link.paired).model_dump(mode="json"), wire=websocket
+                ),
+                timeout=LINK_SEND_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - an undeliverable handshake is a dead dial
+            with suppress(Exception):
+                await asyncio.wait_for(websocket.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+            if self.link.websocket is websocket:
+                self.link.disconnect()
+                self.publish_safely()
+            return
         try:
             while True:
                 frame = await websocket.receive_json()
+                if not self.link.is_authoritative(websocket, generation):
+                    # A replacement connection is authoritative now and this
+                    # socket is a superseded one still draining buffered frames.
+                    # Its events must not stamp liveness, publish into the driven
+                    # record, drop an approval, or resolve a future — every one of
+                    # which is the LIVE link's state (audit A1, receive-side half).
+                    logger.debug("browser bridge stopped reading a superseded socket")
+                    break
                 # ANY frame, recorded BEFORE any dispatch on its type: this is
                 # the liveness signal `proven` reads, and taking it here (rather
                 # than inside each event branch) is what makes an older
-                # extension that only pongs count as alive.
+                # extension that only pongs count as alive. The probe waits on
+                # this event, so it is set on the same line as the stamp: a
+                # frame that counts as liveness but not as an answer would leave
+                # the probe blind to a peer that is plainly talking.
                 self.link.last_frame_at = time.monotonic()
+                self.link.frame_event.set()
                 if frame.get("event") == "pair":
                     try:
                         pair = PairRequest.model_validate(frame)
                     except ValidationError:
                         continue
                     result = await self._try_pair(pair)
-                    await self.link.send(result.model_dump(mode="json"))
+                    with suppress(Exception):
+                        await asyncio.wait_for(
+                            self.link.send(result.model_dump(mode="json"), wire=websocket),
+                            timeout=LINK_SEND_TIMEOUT_S,
+                        )
                     continue
                 if frame.get("event") == "awaiting_origin":
                     # The extension paused this request on a human origin
@@ -985,8 +1202,12 @@ class BridgeService:
             # change exists to remove (design D1/D2). A peer that REALLY closed
             # never latches the reason (`clear_unproven_drop` runs on every
             # ordinary socket end), so it still gets the honest absent copy.
-            dropped_for = self.link.recent_drop_silence()
+            # Read the latched silence only AFTER the guard that decides whether
+            # it means anything: the value is 0.0 both for "never dropped" and
+            # for "dropped at time zero", so trusting it before the check invites
+            # reading an ambiguous number as a fact (review R2-6).
             if self.link.dropped_unproven():
+                dropped_for = self.link.recent_drop_silence()
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1005,7 +1226,10 @@ class BridgeService:
             # wedged. This is the gate that turns "everything hangs" into
             # "typed error immediately" even before a ping tick has noticed.
             silent = self.link.silent_for()
-            await self._drop_unproven_link(f"command refused: link silent for {silent:.0f}s")
+            await self._drop_unproven_link(
+                f"command refused: link silent for {silent:.0f}s",
+                expected=(self.link.websocket, self.link.generation),
+            )
             return self._error_response(
                 request.id,
                 ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1056,12 +1280,61 @@ class BridgeService:
     @staticmethod
     def lock_key_for(request: Request) -> str:
         """The serialization key one RPC dispatches under (see the comment
-        above; a separate method so the lock topology is directly testable)."""
+        above; a separate method so the lock topology is directly testable).
+
+        Three shapes, and the difference between them is WHOSE budget a stuck
+        command may spend (audit A4, scoping answer D2):
+
+        - a per-REQUEST key for `await_access` (a human wait must queue behind
+          nothing);
+        - the short `__access__` key for `request_access`;
+        - a per-TAB key whenever the request names a tab — and here the lock
+          spans the WHOLE command on purpose, because that span is what stops
+          two commands interleaving into one tab's CDP session;
+        - otherwise a per-OWNER key (`__owner__:<proof>`) when the request
+          carries one, and `__global__` only for the proof-less remainder
+          (`tabs`, a handle-less `status`, legacy capability clients).
+
+        Why the owner key replaced `__global__` for owned no-tab commands: they
+        carry no `tab` (`resources.py` builds owner params without one), so one
+        owner's `open`/`owner_recover`/`owner_finish` used to serialize with
+        EVERY other owner's — across a full navigation (30 s) or an approval
+        wait (+65 s). A parked `open` therefore blocked a different owner's
+        `open`, and the `owner_recover` that exists to recover from exactly that
+        (audit A4). The cap race `__global__` was a PROXY guard for is not the
+        daemon's to enforce any more: `MAX_SURFACES` is a property of the
+        extension's surfaces map, and every mutation of it is a read-modify-write
+        inside that worker's `storeQueue`. The extension owns it; the extension
+        now guards it (`withAdmission`, `state.ts`). See the addendum's D2/D3.
+        """
         if request.method == "await_access":
             return f"__await__:{request.id}"
         if request.method == "request_access":
             return "__access__"
-        return str(request.params.get("tab") or "__global__")
+        tab = request.params.get("tab")
+        if tab:
+            return str(tab)
+        proof = request.params.get("owner_proof")
+        if isinstance(proof, str) and proof:
+            return f"__owner__:{proof}"
+        return "__global__"
+
+    @staticmethod
+    def _admission_only(tab_key: str) -> bool:
+        """Whether this key's lock may be released before the response.
+
+        True for exactly the two keys the scoping change is about — a per-OWNER
+        key and the proof-less `__global__` one — which exist to order the frame
+        onto the wire, not to hold a navigation or a human wait.
+
+        Everything else keeps the whole-command span: a per-TAB key IS the
+        CDP-interleave guard (and starves nobody, being per tab), `await_access`
+        has its own per-request key so its span cannot queue behind anything, and
+        `__access__` is the short shared key `request_access` has always used.
+        Derived from the KEY rather than re-reading the request, so the decision
+        cannot drift from `lock_key_for`.
+        """
+        return tab_key == "__global__" or tab_key.startswith("__owner__:")
 
     async def _dispatch_serialized(self, request: Request) -> JSONResponse:
         tab_key = self.lock_key_for(request)
@@ -1081,27 +1354,92 @@ class BridgeService:
                     return await self._dispatch_locked(request)
             finally:
                 self._tab_locks.pop(tab_key, None)
+        if not self._admission_only(tab_key):
+            async with lock:
+                response = await self._dispatch_locked(request)
+            # Per-tab keys used to be near-singleton; with every opened tab minting
+            # a token the map would now grow for the daemon's lifetime. Evict the
+            # key once its tab is closed and nothing is waiting on the lock —
+            # unlocked-and-unwaited means a later command for the same (now dead)
+            # handle can safely mint a fresh Lock.
+            if request.method == "close" and not lock.locked():
+                self._tab_locks.pop(tab_key, None)
+            return response
+        # ADMISSION ONLY (`_admission_only`'s docstring): register the pending
+        # future and get the frame onto the wire under the key, then release it
+        # BEFORE waiting for the answer. Nothing in the response phase reads
+        # shared daemon state under a key — `_await_response` resolves one future
+        # from `link.pending` and the timeout/teardown paths key off
+        # `request.id` — so holding the lock across the answer bought nothing and
+        # cost every other owner its budget.
+        future = self._register_pending(request)
+        wire = self._wire()
         async with lock:
-            response = await self._dispatch_locked(request)
-        # Per-tab keys used to be near-singleton; with every opened tab minting
-        # a token the map would now grow for the daemon's lifetime. Evict the
-        # key once its tab is closed and nothing is waiting on the lock —
-        # unlocked-and-unwaited means a later command for the same (now dead)
-        # handle can safely mint a fresh Lock.
-        if request.method == "close" and tab_key != "__global__" and not lock.locked():
+            refused = await self._admit(request, future, wire)
+        # Evict a key that is neither shared nor currently held. Without this the
+        # map grows for the daemon's lifetime: a per-OWNER key is minted per
+        # session-resource, which is the same unbounded-growth defect round-3 M1
+        # fixed for the `__await__` keys. Known residual, benign and deliberate:
+        # a waiter that has not woken yet still holds the popped Lock object while
+        # a later request mints a fresh one, so two commands of ONE owner can be
+        # admitted concurrently — admission is a frame write, and the extension's
+        # per-proof lane re-serializes on arrival, so the worst case is "two
+        # frames admitted in an unspecified order".
+        if tab_key != "__global__" and not lock.locked():
             self._tab_locks.pop(tab_key, None)
-        return response
+        if refused is not None:
+            return refused
+        return await self._complete(request, future, wire)
 
     async def _dispatch_locked(self, request: Request) -> JSONResponse:
+        """Dispatch one command with the caller's key held for its WHOLE life.
+
+        The per-TAB path: for those keys the lock span IS the guard that stops two
+        commands interleaving into one tab's CDP session, and it starves nobody
+        because it is per tab. Keys that may be released after admission go
+        through `_admit`/`_complete` directly from `_dispatch_serialized` — see
+        `_admission_only`.
+        """
+        future = self._register_pending(request)
+        # The wire THIS command is being sent on, captured before the first await
+        # on it. Every later decision about the link — the send deadline's
+        # teardown, the promotion rule — is fenced to it, so a command that was
+        # suspended across a reconnect can never sever (or answer on behalf of)
+        # the healthy replacement that arrived in the meantime (audit A1).
+        wire = self._wire()
+        refused = await self._admit(request, future, wire)
+        if refused is not None:
+            return refused
+        return await self._complete(request, future, wire)
+
+    def _wire(self) -> tuple[WebSocket | None, int]:
+        """The current link as a fenceable pair (socket identity + generation)."""
+        return (self.link.websocket, self.link.generation)
+
+    def _register_pending(self, request: Request) -> asyncio.Future[Response]:
+        """Register this command's future BEFORE its frame can be answered."""
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()
         self.link.pending[request.id] = future
+        return future
+
+    async def _admit(
+        self, request: Request, future: asyncio.Future[Response], wire: tuple[WebSocket | None, int]
+    ) -> JSONResponse | None:
+        """Get one command onto the wire. None means it was delivered.
+
+        The ADMISSION phase, split out of `_dispatch_locked` so a caller can hold
+        its lock for exactly this much and release it before the answer (see
+        `_admission_only`). Nothing here waits on the peer — a bounded write and
+        nothing else — so every result it can return is final.
+        """
         try:
             # Bounded INCLUDING the ``send_lock`` acquisition inside
             # ``link.send``: a stuck lock holder used to hang the RPC past every
             # deadline in COMMAND_TIMEOUTS while holding this tab's lock key,
             # queueing every other command for the same key behind it.
             await asyncio.wait_for(
-                self.link.send(request.model_dump(mode="json")), timeout=LINK_SEND_TIMEOUT_S
+                self.link.send(request.model_dump(mode="json"), wire=wire[0]),
+                timeout=LINK_SEND_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
             # Never left the daemon. Distinct from "delivered, no answer" and
@@ -1114,9 +1452,22 @@ class BridgeService:
             # produce an unretrieved-exception warning at collection time.
             self.link.pending.pop(request.id, None)
             silent = self.link.silent_for()
-            await self._drop_unproven_link(
-                f"send of {request.method} exceeded {LINK_SEND_TIMEOUT_S:.0f}s"
+            dropped = await self._drop_unproven_link(
+                f"send of {request.method} exceeded {LINK_SEND_TIMEOUT_S:.0f}s",
+                expected=wire,
             )
+            if not dropped:
+                # The wire this command was being written to was superseded while
+                # the write was suspended, so the command was never delivered and
+                # there is no unresponsive peer to report — the replacement is
+                # answering. Say what actually happened (audit A1): the session's
+                # connection went away mid-send.
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_DISCONNECTED,
+                    f"{request.method} was not delivered: the extension replaced its "
+                    "connection while the command was being written",
+                )
             return self._error_response(
                 request.id,
                 ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1126,6 +1477,20 @@ class BridgeService:
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
             self.link.pending.pop(request.id, None)
             return self._error_response(request.id, ErrorCode.EXTENSION_DISCONNECTED, str(exc))
+        return None
+
+    async def _complete(
+        self, request: Request, future: asyncio.Future[Response], wire: tuple[WebSocket | None, int]
+    ) -> JSONResponse:
+        """Wait for one admitted command's answer and render it.
+
+        The RESPONSE phase, and deliberately key-independent: it resolves one
+        future out of ``link.pending`` and keys every teardown off ``request.id``
+        (plus A1's wire fence), so no caller needs to hold a lock across it. An
+        abandoned command — the daemon gave up, the extension answers later — is
+        covered by the ``pending`` eviction below (the id is gone, so a late frame
+        finds no future) together with that fence.
+        """
         try:
             response = await self._await_response(
                 request.id, future, COMMAND_TIMEOUTS[request.method]
@@ -1151,10 +1516,35 @@ class BridgeService:
             # the full candidate length to trip on. A slow SITE still cannot
             # trip this: the extension is ponging throughout, so silent_for()
             # stays ~0.
-            if silent > PING_INTERVAL_S * 1.5:
-                await self._drop_unproven_link(
-                    f"{request.method} unanswered with the link silent for {silent:.0f}s"
+            #
+            # …but elapsed silence ALONE cannot reach 30 s inside a 20 s budget,
+            # so on its own that rule was inert for exactly the methods the
+            # record added it for — `read`/`snapshot`/`screenshot` all time out
+            # at 20 s (review R2-3 / QA Q2-4 measured the change: the frozen
+            # worker returned `internal {timeout_s: 20.0}` where round 1 returned
+            # `extension_unresponsive`). The OR below is the fix for that, and it
+            # is deliberately NOT a lower threshold: a threshold below the
+            # healthy sawtooth is what review R1-2 reproduced, because the daemon
+            # is the only party that solicits speech. Asking the peer directly
+            # instead of inferring from a clock gives a definitive answer inside
+            # whatever budget the method has, so the rule fires for the tight
+            # methods without re-opening the false positive. The already-answered
+            # case short-circuits on the OR before probing.
+            if silent > PING_INTERVAL_S * 1.5 or not await self._peer_answers_a_solicited_ping():
+                dropped = await self._drop_unproven_link(
+                    f"{request.method} unanswered with the link silent for {silent:.0f}s",
+                    expected=wire,
                 )
+                if not dropped:
+                    # Same fence as the send deadline: nothing of ours is left to
+                    # sever, so the honest answer is the one the failed future
+                    # already carries.
+                    return self._error_response(
+                        request.id,
+                        ErrorCode.EXTENSION_DISCONNECTED,
+                        f"{request.method} was delivered on a connection the extension "
+                        "has since replaced",
+                    )
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,

@@ -76,6 +76,52 @@ export const SCRIPTING_DEADLINE_MS = 15_000;
  * (the re-attach is refused with "already attached" and `ownAttachment` adopts
  * it) — see `attach`.
  *
+ * THE POLICY, stated once because it is what every call site is judged against
+ * (contention-scoping addendum D4): a deadline guarantees that the OP SETTLES
+ * — so the queue link drains and the next command runs — and guarantees NOTHING
+ * about the mutation, which may land afterwards. The corollary is why this
+ * paragraph is longer than one sentence: every `chrome.storage.*.set` inside a
+ * `deadline()` is a write that may commit after its caller gave up, and since
+ * each set is a whole-key overwrite of a value read before the stall, a late set
+ * can revert a newer write. Per call class, that is either already reconciled —
+ * with the mechanism named — or it is not and the cost is stated:
+ *
+ *   - surfaces map (`state.ts` putSurface/removeSurface/touchSurface): a
+ *     resurrected dead entry is pruned by `liveSurfaces` on the next
+ *     open/tabs/status; a lost entry stops resolving, which is a typed
+ *     `tab_closed`, and the tab stays journaled so `owner_recover` reports it.
+ *   - `ownerScopes` (`ownership.ts` `mutate`): every read validates session +
+ *     generation and refuses, so a stale write surfaces as a typed
+ *     `owner_refused` rather than being honoured.
+ *   - access queue/receipts (`approval-store.ts`): liveness is computed on read
+ *     (`expiresAt` re-tested) and re-derived by the sweep, so a revived entry
+ *     reads as absent.
+ *   - snapshot refs (`state.ts` setRefs): already closed — refs carry an `epoch`
+ *     and consumers refuse a mismatch. This is the model the others are measured
+ *     against.
+ *   - log buffers (`log-capture.ts`): nothing to do — in-memory only, no storage
+ *     write in the path, and the enables are idempotent behind a tabId guard.
+ *   - CDP commands and `attach`: covered above.
+ *   - one-shot grants (`origins.ts` consumeOnceGrant/consumeGrantFor): the ONE
+ *     genuine residue, and it is deliberately NOT closed here. Two existing
+ *     properties bound it — the grant is requester-bound and TTL-bounded (10
+ *     min) — so the worst case is one requester spending its own grant twice
+ *     inside its own TTL, not a cross-owner consent hole. Deferred because the
+ *     closing move (a monotonic per-key spend counter, or a read-back verify
+ *     inside `withSessionMutation`) is a consent-surface change that wants its
+ *     own review round and its own repro. What WOULD promote it into scope: a
+ *     repro where a late set restores a grant for a DIFFERENT requester or a
+ *     different origin.
+ *
+ * The related ordering hypothesis — a delayed `storage.set` letting a stale
+ * write overwrite a newer one (the surfaces-map row above) — is a mechanically
+ * plausible consequence of the whole-key overwrite, and it is UNPROVEN: nothing
+ * in this change measures it, in a fault-injected or in a native-Chrome run, so
+ * nothing here claims native storage reordering. The fix it would justify
+ * (epoch-guarded map writes) is out of scope. The fixture that would settle it
+ * is named in the addendum: a whole-map write from a stalled caller that
+ * resolves after a peer's set has already committed.
+ *
  * Do NOT wrap the queue itself with this. Timing out a chain head while the op
  * still holds a half-read copy of `surfaces` is a lost update or a double-spent
  * one-shot grant (state.ts documents the reproduced double-spend); bound the

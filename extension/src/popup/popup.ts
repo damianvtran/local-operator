@@ -110,6 +110,13 @@ let scopeBuiltForEntryId: string | undefined;
 const repeatAskByOrigin = new Map<string, DecidedOrigin>();
 
 interface Health {
+  /** The daemon's liveness bit for the socket. DECLARATIVE ONLY: the card choice
+   * below reads `paired` and `extension_unresponsive` instead, because "the
+   * socket is open" is not the question the user is asking (a paired,
+   * not-attached link — Chrome up, worker between dials — is `false` here and
+   * still renders the connected card; see the recorded D2-4 follow-up). Kept in
+   * the type because /health is the wire contract, not because this module
+   * consumes it. */
   extension_connected: boolean;
   /** The socket is attached but the worker has stopped answering — either
    * still attached and mute, or severed by the daemon for silence within its
@@ -451,19 +458,33 @@ async function renderOnce(): Promise<void> {
   }
   // /health is the authority on whether this browser is paired, so it is what
   // the first-paint layout hint is mirrored from — in BOTH directions, so an
-  // unpair shrinks the next first paint back to the form's height.
-  writePairedHint(health.paired);
+  // unpair shrinks the next first paint back to the form's height. The ONE
+  // state that inverts this is a wedged-but-paired link: it renders the honest
+  // card below, NOT the pairing form, so pinning the form's height for it would
+  // open on a resize. (`extension_unresponsive` is exactly "the daemon says a
+  // pairing exists and the worker is not answering".)
+  writePairedHint(health.paired || health.extension_unresponsive === true);
+  // The worker is wedgeable in a way the socket does not show: attached, paired,
+  // and answering nothing. Say so instead of painting the green "Connected."
+  // card over a browser the agent cannot drive — that card is exactly what the
+  // incident looked like from this popup (design D4). One render after the state
+  // clears, the card returns to normal, because this reads /health on every
+  // render like everything else here.
+  //
+  // Read BEFORE the `paired` gate, deliberately. `paired` here is link-derived
+  // (`daemon.py`: it is false once the daemon has severed the link), while the
+  // daemon's own `paired:` line — and the pairing on disk — are still true. So a
+  // gate on `paired` made this card unreachable in exactly the half of its
+  // window it exists for: the post-drop cooling-off period, where the popup fell
+  // through to the PAIRING FORM ("Enter the code shown in Local Operator") for a
+  // browser that is paired on disk and about to re-dial (QA Q2-3 / review R2-5).
+  // Keyed on the latch, which is the daemon's statement about the link, not on
+  // the link's own copy of `paired`.
+  if (health.extension_unresponsive === true) {
+    show("unresponsive");
+    return;
+  }
   if (health.paired) {
-    // The worker is wedgeable in a way the socket does not show: attached,
-    // paired, and answering nothing. Say so instead of painting the green
-    // "Connected." card over a browser the agent cannot drive — that card is
-    // exactly what the incident looked like from this popup (design D4). One
-    // render after the state clears, the card returns to normal, because this
-    // reads /health on every render like everything else here.
-    if (health.extension_unresponsive === true) {
-      show("unresponsive");
-      return;
-    }
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
     // unpair (daemon revoke → close 4003) renders the form again instead of a

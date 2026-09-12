@@ -74,7 +74,33 @@ let alive = false;
 // over — nothing may depend on it firing.
 let fastPathTimer: ReturnType<typeof setTimeout> | undefined;
 
-function send(frame: object): void {
+//: Monotonic id of the CURRENT wire, bumped by every dial.
+//
+// The socket alone cannot fence anything here, because `dispatch` is fired
+// fire-and-forget: a handler that finishes after a reconnect would otherwise
+// write its response — and its `tab_update` — to `socket`, which by then is the
+// REPLACEMENT connection. That is not a cosmetic misdelivery: the daemon
+// matches a response to the request IT sent on the OLD socket, so the new socket
+// receives a frame it never asked for and the daemon's own
+// "nothing is replayed on a new socket" contract (see `respond`) is broken from
+// the other side. Reproduced by the concurrency audit by bundling this file,
+// gating one handler, replacing the wire through the reconnect alarm and then
+// releasing the handler — the NEW wire received
+// `oldResponseOnNewWire=[tab_update bridge:1:old, {id: old-request, ok:true}]`.
+//
+// So every send that belongs to a REQUEST carries the generation of the wire the
+// request arrived on, and anything that would land on a different wire is
+// dropped with a log instead of being delivered.
+let wireGeneration = 0;
+
+function send(frame: object, generation: number = wireGeneration): void {
+  if (generation !== wireGeneration) {
+    // An event produced by a superseded request. Dropping it is the point: the
+    // daemon that asked has already failed that request's future, and the live
+    // connection has its own records to keep.
+    console.warn("dropped an event from a superseded connection", frame);
+    return;
+  }
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
 }
 
@@ -190,7 +216,18 @@ async function daemonPort(): Promise<number> {
   return port ?? DEFAULT_PORT;
 }
 
-async function respond(response: Response): Promise<void> {
+async function respond(response: Response, generation: number): Promise<void> {
+  if (generation !== wireGeneration) {
+    // The request this answers arrived on a connection that has since been
+    // replaced. `worker.ts`'s own contract (see the note below) is that a stale
+    // result must never be replayed onto a new socket — and the daemon has
+    // already failed this request's future when it accepted the replacement, so
+    // there is nothing left to answer. Say so rather than misdelivering it.
+    console.warn(
+      `dropped response for ${response.id}: it belongs to a superseded connection`,
+    );
+    return;
+  }
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(response));
     return;
@@ -206,10 +243,13 @@ async function respond(response: Response): Promise<void> {
   console.warn(`dropped response for ${response.id}: the extension socket is not open`);
 }
 
-async function dispatch(request: { id: string; method: string; params: Record<string, unknown> }): Promise<void> {
+async function dispatch(
+  request: { id: string; method: string; params: Record<string, unknown> },
+  generation: number,
+): Promise<void> {
   const handler = HANDLERS[request.method];
   if (!handler) {
-    await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } });
+    await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: `unknown method ${request.method}`, data: {} } }, generation);
     return;
   }
   try {
@@ -240,7 +280,7 @@ async function dispatch(request: { id: string; method: string; params: Record<st
       // of forking one.
       const raw = typeof result.tab === "string" ? result.tab : String(request.params.tab ?? "");
       const handle = isRedactedToken(raw) ? "" : raw;
-      send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") });
+      send({ event: "tab_update", tab: handle, url: result.url, title: String(result.title ?? "") }, generation);
     }
     // An explicit `close` retires the surface, so tell the daemon now rather
     // than relying on the onRemoved listener: chrome.tabs.remove fires
@@ -254,14 +294,14 @@ async function dispatch(request: { id: string; method: string; params: Record<st
     // so it says so and the daemon drops precisely that one.
     if (request.method === "close") {
       const closed = typeof result.closed === "string" ? result.closed : String(request.params.tab ?? "");
-      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed });
+      send({ event: "tab_closed", tab: isRedactedToken(closed) ? "" : closed }, generation);
     }
-    await respond({ id: request.id, ok: true, result });
+    await respond({ id: request.id, ok: true, result }, generation);
   } catch (error) {
     if (error instanceof BridgeCommandError) {
-      await respond({ id: request.id, ok: false, error: { code: codeFor(error.code), message: error.message, data: error.data } });
+      await respond({ id: request.id, ok: false, error: { code: codeFor(error.code), message: error.message, data: error.data } }, generation);
     } else {
-      await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: String(error), data: {} } });
+      await respond({ id: request.id, ok: false, error: { code: ErrorCode.INTERNAL, message: String(error), data: {} } }, generation);
     }
   }
 }
@@ -300,6 +340,11 @@ async function connect(): Promise<void> {
 
   const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
   socket = wire;
+  // This dial's identity. Everything asynchronous that belongs to it — the
+  // handshake writes, the frames it carries, and every response a handler it
+  // dispatched eventually produces — is scoped to this number, so a later dial
+  // cannot be written to by an earlier one (see `wireGeneration`).
+  const generation = ++wireGeneration;
 
   // Explicit dial deadline: if a dead loopback handshake neither opens nor
   // fires onerror/onclose, `connecting` would otherwise stay true forever and
@@ -328,6 +373,17 @@ async function connect(): Promise<void> {
 
   wire.onopen = () => {
     clearDialTimer();
+    if (socket !== wire) {
+      // A later dial already owns the worker; this one must not claim
+      // `connected`, must not send its own `hello` (two handshakes race for the
+      // daemon's single authority), and must not be left dangling.
+      try {
+        wire.close();
+      } catch {
+        // Already closing.
+      }
+      return;
+    }
     connected = true;
     connecting = false;
     attempt = 0;
@@ -335,8 +391,9 @@ async function connect(): Promise<void> {
     wire.send(JSON.stringify(hello));
   };
   wire.onmessage = (message) => {
+    if (socket !== wire) return; // a superseded socket's frames are not ours
     const frame = JSON.parse(String(message.data)) as DaemonMessage;
-    if ("method" in frame) void dispatch(frame);
+    if ("method" in frame) void dispatch(frame, generation);
     else if (frame.event === "ping") wire.send(JSON.stringify({ event: "pong" }));
     else if (frame.event === "hello_ack") {
       paired = frame.paired;
@@ -350,6 +407,13 @@ async function connect(): Promise<void> {
   };
   const teardown = (event?: CloseEvent) => {
     clearDialTimer();
+    if (socket !== wire) {
+      // A superseded socket finishing its close, long after a replacement dial
+      // took over. Resetting the live connection's flags here — or publishing a
+      // `connState` from it — would tear down the socket that is actually up:
+      // the delayed-onclose half of the same defect class as a stale response.
+      return;
+    }
     connected = false;
     connecting = false;
     paired = false;

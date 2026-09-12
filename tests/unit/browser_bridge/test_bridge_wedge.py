@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pytest
 from starlette.testclient import TestClient
@@ -43,13 +44,112 @@ ORIGIN = f"chrome-extension://{EXTENSION_ID}"
 
 
 class _RecordingSocket:
-    """Stand-in for the extension leg's websocket: records close codes."""
+    """Stand-in for the extension leg's websocket: records close codes and frames."""
 
     def __init__(self) -> None:
         self.closed: list[int | None] = []
+        self.sent: list[dict[str, Any]] = []
 
     async def close(self, code: int | None = None, reason: str | None = None) -> None:
         self.closed.append(code)
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+
+
+class _StallingSendSocket(_RecordingSocket):
+    """A socket that ACCEPTS the write and never finishes it.
+
+    The distinction matters: parking the coroutine before `send_json` is entered
+    would never set ``entered``, and the test could not tell a write that was
+    suspended from one that was never attempted.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.entered.set()
+        await asyncio.Future()
+
+
+class _StallingCloseSocket(_RecordingSocket):
+    """A socket whose close() never resolves (audit A2's fake close)."""
+
+    async def close(self, code: int | None = None, reason: str | None = None) -> None:
+        self.closed.append(code)
+        await asyncio.Future()
+
+
+class _FakePeer:
+    """A scripted /extension connection: feeds frames, records what it is sent.
+
+    The receive path is a QUEUE rather than a list so a test can decide when a
+    frame becomes available — which is the whole point of the stale-frame row:
+    the frame must arrive strictly after the socket stops being authoritative.
+    """
+
+    def __init__(self, extension_id: str = EXTENSION_ID) -> None:
+        self.headers = {"origin": f"chrome-extension://{extension_id}"}
+        self.accepted = False
+        self.closed: list[int | None] = []
+        self.sent: list[dict[str, Any]] = []
+        self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive_json(self) -> dict[str, Any]:
+        return await self._frames.get()
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+
+    async def close(self, code: int | None = None, reason: str | None = None) -> None:
+        self.closed.append(code)
+
+    def push(self, frame: dict[str, Any]) -> None:
+        self._frames.put_nowait(frame)
+
+
+class _StallingClosePeer(_FakePeer):
+    """A superseded connection that is asked to close and never finishes it."""
+
+    def __init__(self, extension_id: str = EXTENSION_ID) -> None:
+        super().__init__(extension_id)
+        self.close_entered = asyncio.Event()
+
+    async def close(self, code: int | None = None, reason: str | None = None) -> None:
+        self.closed.append(code)
+        self.close_entered.set()
+        await asyncio.Future()
+
+
+def _hello(**overrides: Any) -> dict[str, Any]:
+    frame = {
+        "event": "hello",
+        "proto": PROTO_VERSION,
+        "token": "",
+        "extension_version": "0.1.10",
+        "browser": "Chrome/153",
+    }
+    frame.update(overrides)
+    return frame
+
+
+async def _settles(predicate: Callable[[], bool], seconds: float = 2.0) -> bool:
+    """Await ``predicate``, giving REAL timers room to fire.
+
+    A loop of ``await asyncio.sleep(0)`` advances no clock, so it can never let a
+    deadline expire — which is exactly the behaviour these callers assert on.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.005)
+    return predicate()
 
 
 def _connected(service: BridgeService, *, silent_for: float = 0.0) -> _RecordingSocket:
@@ -58,6 +158,21 @@ def _connected(service: BridgeService, *, silent_for: float = 0.0) -> _Recording
     service.link.websocket = socket  # type: ignore[assignment]
     service.link.last_frame_at = time.monotonic() - silent_for
     return socket
+
+
+def _peer_spoke(service: BridgeService) -> None:
+    """Record that the extension just said something.
+
+    The receive loop does TWO things with an arriving frame — stamps liveness
+    and sets the probe's event — so a test stub that stands in for a live peer
+    must do both, or it models a peer that is talking while refusing to answer
+    (which is not a state the protocol can produce). The `wire` keyword on every
+    stub below is the other half of the same change: a send is scoped to the
+    socket the caller captured, so a stub that models the extension leg has to
+    accept it.
+    """
+    service.link.last_frame_at = time.monotonic()
+    service.link.frame_event.set()
 
 
 def _health_payload(tmp_path: Path) -> dict[str, Any]:
@@ -129,7 +244,7 @@ def test_command_against_a_silent_link_fails_fast_with_a_typed_code(
             socket.receive_json()
             sent: list[dict[str, Any]] = []
 
-            async def record(payload: dict[str, Any]) -> None:
+            async def record(payload: dict[str, Any], *, wire: Any = None) -> None:
                 sent.append(payload)
 
             service.link.send = record  # type: ignore[method-assign]
@@ -262,7 +377,7 @@ async def test_command_timeout_against_a_silent_link_is_promoted(
     # lets the command through) but already past one ping interval.
     _connected(service, silent_for=1.0)
 
-    async def silent(payload: dict[str, Any]) -> None:
+    async def silent(payload: dict[str, Any], *, wire: Any = None) -> None:
         # Delivered and accepted — the send RETURNS, it does not park — and then
         # no response ever arrives. Parking here instead would exercise the send
         # deadline (D7), not the promotion rule.
@@ -292,11 +407,11 @@ async def test_command_timeout_against_a_live_link_is_still_nav_timeout(
     service = BridgeService(root=tmp_path)
     socket = _connected(service, silent_for=0.0)
 
-    async def ponging(payload: dict[str, Any]) -> None:
+    async def ponging(payload: dict[str, Any], *, wire: Any = None) -> None:
         # The extension received the command and is working on it. Its pongs
         # keep arriving for the whole budget — that is what a slow page looks
         # like on the wire. The send RETURNS; only the answer is missing.
-        service.link.last_frame_at = time.monotonic()
+        _peer_spoke(service)
         return None
 
     service.link.send = ponging  # type: ignore[method-assign]
@@ -336,7 +451,7 @@ async def test_blocked_send_does_not_outlive_its_deadline(
     service = BridgeService(root=tmp_path)
     _connected(service, silent_for=0.0)
 
-    async def blocked(payload: dict[str, Any]) -> None:
+    async def blocked(payload: dict[str, Any], *, wire: Any = None) -> None:
         await asyncio.sleep(3600)
 
     service.link.send = blocked  # type: ignore[method-assign]
@@ -365,7 +480,7 @@ async def test_blocked_send_does_not_outlive_its_deadline(
     assert service.link.dropped_unproven() is True
 
     # The next command on the same key is served, not queued behind a corpse.
-    async def answer(payload: dict[str, Any]) -> None:
+    async def answer(payload: dict[str, Any], *, wire: Any = None) -> None:
         request_model = Request.model_validate(payload)
         future = service.link.pending.get(request_model.id)
         if future and not future.done():
@@ -682,10 +797,17 @@ async def test_a_drifted_ping_tick_does_not_promote_a_healthy_link(
     # inside LINK_SILENCE_TIMEOUT_S), so the rpc gate lets the command through.
     socket = _connected(service, silent_for=1.2)
 
-    async def silent(payload: dict[str, Any]) -> None:
+    async def answering(payload: dict[str, Any], *, wire: Any = None) -> None:
+        # A HEALTHY peer's job in this row is not to be asleep: it answers a
+        # solicited ping within an event-loop turn whatever else it is doing
+        # (record §2.2). The fixture therefore has to answer, because the rule
+        # under test now ASKS the peer instead of inferring from a clock — and a
+        # stub that stayed mute would be modelling the defect, not the healthy
+        # link this row exists to protect.
+        _peer_spoke(service)
         return None
 
-    service.link.send = silent  # type: ignore[method-assign]
+    service.link.send = answering  # type: ignore[method-assign]
     response = await service._dispatch_serialized(
         Request(id="r-drift", method="read", params={"tab": "bridge:9:n"})
     )
@@ -712,7 +834,7 @@ async def test_a_corroborated_dead_peer_still_promotes_past_the_slack(
     # 2 intervals of silence: past the 1.5x slack, still proven.
     socket = _connected(service, silent_for=2.0)
 
-    async def silent(payload: dict[str, Any]) -> None:
+    async def silent(payload: dict[str, Any], *, wire: Any = None) -> None:
         return None
 
     service.link.send = silent  # type: ignore[method-assign]
@@ -723,6 +845,53 @@ async def test_a_corroborated_dead_peer_still_promotes_past_the_slack(
     assert ErrorCode.EXTENSION_UNRESPONSIVE.value in body
     assert '"phase":"response"' in body
     assert socket.closed == [4000], "a corroborated dead peer must be severed"
+
+
+@pytest.mark.asyncio
+async def test_the_tight_budget_methods_can_still_corroborate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule must fire for a 20 s method, not only past the 30 s slack.
+
+    Review R2-3 / QA Q2-4 measured the regression this pins: `PING_INTERVAL_S *
+    1.5` is 30 s, above the 20 s budget of `read`/`snapshot`/`screenshot`, so a
+    frozen worker was answered `internal {timeout_s: 20}` where round 1 answered
+    `extension_unresponsive` — the rule had gone inert for exactly the methods
+    the record introduced it for ("requiring 50 s would make a `read` unable to
+    ever corroborate, since its own timeout fires first", §2.4).
+
+    Silence here is 1.2 intervals — deliberately INSIDE the slack, below the
+    threshold that protects a healthy link — so this row can only pass because
+    the daemon ASKS the peer and gets nothing back. The companion row above
+    (1.2 intervals, peer answering) is what stops that from becoming a licence
+    to tear down healthy links: together they pin "the clock alone cannot
+    decide; the answer can".
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    # The probe window is shortened so the row is deterministic and fast; the
+    # REAL number is a magnitude below every method's budget, which is the whole
+    # property under test (see daemon.PING_PROBE_TIMEOUT_S).
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    socket = _connected(service, silent_for=1.2)
+
+    async def mute(payload: dict[str, Any], *, wire: Any = None) -> None:
+        # Accepts the frame and answers NOTHING — not the command, and not the
+        # probe's ping. This is the wedged worker: its socket is open and it is
+        # still draining, so only a direct question distinguishes it from a slow
+        # page.
+        return None
+
+    service.link.send = mute  # type: ignore[method-assign]
+    response = await service._dispatch_serialized(
+        Request(id="r-frozen", method="read", params={"tab": "bridge:9:n"})
+    )
+    body = bytes(response.body).decode().replace(" ", "")
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value in body
+    assert '"phase":"response"' in body
+    assert socket.closed == [4000], "a mute peer inside the slack must be severed"
 
 
 # --- D2 / R1-5 / Q1 -------------------------------------------------------
@@ -810,22 +979,79 @@ def test_a_peer_that_closes_its_own_socket_is_absent_not_unresponsive(tmp_path: 
 # --- D5 / D6 --------------------------------------------------------------
 
 
-def test_a_daemon_side_timeout_names_a_remedy_not_a_raw_code() -> None:
-    """`internal` + `timeout_s` must render as an action, not as a bare code.
+class _RecoverFailure:
+    """A browser resource whose recovery preamble raises the given error.
+
+    Deliberately the REAL seams `execute_browser` drives (`lock`, `initialize`,
+    `recover`, `recovered`) rather than a stubbed render helper: the defect this
+    stands in for was a GREEN guard over a broken path, because the guard called
+    `format_error` directly with the default empty `action` while the tool passed
+    the daemon's verb name (design D2-1, review R2-2).
+    """
+
+    def __init__(self, exc: BaseException, *, recovered: bool) -> None:
+        self._exc = exc
+        self.generation = "g-test"
+        self.record: dict[str, Any] = {"surface_id": "bridge:9:nonce"}
+        self.recovered = recovered
+        self.lock = asyncio.Lock()
+
+    def initialize(self) -> None:
+        return None
+
+    async def recover(self) -> dict[str, Any]:
+        raise self._exc
+
+
+def _recover_context(exc: BaseException, *, recovered: bool) -> Any:
+    from local_operator.harness.types import BrowserSurface, ToolContext
+
+    surface = BrowserSurface()
+    surface.surface_id = "bridge:9:nonce"
+    surface.resource = _RecoverFailure(exc, recovered=recovered)  # type: ignore[assignment]
+    return ToolContext(browser=surface)
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_side_timeout_names_a_remedy_not_a_raw_code() -> None:
+    """`internal` + `timeout_s` must render as an action, not as a bare code,
+    THROUGH THE TOOL — both of its render sites.
 
     P3 correctly stopped a daemon-side timeout reading as a version mismatch,
     but left it on the generic fallback: an obscure code, the daemon's internal
-    verb name, and no remedy at all — on `owner_recover`, whose entire job is
+    verb name, and no remedy at all — on the recovery path, whose entire job is
     recovery (design D5). The budget stays in details for diagnostics.
+
+    The two sites are the recovery preamble and an explicit `recover` action.
+    They used to disagree: the preamble rendered `format_error`, the action
+    returned `str(exc)` — the raw `owner_recover timed out`, with no remedy and
+    no typed code (design D2-1, review R2-2). The previous version of this test
+    called `format_error` directly and passed vacuously; it now drives the tool
+    with a resource whose `recover()` raises.
     """
-    rendered = format_error(
-        BridgeError(ErrorCode.INTERNAL, "owner_recover timed out", {"timeout_s": 20.0})
+    from local_operator.tools import builtin
+
+    error = BridgeError(ErrorCode.INTERNAL, "owner_recover timed out", {"timeout_s": 20.0})
+
+    # The preamble site: the session had not recovered yet, which is the flow the
+    # reported incident took.
+    preamble = await builtin.execute_browser(
+        "t", {"action": "read"}, None, None, _recover_context(error, recovered=False)
     )
-    assert "did not answer within 20s" in rendered
-    assert "chrome://extensions" in rendered
-    assert "internal" not in rendered
-    assert "owner_recover" not in rendered, "the daemon's internal verb does not belong in prose"
-    assert "browser bridge error" not in rendered
+    # The explicit-action site. `recovered=True` so the preamble passes and the
+    # action's own `recover()` call is what fails.
+    explicit = await builtin.execute_browser(
+        "t", {"action": "recover"}, None, None, _recover_context(error, recovered=True)
+    )
+
+    for result in (preamble, explicit):
+        assert "did not answer within 20s" in result.text
+        assert "chrome://extensions" in result.text, "the remedy must travel with the failure"
+        assert "internal" not in result.text
+        assert "owner_recover" not in result.text, "the internal verb does not belong in prose"
+        assert "browser bridge error" not in result.text
+        assert "the browser tab recovery" in result.text
+        assert (result.details or {}).get("error_code") == "internal"
 
 
 def test_the_undrivable_tab_copy_names_no_opaque_handle() -> None:
@@ -846,3 +1072,309 @@ def test_the_undrivable_tab_copy_names_no_opaque_handle() -> None:
     assert "(unknown)" not in rendered
     assert "bridge:12:deadbeef" not in rendered
     assert "'open' with a URL" in rendered
+
+
+# --- Audit round 1: A1 — the generation fence -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_old_send_deadline_cannot_sever_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1, the daemon's command half. The most severe of the audit's findings.
+
+    An OLD `send_json` is suspended when the daemon's link is replaced by a
+    freshly healthy one. The old send's deadline then fires, and pre-fix
+    `_drop_unproven_link` captured `self.link.websocket` — the CURRENT socket —
+    closing the HEALTHY replacement with 4000 and failing every new session's
+    futures. Reproduced by the auditor against the pinned head:
+
+        {"new_closed":[4000],"new_still_attached":false,
+         "response":{"error":{"code":"extension_unresponsive",
+                              "data":{"phase":"send",...}}}}
+
+    The fence is what makes those two sockets distinguishable: the teardown is
+    scoped to the wire the caller decided about, and a caller whose wire is gone
+    is told so rather than being handed a lie about a peer that is answering.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_SEND_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    old = _StallingSendSocket()
+    service.link.attach(old)  # type: ignore[arg-type]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    task = asyncio.create_task(
+        service._dispatch_serialized(
+            Request(id="r-old", method="read", params={"tab": "bridge:1:n"})
+        )
+    )
+    await asyncio.wait_for(old.entered.wait(), timeout=2.0)
+
+    # A later, healthy connection arrives while the old write is still in flight.
+    new = _RecordingSocket()
+    service.link.forget_link_state()
+    service.link.attach(new)  # type: ignore[arg-type]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    response = await asyncio.wait_for(task, timeout=2.0)
+    body = bytes(response.body).decode().replace(" ", "")
+
+    assert new.closed == [], "the healthy replacement was severed by a stale decision"
+    assert service.link.websocket is new
+    assert service.link.dropped_unproven() is False, "nothing was severed, so nothing is latched"
+    assert ErrorCode.EXTENSION_DISCONNECTED.value in body
+    assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in body
+    assert "notdelivered" in body.replace('"', ""), body
+
+
+@pytest.mark.asyncio
+async def test_an_old_ping_deadline_cannot_sever_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1, the ping path — the same shape, and the audit names it explicitly.
+
+    `_ping_tick`'s bounded send is the other place a deadline can fire long
+    after the socket it was measuring stopped being the socket. A ping whose
+    send parks must not take the replacement down with it, or a single stalled
+    tick costs every session on a bridge that is now healthy.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_SEND_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 0.01)
+    service = BridgeService(root=tmp_path)
+    old = _StallingSendSocket()
+    service.link.attach(old)  # type: ignore[arg-type]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    tick = asyncio.create_task(service._ping_tick())
+    await asyncio.wait_for(old.entered.wait(), timeout=2.0)
+
+    new = _RecordingSocket()
+    service.link.forget_link_state()
+    service.link.attach(new)  # type: ignore[arg-type]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    await asyncio.wait_for(tick, timeout=2.0)
+
+    assert new.closed == [], "a stale ping tick severed the live replacement"
+    assert service.link.websocket is new
+    assert service.link.dropped_unproven() is False
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_frame_cannot_touch_the_live_link(tmp_path: Path) -> None:
+    """A1, the receive half: an abandoned connection keeps draining frames.
+
+    The audit inserted `bridge:1:old` into the NEW connection's driven records
+    through a frame that completed on the old socket
+    (`staleDrivenAccepted:true`). It is protocol fault injection rather than
+    proof that real Chrome delivers a post-close frame — but the receive loop
+    had no fence at all, so any buffered or delayed frame was processed as if it
+    belonged to the live link. This pins the fence on the LOOP BODY, not just on
+    the `finally` that already checked identity.
+    """
+
+    service = BridgeService(root=tmp_path)
+    stale = _FakePeer()
+    stale.push(_hello())
+    stale_task = asyncio.create_task(service.extension(stale))  # type: ignore[arg-type]
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if stale.sent:
+            break
+    assert stale.sent, "the handshake answer never went out"
+    first_generation = service.link.generation
+
+    live = _FakePeer()
+    live.push(_hello())
+    live_task = asyncio.create_task(service.extension(live))  # type: ignore[arg-type]
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if live.sent:
+            break
+    assert service.link.generation == first_generation + 1
+    assert service.link.websocket is live
+    assert stale.closed == [4000], "the superseded socket was closed"
+
+    # Freeze the live link's observable liveness, then let the stale socket
+    # deliver the frame it was sitting on.
+    service.link.last_frame_at = 1234.5
+    stale.push(
+        {"event": "tab_update", "tab": "bridge:1:old", "url": "https://old.test", "title": "OLD"}
+    )
+    await asyncio.sleep(0.05)
+
+    assert service.link.driven == {}, "a superseded frame published into the live link"
+    assert service.link.last_frame_at == 1234.5, "a superseded frame stamped liveness"
+    assert service.link.websocket is live
+
+    for task in (stale_task, live_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+# --- Audit round 1: A2 — the teardown close is bounded ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_teardown_close_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2: a close that never resolves must not park the recovery it IS.
+
+    `_drop_unproven_link` clears the link and then awaits `websocket.close()`;
+    pre-fix that await had no deadline, so a send-stalled peer left the
+    initiating RPC — or the ping supervisor — pending forever with the link
+    already cleared. The auditor's probe against the pinned head:
+
+        {"case":"drop with blocked close","link_cleared":true,"drop_completed":false}
+
+    Bounded here, and asserted through an outer `wait_for` so a regression fails
+    as a red assertion in ~0.05 s rather than as a hung test (RC=124 under
+    `-n auto --dist worksteal` is a killed worker carrying unrelated tests).
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    socket = _StallingCloseSocket()
+    service.link.attach(socket)  # type: ignore[arg-type]
+    service.link.last_frame_at = time.monotonic()
+    service.link.paired = True
+
+    dropped = await asyncio.wait_for(
+        service._drop_unproven_link("audit stalled close"), timeout=2.0
+    )
+
+    assert dropped is True
+    assert socket.closed == [4000], "the close was never attempted"
+    assert service.link.websocket is None
+    assert service.link.dropped_unproven() is True
+
+
+# --- QA Q2-1 / review R2-1: a revoke clears the latch -----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_revoke_clears_a_latched_unproven_drop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The latch must not outlive the pairing it describes.
+
+    `lop browser pair --reset` runs in ANOTHER process, so the only thing the
+    daemon can notice is the pairing file changing. Pre-fix the clear lived in
+    `revoke()`, whose every path requires a live socket (`_revocation_tick`
+    guarded on `websocket is not None and paired`) — and the latch exists only
+    AFTER `disconnect()` has nulled both. So for the rest of `LINK_DROP_TTL_S`
+    the daemon told every caller "attached and paired … pairing is preserved"
+    about a bridge the user had deliberately unpaired (QA Q2-1, mechanism added
+    by review R2-1).
+
+    The fix moves the clear to where the revocation is OBSERVED. No socket here
+    on purpose: that is the state a drop leaves behind, and the state the old
+    guard could not act in.
+    """
+
+    service = BridgeService(root=tmp_path)
+    service.link.extension_id = EXTENSION_ID
+    daemon_module._private_write(
+        daemon_module._pairing_path(tmp_path), {"extension_id": EXTENSION_ID, "token_hash": "x"}
+    )
+    service.link.note_unproven_drop(52.0)
+    assert service.link.dropped_unproven() is True
+    assert service.link.websocket is None
+
+    daemon_module.reset_pairing(tmp_path)
+    monkeypatch.setattr(daemon_module, "REVOKE_WATCH_S", 0.0)
+    await service._revocation_tick()
+
+    assert service.link.dropped_unproven() is False, "an unpaired bridge still reads as wedged"
+
+
+@pytest.mark.asyncio
+async def test_a_revocation_tick_leaves_a_live_pairing_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inverse guard: a tick that finds the pairing intact changes nothing.
+
+    Without this half, clearing the latch unconditionally on every tick would
+    pass the row above and quietly disable the honest "attached but not
+    answering" answer for a bridge that is merely mute.
+    """
+
+    service = BridgeService(root=tmp_path)
+    service.link.extension_id = EXTENSION_ID
+    daemon_module._private_write(
+        daemon_module._pairing_path(tmp_path), {"extension_id": EXTENSION_ID, "token_hash": "x"}
+    )
+    service.link.note_unproven_drop(52.0)
+
+    monkeypatch.setattr(daemon_module, "REVOKE_WATCH_S", 0.0)
+    await service._revocation_tick()
+
+    assert service.link.dropped_unproven() is True
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_revoke_close_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2's sibling: `revoke()` closes with 4003 and must not park either.
+
+    The same hole one function over, and this one is reached from the RPC gate
+    and from the revocation watcher — so an unresponsive peer could park the
+    revocation itself (audit A2 asks for the sibling closes explicitly, so that
+    the fix is not merely relocated).
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    socket = _StallingCloseSocket()
+    service.link.attach(socket)  # type: ignore[arg-type]
+    service.link.paired = True
+
+    await asyncio.wait_for(service.revoke(), timeout=2.0)
+
+    assert socket.closed == [4003], "the 4003 revoke close was never attempted"
+    assert service.link.websocket is None
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_socket_that_never_closes_does_not_park_the_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2's other sibling: the later-connection-wins eviction close.
+
+    A second browser profile arriving while the first is mid-close used to make
+    the ACCEPT path await that close, so the healthy new connection could not
+    finish its handshake behind a peer that never answers a close frame.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    first = _StallingClosePeer()
+    first.push(_hello())
+    first_task = asyncio.create_task(service.extension(first))  # type: ignore[arg-type]
+    assert await _settles(lambda: bool(first.sent)), "precondition: the first connection handshook"
+
+    second = _FakePeer()
+    second.push(_hello())
+    second_task = asyncio.create_task(service.extension(second))  # type: ignore[arg-type]
+    assert await _settles(
+        lambda: bool(second.sent)
+    ), "the replacement's handshake completed behind a stalled close"
+
+    assert first.close_entered.is_set(), "the superseded socket was asked to close"
+    assert second.sent, "the replacement's handshake completed behind a stalled close"
+    assert service.link.generation == 2
+    assert service.link.websocket is second
+
+    for task in (first_task, second_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task

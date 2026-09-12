@@ -440,19 +440,70 @@ own command heals the link), the command-timeout **promotion rule**, and a
 bounded send (§5.4).
 
 The promotion rule fires when a command exhausted its budget while the link was
-ALSO silent for **1.5 ping intervals** (> 30 s), not one. The slack is the same
-reasoning the 50 s threshold above uses, and it is required here rather than
-optional: a healthy peer speaks only when spoken to, so its silence is a
-sawtooth from 0 to one interval plus whatever the DAEMON's own loop adds (a
-dropped tick; `_supervise`'s up-to-30 s backoff after a failed one), and the
-daemon is the only party that solicits speech — daemon-side delay is otherwise
-indistinguishable from peer death. With zero slack a healthy link was measured
-torn down (close 4000, every session's pending futures failed). A slow SITE
-cannot trip it at any slack: the extension pongs throughout, so `silent_for()`
-stays ~0. The cost of a false positive is not small — `_drop_unproven_link`
+ALSO silent for **1.5 ping intervals** (> 30 s), **or** when a direct, bounded
+liveness solicitation goes unanswered inside that method's own budget.
+
+**Why the threshold alone was not enough (recorded from review R2-3 / QA Q2-4).**
+The slack above is the same reasoning the 50 s threshold uses, and it is
+required rather than optional: a healthy peer speaks only when spoken to, so its
+silence is a sawtooth from 0 to one interval plus whatever the DAEMON's own loop
+adds (a dropped tick; `_supervise`'s up-to-30 s backoff after a failed one), and
+the daemon is the only party that solicits speech — daemon-side delay is
+otherwise indistinguishable from peer death. With zero slack a healthy link was
+measured torn down (close 4000, every session's pending futures failed). But
+`1.5 × 20 s = 30 s` is ABOVE the 20 s budget of `read`/`snapshot`/`screenshot`,
+so the rule went **inert for exactly the methods the threshold was introduced to
+serve** — the record's own justification for not using 50 s here was "requiring
+50 s would make a `read` (20 s budget) unable to ever corroborate, since its own
+timeout fires first". Measured: a frozen worker returned
+`internal {timeout_s: 20.0}` where the pre-slack build returned
+`extension_unresponsive`.
+
+Lowering the threshold is NOT the fix: any threshold at or below one ping
+interval re-opens the false positive above, because the daemon cannot tell a
+delayed tick from a dead peer by looking at a clock. The rule therefore stops
+inferring and ASKS: `_peer_answers_a_solicited_ping` sends a ping on the captured
+wire and waits `PING_PROBE_TIMEOUT_S = 5 s` for ANY frame back (the same "any
+frame" rule the silence detector uses). A healthy worker answers within one
+event-loop turn whatever it is doing (§5.4), and the daemon is demonstrably alive
+at the moment it probes — it is running the timeout path — which is precisely the
+ambiguity R1-2 was about. An unanswered SOLICITATION is evidence; an elapsed
+clock is not. The 5 s window is bounded by the same generosity argument as
+`LINK_SEND_TIMEOUT_S`, and it is a magnitude below the smallest method budget,
+which is what "respects each method's budget" has to mean here. The clearly
+corroborated case short-circuits on the OR before probing, so a dead peer is
+still severed without the extra wait.
+
+The cost of a false positive is not small — `_drop_unproven_link`
 fails every pending future across ALL sessions and clears `driven` and
 `awaiting_origin`, so one drifted tick would convert a slow page into every
 session losing its tab handles.
+
+**The teardown is FENCED to the socket it was decided about, and its close is
+bounded.** Both halves are one defect class: a decision that spans an `await`.
+`link.send` is bound to the wire the caller captured — sending to `self.websocket`
+at call time is how a command from a superseded connection was delivered to its
+replacement, a request that peer never received, for a tab it does not own. The
+ping tick, the send deadline and the promotion rule each pass the wire they
+measured, and `_drop_unproven_link` refuses a teardown whose wire is no longer
+authoritative (returning that refusal, so the session is told "the extension
+replaced its connection" rather than being handed a claim about a peer that is
+answering). The receive loop checks the same predicate on every frame, so a
+superseded socket still draining a buffered `tab_update` cannot stamp liveness or
+publish into the live link's driven record. Both halves were reproduced by an
+independent concurrency audit against the pre-fix build — the command-send case
+closed the HEALTHY replacement with 4000 and failed every new session's futures;
+the receive case inserted a stale tab into the new link's records.
+
+The teardown's close is wrapped in `LINK_CLOSE_TIMEOUT_S` because it runs INSIDE
+the recovery it performs: the gate, the command-timeout path and the ping
+supervisor all await `_drop_unproven_link`, so an unbounded `close()` on a
+peer that has stopped draining parked the initiating RPC and stalled the
+liveness loop inside its own recovery. The audit reproduced that too
+(`{"case":"drop with blocked close","link_cleared":true,
+"drop_completed":false}`). The same bound covers the two sibling closes on this
+path (the later-connection-wins eviction and the 4003 revoke) and the two
+handshake/`hello_ack` sends, so the hole is not merely relocated.
 
 **The reason a link was severed is LATCHED, because the teardown is the answer.**
 `_drop_unproven_link` records the silence it measured (`note_unproven_drop`),
@@ -468,7 +519,13 @@ remove. For the same window the `rpc()` gate answers `extension_unresponsive`
 advises cannot land on the wrong message either. The latch is cleared by
 anything that means the daemon did not sever the link — every ordinary socket
 end, a revoke, and a new authoritative socket — so a browser the user simply
-closed still reads as absent. 60 s is sized to the slowest real recovery
+closed still reads as absent. The REVOKE half is cleared by the revocation
+WATCHER, not by `revoke()`: a drop nulls the socket AND `paired`, so every
+`revoke()` path was unreachable while the latch was live, and the out-of-process
+`lop browser pair --reset` left a deliberately unpaired bridge answering
+"attached and paired … pairing is preserved" for the rest of the window (QA
+Q2-1 / review R2-1). The watcher only needs the pairing FILE and clears within
+one `REVOKE_WATCH_S` tick. 60 s is sized to the slowest real recovery
 (the 58.21 s alarm floor below), after which a worker that never re-dials
 correctly reads as absent because by then nothing is attached.
 
@@ -586,10 +643,21 @@ extension per-call deadline (5-15 s)
   < session client timeout (base + 65 + 5)
 ```
 
-So a single stalled call answers before the daemon gives up. A pathological
+So a single stalled call answers before the daemon gives up. **The margin is one
+call wide, not two, on the four 20 s methods** (recorded from review R2-3):
+`snapshot` issues three sequential `cdp()` calls inside one 20 s budget
+(`Accessibility.enable` → `getFullAXTree` → `disable`), each bounded at 15 s, so
+a single stalled call plus any real work on the other two now exceeds the budget
+where at the old 10 s bound two stalls were needed to do so. At 10 s one stall
+consumed half the budget; at 15 s it consumes three-quarters (`click`/`type` have
+25 s and 10 s of slack; `open`/`goto` 30 s and 15 s). The old sentence — that the
+ceiling was raised and the rule "only gained slack" — was wrong in both
+directions: the ceiling change costs this margin, and the promotion rule did not
+gain slack, it went inert for those same methods (see §5.2). A pathological
 CHAIN of stalls can still exceed the daemon's budget, which is acceptable — the
 daemon's own timeout is then correct, and §5.2's promotion rule corroborates it
-into `extension_unresponsive` rather than a silent wedge.
+into `extension_unresponsive` rather than a silent wedge, because the
+corroboration is now a solicitation the peer either answers or does not.
 
 Two things must NOT get a deadline. `settle()` is already bounded and its 30 s
 default is calibrated to `open`/`goto`; `input.ts`'s
@@ -649,6 +717,96 @@ epoch answers `element_not_found` with "the page has navigated since that
 snapshot; take a new snapshot" — matching the format the model already knows
 from cmux's `snapshot`/`[e5]` refs (the `BrowserParams.selector` description,
 builtin.py:4693-4697, names `e5` explicitly and is unchanged).
+
+### 5.6 Concurrency: whose budget a stuck call spends (audit A3/A4)
+
+§5.4 answers "does one stuck call settle?". It does. This answers the next
+question an independent concurrency audit asked: **whose budget does it settle
+out of?** Every lane that was module-global was a lane where a healthy-but-slow
+owner spent a *different* owner's budget, and the daemon had a matching one. Four
+rescopes, all of them scope rather than a new number (the ceilings stay 15 s:
+see below for why a smaller global ceiling cannot work).
+
+- **AX lane → per target tab.** The `enable → read → disable` window is
+  serialized per `tabId`, not module-globally, with the per-key identity-check
+  eviction `ownership.ts` already uses. The hazard the lane exists for is one a11y
+  engine interleaving `enable/enable/read/DISABLE/read`, and the CDP
+  `Accessibility` domain is per debuggee (`cdp()` is addressed by `tabId`) — two
+tabs have two engines, so serializing across them protected nothing while
+letting owner A's 15 s `getFullAXTree` plus its 15 s `finally` disable stop owner
+B issuing even `Accessibility.enable` inside B's own 20 s budget.
+- **Daemon no-tab keys → per owner.** `lock_key_for` keys a command on its `tab`
+  when it has one, else `__owner__:<owner_proof>`, and `__global__` only for the
+  proof-less remainder (`tabs`, a handle-less `status`, legacy capability
+  clients). `open`, `owner_recover`, `owner_finish`, `owner_retain` and
+  `owner_release` all carry no `tab`, so under the old single key a parked `open`
+  serialized against a *different* owner's `open` — and against the
+  `owner_recover` whose only job is recovering from one — across a 30 s
+  navigation or a +65 s approval wait.
+- **Daemon lock duration → admission only, for those keys.** The lock now covers
+  *register the pending future + write the frame* and is released before the
+  answer is awaited; per-TAB keys still span the whole command, because that span
+  IS the CDP-interleave guard and it starves nobody. Nothing in the response
+  phase reads shared daemon state under a key (`_await_response` resolves one
+  future out of `link.pending`; the timeout and teardown paths key off
+  `request.id` plus §5.2's wire fence), so the release gives up nothing — but it
+  is the one claim in this change that wants an independent confirmation rather
+  than the author's word, and it is recorded as such in the PR thread. Proof keys
+  are EVICTED after use (a per-owner key is minted per session-resource, which
+  would otherwise grow `_tab_locks` for the daemon's lifetime — the defect
+  round-3 M1 fixed for the `__await__` keys).
+- **Extension pool admission → the cap's own read-modify-write.** The lane that
+  used to span the whole `open` handler is now `withAdmission` in `state.ts`,
+  wrapping exactly *cap read (`liveSurfaces` + `atSurfaceCap`) → `tabs.create` →
+  `putSurface`*. That is where the eight-surface cap actually is: the cap counts
+  the **surfaces map**, and the slot is consumed by the write that puts the
+  surface in it — not by the allocation journal, so narrowing to the journal
+  writes would have broken the cap. Attach, log capture, grouping, `navigate()`
+  (including a redirect that parks on a human decision) and the whole rollback
+  run outside it. The per-owner lane still spans the handler, which is what stops
+  a same-owner `owner_finish` overtaking its own `open`.
+
+**D2 and D3 are one change, not two.** The daemon's `__global__` key was the cap's
+only *current* guard, and it was a proxy: the daemon does not know `MAX_SURFACES`
+(the cap lives in the extension's session storage). Removing it without moving
+the guard onto the data would be a regression, so the per-owner key, the
+admission-only release and `withAdmission` ship together.
+
+**Why not a smaller global AX ceiling instead.** Arithmetic, not taste: for a
+global lane to be safe, A's whole three-call window must fit inside B's budget
+minus B's own work — `3 × ceiling ≤ ~15 s`, i.e. a ceiling of ~5 s. QA measured a
+legitimate heavy `screenshot` at **10.91 s**, so a 5 s ceiling kills work the
+daemon's own 20 s budget would have accepted. No ceiling the measurements permit
+makes a global AX lane safe; per-target is forced.
+
+**Flagged, not fixed (addendum D5).** After rescoping, an owner shares only
+`storeQueue` and `groupQueue` with a stranger (both 5 s ceilings), so the
+cross-owner term shrinks from *n* × 15 s to a small multiple of 5 s. Two honest
+costs remain, both recorded rather than hidden: (1) the 20 s trio
+(`read`/`snapshot`/`screenshot`) has only ~1-2 s of margin against a single 15 s
+stall plus healthy work, and this change does not widen it — raising 20 s is a
+daemon-budget change with client-timeout consequences, so it is not done here;
+(2) `tabs`/`status` have a PRE-EXISTING 8 × 5 s = 40 s worst case in
+`liveSurfaces`, which `withAdmission` now pulls *inside* the admission window, so
+a pathological browser can delay another owner's admission for that long. Whether
+to bound that loop is deferred: a stalled `chrome.tabs.get` must not prune a live
+surface, so it needs its own pruning-semantics work. A stalled `putSurface` can
+also transiently over-admit by one (nine surfaces for as long as the write is in
+flight); it self-corrects on the next `liveSurfaces`.
+
+**What a deadline does and does not buy (addendum D4).** A deadline makes the op
+SETTLE — the lane link drains and the next command runs. It does NOT cancel the
+mutation; `chrome.debugger.sendCommand`, `chrome.tabs.*` and `chrome.storage.*`
+expose no cancellation, so an abandoned write may still commit. `settle.ts`'s
+`deadline()` docstring carries the per-class policy stating, for each kind of
+write on these paths, either the mechanism that already reconciles a late write
+(surfaces map, `ownerScopes`, access queue, snapshot refs, log buffers) or the
+one genuine residue that is deferred with its bounds and the evidence that would
+promote it (a once-grant re-spent by the same requester inside its own 10-minute
+TTL). The related ordering hypothesis — a delayed `storage.set` reverting a newer
+write — is recorded there as **UNPROVEN**: nothing in this change measures it in
+a fault-injected or native-Chrome run, and nothing here claims native storage
+reordering.
 
 ## 6. Security and pairing
 
@@ -970,10 +1128,15 @@ than the `internal` + `data` discriminator it can rely on instead (§4.4).
   The popup still renders the state HONESTLY when it is open — a dedicated card
   keyed on `/health`'s `extension_unresponsive`, with the toggle remedy, instead
   of the green "Connected." card that used to be painted over a mute worker —
-  and that is deliberately not the primary signal for this reason: the state can
-  reach an already-open popup (a silent link with the popup up, a worker that
-  wedges while it is open), and a surface that lies is worse than one that is
-  merely unreachable.
+  and that is deliberately not the primary signal for this reason: `render()` is
+  re-entered only by a `chrome.storage.onChanged` write (`connState` /
+  `pendingOrigin` / `accessQueue`), and a MUTING worker writes nothing — so an
+  open popup keeps the card it painted, and the reachable path is the NEXT
+  render, e.g. reopening the popup inside the latch window (rendered and
+  measured: a popup held open across the transition to a mute worker stays on
+  `connected`; design D2-3). That is a real path and enough for the card to earn
+  its place, and a surface that lies is worse than one that is merely
+  unreachable.
 - **Backend precedence surprises**: a cmux user with the extension installed
   gets cmux (7.1). If real usage shows people wanting to prefer the bridge
   inside cmux, add an explicit config knob then — do not guess now.
