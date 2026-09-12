@@ -514,7 +514,10 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         assert len(sidebar.visible_entries) <= sidebar.page_size
         lines = sidebar.render().plain.splitlines()
         assert len(lines) <= sidebar.size.height
-        assert lines[-1] == f"1–{sidebar.page_size}/101 · ctrl+b hide"
+        # The pager displaces `ctrl+b hide` and KEEPS `f9 focus`: reaching the
+        # list matters more than hiding it, and `f9` is the gate to the two
+        # sidebar-scoped chords (D3b ruling).
+        assert lines[-1] == f"1–{sidebar.page_size}/101 · f9 focus"
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         sidebar.show_error("read failed")
         assert sidebar.entries
