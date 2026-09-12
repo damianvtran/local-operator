@@ -15339,22 +15339,34 @@ class OperatorApp(App[None]):
         # `typed=` carries the chip line on for NAMING only — the expanded
         # payload is what the row shows and what the model gets, but titling a
         # conversation after a pasted stack trace is not what the user asked.
-        # REFERENCES FIRST, invocation second, and the order is load-bearing. A
-        # `@path` inside a `$skill` REQUEST must expand; one inside the SKILL.md
-        # BODY must not, and `_expand_invocation`'s request-only splice already
-        # guarantees that shape — but only if the references are already in the
-        # request by the time it runs. Expanding after would reach the body.
+        # `@path` REFERENCES ARE DELIBERATELY NOT EXPANDED HERE. `Session.prompt`
+        # expands them, before it takes `_turn_lock` and with the approval gate
+        # passed (`session.py:4930`), which is what makes the deny-list and the
+        # outside-workspace escalation reachable at all.
         #
-        # `text` itself is rebound, so the invocation parse below sees the
-        # expanded request while `row`/`typed` keep the line the user typed:
-        # the transcript shows `@src/app.py`, the model gets the file.
-        referenced = await self._expand_references(text)
-        sent = self._expand_invocation(referenced, message.attachments)
-        if sent is None and referenced is not text:
-            # Not an invocation, but references DID expand: send the expanded
-            # text explicitly, since the `row if sent is None` rule below would
-            # otherwise send the typed line and drop the block entirely.
-            sent = referenced
+        # Expanding here instead — the design's §2.7 "preferred" mitigation —
+        # cannot carry that gate, and the reason is this method's own contract
+        # documented above: the pump awaits each handler to completion, and the
+        # approval card is MOUNTED and ANSWERED through that same pump. Awaiting
+        # an approval here therefore blocks the loop that would draw it. Probed
+        # on a real app: with the gate marshalled through `call_later` no card
+        # ever mounted and Enter never returned; mounting it inline instead got
+        # a card that a keypress could not reach. A frozen composer is worse
+        # than the slow turn R3 was written about.
+        #
+        # So exit 1 is exactly what it was before this feature, and the session
+        # is the single expansion site for it, exits 3 and 4 (ruling D). The
+        # ASIDE is the one exception and must be, because `_ask_aside` never
+        # reaches `Session.prompt` — it expands in `_aside_worker`, which is a
+        # `run_worker` and so is off the pump, where the gate IS answerable.
+        #
+        # The cost is that exit 1 paints no reference notice (an unresolved
+        # `@nope.py` is sent verbatim and silently). Exits 3 and 4 already
+        # behave that way, so this is consistent rather than newly broken. The
+        # fix, if it is ever wanted, is moving this expansion into a worker —
+        # which disturbs the submit ORDERING this docstring calls load-bearing
+        # and so deserves its own change, not a line in this one.
+        sent = self._expand_invocation(text, message.attachments)
         # An INVOCATION keeps the typed line as its row; everything else shows
         # the expanded text (design §2.5).
         #
@@ -32247,11 +32259,10 @@ class OperatorApp(App[None]):
     async def _expand_references(self, text: str) -> str:
         """Expand every ``@path`` in ``text``, painting one notice per problem.
 
-        The shared tail of the submit exits, so "what does a reference expand
-        to" has ONE answer no matter which exit the text left by. The exits
-        differ in what they do with the result — the aside asks with it, the
-        prompt path sends it while the row keeps the typed line — but never in
-        how the expansion itself is computed.
+        THE ASIDE'S expansion, and only the aside's. Every other exit is
+        expanded by :meth:`Session.prompt`; this one cannot be, because
+        ``complete_aside`` is a separate model call that never reaches it. See
+        ``on_editor_submitted`` for why the main submit path does NOT call this.
 
         Never raises, by the resolver's contract: every failure degrades to the
         original text plus a notice. That is the same bargain
@@ -32262,8 +32273,48 @@ class OperatorApp(App[None]):
         Notices go through the app's ordinary :meth:`_notice` rather than any
         new mechanism, so a reference problem reads like every other thing the
         app has to tell the user.
+
+        THE GATE PASSED HERE DECLINES, and the interactive one MUST NOT be used
+        in its place — doing so cancels this very worker. The chain, because it
+        is three hops and invisible from this line:
+
+        1. :meth:`request_tool_approval` calls :meth:`_close_aside`
+           (``app.py:16909``), deliberately: its card floats over the transcript,
+           so a question raised behind an open aside would be drawn underneath
+           it while still taking focus.
+        2. :meth:`_close_aside` cancels the ``aside`` worker group
+           (``app.py:29786``) — it retires the in-flight request, not just the
+           surface.
+        3. :meth:`_aside_worker` RUNS in that group (``app.py:29886``).
+
+        So awaiting the interactive gate from here is self-cancelling. Probed on
+        a real app with ``/btw what is in @.env ?``: ``_close_aside CALLED`` →
+        ``EXPAND WAS CANCELLED mid-await`` → ``card never mounted`` →
+        ``asides=0``. The user's question is discarded in silence, which reads
+        as a flake rather than as a denial. A reader who cannot see this chain
+        will "fix" the decline by passing the real gate and reintroduce it.
+
+        This is NOT a second approval convention: same parameter, same shape,
+        same routing, and the decline degrades through the module's existing
+        path — verbatim token plus a notice, exactly as an unresolvable one
+        does. What differs is the POLICY for a surface with no interactive
+        approval channel available to it, expressed as the value passed.
+
+        The cost is bounded and it is the right half to lose. An ordinary
+        in-workspace file never consults the gate at all, so the common
+        ``/btw what does @auth.py do?`` expands exactly as before; only a
+        deny-listed or outside-workspace path is refused, and it is refused with
+        a notice rather than a hang. The real fix is resolving the approval
+        BEFORE the panel opens, which needs `_ask_aside` to stop being
+        synchronous — one of its three callers is a message handler, so that is
+        the pump question again and its own change.
         """
-        result = await expand_references(text, self._session_cwd())
+
+        async def _decline(tool_name: str, description: str) -> bool:
+            """Refuse without asking — see the chain above for why."""
+            return False
+
+        result = await expand_references(text, self._session_cwd(), request_approval=_decline)
         for notice in result.notices:
             self._notice(notice, "warning")
         return result.sent

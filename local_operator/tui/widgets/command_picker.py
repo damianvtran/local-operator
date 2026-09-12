@@ -1802,11 +1802,25 @@ class CommandPicker(Static):
         # Esc once with no way to get the list back while still typing.
         self._dismissed_query = None
         if not matches:
-            if mode is PickerMode.ARGUMENT and self._notice:
+            if mode in (PickerMode.ARGUMENT, PickerMode.FILE) and self._notice:
                 # No rows, but something to say in their place. The list stays up
                 # holding the one informational row, and holds it across every
                 # re-derivation — the user editing the argument of a command with
                 # nothing to offer does not make the answer any less true.
+                #
+                # FILE is here for exactly that reason, and the pairing is spelled
+                # the same way :meth:`is_pending` spells it. "nothing to reference
+                # in src/" stays true while the user types a longer name INSIDE
+                # that directory, and the editor only re-posts `FileQueryOpened`
+                # when the DIRECTORY changes — so without this arm the notice
+                # painted for one frame and the next keystroke dropped it, which
+                # is a notice the user cannot read.
+                #
+                # SKILL is deliberately NOT included. Its vocabulary is fixed for
+                # the session, so an empty match set there means "no skill by
+                # that name", which is an ordinary no-match the closed list
+                # already says — not an informative answer that has to outlive
+                # the next keystroke.
                 self._reset_rows()
                 self.display = True
                 self._repaint()

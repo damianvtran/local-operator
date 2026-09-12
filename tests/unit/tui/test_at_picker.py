@@ -514,3 +514,77 @@ def test_the_ghost_is_an_append_for_a_file_row() -> None:
     assert completed is not None
     assert completed[0].startswith("@READ")
     assert ghost_for(completed, "@READ") == "ME.md"
+
+
+@pytest.mark.asyncio
+async def test_the_pending_window_covers_FILE_not_just_ARGUMENT(workspace) -> None:
+    """``is_pending`` must answer True for a FILE list still being filled.
+
+    THE ARM HAD NO TEST THAT COULD GO RED. Replacing ``is_pending``'s body with
+    the base ARGUMENT-only rule left all three composer test files green, so
+    nothing held the FILE branch in place: a later reader had no way to learn it
+    was load-bearing, and deleting it would have looked free.
+
+    What it buys is the Esc in the one-tick fill window. The editor posts
+    ``FileQueryOpened`` and the app answers with ``set_choices`` a tick later
+    (``app.on_file_query_opened``); in between, the picker is in FILE mode
+    holding nothing — closed by ``is_open()``, but a list the user has just
+    opened as far as they are concerned. ``Editor._on_key`` routes Esc on
+    ``is_pending()`` alone, so without the FILE arm the key is dropped and the
+    user watches the list they dismissed appear anyway.
+
+    Reached WITHOUT pumping the message loop, which is the whole trick: the
+    state under test is the tick BEFORE the app answers, so a test that paused
+    would be testing the filled list instead. ``_sync_picker`` is called
+    directly to derive the mode from the buffer, exactly as the keystroke path
+    does, and the app's answer is never awaited.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.load_text("@")
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
+
+        picker = editor.picker
+        assert picker.mode is PickerMode.FILE, "the buffer did not put the picker in FILE mode"
+        assert not picker.suggestions(), "the app already answered; this is not the fill window"
+        assert not picker.is_open(), "an empty list must still read as closed"
+        # The assertion the ARGUMENT-only rule fails. It is the only one here
+        # that distinguishes the two implementations, so it is the one that
+        # proves the arm exists.
+        assert picker.is_pending(), "a FILE list being filled must read as pending"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_directory_notice_SURVIVES_the_next_keystroke(workspace) -> None:
+    """The notice has to outlive the frame it was painted on to be readable.
+
+    `_apply`'s notice-hold branch enumerated ARGUMENT only, so a FILE notice was
+    dropped by the very next re-derivation: "nothing to reference in empty/"
+    painted for one frame and vanished as the user kept typing. A notice nobody
+    can read is not an answer.
+
+    It is still true while they type, which is the point — the editor re-posts
+    `FileQueryOpened` only when the DIRECTORY changes, so every keystroke inside
+    an empty directory re-derives against the same empty listing.
+    """
+    (workspace / "empty").mkdir()
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        editor = await _draft(app, pilot, "@empty/")
+        picker = editor.picker
+        assert picker._notice, "the empty directory produced no notice at all"
+        held = picker._notice
+        assert picker.display, "the list closed instead of holding the notice"
+
+        # One more character INSIDE the same directory: a re-derivation, not a
+        # new query, which is exactly the window the notice used to die in.
+        editor.insert("x")
+        for _ in range(6):
+            await pilot.pause()
+
+        assert picker._notice == held, "the FILE notice was dropped on the next keystroke"
+        assert picker.display, "the list closed and took the notice with it"
