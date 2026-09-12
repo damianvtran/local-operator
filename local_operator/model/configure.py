@@ -471,6 +471,65 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
 _OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
 
+#: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
+#: model's provider emits at the head of the content channel, keyed on the MODEL
+#: id like :data:`_SAMPLING_POLICY` and for the same reason -- the template
+#: belongs to the model, so the same weights leak the same token on the direct
+#: route, on OpenRouter and on Radient, and a provider-keyed rule would fix one
+#: route and leave the rest carrying the defect.
+#:
+#: **The defect.** MiniMax M3 served through OpenRouter splits one turn across
+#: two channels -- ``reasoning_content`` for the thinking, ``content`` for the
+#: answer -- and the closing half of the template's boundary token is emitted at
+#: the joint, so the reply the harness assembles begins with ``</mm:think>``
+#: welded to a byte-perfect action batch. The strict decoder refuses a reply that
+#: does not START with a JSON value (``_decode_leading_json``, deliberately: it
+#: must never guess where a value begins), so the whole turn was billed and
+#: discarded as ``malformed-json``. Measured over the sealed campaign (329
+#: rejection artifacts, 17 replies carrying the token, all at offset 0, all
+#: CLOSING tags and zero opening tags -- see ``ModelSpec
+#: .reasoning_boundary_markers`` for why that asymmetry is an authorship
+#: signature rather than prose).
+#:
+#: **Why an empty fallback rather than a guess.** A token this table does not
+#: list is not stripped, and the reply keeps the strict parser and the ordinary
+#: corrective re-prompt it has today. Adding a row is an evidence-backed claim
+#: that the model's rendered chat template puts that exact string at the head of
+#: the content channel; the cost of being wrong is asymmetric, because a strip
+#: REMOVES bytes the model sent. Unanchored and case-insensitive, so an
+#: aggregator prefix (``minimax/minimax-m3``) and the harness's own normalised
+#: spelling (``minimax_sminimax-m3``, observed in a sealed run's route) both
+#: match. FIRST MATCH WINS, so a narrower row must precede a broader one.
+#:
+#: Deliberately NOT scoped by ``_USER_SUPPLIED_MODEL_PROVIDERS``, unlike
+#: sampling: that exemption exists because a per-request sampling value would
+#: OVERRULE the publisher's tuning. Nothing here is an assertion about tuning --
+#: the token is a property of the model's chat template whichever route renders
+#: it -- so a locally-served MiniMax gets the same treatment and keeps it.
+_REASONING_BOUNDARY_MARKERS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    # -- MiniMax -----------------------------------------------------------
+    # Matches ``minimax/minimax-m3`` (OpenRouter), a bare ``MiniMax-M3`` and the
+    # normalised ``minimax_sminimax-m3``. Only the CLOSING token is declared:
+    # zero opening tags were observed in the corpus, and declaring a token
+    # nothing emits would be an unmeasured strip rather than an absorbed one.
+    (re.compile(r"minimax"), ("</mm:think>",)),
+)
+
+
+def _reasoning_boundary_markers(model_id: str) -> tuple[str, ...]:
+    """The boundary markers declared for ``model_id``; empty when unlisted.
+
+    Split out of ``build_model_spec`` so the table's shape is testable on its
+    own (the drift pin mutates it and asserts the SPEC moved), and so the
+    fallback is one statement rather than one branch per caller.
+    """
+
+    lowered = model_id.casefold()
+    for pattern, markers in _REASONING_BOUNDARY_MARKERS:
+        if pattern.search(lowered):
+            return markers
+    return ()
+
 
 def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = None) -> ModelSpec:
     """Derive a harness ``ModelSpec`` from the model's resolved metadata.
@@ -760,6 +819,12 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # diverge as soon as the user picks a level, which is precisely when
         # `/effort auto` needs the original still recorded somewhere.
         reasoning_default_effort=reasoning_effort,
+        # Keyed on the model id and NOT gated on the route or the provider: the
+        # token is the model's chat template's, so the same weights leak it on
+        # every route that renders that template. An unlisted id (and every
+        # local-provider spec, which returns above) declares none, which leaves
+        # the strict parser and the corrective re-prompt exactly as they were.
+        reasoning_boundary_markers=_reasoning_boundary_markers(model_name),
         # Derived from the CANONICAL provider and the model together, because
         # the fast-mode dialect belongs to the route rather than to the model
         # (`model.speed` opens with why). `canonical` and not `hosting`: the

@@ -825,6 +825,242 @@ async def test_client_still_treats_ordinary_malformed_json_as_correctable() -> N
 
 
 # ---------------------------------------------------------------------------
+# The provider reasoning-boundary marker
+# ---------------------------------------------------------------------------
+#
+# MiniMax M3 served through OpenRouter splits one model turn across two wire
+# channels -- ``reasoning_content`` for the thinking, ``content`` for the answer
+# -- and the closing half of the template's boundary token is emitted at the
+# joint, so the reply the harness assembles begins with ``</mm:think>`` welded
+# to an otherwise byte-perfect action batch. The strict decoder refuses a reply
+# that does not START with a JSON value (by design: hunting forward for the
+# first ``{`` can execute a batch the model never sent), so the whole billed
+# turn was discarded as ``malformed-json`` -- 15 of the sealed corpus's 40
+# published replies, all 15 recoverable.
+#
+# The tests below pin four things: the DECLARATION decides (never the reply's
+# text), only the HEAD is touched, a strip is counted and reported rather than
+# silent, and the decoder's own tolerances are unchanged on the path where
+# stripping is active.
+
+#: The token as the provider emits it: the CLOSING half only. Zero opening tags
+#: appear anywhere in the sealed corpus, and that asymmetry is the authorship
+#: proof -- see ``ModelSpec.reasoning_boundary_markers``.
+BOUNDARY_MARKER = "</mm:think>"
+
+
+def _minimax_spec(*markers: str) -> ModelSpec:
+    """A spec that DECLARES ``markers``, without consulting the real table.
+
+    Built by hand rather than through ``build_model_spec("openrouter",
+    "minimax/minimax-m3")`` so these tests measure the reply path and not the
+    table: the table has its own tests in ``tests/unit/model``, and a client
+    test that needed it would be asserting two things and pinning neither.
+    """
+
+    return ModelSpec(
+        provider="openrouter",
+        model_id="minimax/minimax-m3",
+        reasoning_boundary_markers=markers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_declared_boundary_marker_is_absorbed_and_the_batch_is_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """The tagged reply and the untagged one are the SAME decision.
+
+    Not "both accepted" -- BYTE-IDENTICAL, asserted on the canonical bytes the
+    harness would execute, because that is the whole safety argument for
+    removing bytes the model sent: the strip may not be a repair, an
+    interpretation or a salvage. If the two differ by one byte, the strip is
+    changing what the model decided and has no business running.
+    """
+
+    current = observation()
+    untagged = finish_payload(current)
+    stream = ScriptedStream(BOUNDARY_MARKER + untagged, reasoning=("thinking...",))
+    client = _client(stream, tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER))
+
+    decision = await client.decide(current, _turns(current))
+
+    reference = parse_decision(untagged, current, route=ROUTE)
+    assert decision.action_batch.to_canonical_json() == (reference.action_batch.to_canonical_json())
+    # And both are executable against the observation they answer.
+    decision.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_a_spec_that_declares_no_marker_still_refuses_the_tagged_reply() -> None:
+    """The strip is DECLARATION-driven, not a licence to rewrite any reply.
+
+    The same bytes, the same model id, the same request -- only the spec's
+    declaration differs. A build that stripped this token unconditionally would
+    pass the test above and fail this one, and would silently mangle the first
+    model whose prose legitimately opens with that text.
+    """
+
+    current = observation()
+    stream = ScriptedStream(BOUNDARY_MARKER + finish_payload(current))
+    client = _client(stream, model_spec=_minimax_spec())
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+
+    assert info.value.class_key == "leading-delimiter"
+    assert info.value.stripped_reply_markers == 0
+    # The reply is judged on its ORIGINAL bytes, and the evidence keeps them.
+    assert info.value.evidence_reply == BOUNDARY_MARKER + finish_payload(current)
+
+
+@pytest.mark.asyncio
+async def test_a_marker_inside_the_reply_is_never_surgery(tmp_path: Path) -> None:
+    """A token that is not at the head is not a boundary token.
+
+    Both seeds are real: a model quoting the token inside its visible notes (its
+    ``public_observations`` string) and a model discussing it in prose. Neither
+    is the template joint, so neither may be touched -- and the reply that
+    carries one must decode to the bytes the model wrote. This is the property
+    that keeps the tolerance from becoming the substring surgery the decoder
+    refuses to do.
+    """
+
+    from local_operator.evaluation.runner.provider_client import (
+        strip_reasoning_boundary_markers,
+    )
+
+    current = observation()
+    quoted = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {"actions": json.loads(finish_payload(current))["actions"]},
+            "public_observations": f"the template emits {BOUNDARY_MARKER} between turns",
+        }
+    )
+
+    decision = await _client(
+        ScriptedStream(quoted), tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER)
+    ).decide(current, _turns(current))
+
+    assert BOUNDARY_MARKER in (decision.public_reply or "")
+    # The helper itself: only a head match moves, and a doubled boundary token
+    # (two channels, one after the other) is absorbed whole.
+    assert strip_reasoning_boundary_markers(quoted, (BOUNDARY_MARKER,)) == (quoted, ())
+    assert strip_reasoning_boundary_markers(" " + BOUNDARY_MARKER + quoted, (BOUNDARY_MARKER,)) == (
+        quoted,
+        (BOUNDARY_MARKER,),
+    )
+    assert strip_reasoning_boundary_markers(BOUNDARY_MARKER * 2 + quoted, (BOUNDARY_MARKER,)) == (
+        quoted,
+        (BOUNDARY_MARKER, BOUNDARY_MARKER),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tagged_reply_that_is_still_broken_names_both_halves() -> None:
+    """The residual class: something was removed AND the object was incomplete.
+
+    The reply the model sees in its own history is the version it WROTE, the
+    delimiter included, so a hint that named only truncation would send it
+    looking for a mistake it cannot find in what it sent. The class must be the
+    residual one, not the leading one: the decode did start.
+    """
+
+    current = observation()
+    truncated = BOUNDARY_MARKER + '{"action_batch": {"actions": ['
+    stream = ScriptedStream(truncated)
+    client = _client(stream, model_spec=_minimax_spec(BOUNDARY_MARKER))
+
+    with pytest.raises(DecisionRejected) as info:
+        await client.decide(current, _turns(current))
+
+    assert info.value.class_key == "incomplete-json"
+    assert info.value.stripped_reply_markers == 1
+    assert "reasoning delimiter was removed" in info.value.diagnostic
+    assert "incomplete" in info.value.diagnostic
+
+
+@pytest.mark.asyncio
+async def test_a_strip_leaves_the_decoders_own_tolerances_untouched(tmp_path: Path) -> None:
+    """The two tolerances are independent, and both survive the strip.
+
+    Trailing noise is tolerated after a complete value and a second batch for
+    the same observation is refused wherever it sits -- through a spec that is
+    actively stripping, i.e. on the one path where a mistake in the assembler
+    could plausibly disturb the decoder downstream of it.
+    """
+
+    current = observation()
+    client = _client(
+        ScriptedStream(BOUNDARY_MARKER + type_payload(current) + " Hope that helps!"),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    )
+    decision = await client.decide(current, _turns(current))
+    action = decision.action_batch.actions[0]
+    assert isinstance(action, TypeAction)
+    assert action.text == "hello"
+
+    competing = _client(
+        ScriptedStream(BOUNDARY_MARKER + type_payload(current) + finish_payload(current)),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    )
+    with pytest.raises(DecisionRejected) as info:
+        await competing.decide(current, _turns(current))
+    assert info.value.class_key == "second-batch"
+
+
+@pytest.mark.asyncio
+async def test_every_attempt_records_its_strip_count_including_a_zero(tmp_path: Path) -> None:
+    """A tolerance nobody can see is indistinguishable from mangling a reply.
+
+    The count is recorded on the ACCEPTED path, which is the only place the
+    tolerance working is visible at all, and it is recorded as zero on an
+    ordinary attempt -- a run of zeros is how a provider changing its chat
+    template becomes visible from here, and a field that only appeared when
+    something was stripped could never express that.
+    """
+
+    current = observation()
+    stripped = await _client(
+        ScriptedStream(BOUNDARY_MARKER + finish_payload(current)),
+        tmp_path,
+        model_spec=_minimax_spec(BOUNDARY_MARKER),
+    ).decide(current, _turns(current))
+    plain = await _client(
+        ScriptedStream(finish_payload(current)), tmp_path, model_spec=_minimax_spec(BOUNDARY_MARKER)
+    ).decide(current, _turns(current))
+
+    assert stripped.stripped_reply_markers == 1
+    assert plain.stripped_reply_markers == 0
+
+
+@pytest.mark.asyncio
+async def test_the_strip_is_reported_rather_than_silent(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same rule as the trailing-junk tolerance: tolerated is not silent.
+
+    The strip removes bytes the model sent, so the log line is the one place a
+    reader can reconstruct that it happened, which marker, and how many bytes.
+    """
+
+    current = observation()
+    with caplog.at_level(logging.WARNING):
+        await _client(
+            ScriptedStream(BOUNDARY_MARKER + finish_payload(current)),
+            tmp_path,
+            model_spec=_minimax_spec(BOUNDARY_MARKER),
+        ).decide(current, _turns(current))
+
+    assert BOUNDARY_MARKER in caplog.text
+    assert "minimax/minimax-m3" in caplog.text
+    assert str(len(BOUNDARY_MARKER)) in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # Frame-id contract: the model is told which frame ids exist, and a wrong one
 # is fed back rather than ending the episode (the first paid OSWorld episode).
 # ---------------------------------------------------------------------------
@@ -2096,8 +2332,15 @@ def _defective_reply(case: str, current: Observation) -> str:
     """
 
     observation_id = current.observation_id
-    if case == "malformed-json":
+    if case == "leading-delimiter":
+        # A preamble before the object: the offset-0 half of the class, and the
+        # one shape of it the harness deliberately does NOT absorb (hunting
+        # forward for the first ``{`` can execute a batch the model never sent).
         return "Sure, here you go: {"
+    if case == "incomplete-json":
+        # The other half: the decode STARTED and the object broke inside. Verbatim
+        # the shape of a sealed MiniMax reply whose action was cut mid-object.
+        return '{"actions": [{"kind": "type", "text": "hello"'
     if case == "fenced-json":
         return '```json\n{"actions": [{"kind": "finish"}]}\n```'
     if case == "unsupported-reply-version":
@@ -2183,8 +2426,21 @@ def _defective_reply(case: str, current: Observation) -> str:
 # pinned here, and the hygiene rule (no ``input_value=``, no docs URL) is
 # asserted for every row rather than for a representative one.
 _REJECTION_HINT_CASES = [
-    ("malformed-json", "malformed-json", ['"reply_version": "1.0"', '"action_batch"']),
-    ("fenced-json", "malformed-json", ["not one complete JSON object", "code fence"]),
+    # The two halves of the old ``malformed-json`` class, split so the offset-0
+    # failures -- which is what a provider reasoning boundary token and a code
+    # fence both produce, and one of them is now absorbed before the decoder
+    # sees it -- are countable apart from the replies that broke mid-object.
+    (
+        "leading-delimiter",
+        "leading-delimiter",
+        ["did not begin with the JSON object", "beginning with '{'", '"reply_version": "1.0"'],
+    ),
+    (
+        "incomplete-json",
+        "incomplete-json",
+        ['"reply_version": "1.0"', '"action_batch"', "incomplete"],
+    ),
+    ("fenced-json", "leading-delimiter", ["did not begin with the JSON object", "code fence"]),
     (
         "unsupported-reply-version",
         "unsupported-reply-version",
