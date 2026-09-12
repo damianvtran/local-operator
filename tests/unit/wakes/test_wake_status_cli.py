@@ -604,3 +604,45 @@ def test_a_remedy_command_is_never_split_across_lines(
 
     out = capsys.readouterr().out
     assert "'lop wake install'" in out, out
+
+
+def test_a_future_wake_is_named_even_when_another_is_overdue(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D19: one late wake must not hide the next one.
+
+    `upcoming` is sorted soonest-first and the `next:` line was gated on its
+    HEAD, so a single overdue row suppressed `next:` for every future wake —
+    a wake a minute away went unnamed on the surface README promises reports
+    "the soonest wake that will fire". D16 (no `next:` when there is nothing
+    in the future) is asserted by
+    `test_status_reports_overdue_and_stale_counts`; this is the other half.
+    """
+    from local_operator.cli import wake_command
+
+    _arm(
+        tmp_path,
+        "d19late0001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "late watch", "next_due_at": NOW_MS - 600_000}],
+    )
+    _arm(
+        tmp_path,
+        "d19soon0001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "release-owner check", "next_due_at": NOW_MS + 60_000}],
+    )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    next_line = next(
+        (line for line in out.splitlines() if line.startswith("next:")),
+        "",
+    )
+    assert next_line, f"a wake one minute away went unnamed: {out}"
+    assert "release-owner check" in next_line, next_line
+    # And the late one is still reported, on its own line, exactly once.
+    overdue_line = next(line for line in out.splitlines() if line.startswith("overdue:"))
+    assert "late watch" in overdue_line, overdue_line
+    assert "late watch" not in next_line, next_line

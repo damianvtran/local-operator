@@ -3067,6 +3067,12 @@ def wake_command(args: argparse.Namespace) -> int:
         head = fixed + (when_w + 1 if show_when else 0)
         message_w = max(message_floor, term_width - head - 1)
         header = f"{'WHEN':<{when_w}} " if show_when else ""
+        # THE FLOOR IS 50 COLUMNS, stated rather than left to be discovered:
+        # 11 (DUE) + 13 (SESSION) + 2 gaps + a 24-character message. Below
+        # that a row overflows even with WHEN dropped, because clamping the
+        # message further would leave too little of it to recognise. 40-column
+        # terminals therefore wrap here, deliberately — the alternative is a
+        # table whose message column says nothing.
         print(f"{header}{'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
             when = when_cells[row["next_due_at"]]
@@ -3163,7 +3169,11 @@ def wake_command(args: argparse.Namespace) -> int:
         if any(row["dormant"] for row in rows):
             _legend("dormant", "the session was stopped; reopening it re-arms its wakes")
         if any(row["ghost"] for row in rows):
-            _legend("ghost", "no session with this id exists on disk; nothing can fire these")
+            _legend(
+                "ghost",
+                "no session with this id exists on disk; nothing can fire these, and "
+                "nothing clears them automatically",
+            )
         if not show_when:
             # The omission is STATED, not silent: the absolute time was dropped
             # to keep the table aligned on a narrow terminal (round 2, D12), and
@@ -3331,7 +3341,7 @@ def wake_command(args: argparse.Namespace) -> int:
         # wakes as supervised while the running process watches a different
         # store. Observed during validation, where an isolated run printed the
         # operator's real LaunchAgent pid.
-        print("supervisor:  cannot be verified for this store")
+        print(_wrap_status("cannot be verified for this store", "supervisor:"))
         print(_wrap_status(f"({state.detail})"))
         print(_wrap_status("(wakes here fire only while a session is open)"))
     elif running:
@@ -3340,17 +3350,21 @@ def wake_command(args: argparse.Namespace) -> int:
         # noise, and the pid already says it is there (round 1, D9).
         if uptime_s is not None and uptime_s >= 60:
             detail += f", up {_format_duration(uptime_s)}"
-        print(f"supervisor:  {detail}")
+        print(_wrap_status(detail, "supervisor:"))
     elif state and state.loaded:
         # The exact state that produced the permanent misses: launchd knows
         # the job, `launchctl print` returns 0, and nothing is running. The
         # parenthetical carries the LAUNCHD fact rather than repeating the
         # state word it was meant to disambiguate (round 1, D9).
-        print("supervisor:  loaded but NOT running (launchd has the job; it has exited)")
+        print(
+            _wrap_status(
+                "loaded but NOT running (launchd has the job; it has exited)", "supervisor:"
+            )
+        )
     elif plist_present:
-        print("supervisor:  not loaded (a plist exists but launchd has no job)")
+        print(_wrap_status("not loaded (a plist exists but launchd has no job)", "supervisor:"))
     else:
-        print("supervisor:  not installed")
+        print(_wrap_status("not installed", "supervisor:"))
     # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and
     # the ACTIONABLE branch used to fire in the not-loaded state, printing
     # `run 'lop wake install'` twice in a four-line block.
@@ -3385,12 +3399,18 @@ def wake_command(args: argparse.Namespace) -> int:
         print(_wrap_status("(dormant — their sessions were stopped; reopening one re-arms it)"))
 
     # ONE LINE PER DISTINCT STATE (round 1, D5; sharpened in round 2, D16).
-    # `next:` is only printed when there IS a next — a fireable wake in the
-    # future. An overdue fireable wake is reported by the `overdue:` line
-    # below, because labelling something already late as "next" promises a
-    # future event, and saying it twice was the overlap D16 named.
-    if upcoming and not upcoming[0]["overdue"]:
-        soonest = upcoming[0]
+    # `next:` names a wake in the FUTURE; an already-late one is reported by
+    # `overdue:` below, because labelling something late as "next" promises a
+    # future event and says twice what the line below already says (D16).
+    #
+    # SELECT the soonest future row rather than testing the head of the list
+    # (round 3, D19). `upcoming` is sorted soonest-first, so gating on
+    # `upcoming[0]` let ONE overdue row suppress `next:` for every future wake
+    # — a wake a minute away went unnamed on a surface README promises reports
+    # "the soonest wake that will fire".
+    future = [row for row in upcoming if not row["overdue"]]
+    if future:
+        soonest = future[0]
         print(_wrap_status(f"{_format_due(soonest['due_in_s'])}  {soonest['message']}", "next:"))
     if overdue:
         # Counted over FIREABLE rows only, so "worst" is a wake that is
@@ -3411,11 +3431,25 @@ def wake_command(args: argparse.Namespace) -> int:
     if ghost:
         # The supervisor refuses these and retires on a ghost-only store
         # (round 2, Q4). Saying so here is what stops this frame contradicting
-        # the process; the remedy is the session, not the wake subsystem.
+        # the process.
+        #
+        # THE REMEDY IS THE FILE (round 3, D20). The earlier wording said the
+        # entry "is removed when that session id is next written", which no
+        # reader can bring about: both callers of `store.remove_entry` need a
+        # live session (a persist with no schedules left, or `cleanup` after
+        # the session directory goes away), and `lop wake` exposes no cancel.
+        # So a ghost row is permanent, and the only action available is to
+        # delete the entry file — which is what the line now names.
+        # RELATIVE, not the absolute path: an absolute config root is one
+        # unbreakable token long enough to overflow a narrow terminal by
+        # itself, which is the thing D21 asked to stop. `wakes/<id>.json` is
+        # the form the design round suggested, and the ids it needs are on
+        # screen in `lop wake list`.
         print(
             _wrap_status(
-                f"{len(ghost)} with no session on disk — nothing can fire these; "
-                "the entry is removed when that session id is next written",
+                f"{len(ghost)} with no session on disk — nothing can fire these, and "
+                "nothing clears them automatically; delete its "
+                "wakes/<session-id>.json entry to remove one",
                 "ghost:",
             )
         )

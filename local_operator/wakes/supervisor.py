@@ -137,8 +137,13 @@ WAKE_DEADLINE_S = 180.0
 #: KNOWN RESIDUAL (round 2, QA Q3, deferred deliberately): a freshly armed wake
 #: still queues behind permanently-failing engages, because `_due_sessions`
 #: sorts oldest-first and a failed engage keeps its original `due_ms`, so it
-#: keeps winning the semaphore. Measured at a 10 s scaled deadline: N=0 → 8.2 s,
-#: N=2 → 18.2 s, N=6 → 38.2 s (was 58.2 s before the round-1 restructure).
+#: keeps winning the semaphore. The figures below are on a DELIBERATELY SCALED
+#: 10 s deadline, not the shipped 180 s one, so they show the shape rather than
+#: the production wait — do not read them as real latencies (round 3, R13).
+#: Scaled deadline 10 s, semaphore 2, N permanently-failing sessions, measured
+#: by QA on 2026-09-11 on the operator's 14-core host at load average 21-105:
+#: N=0 → 8.2 s, N=2 → 18.2 s, N=6 → 38.2 s (was 58.2 s before the round-1
+#: restructure).
 #: Widening this number is NOT the fix — it trades a rare lateness for cold-start
 #: storms on a loaded box, where several runtimes coming up at once is exactly
 #: what the original 30 s deadline was thrashing on. A real fix is a scheduling
@@ -545,10 +550,14 @@ async def _engage_one(
             # session fails identically on every pass, so it gets the same
             # burst-then-heartbeat treatment as the stale and ghost skips.
             if _skip_log.should_log(session_id, "failed"):
+                # THE EXCEPTION CARRIES THE SUBJECT (round 3, D22).
+                # `engage_runtime` raises "could not start a runtime for
+                # session <id>: <cause>", so repeating that phrase and the id
+                # in the wrapper produced a 266-column line saying the same
+                # thing twice. This prefix adds only what the exception cannot
+                # know: how long the attempt took and how late the wake is.
                 logger.warning(
-                    "failed: could not start a runtime for %s after %.1fs "
-                    "(wake %.1fs overdue): %s",
-                    session_id,
+                    "failed: after %.1fs (wake %.1fs overdue): %s",
                     time.monotonic() - started,
                     overdue_s,
                     exc,
@@ -766,16 +775,32 @@ def _retirement_reason(config_dir: Path) -> str:
     from local_operator.wakes.store import read_index
 
     now_ms = int(time.time() * 1000)
-    dormant = stale = ghost = 0
+    dormant = stale = ghost = unreadable = 0
     for session_id, entry in read_index(config_dir).items():
         if not isinstance(entry, dict) or not entry.get("schedules"):
             continue
+        # PRECEDENCE MATCHES `wake status` (round 3, R11). An entry can be
+        # both stale and a ghost, and the two surfaces bucketed it differently
+        # — `cli.py`'s `stale = [... if row["stale"] and not row["ghost"]]`
+        # calls it a ghost while this chain called it stale. That made the
+        # retirement line promise delivery "when the session is next opened"
+        # for a session that does not exist. Ghost is also the STRONGER fact:
+        # a stale wake still has a session to be delivered into, and a ghost
+        # has nothing at all, so it is the one worth telling the operator.
         if entry.get("stopped_at"):
             dormant += 1
-        elif not _has_fireable_schedule(entry, now_ms):
-            stale += 1
         elif not _session_exists(config_dir, session_id):
             ghost += 1
+        elif not _schedule_due_times(entry):
+            # NOT STALE — it never crossed the bound, it has no readable due
+            # time to cross (round 3, R12). `_has_fireable_schedule` is False
+            # here for a different reason than staleness, and bucketing the
+            # two together named a bound this entry never reached and promised
+            # a catch-up delivery that no due time can produce. `_is_stale`
+            # says False for it too, so this keeps the two in agreement.
+            unreadable += 1
+        elif not _has_fireable_schedule(entry, now_ms):
+            stale += 1
     parts: list[str] = []
     if stale:
         parts.append(
@@ -786,6 +811,8 @@ def _retirement_reason(config_dir: Path) -> str:
         parts.append(f"{dormant} dormant — reopening the session re-arms them")
     if ghost:
         parts.append(f"{ghost} with no session on disk")
+    if unreadable:
+        parts.append(f"{unreadable} with no readable due time — rewritten when its session opens")
     if not parts:
         return "nothing is scheduled; the next persist reinstalls it"
     return "; ".join(parts)

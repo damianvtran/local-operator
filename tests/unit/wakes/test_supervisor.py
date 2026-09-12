@@ -1267,11 +1267,22 @@ async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
     # Retried, not lost: the schedule is untouched, so later passes try again.
     assert attempts > 1, f"the wake was not retried after the failure (attempts={attempts})"
     # THROTTLED: many attempts, few lines. The burst bound is _SKIP_BURST.
-    lines = [rec for rec in caplog.records if "could not start a runtime" in rec.message]
+    # Matched on the `failed:` prefix rather than the wrapper's old prose: the
+    # subject now comes from the exception itself, which already names the
+    # session (round 3, D22).
+    lines = [rec for rec in caplog.records if rec.message.startswith("failed:")]
     assert (
         len(lines) <= mod._SKIP_LOG_BURST
     ), f"{attempts} failures produced {len(lines)} log lines; the throttle was bypassed"
-    assert lines and lines[0].message.startswith("failed:"), lines[0].message if lines else "none"
+    assert lines, "the engage failure was never reported"
+    # THE WRAPPER ADDS ONLY TIMING (round 3, D22). The real `engage_runtime`
+    # raises "could not start a runtime for session <id>: <cause>", so the
+    # prefix must not restate the subject — asserted as "the session id
+    # appears at most once", which holds whatever the cause says. (This test's
+    # fake raises a bare message, so asserting on the phrase itself would pin
+    # the fixture rather than the format.)
+    assert lines[0].message.count("alwaysfail01") <= 1, lines[0].message
+    assert lines[0].message.startswith("failed: after "), lines[0].message
 
 
 @pytest.mark.asyncio
