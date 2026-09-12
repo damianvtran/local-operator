@@ -50,7 +50,10 @@ from local_operator.mobile.types import (
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import scan
-from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
+from local_operator.session.runtime.types import (
+    DESKTOP_WATCH_CAPABILITY,
+    EVENT_MUTE_CAPABILITY,
+)
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -782,6 +785,7 @@ class AttachClient:
         self._req_seq = 0
         self._session_id = ""
         self._attention_supported = False
+        self._event_mute_supported = False
         self._connected = False
 
     @property
@@ -791,6 +795,34 @@ class AttachClient:
     @property
     def supports_completion_ack(self) -> bool:
         return self.connected and self._attention_supported
+
+    @property
+    def supports_event_mute(self) -> bool:
+        """Whether this owner advertised ``EVENT_MUTE_CAPABILITY``.
+
+        Read from the RECORD, at dial, the way ``_attention_supported`` is:
+        the owner's build cannot change while it lives, and a record is
+        rewritten on every start, so one read at connect is complete. An
+        owner without the string is exactly the pre-mute behaviour — it keeps
+        sending every frame and the parked controller keeps discarding them —
+        so the caller must gate the send on this and never send blind.
+        """
+        return self.connected and self._event_mute_supported
+
+    async def set_event_muted(self, muted: bool) -> bool:
+        """Ask the owner to stop (``True``) or resume delta-grade event frames.
+
+        Best-effort by contract: the mute is an optimisation over the parked
+        controller's app-side discard, so a refusal or a dead connection here
+        costs delivery, never correctness. Returns whether the owner acked;
+        callers that cannot wait (a synchronous park toggle) run this in a
+        task and ignore the result. The op is idempotent, which is what makes
+        the reconnect re-assert legal rather than a special case.
+        """
+        if not self.supports_event_mute:
+            return False
+        await self._request("event_mute" if muted else "event_unmute")
+        return True
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Dial, authenticate as an attach client, and verify identity.
@@ -806,6 +838,7 @@ class AttachClient:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
         self._attention_supported = "completion-ack-v1" in record.capabilities
+        self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
