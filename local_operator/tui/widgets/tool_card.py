@@ -5,6 +5,10 @@ background-filled cards — one elevation step brighter than the ground
 (kit ``surface`` on ``bg``), full-width single rows with 1-cell inner
 padding, NO border. Elevation is a background step, never a shadow or line.
 
+One line of INK, two terminal rows: the sheet pads one row below the summary
+so the card's fill ends on air rather than on the inked line itself. That is
+the default density; ``display.comfortable_rows`` adds the matching row above.
+
 Row anatomy — one COLUMN per field, so a ledger is scanned down, not read
 across::
 
@@ -924,10 +928,13 @@ def _row_text() -> Text:
 
     What actually holds the one-row rule, in order:
 
-    1. ``ToolCard { height: 1 }`` in the stylesheet — the real enforcement. A
-       collapsed card is one cell tall, so wrapped content is clipped, never
-       reflowed. ``ToolCard.tool-expanded`` relaxes it to ``height: auto``
-       precisely because expansion is the one case that may be taller.
+    1. ``ToolCard { height: 2; padding: 0 0 1 0 }`` in the stylesheet — the
+       real enforcement. The pin is ``1 + padding-bottom`` (Textual sizes a
+       fixed-height widget including its padding), so the CONTENT box stays one
+       cell tall and wrapped content is clipped, never reflowed; the second row
+       is the pad that keeps consecutive actions from reading as one stack.
+       ``ToolCard.tool-expanded`` relaxes it to ``height: auto`` precisely
+       because expansion is the one case that may be taller.
     2. The status segment is hard-trimmed to ``width - 3`` in ``_build_row``,
        so no state's label can outgrow its column.
     3. Diff counters are dropped first when the cap bites, so the outcome
@@ -961,7 +968,13 @@ START_UNKNOWN = _UnknownStart()
 
 
 class ToolCard(ExpandableActionBlock):
-    """A tool execution: ONE row, on a state-tinted elevation step.
+    """A tool execution: ONE row of ink, on a state-tinted elevation step.
+
+    The widget occupies two terminal rows collapsed, not one: the summary plus
+    a pad row below it in the card's own fill. The ledger is still one LINE per
+    action — the pad carries no glyph — and the extra row is what stops a run
+    of actions reading as a single jammed stack (see the ``ToolCard`` rule in
+    ``local_operator.tcss`` for the ladder and the rejected alternatives).
 
     Lifecycle: construct with ``tool_call_id``/``tool_name`` (running),
     :meth:`mark_done` on success, :meth:`mark_failed` on error,
@@ -2064,10 +2077,11 @@ class ToolCard(ExpandableActionBlock):
         ``Static.update`` reflows by default and a reflow re-arranges the whole
         transcript — 7.8 ms across 173 widgets on a 161-block screen — but a
         card's footprint is its row count and nothing else: collapsed, the
-        sheet pins it to ``height: 1`` and the row cannot reflow anything at
-        all. Without this guard the 1 Hz clock on every running card, and every
-        pointer crossing a card's edge, each reflowed the entire screen to
-        repaint one row.
+        sheet pins it to a one-cell content box (``height: 2`` against a
+        one-row bottom pad) and the row cannot reflow anything at all. Without
+        this guard the 1 Hz clock on every running card, and every pointer
+        crossing a card's edge, each reflowed the entire screen to repaint one
+        row.
         """
         # `fold_width(0)` walks size → container → the parent transcript's
         # scrollable content region, and returns 0 only when none of the three

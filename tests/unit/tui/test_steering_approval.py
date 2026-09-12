@@ -453,9 +453,13 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
         assert not app.query(AssistantBlock)
         painted = rows(app)
         # The working line TRAILS the row it reports on — it is pinned to the
-        # foot of the transcript — with exactly ONE blank row between them: the
-        # air that says "this is the live status, not another ledger entry".
-        # An eagerly mounted empty prose block would open a second hole.
+        # foot of the transcript — with exactly ONE row of GROUND between them:
+        # the air that says "this is the live status, not another ledger
+        # entry". An eagerly mounted empty prose block would open a second
+        # hole. The distance is 3 rather than 2 because the tool row carries
+        # its own pad row below the summary (see the `ToolCard` rule in the
+        # sheet); the ground row between the two blocks is still exactly one,
+        # which is what this asserts.
         # Found by its spinner head rather than by its words, because the
         # ledger row above it also carries the tool's name.
         working = next(
@@ -466,7 +470,7 @@ async def test_empty_assistant_message_mounts_no_block() -> None:
         tool = next(
             index for index, row in enumerate(painted) if "bash" in row and index != working
         )
-        assert working - tool == 2
+        assert working - tool == 3
 
 
 @pytest.mark.asyncio
