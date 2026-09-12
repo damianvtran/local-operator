@@ -15,7 +15,12 @@ What local-operator DOES fetch, grouped by the credential it needs:
   - ``kimi`` — Moonshot `GET /v1/users/me/balance`, on whichever host the
     provider is CONFIGURED for, so the key that reaches the chat API is the
     key that reaches the balance. The region also fixes the currency.
-  - ``deepseek`` — `GET /user/balance` → one balance per currency.
+  - ``deepseek`` — `GET /user/balance` → one balance per currency, each with
+    the vendor's granted/topped-up split and its ``is_available`` serving flag.
+    DeepSeek publishes **no** usage or spend endpoint — `/user/balance` is the
+    only account route in their API docs — so there is no window to report and
+    none is invented here. What these sessions cost locally is
+    `/analytics`' question, answered from recorded token counts.
 
 - With an OAuth access token, when the user logged in via OAuth:
   ``anthropic`` (`/api/oauth/usage`), ``openai``/``openai-device`` (ChatGPT
@@ -276,6 +281,14 @@ class UsageLimit:
     #: must not look alike in a list where the user is deciding whether to switch
     #: models or stop working.
     shared: bool = False
+    #: One line of vendor-supplied composition for this allowance, rendered
+    #: under its row (DeepSeek's ``100.00 USD paid · 20.00 USD granted``). It
+    #: exists because a single total hides the part that EXPIRES: granted
+    #: credit is promotional and dated, so an account reading ``120.00 USD
+    #: left`` may have far less durable balance than the number suggests.
+    #: Free-form display text, never parsed back — a fetcher that has no split
+    #: to report leaves it empty and the renderer emits no line.
+    detail: str = ""
 
     def effective_status(self) -> str:
         return self.status or self.amount.status()
@@ -745,6 +758,15 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     a factor of seven. ``is_available`` is the provider's own "can this account
     still serve requests" flag and is worth surfacing, because a zero balance and a
     suspended account look identical in the numbers alone.
+
+    Every row carries an EXPLICIT status. A balance-only amount has no
+    denominator, so ``UsageAmount.status()`` can only ever answer ``unknown``
+    for it — which rendered a number the endpoint had just reported as a
+    number we do not have (hollow mark) and tallied it in the footer as "not
+    reported". The account flag and the sign of the total are the two facts
+    that decide whether this wallet can pay for the next request, and they are
+    what the status is derived from here. Same shape
+    :func:`fetch_radient_balance` already uses.
     """
     payload = await _get_json(client, DEEPSEEK_BALANCE_URL, _bearer(api_key))
     if payload is None:
@@ -752,6 +774,11 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     infos = payload.get("balance_infos")
     if not isinstance(infos, list):
         return None
+    # Strictly a JSON ``false``. A missing key or a value of another type is
+    # NOT evidence the account is suspended, and coercing one (``""``, ``0``)
+    # into "unavailable" would paint every row of a healthy account red on a
+    # schema change. Absent stays fail-open, as it was before.
+    available = payload.get("is_available") is not False
     limits: list[UsageLimit] = []
     for item in infos:
         if not isinstance(item, dict):
@@ -769,12 +796,39 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
                 # currency in the label rather than mislabelled as dollars.
                 amount=UsageAmount(remaining=total, unit="usd" if currency == "USD" else "unknown"),
                 window="lifetime",
+                status="ok" if available and total > 0 else "exhausted",
+                detail=_deepseek_split(item, currency),
             )
         )
     if not limits:
         return None
-    notes = None if payload.get("is_available", True) else "account not available for requests"
+    notes = None if available else "account not available for requests"
     return UsageReport(provider="deepseek", limits=limits, notes=notes)
+
+
+def _deepseek_split(item: dict[str, Any], currency: str) -> str:
+    """``100.00 USD paid · 20.00 USD granted`` for one balance entry.
+
+    The vendor reports the total as the sum of a topped-up part the user bought
+    and a granted part that was given and EXPIRES, which is why the split is
+    worth a line: the same ``120.00 USD left`` means something different
+    depending on how much of it is dated promotional credit.
+
+    The currency is repeated on each number rather than factored out, because
+    the row above states it only in its label — a CNY amount is deliberately
+    unitless in ``amount.unit`` (see the fetcher), so this line is the only
+    place a number and its currency appear together.
+
+    Built from whichever parts parsed: a body carrying neither field produces
+    no line at all rather than an empty scaffold.
+    """
+    parts = [
+        (_num(item.get("topped_up_balance")), "paid"),
+        (_num(item.get("granted_balance")), "granted"),
+    ]
+    return " · ".join(
+        f"{value:.2f} {currency} {name}" for value, name in parts if value is not None
+    )
 
 
 #: Z.AI's coding-plan quota endpoint. Lives on the API host but OUTSIDE the
