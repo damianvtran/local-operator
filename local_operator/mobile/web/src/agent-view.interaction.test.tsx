@@ -650,6 +650,133 @@ describe("AgentConversation", () => {
 		expect(screen.getByText(/reviewer · high/)).toBeTruthy();
 	});
 
+	it("keeps a running child's dropped poll quiet while its rows are on screen", async () => {
+		/* A running child polls every 1.5 s, so its own poll is the recovery path
+		   for a dropped tick (see the catch block): the transient card must not
+		   paint over rows that are still live — on the flaky link this surface
+		   exists for it would flash an error once per drop over a transcript the
+		   user can read — and the next successful tick restores the tail. The row
+		   has to LAND first, so the first fetch succeeds and the failure is the
+		   tick after it. */
+		vi.useFakeTimers();
+		try {
+			const { detail, projection } = fixture();
+			const running = {
+				...detail,
+				status: "running" as const,
+				transcript: [],
+				prompt: "",
+				launch_message_id: "",
+			};
+			const live = entry("live", "assistant", "Live step one");
+			const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+			getSubagentHistory.mockReset();
+			getSubagentHistory
+				.mockResolvedValueOnce({ entries: [live], has_more: false })
+				.mockRejectedValueOnce(new Error("poll dropped"))
+				.mockResolvedValueOnce({
+					entries: [live, entry("tail", "assistant", "Live step two")],
+					has_more: false,
+				});
+			render(
+				<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={running} />,
+			);
+			await vi.waitFor(() => expect(screen.getByText("Live step one")).toBeTruthy());
+			// One dropped poll tick: the fetch really ran and really failed...
+			await vi.advanceTimersByTimeAsync(1600);
+			expect(getSubagentHistory).toHaveBeenCalledTimes(2);
+			await vi.advanceTimersByTimeAsync(10);
+			// ...the rows are still there, and the drop is not announced over them.
+			expect(screen.getByText("Live step one")).toBeTruthy();
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+			expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+			// The next tick lands the tail with no card in between, no retry needed.
+			await vi.advanceTimersByTimeAsync(1600);
+			await vi.waitFor(() => expect(screen.getByText("Live step two")).toBeTruthy());
+			expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps the retry card when a settled child's later fetch fails (U1)", async () => {
+		/* The mirror of the rule above, and the reason it keys on ``running``
+		   rather than on rows alone: a settled child has NO poll, so nothing
+		   recovers a dropped fetch — not even when rows from an earlier fetch are
+		   still on screen, where a rows-only gate would lose the transcript
+		   silently. Here the first fetch lands, the link drops, the effect re-runs
+		   (``connected`` is a dependency) and fails: the card must be back under
+		   the row that is still there. */
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory
+			.mockResolvedValueOnce({
+				entries: [entry("landed", "assistant", "Landed step")],
+				has_more: false,
+			})
+			.mockRejectedValueOnce(new Error("link dropped"));
+		const view = (connected: boolean) => (
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected={connected} detail={settled} />
+		);
+		const { rerender } = render(view(true));
+		await waitFor(() => expect(screen.getByText("Landed step")).toBeTruthy());
+		rerender(view(false));
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		expect(screen.getByText("Landed step")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+	});
+
+	it("gives both notice cards the app's 8 px title/body pair gap (D6)", async () => {
+		/* The D4 wrapper took the pair spacing over from the card's own
+		   ``flex … gap-2``, so the title and body sat flush at 0 px where the
+		   app's equivalent pair (``AgentUnavailable`` → ``InlineState``) is 8 px.
+		   Layout is not measurable in happy-dom, so this pins the utility the
+		   designer specified rather than the rendered geometry; the two branches
+		   are one component and must not drift apart on it. */
+		const { detail, projection } = fixture();
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		const { unmount } = render(
+			<AgentConversation
+				sessionId="root"
+				jobId="current"
+				projection={projection}
+				connected
+				detail={{ ...detail, status: "completed" as const, transcript: [] }}
+			/>,
+		);
+		await waitFor(() => expect(screen.getByText("No transcript for this agent.")).toBeTruthy());
+		const terminal = screen.getByRole("alert");
+		expect(terminal.classList.contains("gap-2")).toBe(true);
+		expect(terminal.className).toContain("flex-col");
+		unmount();
+		// The transient branch takes the same class: same title/body pair rhythm.
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(new Error("transient drop"));
+		render(
+			<AgentConversation
+				sessionId="root"
+				jobId="current"
+				projection={projection}
+				connected
+				detail={{ ...detail, status: "completed" as const, transcript: [], prompt: "" }}
+			/>,
+		);
+		await waitFor(() => expect(screen.getByText("Couldn't load the transcript.")).toBeTruthy());
+		expect(screen.getByRole("alert").classList.contains("gap-2")).toBe(true);
+	});
+
 	it("keeps a running child's sheet live by polling its transcript", async () => {
 		/* status===running means the sheet must re-pull the transcript on an
 		   interval so an open sheet stays real-time; a settled child fetches once. */
