@@ -797,3 +797,98 @@ def test_the_net_hands_a_version_skewed_broker_to_the_sweep_and_counts_it(
     finally:
         _cleanup_planted_socket(candidate)
     assert stopped == [candidate], "the skewed candidate never reached the sweep"
+
+
+def test_the_sweep_survives_a_skewed_probe_and_never_assumes_the_broker_died(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal in the post-SIGTERM wait loop cannot escape cleanup.
+
+    `_stop_brokers_in` waits for the daemon to stop ANSWERING, and the bare
+    `client.is_running` it used to call there RAISES for the one daemon that is
+    still there to refuse: `is_running` re-raises `BrokerIncompatible` on purpose
+    (a version-skewed broker is live), and such a daemon is very likely still
+    listening on the first poll after the signal. Because the call-phase reap runs
+    inside `finally` for every test, that refusal failed an unrelated passing test
+    — the same class of defect the net's `BrokerIncompatible` handling closes, one
+    call site over. The loop now asks `_broker_is_still_up`, which reads any
+    failure to answer as STILL UP, so the wait stays bounded and the broker's fate
+    is never assumed: the net's count refuses to call a broker it could not
+    confirm stopped "reclaimed".
+
+    A real process that IGNORES `SIGTERM` (and records that it received it) stands
+    in for the daemon the sweep cannot confirm dead, so both halves are pinned: the
+    sweep must not raise, and the count must be 0 rather than a broker assumed
+    dead. Only the probe and `broker_status` are patched. The test costs the wait
+    loop's own bound (~5s), which is the behaviour under test.
+    """
+    candidate = tmp_path / "config"
+    candidate.mkdir()
+    _plant_socket(candidate)
+    marker = tmp_path / "sigterm-received"
+    ready = tmp_path / "sigterm-handled"
+    # The handler is what makes the signal observable rather than merely deliverable,
+    # and it is also why this daemon survives: a bare ignore would prove delivery no
+    # better but leave the process alive for the same reason. The `ready` file is not
+    # decoration — without it the TEST can signal a child that has not installed the
+    # handler yet, and a default-action SIGTERM would kill it and turn the count into
+    # a spurious 1.
+    daemon = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, signal, time\n"
+            "ready = os.environ['LO958_READY']\n"
+            "marker = os.environ['LO958_SIGTERM_MARKER']\n"
+            "signal.signal(signal.SIGTERM, lambda *_: open(marker, 'w').write('SIGTERM'))\n"
+            "open(ready, 'w').write('ready')\n"
+            "time.sleep(60)\n",
+        ],
+        env={
+            **os.environ,
+            "LO958_SIGTERM_MARKER": str(marker),
+            "LO958_READY": str(ready),
+        },
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not ready.exists():
+        time.sleep(0.05)
+    assert ready.exists(), "the stand-in daemon never installed its SIGTERM handler"
+
+    def skewed(base: Path | None = None) -> bool:
+        if daemon.poll() is None:
+            raise client.BrokerIncompatible(
+                "the broker speaks protocol 0", pid=daemon.pid, protocol=0
+            )
+        return False
+
+    monkeypatch.setattr("tests.conftest._SESSION_SWEEP_ROOTS", {candidate})
+    monkeypatch.setattr(client, "is_running", skewed)
+    monkeypatch.setattr(
+        client, "broker_status", lambda base=None: {"pid": daemon.pid, "incompatible": True}
+    )
+    started = time.monotonic()
+    try:
+        # Before the wait loop was fixed this raised BrokerIncompatible straight out
+        # of the reap — an error in whatever test was running, not a suppressed
+        # cleanup.
+        reclaimed = _sweep_session_leftovers(tmp_path)
+        waited = time.monotonic() - started
+        assert reclaimed == 0, (
+            "the net counted a broker it could not confirm stopped — an unanswerable "
+            "probe reads as STILL UP, never as a reclaim"
+        )
+        assert waited >= 1.0, (
+            f"the wait loop returned after {waited:.2f}s: it must wait out its bound "
+            "for a daemon that never answers, not declare it stopped"
+        )
+        assert marker.exists(), (
+            "the sweep never signalled the daemon: the refusal above must come from a "
+            "stop that was actually attempted"
+        )
+        assert daemon.poll() is None, "the stand-in daemon was expected to survive SIGTERM"
+    finally:
+        _cleanup_planted_socket(candidate)
+        with suppress(OSError):
+            daemon.kill()
+        daemon.wait(timeout=5)

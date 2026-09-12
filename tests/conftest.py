@@ -568,12 +568,16 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
 
 
 def _broker_is_still_up(candidate: Path) -> bool:
-    """Did the net's stop attempt leave ``candidate``'s broker answering?
+    """Is ``candidate``'s broker still answering, after a stop was attempted?
+
+    Used by the session-end net's count and by `_stop_brokers_in`'s post-SIGTERM
+    wait loop, so both ask the question the same way.
 
     Conservative in the only direction that is honest: any failure to get an
     answer counts as STILL UP, so the net never claims a reclaim it could not
-    observe. `is_running` deliberately re-raises `BrokerIncompatible`, and a
-    skewed daemon that survived the stop is not a reclaim either.
+    observe and the wait loop never lets a refusal escape cleanup. `is_running`
+    deliberately re-raises `BrokerIncompatible`, and a skewed daemon that survived
+    the stop is not a reclaim either.
     """
     from local_operator.secrets import client
 
@@ -751,8 +755,21 @@ def _stop_brokers_in(candidates: list[Path]) -> None:
             continue
         with suppress(OSError):
             os.kill(pid, signal.SIGTERM)
+        # Wait for the daemon to stop ANSWERING — but ask it through
+        # `_broker_is_still_up` rather than `client.is_running` directly, because
+        # the bare call RAISES for the one daemon that is still there to refuse:
+        # `is_running` re-raises `BrokerIncompatible` on purpose (a version-skewed
+        # broker is live, and answering False would launder it into
+        # "unreachable"), and on the first poll after the signal such a daemon is
+        # very likely still listening. That refusal then escaped cleanup — the
+        # call-phase reap, which runs inside `finally` for every test — so a
+        # version-skewed broker could fail an unrelated passing test. The helper
+        # answers the same question with any failure to answer read as STILL UP,
+        # which keeps this loop bounded by its deadline and keeps the broker's
+        # fate honest: nothing here assumes the daemon died, and the session-end
+        # net re-asks the same question before it counts a candidate as reclaimed.
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and client.is_running(candidate):
+        while time.monotonic() < deadline and _broker_is_still_up(candidate):
             time.sleep(0.05)
 
     # The fallback runtime dir is derived from the SECRETS dir and is created
