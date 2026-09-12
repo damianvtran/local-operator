@@ -672,3 +672,53 @@ def test_a_mismatched_provisional_anchor_cannot_supersede(tmp_path: Path) -> Non
     store.publish("session/a", token, "message-real", "complete")
     assert store.state("session/a")["kind"] == "complete"
     assert store.state("session/a")["anchor_id"] == "message-real"
+
+
+def test_the_desktop_is_just_another_claimant_with_no_special_path(tmp_path: Path) -> None:
+    """A desktop claim and a TUI claim for one completion produce ONE winner.
+
+    The desktop app reaches this primitive through `DesktopSessions.
+    claim_notification`, which passes `backend="desktop"`. The `backend` column
+    is diagnostics only — no decision may read it, because a claim that
+    consulted anything beyond the monotonic sequence would stop being
+    clock-free and two observers with disagreeing clocks would both deliver —
+    so the important property is that naming a new backend buys no privilege
+    whatsoever.
+
+    That matters because the two surfaces are genuinely concurrent in the real
+    configuration this feature ships into: with the desktop window unfocused, a
+    session's `live_state` is `idle`, which makes BOTH a TUI observer and the
+    desktop eligible for the same completion. Exactly one banner is the
+    contract; which one wins is deliberately unspecified.
+    """
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "result", "complete")
+
+    # Separate stores, as two separate PROCESSES would hold: no shared
+    # connection, no shared cache, only the file.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(
+            pool.map(
+                lambda backend: AttentionStore(path).claim_delivery("session/a", token, backend),
+                ("desktop", "cmux"),
+            )
+        )
+    assert claims.count(True) == 1, "two surfaces both announced one completion"
+
+    # Whoever lost stays locked out, in either order, and a late third surface
+    # inherits the watermark rather than re-firing.
+    assert AttentionStore(path).claim_delivery("session/a", token, "desktop") is False
+    assert AttentionStore(path).claim_delivery("session/a", token, "detached") is False
+
+    # And the claim did not touch the READ watermark on any of those paths:
+    # the sidebar's mark belongs to a human opening the conversation.
+    assert store.state("session/a")["unseen"] is True
+
+    # A NEWER completion is a fresh arbitration, so a delivered conversation is
+    # not permanently silenced on either surface.
+    newer = str(uuid.uuid4())
+    store.publish("session/a", newer, "result-2", "complete")
+    assert AttentionStore(path).claim_delivery("session/a", newer, "desktop") is True
+    assert AttentionStore(path).claim_delivery("session/a", newer, "cmux") is False

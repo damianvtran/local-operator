@@ -31,6 +31,7 @@ from local_operator.server.models.desktop_sessions import (
     CreatedSession,
     HistoryPage,
     MessageAdmission,
+    NotificationClaim,
     SessionList,
     SessionSnapshot,
     WatchReceipt,
@@ -84,6 +85,15 @@ class Input(BaseModel):
 class Seen(Input):
     # A durable completion UUID is the only admission: timestamps or a caller's
     # runtime epoch could accidentally acknowledge a later, unseen outcome.
+    completion_token: RequestID
+
+
+class Notified(Input):
+    # Same admission as `Seen`, and for the same reason: a durable completion
+    # UUID is the only identity that survives a runtime epoch, so nothing a
+    # caller can invent (a timestamp, its own epoch) may enter the watermark.
+    # The two routes are otherwise unrelated — this one claims the right to
+    # notify and NEVER acknowledges a read.
     completion_token: RequestID
 
 
@@ -518,6 +528,28 @@ async def answer(session_id: str, body: Answer, request: Request):
 async def seen(session_id: str, body: Seen, request: Request):
     async with errors():
         return reply(await host(request).acknowledge_attention(session_id, body.completion_token))
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/notified", response_model=CRUDResponse[NotificationClaim]
+)
+async def notified(session_id: str, body: Notified, request: Request):
+    """Claim the right to raise ONE banner for one completion.
+
+    Called by the desktop app immediately before it constructs the OS
+    notification, and only then: claim-then-deliver means the claimant has to
+    be the deliverer, so a renderer that is going to suppress the banner
+    (focused window, stale dedupe key) must not reach here. A claim taken for a
+    toast nobody sees is delivered-to-nobody forever, and no other surface can
+    ever pick it up.
+
+    Cold and receipt-free, unlike ``/seen`` beside it: no bridge is acquired,
+    no runtime is started, and neither ``unseen`` nor the read watermark moves.
+    Notifying is not reading.
+    """
+    async with errors():
+        claimed = await host(request).claim_notification(session_id, body.completion_token)
+        return reply({"claimed": claimed})
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])

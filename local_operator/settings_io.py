@@ -1246,11 +1246,22 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.BOOL,
         default=True,
         # Leads with the CONSEQUENCE, not the mechanism: the decision being
-        # asked for is whether a model-written session name appears on a lock
-        # screen, which is the one fact that changes someone's answer. The
-        # neighbours ("Fires only while the terminal is unfocused.") are worded
-        # the same way (design round 1, D6).
-        help="A session's name appears on banners, including the lock screen.",
+        # asked for is whether model-written content (session name, last
+        # line, error cause) appears on a lock screen, which is the one fact
+        # that changes someone's answer. The neighbours ("Fires only while
+        # the terminal is unfocused.") are worded the same way (design
+        # round 1, D6). All three legs are named because this flag gates
+        # banner BODIES too, not just names (design round 2, D1): OFF drops
+        # the error cause that makes an error banner actionable, and a row
+        # that hides that trade surprises someone who turns it off.
+        # Implicit concatenation keeps the rendered string one sentence while
+        # holding the line under the 100-column flake8/black budget; a
+        # `noqa: E501` on the joined form is reserved in this repo for
+        # unsplittable content (URLs, embedded code), not prose.
+        help=(
+            "A session's name, last line and error causes appear on banners, "
+            "including the lock screen."
+        ),
         # `off` no longer means "app name only" on every route — a background
         # session with no stored title is titled "A session finished" — so the
         # label names what the user gets rather than a fallback that is now one
