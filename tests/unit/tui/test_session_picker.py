@@ -1985,8 +1985,92 @@ def test_a_marker_change_with_nothing_busy_still_repaints() -> None:
     assert repaints["n"] == 0, "an unchanged settled store must stay cheap"
 
     state["live"] = "wedged"
+    # The live-marker read is on a BOUNDED cadence now (`LIVE_REFRESH_INTERVAL_S`
+    # in the widget), so this test drives the refresh explicitly instead of
+    # assuming the frame rate is it. What is pinned here is the
+    # repaint-on-visible-change property; the cadence has its own test
+    # (`test_the_overlay_is_not_re_run_on_every_tick`).
+    screen._live_refreshed_at = float("-inf")
     screen._tick()
     assert repaints["n"] == 1, "a marker transition must reach the screen"
+
+
+def test_the_overlay_is_not_re_run_on_every_tick(monkeypatch) -> None:
+    """The overlay's cost was per FRAME; the design says per visible change.
+
+    `_tick` runs at `SPINNER_INTERVAL_S` (12.5 Hz) and called `refresh`
+    unconditionally — one `registry.scan()` (a glob, a JSON parse per record, a
+    `ps` per quiet-heartbeat record) plus `read_index()` — while its own
+    docstring claimed the refresh was "skipped entirely when no row is
+    animating". An open picker over a store of cold sessions therefore
+    re-scanned the whole store twelve times a second to discover that nothing
+    had changed.
+
+    Driven with a fake clock so the cadence is asserted EXACTLY rather than
+    inferred from how fast the test machine happened to run: the property is a
+    ratio of refreshes to frames, and nothing here measures a duration.
+    """
+    import time as real_time
+
+    from local_operator.resume import SessionRow
+    from local_operator.tui.widgets import session_picker as picker_module
+    from local_operator.tui.widgets.session_picker import (
+        LIVE_REFRESH_INTERVAL_S,
+        SPINNER_INTERVAL_S,
+        SessionPickerScreen,
+    )
+
+    clock = {"t": 0.0}
+
+    class _Clock:
+        # Patched onto the widget's own module reference, not onto `time`
+        # itself: only this picker sees it, and pytest's own timing is untouched.
+        @staticmethod
+        def monotonic() -> float:
+            return clock["t"]
+
+    monkeypatch.setattr(picker_module, "time", _Clock)
+
+    now = real_time.time()
+    rows = [SessionRow(id="aaaaaaaaaaa1", mtime=now, name="only", live_state="idle")]
+    refreshes = {"n": 0}
+
+    def refresh(current: list[SessionRow]) -> list[SessionRow]:
+        refreshes["n"] += 1
+        return list(current)
+
+    screen = SessionPickerScreen(rows, now, refresh_live_state=refresh)
+
+    class _Body:
+        is_mounted = True
+
+        def update(self, _text: object) -> None:
+            return None
+
+    screen._body = _Body()  # type: ignore[assignment]
+
+    # One second of frames (0.00 through 0.96 s) — one refresh, not thirteen.
+    for tick in range(13):
+        clock["t"] = tick * SPINNER_INTERVAL_S
+        screen._tick()
+    assert refreshes["n"] == 1, "the overlay was re-run once per frame"
+
+    # A CADENCE, not a one-off: the next interval refreshes again, which is what
+    # keeps a row that REORDERS (a session parking on a gate, nothing animating)
+    # from freezing on screen — the property the D10 tests above pin.
+    clock["t"] += LIVE_REFRESH_INTERVAL_S
+    screen._tick()
+    assert refreshes["n"] == 2
+
+    # ...and the frame counter still runs at the FRAME rate while a row is
+    # busy, because that is motion and it is the honest thing for a running
+    # marker to show. The data stays on the slower cadence.
+    screen._all = [row._replace(live_state="busy") for row in screen._all]
+    before_frames = screen._frame
+    for _ in range(5):
+        clock["t"] += SPINNER_INTERVAL_S
+        screen._tick()
+    assert screen._frame == before_frames + 5, "the spinner stopped animating"
 
 
 def test_a_pure_reorder_with_identical_content_still_repaints() -> None:

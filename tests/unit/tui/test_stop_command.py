@@ -1196,8 +1196,17 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
         # that reproduces the shape by hand would step straight over it. Its
         # imports are function-local, so the record lookup and the connect are
         # patched at their source modules and everything else is the real path.
+        #
+        # The record must be one `_attach_or_refuse` will actually DIAL. It used
+        # to be pinned to protocol 4, which was goalless even then — the guard
+        # refused below 4, so 4 was simply the oldest dialable value — and is
+        # now refused before the dial: the first-attempt guard applies
+        # `FRONTEND_ATTACH_MIN_PROTOCOL` (the canonical check) instead of a
+        # literal, so anything below the current build gets the upgrade refusal
+        # rather than a doomed connect. A refusal here would step over the swap
+        # window this test is about, which is why the field is left at its
+        # current-protocol default.
         remote_record = _record(90909, "the remote")
-        remote_record.protocol = 4
 
         async def fake_find(_root: Any, _concrete: str):
             return remote_record, 90909
@@ -1222,7 +1231,7 @@ async def test_a_strand_mid_swap_leaves_the_kill_switch_armed(
         app._resume_factory = fake_find  # type: ignore[assignment]
 
         with pytest.raises(RuntimeError):
-            await app._attach_or_refuse(tmp_path, "remote-1", 90909)
+            await app._attach_or_refuse(tmp_path, "remote-1")
 
         assert app._session is None, "the viewer really is unbound"
         assert app._adopted_session_id == "sess", "the only lever the user has must survive"
