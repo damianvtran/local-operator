@@ -982,6 +982,11 @@ async def test_repaired_config_boots_into_an_escapable_state(
     seed = ConfigManager(tmp_path)
     seed.set_config_value("hosting", "anthropicxyq")
     seed.set_config_value("model_name", "claude-sonnet-4-5")
+    # A stored effort this recovery does NOT touch but which rides into the boot
+    # it is about to start, clamped to whatever the chosen model takes (U5). The
+    # receipt names it, because a default is host + model + effort and this is
+    # the one receipt a first-run user sets one through.
+    seed.set_config_value("model_effort", "xhigh")
 
     # The repair the app performs on a successful `/login`, through the real
     # planner rather than a hand-written config: the point is that this exact
@@ -1049,7 +1054,8 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         # THE SUBSTANCE: the state must be escapable. A setup state you cannot
         # leave is the same bug wearing a different colour.
-        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": None)
+        receipts: list[str] = []
+        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": receipts.append(body))
         for _ in range(200):
             await pilot.pause()
             if app._session is not None:
@@ -1058,6 +1064,10 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         assert app._session is session, "the recovery command must BUILD the session"
         assert app._setup_state is False
+        # U5: the stored effort is named beside the pair it will govern. It is
+        # not rewritten here and it IS what the new boot runs on, so a receipt
+        # that stopped at host + model described two thirds of the default.
+        assert any("model_effort xhigh" in body for body in receipts), receipts
 
     # The escape persisted the pair, so the next launch does not return here.
     recovered = ConfigManager(tmp_path)
@@ -8873,8 +8883,11 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert written["hosting"] == "anthropic", written
     assert written["model_name"] == "claude-opus-5", written
-    # What it wrote, under the names the config file uses…
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    # What it wrote, named the way the app names a model everywhere else (the
+    # joined label) with the third key under its registry name (design D3: at
+    # 120 columns a row holds 110 cells, so the pair is joined rather than
+    # spelled as the two config keys).
+    assert _unwrapped("anthropic/claude-opus-5, model_effort") in _unwrapped(text), text
     # …and where, so the user can go and read or undo it.
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
@@ -8927,7 +8940,7 @@ async def test_model_default_alone_saves_the_model_the_session_is_on(
     # the persist path's own `set_model` is a no-op re-selection.
     assert label_after == "anthropic/claude-opus-5", label_after
     # Same receipt vocabulary as the explicit spelling — one outcome, one wording.
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    assert _unwrapped("anthropic/claude-opus-5, model_effort auto") in _unwrapped(text), text
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
 
@@ -9143,7 +9156,7 @@ async def test_model_default_alone_is_write_only(
         await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     # The bare form WROTE (its receipt names the pair) without the access note…
-    assert _unwrapped("hosting openrouter, model_name deepseek/deepseek-chat") in bare_receipt
+    assert _unwrapped("openrouter/deepseek/deepseek-chat, model_effort auto") in bare_receipt
     assert _unwrapped("openrouter logged in") not in bare_receipt, bare_receipt
     # …and the explicit form with a different model took the switch tail once.
     assert session.set_model_calls == [("anthropic/claude-opus-5", True)], session.set_model_calls
@@ -9220,11 +9233,18 @@ async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
             await pilot.pause()
             await pilot.pause()
             notices = [block.text() or "" for block in app.query(NoticeBlock)]
-        receipts = [n for n in notices if "boot default saved" in n]
+        # `startswith`, not a substring (review round 3, MINOR-2): three
+        # FAILURE notices contain `default:` — `could not save default:`,
+        # `model switched, but could not save default:` and `could not read the
+        # saved default:` — so the substring form would also have passed had the
+        # success receipt been replaced by a save failure, which is the one
+        # substitution this assertion exists to catch. The sibling budget test in
+        # `test_effort.py` uses the same shape against the same receipt.
+        receipts = [n for n in notices if n.startswith("default: ")]
         assert len(receipts) == 1, notices
         assert not [n for n in notices if "config.yml changed" in n], notices
         # The receipt is the LAST row: nothing followed it.
-        assert "boot default saved" in notices[-1], notices
+        assert notices[-1].startswith("default: "), notices
     finally:
         _reset_for_tests()
 
@@ -10130,7 +10150,7 @@ async def test_model_default_on_a_cold_viewer_still_saves(
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("default:") in text, text
     assert _unwrapped("no runtime is running") not in text, text
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
@@ -10179,7 +10199,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used by new sessions") in text, text
+    assert _unwrapped("(new sessions)") in text, text
 
 
 @pytest.mark.asyncio

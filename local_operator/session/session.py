@@ -11622,8 +11622,8 @@ class Session:
         if "web_search.enabled" in changed or "web_fetch.enabled" in changed:
             if self._job_id is None:
                 self._web_tools_dirty = True
-        if "hosting" in changed or "model_name" in changed:
-            self._on_configured_model_changed(values, local=source == "local")
+        if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
+            self._on_configured_model_changed(values, local=source == "local", changed=changed)
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.
@@ -11655,7 +11655,9 @@ class Session:
             return
         self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
 
-    def _on_configured_model_changed(self, values: Mapping[str, Any], *, local: bool) -> None:
+    def _on_configured_model_changed(
+        self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]
+    ) -> None:
         """Defaults seed NEW conversations; reloading them never selects a model.
 
         A watcher cannot identify which pane authored an edit. Local commands
@@ -11711,25 +11713,79 @@ class Session:
         per-tick coalescing of the notice, which a source flag cannot express.
         The fix is scoped to ``local`` because ``source`` identifies that
         writer set exactly, not because tearing is impossible elsewhere.
+
+        ``model_effort`` is part of the SAME predicate, for the reason the pair
+        is: it is the third key of the same ``model`` section, it governs the
+        same birth defaults, and the TUI's own listener skips the whole
+        ``model`` section (a local write is the author's own receipt). Without
+        it an effort-only edit from ANOTHER process would change new sessions'
+        default with no signal anywhere — the one member of the section that
+        moved silently. The notice's advice is now literally true: ``/model
+        saved`` adopts the configured effort here, so naming the change is
+        naming the thing the user can act on.
+
+        The third member is detected as a CHANGE rather than inferred from values
+        (round-3 ruling). ``ConfigChange.changed_keys`` states which registry key
+        actually moved, so the rule is: the pair still matches this session's
+        model AND ``model_effort`` is one of the keys that moved. That is the
+        form that satisfies every case at once. A value comparison cannot: it has
+        to decide what the session's "own" level is, and each such rule
+        mis-fires in one direction — comparing against the raw spec field made
+        an unrelated delivery announce for every seed-carrying model (M2);
+        normalising a seed to ``""`` made an unrelated same-value write announce
+        for a session holding a DELIBERATE level (Q2); and it made a genuine
+        move to ``""`` (the user clearing the key) silent for a session on the
+        seeded level (Q3) — the one member of this section the effort term
+        exists to keep audible. A key that moved is a fact about the writer, not
+        a guess about the reader.
         """
         if self._job_id is not None:
             return
         if local:
             return
-        if (values.get("hosting"), values.get("model_name")) == (
-            self.model.provider,
-            self.model.model_id,
+        if values.get("hosting") != self.model.provider or (
+            values.get("model_name") != self.model.model_id
         ):
+            # The model default itself moved: the #785 notice, unchanged.
+            self._spawn_background(
+                self._emit(
+                    NoticeEvent(
+                        text=(
+                            f"keeping {self.model_label}; default changed for new sessions. "
+                            "/model saved adopts it here"
+                        ),
+                        kind="info",
+                        headline="Model unchanged",
+                    )
+                )
+            )
             return
+        if "model_effort" not in changed:
+            # The pair still matches and no effort key moved: a delivery that
+            # changed nothing this session follows. The ordinary case is an
+            # unrelated rewrite of `model_name` to the SAME value (or a two-key
+            # save that re-states the pair) — announcing there was M2/Q2.
+            return
+        # An EFFORT-ONLY delivery: name the member that moved and the value it
+        # moved to. "Model unchanged" with an unnamed "a default changed" was
+        # literally true and still left the reader unable to tell WHICH default
+        # without opening `/settings` (U6).
+        #
+        # No model label on this row (U7): the pair MATCHES this session's model
+        # by construction here, so `keeping <label>` restated what the status band
+        # already shows — and the 24 cells it cost were what pushed a 120-cell
+        # row past the 110-cell budget at 120 columns, orphaning the pointer.
+        # The label belongs on the branch above, where the pair really moved.
+        stored_effort = str(values.get("model_effort") or "")
         self._spawn_background(
             self._emit(
                 NoticeEvent(
                     text=(
-                        f"keeping {self.model_label}; default changed for new sessions. "
-                        "/model saved adopts it here"
+                        "reasoning effort default changed for new sessions "
+                        f"({stored_effort or 'auto'}); /model saved adopts it here"
                     ),
                     kind="info",
-                    headline="Model unchanged",
+                    headline="Effort default changed",
                 )
             )
         )

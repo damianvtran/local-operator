@@ -429,7 +429,7 @@ with its title and age:
 | Command | What it does |
 | --- | --- |
 | `/model` | Switch model for this session; `/model default` saves the current one for new ones, `/model saved` reverts to it (`/settings` edits the boot default too) |
-| `/effort` | Show or set reasoning effort (`shift+tab` cycles) |
+| `/effort` | Show or set reasoning effort (`shift+tab` cycles; save a level for new conversations with `/model default`) |
 | `/fast` | Toggle fast mode where the provider sells one: the same answer sooner, at premium pricing |
 | `/approvals` | Set whether tools ask first (`ask`/`auto`; add `default` to keep it) |
 | `/resume` | Pick a past conversation and continue it |
@@ -768,7 +768,9 @@ lop config open        # open it in your editor
 lop config instructions  # which instruction files a session assembles, in order
 ```
 
-Commonly set values: `hosting` and `model_name` (skip the CLI flags),
+Commonly set values: `hosting`, `model_name` and `model_effort` (skip the CLI
+flags; `model_effort` sets the reasoning level new conversations start at, and a
+rung the chosen model lacks clamps to its nearest),
 `conversation_length` / `detail_length` (history kept verbatim vs
 summarized), `tui.theme` (any registered theme name, easier to set with
 `/theme`, which previews live), and `retry.fallbackChains` (the model

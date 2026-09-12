@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers.local import (
     DEFAULT_MODEL_OVERRIDES,
     LOCAL_PRESETS,
@@ -292,8 +293,8 @@ SECTIONS: tuple[Section, ...] = (
         "model",
         "Model",
         Scope.NEW_SESSIONS,
-        "Provider and model for new conversations. Existing sessions keep their model; "
-        "/model saved adopts the default here.",
+        "Provider, model and reasoning effort for new conversations. "
+        "Existing sessions keep their model; /model saved adopts the default here.",
     ),
     # Split out of ``model`` (review round 1, M3). The design left this key in
     # ``model`` and proposed documenting the discrepancy, which was defensible
@@ -577,6 +578,53 @@ def _theme_choices() -> tuple[Choice, ...]:
     return tuple(choices)
 
 
+#: One-line meaning for each rung of :data:`EFFORT_ORDER`, for the
+#: ``model_effort`` row's expanded list. Every member is a 3-argument
+#: :class:`Choice` here (value, label, description), so the descriptions live
+#: beside the ladder's own names rather than in the row. A rung with no entry
+#: falls back to an EMPTY description rather than raising: this table is built
+#: at import, and a KeyError there would take the whole CLI down for a missing
+#: sentence. ``tests/unit/test_settings_io.py`` pins that no rung is missing one,
+#: which is the loud failure this avoids at runtime.
+_EFFORT_LEVEL_HELP: dict[str, str] = {
+    # `reasoning off`, not `no reasoning — fastest, cheapest` (review round 1,
+    # m2): every other rung's description names a DEPTH, and the two benefits
+    # named the one row that costs the least, in a picker where the row directly
+    # above it is `auto`. A description has one job here — say what the member
+    # means — and the ladder's cheapest end is not the place to sell.
+    "none": "reasoning off",
+    "minimal": "the least reasoning the model offers",
+    "low": "light reasoning",
+    "medium": "moderate reasoning",
+    "high": "deep reasoning",
+    "xhigh": "very deep reasoning",
+    "max": "the model's deepest reasoning",
+}
+
+
+def _effort_choices() -> tuple[Choice, ...]:
+    """``model_effort``'s value space: the shared ladder plus the ``auto`` rung.
+
+    ``""`` leads as its own member rather than as an ``empty_unsets`` empty —
+    the same shape ``providers.openrouter.sort`` uses — so the page shows
+    ``auto`` BESIDE the real rungs as a peer to pick between (a bare empty
+    field would not), and the schema knows a stored empty string means "no
+    opinion" rather than a missing key.
+
+    The ladder comes from :data:`EFFORT_ORDER`, not a re-listing: the vocabulary
+    is the one place a rung is defined, and a second copy here would drift the
+    moment a level is added or removed. A rung the chosen model lacks is NOT
+    hidden — it is CLAMPED at use (``configure_model``), which is precisely what
+    makes offering the full ladder safe: the row needs no model to render, which
+    is required on the CLI path (a paint must not resolve a model) and in the
+    no-model setup state.
+    """
+    return (
+        Choice("", "auto", "the model's own default"),
+        *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
+    )
+
+
 SETTINGS: tuple[Setting, ...] = (
     # -- model --------------------------------------------------------------
     Setting(
@@ -604,6 +652,29 @@ SETTINGS: tuple[Setting, ...] = (
         # 72 cells — see the note on `hosting` above.
         help="Model for new conversations. /model saved adopts it here.",
         empty_unsets=True,
+    ),
+    Setting(
+        key="model_effort",
+        path=("model_effort",),
+        section="model",
+        label="Default reasoning effort",
+        kind=Kind.ENUM,
+        # "" is the unset member: the stored empty string means "no opinion"
+        # (the model's own default), exactly like `providers.openrouter.sort`.
+        # An ENUM member rather than `empty_unsets` so the page shows `auto`
+        # beside the real rungs as a peer to pick between.
+        default="",
+        # 57 cells, and that is the point (design round 1, D4+D5; round 2, D10):
+        # it has to hold the row's own meaning AND the resting state inside the
+        # 74-cell detail budget at 80 columns, which the off-default line spends
+        # as `<help> · default: —`. The first cut sat EXACTLY on 74 with zero
+        # headroom, so one more word anywhere would shed the whole sentence in the
+        # state a user reads it in. `the model's default` rather than `the
+        # model's own default` recovers 4 cells; the clamp sentence the original
+        # cut carried is documented in the README and named where it happens, on
+        # the `/model default` receipt.
+        help="Effort for new conversations. Unset: the model's default.",
+        choices=_effort_choices(),
     ),
     # -- providers ----------------------------------------------------------
     Setting(

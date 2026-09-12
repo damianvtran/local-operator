@@ -19,9 +19,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from rich.cells import cell_len
 
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
+from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
 
@@ -1224,3 +1226,212 @@ def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, cand
     with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
+
+
+class TestTheModelEffortRow:
+    """The ``model_effort`` row: the birth-default reasoning level for new sessions.
+
+    Registered rather than read-only because ``/settings`` is where a user
+    discovers what is configurable and ``lop config edit`` resolves names out of
+    the same registry (AGENTS.md, "Adding a configuration key"). Its value space
+    is the shared FIXED vocabulary rather than anything model-derived — a paint
+    must not resolve a model, and the CLI must work with no model configured —
+    and an unsupported rung is exactly what the clamp at session build is for,
+    not a reason to hide rungs.
+    """
+
+    def test_the_row_is_a_fixed_vocabulary_enum(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert setting.kind is Kind.ENUM
+        assert setting.path == ("model_effort",)
+        assert setting.section == "model"
+        assert setting.default == ""
+        # Deliberately NOT a `choices_source` (which would need a model) and NOT
+        # `empty_unsets` ("" is a real choice here — `auto`, the model's own
+        # default — rather than a deletion).
+        assert setting.choices_source is None
+        assert setting.empty_unsets is False
+        labels = [choice.label for choice in setting.resolved_choices]
+        assert labels[0] == "auto"
+        assert labels[1:] == list(EFFORT_ORDER)
+        assert setting.resolved_choices[0].value == ""
+
+    def test_every_rung_carries_a_description(self) -> None:
+        """The page's expanded list wants a three-argument Choice per member.
+
+        The help dict's lookup falls back to an empty description on purpose
+        (a KeyError at import would take the whole CLI down for a missing
+        sentence), so the loud failure for a rung added without one belongs
+        HERE."""
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        for choice in setting.resolved_choices:
+            assert choice.description, choice
+
+    def test_a_level_round_trips_through_the_facade(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        assert settings_io.read_setting(manager, setting) == "high"
+
+    def test_the_empty_value_is_accepted_as_no_opinion(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        settings_io.write_setting(manager, setting, "high")
+        settings_io.write_setting(manager, setting, "")
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_an_off_vocabulary_value_is_refused(self, manager: ConfigManager) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        with pytest.raises(ValueError):
+            settings_io.write_setting(manager, setting, "turbo")
+
+
+class TestConfigEditAcceptsAnEnumLabel:
+    """``lop config edit`` must accept a choice's displayed LABEL.
+
+    It matched the typed text against the choice VALUES only, which left two
+    documented words unreachable: ``model_effort auto`` (the stored ``""``) was
+    rejected outright, and ``model_effort none`` — a real rung of
+    ``EFFORT_ORDER`` — was converted to Python ``None`` by the generic value
+    guess before ``write_setting`` ever saw it. The guard maps a label to its
+    value before that guess, and only for ENUM settings.
+
+    It lives in this file because it is really about the registry's
+    LABEL→VALUE pair, which is this module's subject; the command is just the
+    keyboard for it.
+    """
+
+    @pytest.mark.parametrize(
+        ("typed", "stored"),
+        [
+            ("auto", ""),
+            ("none", "none"),
+            ("HIGH", "high"),
+        ],
+    )
+    def test_a_label_is_stored_as_its_value(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        typed: str,
+        stored: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="model_effort", value=typed))
+        assert code == 0, capsys.readouterr()
+        assert ConfigManager(tmp_path).get_config_value("model_effort") == stored
+
+
+class TestConfigEditEchoesTheTypedLabel:
+    """``lop config edit <enum key> <label>`` reports the word the user used.
+
+    The receipt printed the STORED value, which for an ENUM is a wire form, not
+    vocabulary: ``model_effort auto`` stores ``""``, so the confirmation read
+    "Successfully updated model_effort to " — the user typed a word and the
+    answer named nothing (design review D8). The same blank met every other
+    member whose value is empty (the ``providers.openrouter.*`` "default" rows),
+    and members whose label is not their value at all proposed a third spelling
+    (``display.nerd_icons auto`` stores ``None``).
+    """
+
+    @pytest.mark.parametrize(
+        ("key", "typed", "echoed"),
+        [
+            ("model_effort", "auto", "auto"),
+            ("model_effort", "none", "none"),
+            ("model_effort", "HIGH", "high"),
+            ("display.nerd_icons", "auto", "auto"),
+        ],
+    )
+    def test_the_label_is_what_comes_back(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        key: str,
+        typed: str,
+        echoed: str,
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key=key, value=typed))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert f"Successfully updated {key} to {echoed}" in out, out
+
+    def test_a_value_that_matched_no_label_still_echoes_what_was_stored(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The other half: a value the schema accepts WITHOUT being a label is
+        echoed as stored, so nothing about the normalising path moved.
+
+        ``display.time_format`` stores ``12h`` while its label is ``12-hour``, so
+        the typed word matches no label and must fall through to the stored form
+        (a label lookup that swallowed this case would print ``12-hour`` for a
+        config that holds ``12h`` — the same class of lie the stored-value echo
+        exists to prevent, mirrored)."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="display.time_format", value="12h"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated display.time_format to 12h" in out, out
+
+
+class TestTheModelRowsHelpBudget:
+    """The three ``model`` rows' help must survive an 80-column footer.
+
+    The detail line for a row that is not at its default is
+    ``<help> · default: —``, measured at 74 usable cells at 80 columns, and the
+    ladder SHEDS the whole sentence rather than trimming it — so a help one cell
+    too long disappears entirely in exactly the state (an off-default row) where
+    the user is reading it. The new ``model_effort`` row shipped at 68 and was
+    the only one of the three to shed (design review D4); the cells went to the
+    row's own meaning instead, because the cell renders the unset value as ``—``
+    and the word ``auto`` is otherwise visible only inside the expansion (D5).
+    """
+
+    @pytest.mark.parametrize("key", ["hosting", "model_name", "model_effort"])
+    def test_the_help_fits_with_the_default_clause(self, key: str) -> None:
+        setting = settings_io.resolve_key(key)
+        assert setting is not None
+        assert setting.help
+        assert cell_len(f"{setting.help} · default: —") <= 74, setting.help
+
+    def test_the_effort_help_says_what_the_resting_cell_means(self) -> None:
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        assert "Unset" in setting.help and "model's default" in setting.help, setting.help
+
+    def test_the_effort_help_keeps_headroom_for_another_word(self) -> None:
+        """D10: the first cut sat EXACTLY on the 74-cell detail budget, so one
+        more word anywhere — in the help, in the ladder's ` · default: —`
+        suffix — would shed the whole sentence in the state the sentence exists
+        for, with no warning on the frame.
+
+        Three cells of margin is the floor this pins: enough that a later edit
+        has to notice, not so much that the sentence has to lose a word it needs.
+        """
+        setting = settings_io.resolve_key("model_effort")
+        assert setting is not None
+        # `cell_len`, like every other width in this round: the composed line
+        # carries an em dash and a middot, so a character count is not a cell
+        # count (review round 3, NIT-1). It measures the same today.
+        assert cell_len(f"{setting.help} · default: —") <= 71, setting.help
