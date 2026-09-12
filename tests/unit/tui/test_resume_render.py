@@ -16,6 +16,7 @@ from rich.cells import cell_len
 from textual.events import Key, MouseScrollUp
 
 import local_operator.tui.app as app_module
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.tui.app import (
     RESUME_OLDER_NOTICE,
     RESUME_PAGE_MESSAGES,
@@ -184,7 +185,7 @@ def test_resume_tail_start_skips_a_row_that_paints_nothing() -> None:
         tool_calls=None,
         content=[],
         custom_type=None,
-        provider_payload={"harness_injected": True},
+        provider_payload={RENDERED_INJECTION_KEY: True},
     )
     history = _history(5)
     history.insert(10, injected)

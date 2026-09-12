@@ -80,16 +80,19 @@ async def test_a_carried_notice_copy_mounts_no_user_bubble() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_plain_row_with_the_same_wording_still_replays() -> None:
-    """Negative control: no carried marker, so the text is the user's.
+async def test_a_pasted_notice_is_hidden_on_display_but_kept_in_the_transcript() -> None:
+    """The documented LIMIT of the notice rule, pinned rather than discovered later.
 
-    Pasted notices are a realistic prompt, and a fold that matched the wording
-    alone would eat one. The recognition is scoped to rows a compaction pass
-    carried forward (``harness/rows.py``), and this is what keeps that scope
-    honest.
+    A person who pastes a harness notice verbatim — to ask about one, say — loses
+    their display row, because the audit phase serves stored rows that carry no
+    provenance at all and the text is the only thing left to decide from. The row
+    is not lost anywhere else: it is still in the journal and still in the model's
+    context. ``is_harness_chrome`` trades the same way for the three continuation
+    prompts, which a person can equally paste.
     """
+    pasted = Message.user(_LEGACY_NOTICE)
     session = FakeSession()
-    session._history = [Message.user(_LEGACY_NOTICE)]
+    session._history = [pasted]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -97,7 +100,34 @@ async def test_a_plain_row_with_the_same_wording_still_replays() -> None:
         await pilot.pause()
         shown = _transcript_text(app)
 
-    assert "[model switch] You are now running as zai/glm-5.3" in shown
+    assert "[model switch] You are now running as zai/glm-5.3" not in shown
+    # Not lost: the row itself is untouched, which is the half that matters.
+    assert pasted.text.startswith("[model switch] You are now running as zai/glm-5.3")
+
+
+@pytest.mark.asyncio
+async def test_a_stored_notice_row_mounts_no_user_bubble() -> None:
+    """QA round 2 Q1, at the fold: the AUDIT phase serves stored rows.
+
+    A stored pre-stamp notice has no payload at all — nothing to stamp, nothing
+    to carry — and the audit phase replays it verbatim, so the four such rows on
+    the operator's session were painted as his own words as soon as the carried
+    copies were shed. A row with no provenance is the case the text rule is for.
+    """
+    session = FakeSession()
+    session._history = [
+        Message.user("why did the model change?"),
+        Message(role="user", content=[TextContent(text=_LEGACY_NOTICE)]),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+
+    assert "why did the model change?" in shown
+    assert "[model switch]" not in shown
 
 
 @pytest.mark.asyncio
@@ -125,23 +155,3 @@ async def test_a_harness_injected_row_mounts_no_user_bubble() -> None:
     # …and the notice the user never typed mounts nothing at all.
     assert "[model switch]" not in shown
     assert "You are now running as zai/glm-5.3" not in shown
-
-
-@pytest.mark.asyncio
-async def test_a_row_without_the_stamp_still_replays_as_the_users_words() -> None:
-    """Negative control: the decision keys on the stamp, never on the wording.
-
-    Pasting a failover notice to ask about it is a realistic thing to do, and a
-    fold that matched the text would silently eat that prompt.
-    """
-    notice = format_model_switch_message("kimi/k3", "anthropic/claude-opus-5", transient=True)
-    session = FakeSession()
-    session._history = [Message.user(notice)]
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        app._project_settled_rows(list(session._history))
-        await pilot.pause()
-        shown = _transcript_text(app)
-
-    assert "[model switch] You are now running as kimi/k3" in shown

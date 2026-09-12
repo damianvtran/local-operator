@@ -1003,11 +1003,13 @@ def test_a_harness_injected_row_is_not_painted_as_the_parents_words() -> None:
     carried_rows = fold_transcript_entries([carried("carried-notice")])
     assert carried_rows == []
 
-    # Negative control: the same TEXT without the stamp is the parent's own
-    # words (a pasted notice is a realistic thing to send) and must paint.
-    # The test keys on the stamp, not on the wording.
+    # The LIMIT of the rule, pinned rather than left to be discovered: the same
+    # wording with no stamp is ALSO hidden here, because a stored row offers no
+    # other evidence and an unread child transcript has no journal to consult.
+    # The row is not lost — the panel simply does not attribute the harness's
+    # words to the parent.
     quoted = fold_transcript_entries([row("quoted", notice, injected=False)])
-    assert [entry.text for entry in quoted] == [notice]
+    assert quoted == []
 
 
 def test_fold_survives_junk_without_raising() -> None:

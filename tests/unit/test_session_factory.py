@@ -25,6 +25,10 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
@@ -3881,11 +3885,11 @@ def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
 
     transcript = SimpleNamespace(
         latest_entry=lambda _type: None,
-        latest_user_entry=lambda: entry("carried", notice, {"compaction_preserved": True}),
+        latest_user_entry=lambda: entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
         entries=lambda: [
             entry("mine", "fix the login redirect loop"),
-            entry("stamped", notice, {"harness_injected": True}),
-            entry("carried", notice, {"compaction_preserved": True}),
+            entry("stamped", notice, {RENDERED_INJECTION_KEY: True}),
+            entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
         ],
     )
 
