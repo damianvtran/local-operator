@@ -72,6 +72,21 @@ from local_operator.tui.widgets.transcript import (
 from .test_app_pilot import FakeSession, _factory
 
 
+def _clock_seconds(text: str) -> float:
+    """The seconds a ``format_duration`` reading names, for RANGE assertions.
+
+    A band reading is wall time between the seed and the read, so pinning it to
+    an exact ``27s`` asserts that the machine is fast — the failure mode
+    AGENTS.md names ("prefer a structural invariant to a numeric one"), and one
+    this file's own first CI run demonstrated: a loaded shard spent a second
+    between computing the age and reading the row, and `27s` came back `28s`
+    on a change that was correct. What is worth asserting is the ORDER — the
+    call's own age, not a zero taken at paint time.
+    """
+    assert text.endswith("s") and text[:-1].isdigit(), text
+    return float(text[:-1])
+
+
 def _working(app: OperatorApp) -> WorkingBlock | None:
     """The mounted working line, or None when the turn has settled."""
     blocks = app.query_one(TranscriptView).blocks()
@@ -519,8 +534,13 @@ async def test_the_band_reports_the_true_age_of_a_tool_it_can_date() -> None:
         card = app._tool_cards["c0"]
         assert card.started_at is not None, "a call whose start is known dates itself"
         # Age-only, so the reading is the call's, not the phase's: the band
-        # counts from the oldest live card's own start (D9).
-        assert line._clock_text() == format_duration(int(aged)), line._clock_text()
+        # counts from the oldest live card's own start (D9). The band's number
+        # is asserted as a RANGE (`aged` up to a generous ceiling) rather than
+        # as the string `27s`: the reading grows while the test runs, and the
+        # failure worth catching is the wrong ORDER of magnitude — a zero taken
+        # when the row was painted.
+        shown = _clock_seconds(line._clock_text())
+        assert aged <= shown < aged + 30, line._clock_text()
 
 
 @pytest.mark.asyncio
@@ -554,7 +574,8 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         assert line is not None
         assert line.activity == DEFAULT_ACTIVITY
         # The frame after a switch back: the age is the model call's.
-        assert line._clock_text() == format_duration(int(aged)), line._clock_text()
+        shown = _clock_seconds(line._clock_text())
+        assert aged <= shown < aged + 30, line._clock_text()
 
         # Converted ONCE, not per refresh — asserted with the clock ADJUSTED,
         # because on a healthy clock a re-seed is arithmetically a no-op and the
@@ -570,7 +591,9 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         app._refresh_working_activity()
         app._refresh_working_activity()
         assert line._clock_from == seeded, "the phase's anchor moved on a repaint"
-        assert line._clock_text() == format_duration(int(aged)), line._clock_text()
+        assert _clock_seconds(line._clock_text()) == pytest.approx(
+            shown, abs=2.0
+        ), "a wall-clock jump moved a counter that is supposed to be immune to one"
 
         # A fold that disagrees with the derived phase supplies nothing, so the
         # row is back to its phase zero. The instant belongs to the phase it was
@@ -578,7 +601,7 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
         # thing — the failure mode the whole design round guards.
         session.phase = ("responding", time.time() - aged)
         app._refresh_working_activity()
-        assert line._clock_text() == format_duration(0), line._clock_text()
+        assert _clock_seconds(line._clock_text()) < 5, line._clock_text()
 
 
 @pytest.mark.asyncio
