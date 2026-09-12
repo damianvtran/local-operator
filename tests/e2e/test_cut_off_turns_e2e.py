@@ -46,6 +46,13 @@ pytestmark = pytest.mark.e2e
 #: leaked child cannot outlive the test's cleanup budget by much.
 PARK_S = 30
 
+#: The inherited environment families a spawned runtime must never see, named
+#: once because two different mechanisms enforce it here: ``_child_env``
+#: rebuilds a child's environment, and ``_strip_child_env`` removes them from
+#: THIS process so a runtime the code under test spawns itself (with
+#: ``dict(os.environ)``) also gets a clean one.
+CHILD_ENV_FAMILIES = ("CMUX_", "LOP_MOBILE_CHILD_", "LOP_RUNTIME_")
+
 
 def _seed(config_dir: Path, session_id: str) -> Path:
     """A session with one durable row, on the mock provider.
@@ -69,7 +76,13 @@ def _seed(config_dir: Path, session_id: str) -> Path:
 
 
 def _child_env(config_dir: Path, session_id: str) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    # THREE FAMILIES, not just the cmux one. ``LOP_RUNTIME_ADOPT_SESSION`` and
+    # the ``LOP_MOBILE_CHILD_*`` pair pin a spawned runtime's session and
+    # provider, so a suite run from inside a harness that exports them would
+    # spawn a child that ADOPTS the operator's own session — the same class of
+    # hazard the ``CMUX_*`` strip exists for (#648). The values this cell needs
+    # are set explicitly below, so nothing legitimate is lost.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(CHILD_ENV_FAMILIES)}
     env.update(
         {
             "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),
@@ -847,15 +860,12 @@ def _strip_child_env(monkeypatch: pytest.MonkeyPatch) -> None:
     LOAD-BEARING, not hygiene: the daemon spawns with ``dict(os.environ)``, so a
     test process that inherited ``LOP_RUNTIME_ADOPT_SESSION`` or
     ``CMUX_WORKSPACE_ID`` from the harness it runs inside would spawn a child
-    that adopts the OPERATOR'S session. The three families are stripped here for
-    the same reason the older cells rebuild their child env by hand.
+    that adopts the OPERATOR'S session. ``_child_env`` enforces the same rule for
+    the cells that build a child environment by hand; this one is for a child
+    the CODE UNDER TEST spawns.
     """
     for name in list(os.environ):
-        if (
-            name.startswith("CMUX_")
-            or name.startswith("LOP_MOBILE_CHILD_")
-            or name.startswith("LOP_RUNTIME_")
-        ):
+        if name.startswith(CHILD_ENV_FAMILIES):
             monkeypatch.delenv(name, raising=False)
 
 
