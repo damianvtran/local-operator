@@ -361,48 +361,10 @@ Screen > .screen--selection {
  * Under `auto` that first measurement resolves to two rows and stays there
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
- * cell for one frame, which is the right failure. The pin is therefore
- * `1 + padding-bottom` rather than a bare `1`: Textual sizes a fixed-height
- * widget INCLUDING its padding, so the two numbers below move together or
- * the summary clips instead of gaining air.
- *
- * ONE PAD ROW, BELOW THE SUMMARY, and that row is the default rather than a
- * setting. Reported from the field as "there's essentially no padding between
- * lines": at `height: 1` the summary's ink filled its slab edge to edge, and
- * with one ground row between neighbours the ink pitch was 2 — consecutive
- * actions read as one jammed stack rather than as a ledger of separate
- * things. This takes the pitch to 3.
- *
- * BELOW rather than above, and the two are not interchangeable even though
- * they cost the same row. A top-only pad is exactly what PR 870 removed from
- * `.comfortable-rows`: it leaves the card's fill TERMINATING ON AN INKED
- * LINE, with the summary jammed against the bottom edge of its own slab, and
- * it was reported from the field in that shape ("a row added above the tool
- * call and not below"). A bottom pad ends the slab on air, so the run reads
- * as a column of settled receipts.
- *
- * The other rung that buys the same row was measured and rejected: widening
- * the `.gap-above` ground between neighbours to two rows gives the same pitch
- * of 3, but it spends the row on GROUND rather than on the card, so each
- * action stays a one-cell strip of `$lo-surface` and the ledger reads as thin
- * disconnected bands with more void between them — most visible on the light
- * palette, where the card fill is the quieter of the two. It also grows no
- * click target, where this pad doubles one (the whole row is the expand
- * surface — `ExpandableActionBlock.on_click` is on the widget, so the pad row
- * is inside it).
- *
- * The density cost is honest and is why this is ONE row and not two: a
- * twelve-action ledger occupies 35 rows against 23. `.comfortable-rows`
- * remains the airier opt-in above this (pitch 4, 47 rows) and is unchanged —
- * this is the rung between flush and that, not a replacement for it. */
+ * cell for one frame, which is the right failure. */
 ToolCard, WakeBlock, PeerMessageBlock {
-    height: 2;
+    height: 1;
     background: $lo-surface;
-    /* Vertical only. The left/right values are 0 here because the one-cell
-     * LEFT inset is drawn by the row builder instead — see the NOTE below —
-     * and Textual resolves `padding` as ONE declaration per rule, so this
-     * line owns the whole property for these selectors. */
-    padding: 0 0 1 0;
     /* NOTE: the one-cell LEFT inset these cards carry is drawn by the row
      * builder (`ToolCard.ROW_INDENT`), not declared here. It has to yield at
      * narrow widths — see that constant — and the sheet has no width to
@@ -422,14 +384,7 @@ ToolCard, WakeBlock, PeerMessageBlock {
  * row per line of revealed output (each already truncated to width, so
  * nothing reflows). The class beats the type selector above. WakeBlock and
  * PeerMessageBlock use their own class names because they are different
- * widgets; the height contract is the same.
- *
- * It declares no `padding`, which is deliberate and not an omission: the base
- * rule's bottom pad CASCADES here, so an expanded card ends on the same row of
- * its own fill a collapsed one does and the payload's last line is never the
- * slab's edge. `height: auto` grows to carry that row rather than clipping it,
- * which is exactly why the pad may only be restated where the height is
- * pinned. */
+ * widgets; the height contract is the same. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded {
     height: auto;
 }
@@ -437,23 +392,13 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
 /* COMFORTABLE DENSITY (`display.comfortable_rows`, default ON changed to OFF by maintainer). One padding
  * row above and below an action's summary.
  *
- * Still an opt-in, and still OFF by default, but it is now the TOP rung of a
- * three-rung ladder rather than the only alternative to a flush row. The base
- * rule above pads one row BELOW every summary for everyone (ink pitch 3); this
- * class adds the second row, ABOVE, and brackets the summary on both sides
- * (pitch 4). Strictly airier than the default is the contract — a version of
- * this class that merely restated the default would be a setting that does
- * nothing, which is how it reads to the user who turns it on.
- *
  * This is a HIT TARGET, not decoration. The whole row is the click surface
  * for expand/collapse (`ExpandableActionBlock.on_click` is on the widget, so
  * padding rows are inside it), and at one cell tall that target was a single
  * terminal line: a click a row off either landed on a neighbouring action or
  * fell through to the transcript. Three rows triples the target without
  * moving a single glyph — the summary is still exactly one row of text, so
- * the ledger's one-line-per-action reading is unchanged. (The default's own
- * pad already doubled it; this is the rung for a user who clicks rows often
- * enough to want the whole bracket.)
+ * the ledger's one-line-per-action reading is unchanged.
  *
  * `height: 3` is `1 + padding-top + padding-bottom`. Textual sizes a
  * fixed-height widget INCLUDING its padding, so the three move together or
@@ -462,9 +407,7 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
  * SYMMETRIC, and the argument that said otherwise was wrong. This rule read
  * `padding: 1 0 0 0` for its whole life while the comment above promised air
  * "above and below", on the theory that a bottom row would break the dock's
- * EXACTLY ONE ground row between the last block and the composer. (That same
- * finding is why the base rule's single pad row went BELOW the summary rather
- * than above it.) It does
+ * EXACTLY ONE ground row between the last block and the composer. It does
  * not, and the reason is the distinction this sheet keeps making everywhere
  * else: the guarantee is about GROUND, not about blankness. With a card last
  * a naive blank-row count returns 2, and only one of them is the
@@ -505,31 +448,25 @@ ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded 
  * (widgets/tool_card.py — "NO border. Elevation is a background step, never a
  * shadow or line.").
  *
- * The cost is real: a twelve-action ledger occupies 47 rows against the
- * default's 35, so less history fits on a screen. That is why this is a
- * setting rather than a decision made for everyone — a user who reads a long
- * ledger more often than they click one turns it off, and lands on a default
- * that is itself no longer flush.
+ * The cost is real: a twelve-action ledger occupies 47 rows against 35, so
+ * less history fits on a screen. That is why this is a setting rather than a
+ * decision made for everyone — a user who reads a long ledger more often
+ * than they click one turns it off.
  *
  * Expanded rows are exempt: they are already `height: auto` and content-sized,
  * and the payload gives the pointer plenty to hit. */
 .comfortable-rows ToolCard, .comfortable-rows WakeBlock, .comfortable-rows PeerMessageBlock {
     height: 3;
-    /* REPLACES the base rule's `0 0 1 0` rather than adding to it: Textual
-     * resolves `padding` as ONE declaration per rule, so this line owns the
-     * whole property here and has to restate the bottom pad it keeps (and the
-     * zero left/right, which is where the row builder's inset lives). The
-     * height is `1 + top + bottom` for the same reason the base rule's is
-     * `1 + bottom`. */
+    /* Restates the base rule's left inset rather than adding to it: Textual
+     * resolves `padding` as ONE declaration, so writing only the vertical
+     * values here would win the whole property and drop the inset. */
     padding: 1 0 1 0;
 }
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded {
     height: auto;
-    /* Restated for the same reason as the collapsed rule above — one
-     * declaration wins the whole property, so the bottom pad the base rule
-     * would otherwise cascade has to be written again here. */
+    /* Left value restated for the same reason as the collapsed rule above. */
     padding: 1 0 1 0;
 }
 

@@ -729,12 +729,8 @@ async def test_the_card_shares_the_ledger_spine_with_the_tool_rows() -> None:
         # Same name column, so the two summaries start at the same cell.
         assert peer._name_col(98) == card._name_col(98)
         assert peer.size.height == 1
-        # Ink pitch 3: one row of summary, the widget's own pad row below it,
-        # and one row of ground from the AIRY rule. Sharing the spine means
-        # sharing the pitch — a receipt that kept the old 2 would sit half a
-        # row out of step with the tool rows around it.
-        assert peer.region.height == card.region.height == 2
-        assert peer.region.y - card.region.y == 3
+        # One blank row between them: the AIRY rule, not a bespoke lead.
+        assert peer.region.y - card.region.y == 2
 
 
 @pytest.mark.asyncio
@@ -756,7 +752,7 @@ async def test_real_pointer_hover_and_click_use_the_ledger_contract() -> None:
         await pilot.pause()
 
         assert peer.size.height == 1
-        assert below.region.y - peer.region.y == 3
+        assert below.region.y - peer.region.y == 2
 
         landed = await pilot.hover(peer)
         assert landed, "hover missed the peer card"
@@ -775,7 +771,7 @@ async def test_real_pointer_hover_and_click_use_the_ledger_contract() -> None:
         await pilot.pause()
         assert peer.expanded is False
         assert peer.size.height == 1
-        assert below.region.y - peer.region.y == 3
+        assert below.region.y - peer.region.y == 2
 
 
 @pytest.mark.asyncio
