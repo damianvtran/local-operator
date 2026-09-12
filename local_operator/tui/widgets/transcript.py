@@ -2861,12 +2861,36 @@ class WorkingBlock(TranscriptBlock):
 
         Withholding is still the answer whenever the true age is genuinely
         unavailable, and that is a real population rather than a hypothetical:
-        a call whose producer sent no ``started_at_epoch`` (an older runtime), a
-        folded phase that does not match the one the app derived (a facade with
-        no fold, a compaction or retry fallback), and every child row inside
-        ``subagent_view``. For those the timestamp does not exist on this
-        surface at any price, so the clock stays blank rather than inventing
-        one; the matching rules live in ``OperatorApp._current_activity``.
+        a call whose producer sent no ``started_at_epoch`` (an older runtime),
+        and every child row inside ``subagent_view``. For those the timestamp
+        does not exist on this surface at any price, so the number is withheld
+        rather than invented — ``clock=False``, which paints NO clock glyph at
+        all (``_clock_text`` still computes a nominal ``0s``; what drops it is
+        :meth:`_paint`'s ``if self._clock`` gate) while the glyph's cells stay
+        reserved, so the label beside it clips at the same column it would
+        otherwise. No glyph and a number counting up from zero are different
+        pictures, and which one a phase gets is a decision the next paragraph
+        makes separately rather than a side effect of it.
+
+        A fold that does not match the phase the app derived withholds the
+        SEED, not the number, and the row counts from its own phase zero
+        instead. A facade with no fold and a legacy owner land there; so do
+        the compaction and retry fallbacks, and for those that zero is the
+        honest reading rather than a substitute for one. The seed exists to
+        repair a zero this widget cannot have observed
+        (:meth:`_seed_clock_from_epoch`), so its absence says nothing about
+        the phase's own zero — the instant this row entered its phase, true
+        for every state whose label and phase begin together and never another
+        phase's age — and the fallbacks are exactly such a state.
+        ``OperatorApp._current_activity`` returns the label AS the phase for
+        ``compacting context`` and ``retrying (attempt n)`` precisely because
+        the fold models no compaction or retry edge, so the phase starts when
+        the app derived it from the event that began the pass, and the ``0s``
+        growing under that label IS the age of the pass the label names.
+        Withholding answers the other case — the label arriving at an instant
+        that is not the work's start, as the adopted tool above does — so a
+        mismatch is never a reason to blank a row that is telling the truth;
+        the matching rules live in ``OperatorApp._current_activity``.
 
         The clock restarts only when the PHASE changes, not whenever the label
         does. Keying it to the rendered string made the row refute itself: one

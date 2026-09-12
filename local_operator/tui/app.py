@@ -35025,10 +35025,12 @@ class OperatorApp(App[None]):
         # `on_compaction_started` and `on_retry_started` set this label and
         # re-derive; the fold models no compaction or retry edge, so its phase
         # is still whatever preceded the pass. Asking for the label we just
-        # derived therefore WITHHOLDS the clock for those two — correct, since
-        # the folded zero belongs to the previous phase — while leaving the
-        # ordinary `thinking` case working, where the label and
-        # `ACTIVITY_PHASE_THINKING` are the same string. Passing the constant
+        # derived therefore WITHHOLDS THE SEED for those two —
+        # ``clock_from_epoch``, not the number, so the row falls back to its own
+        # phase zero, which for a fallback is the pass's own start rather than a
+        # substitute for one — while leaving the ordinary `thinking` case
+        # working, where the label and `ACTIVITY_PHASE_THINKING` are the same
+        # string. Passing the constant
         # instead failed OPEN: the equality held, and a `retrying (attempt 2)`
         # row wore the age of the attempt that had just failed.
         return (
