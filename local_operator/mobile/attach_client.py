@@ -682,7 +682,7 @@ def _decode_quietly(data_b64: str) -> bytes:
 
 
 def find_runtime_record(
-    config_dir: Path, session_id: str
+    config_dir: Path, session_id: str, *, check_zombie: bool = True
 ) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
@@ -697,10 +697,17 @@ def find_runtime_record(
     ``(None, pid)`` means an owner exists but no usable record does (old
     binary, registrant failed to start): the caller degrades gracefully.
     ``(None, None)`` means no owner at all.
+
+    ``check_zombie`` is forwarded to :func:`resume.live_runtime_pid`, which owns
+    the decision and documents both modes. It is a parameter because this
+    function is on the engage loop's dense 10 ms path as well as on every attach
+    path, and only the former can afford to defer the proof: there the owner
+    answer can only cause a wait, while an attach turns it into a refusal the
+    user sees.
     """
     from local_operator.resume import live_runtime_pid
 
-    owner = live_runtime_pid(config_dir, session_id)
+    owner = live_runtime_pid(config_dir, session_id, check_zombie=check_zombie)
     if owner is None:
         return None, None
     best: SessionRecord | None = None

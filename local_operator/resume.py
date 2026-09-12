@@ -1121,7 +1121,7 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     return resume_dir(config_dir, requested).name
 
 
-def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
+def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
     """Pid of the process currently hosting ``session_id``, or ``None``.
 
     Two writers on one transcript is how a TUI ``/resume`` of a phone-started
@@ -1148,6 +1148,15 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     the one mechanism that recovers it. Discovery, the attach guard and the
     lease all learn the same answer from one probe now; see
     :func:`local_operator.procstate.is_zombie`.
+
+    ``check_zombie=False`` is for the engage loop's DISCOVERY path, which calls
+    this on every pass of its dense 10 ms grid: the proof costs a `ps` fork
+    (2.4-4.6 ms measured across runs on this host), which is more than the dead
+    time that grid exists to remove. There it may only ever cause a wait — the
+    loop's decision to attach or spawn still ends in a runtime that has to
+    acquire the lease, which always demands the proof — whereas at the three
+    user-facing call sites (the TUI's ``/resume``, ``lop exec --resume`` and the
+    phone's attach) the answer IS the decision, so they keep the default.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
@@ -1174,11 +1183,12 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
         return pid
     except OSError:
         return pid
-    if is_zombie(pid):
+    if check_zombie and is_zombie(pid):
         # The probe is spent only here, where signal 0 has already said
-        # "exists" and the difference between a working runtime and its
-        # corpse decides whether the user is told to go and steer a session
-        # that nobody is running.
+        # "exists". At the user-facing call sites the difference between a
+        # working runtime and its corpse decides whether someone is told to go
+        # and steer a session that nobody is running; on the engage loop's dense
+        # discovery path it is deferred, because there it can only cost a wait.
         return None
     return pid
 
