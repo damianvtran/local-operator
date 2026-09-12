@@ -203,10 +203,12 @@ async def test_crash_and_fork_journal_identity(tmp_path: Path) -> None:
     # An in-flight run whose owner is GONE and whose record left no evidence is
     # an ERROR naming the uncertainty, not an interruption: the taxonomy's
     # default flipped because a cut-off we cannot explain is not a stop. This
-    # assertion read ``interrupted`` before the cut-off work.
+    # assertion read ``interrupted`` before the cut-off work, and the cause
+    # assertion read ``runtime-killed`` before a later round made the
+    # no-evidence branch stop naming a mechanism it cannot observe.
     crashed = store.state("session/owner")
     assert crashed["kind"] == "error"
-    assert crashed["cause"] == "runtime-killed"
+    assert crashed["cause"] == ""
     assert "the cause could not be determined" in crashed["reason"]
     assert crashed["unseen"]
     store.acknowledge("session/owner", token)
@@ -778,7 +780,16 @@ def _write_record(root: Path, session_id: str, pid: int) -> None:
 def test_an_orphaned_run_without_evidence_is_an_error_with_a_named_uncertainty(
     tmp_path: Path,
 ) -> None:
-    """Design test 1: no live owner, no record, no stop marker."""
+    """Design test 1: no live owner, no record, no stop marker.
+
+    The kind is still ``error`` — a cut-off nobody can explain is not a stop —
+    but the CAUSE is left empty and the sentence is the honest one. It used to
+    report ``runtime-killed`` with ``(the cause could not be determined)``
+    appended, which every surface that trims a parenthetical (the sidebar's
+    ``_error_label``) turned into a positive claim about a mechanism nobody
+    observed (design/UX review round 1, D3/U3).
+    """
+    from local_operator.incidents import CUT_OFF_UNKNOWN
     from local_operator.session.attention import bootstrap_transcript
     from local_operator.session.transcript import Transcript
 
@@ -787,13 +798,19 @@ def test_an_orphaned_run_without_evidence_is_an_error_with_a_named_uncertainty(
     store = AttentionStore(tmp_path / "attention.db")
     result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
     assert result is not None
-    kind, cause, _reason, returned = result
-    assert (kind, cause, returned) == ("error", "runtime-killed", token)
+    kind, cause, reason, returned = result
+    assert (kind, cause, returned) == ("error", "", token)
+    assert reason == CUT_OFF_UNKNOWN
     state = store.state(f"session/{session_id}")
     assert state["kind"] == "error"
-    assert state["cause"] == "runtime-killed"
-    assert "could not be determined" in state["reason"]
+    assert state["cause"] == ""
+    assert state["reason"] == CUT_OFF_UNKNOWN
     assert state["unseen"] is True
+    # The sentence and the token must agree with each other, since the inverse
+    # (`cause_from_reason`) is what the live surfaces use to name a cause.
+    from local_operator.incidents import cause_from_reason
+
+    assert cause_from_reason(reason) == ""
 
 
 def test_a_live_owner_stops_the_import_from_publishing_anything(tmp_path: Path) -> None:

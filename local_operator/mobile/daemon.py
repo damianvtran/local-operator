@@ -919,6 +919,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     whole. Degradation is tiered and lossless for the collapsed view (see
     ``cap_projection_frame``); the retained projection object is untouched.
     """
+    from local_operator.harness.rows import completion_notice
     from local_operator.mobile.projection import cap_projection_frame
     from local_operator.mobile.types import TranscriptEntry
 
@@ -926,21 +927,24 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     attention = projection.attention
     data["attention"] = attention
     if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
-        # The reason rides the sentence when the outcome carries one (a cut-off
-        # names its cause; a provider error already names itself). The
-        # suppression above is unchanged and still correct: a LIVE mid-turn
-        # session banners nothing, regardless of the last outcome.
-        reason = str(attention.get("reason") or "")
-        if attention["kind"] == "error":
-            text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
-        else:
-            text = "Interrupted"
+        # The sentence AND its severity come from `harness/rows.py`, which owns
+        # row decisions for both surfaces: the phone's `NoticeRow` picks its
+        # glyph and ink from `details.severity`, so a frame that carried an empty
+        # `details` painted a cut-off as a routine `·` receipt — the same
+        # flattening the TUI's poller had, on the surface the operator reads from
+        # a phone (design review round 1, D4). The suppression above is unchanged
+        # and still correct: a LIVE mid-turn session banners nothing, regardless
+        # of the last outcome.
+        text, severity = completion_notice(
+            str(attention["kind"]), str(attention.get("reason") or "")
+        )
         data["transcript"] = [
             *data["transcript"],
             TranscriptEntry(
                 id=attention["anchor_id"],
                 kind="notice",
                 text=text,
+                details={"severity": severity},
             ).to_json(),
         ]
     if degraded:

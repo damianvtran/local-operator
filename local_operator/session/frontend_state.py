@@ -1534,6 +1534,15 @@ class JobState(BaseModel):
             output_tail=str(getattr(job, "output_tail", "") or ""),
             output_seq=int(getattr(job, "output_seq", 0) or 0),
             restored=bool(getattr(job, "restored", False)),
+            # Carried, not re-derived here: the resolver that sets it
+            # (``session/restored_rows.py``) is the one place that knows whether
+            # a restored row's outcome came from a record, from the child's own
+            # journal, or from nothing at all. Dropping it on the way to the
+            # wire is what left the dock unable to say WHY a restored child
+            # stopped — and, for a child whose record reads ``completed``, was
+            # how the whole resolved row disappeared within a second of the
+            # session opening (UX review round 1, U2).
+            cut_off_cause=str(getattr(job, "cut_off_cause", "") or ""),
         )
 
 

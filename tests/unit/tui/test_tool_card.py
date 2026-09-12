@@ -2564,3 +2564,25 @@ def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
     assert card.started_at == 3_000.0
     now[0] += 2.0
     assert card._build_row(80).plain.rstrip().endswith("2s")
+
+
+def test_a_cut_off_turn_names_its_cards_cut_off() -> None:
+    """D2: the word changes, the glyph and the tier do not.
+
+    ``interrupted`` is now reserved for a positively recorded stop, so a row
+    stranded by a cut-off that still said ``interrupted ⊘`` re-stated the
+    ambiguity the taxonomy removed — on the same screen as the ``✗ turn cut
+    off`` notice that had just resolved it (design review round 1, D2).
+    """
+    card = ToolCard("t", "bash", {"command": "pytest tests/unit -q"})
+    card.mark_interrupted(cut_off=True)
+    row = card._build_row(100).plain
+    assert "cut off" in row
+    assert "interrupted" not in row
+    # Same mark, same ink: only the word was the ambiguity, and a new glyph or
+    # a colour would be new design surface for a finding this small.
+    assert "⊘" in row
+
+    deliberate = ToolCard("t", "bash", {"command": "pytest tests/unit -q"})
+    deliberate.mark_interrupted()
+    assert "interrupted" in deliberate._build_row(100).plain, "a stop still says so"

@@ -1208,11 +1208,7 @@ class ServingSessionHandle(SessionHandle):
         ``lop stop``, and it must be recorded as such or the taxonomy (which
         now requires positive evidence for ``interrupted``) would have to guess.
         """
-        if not self._retiring_cause:
-            session = getattr(self, "_session", None)
-            note = getattr(session, "note_deliberate_stop", None)
-            if callable(note):
-                note()
+        self._note_deliberate_stop()
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -1229,6 +1225,31 @@ class ServingSessionHandle(SessionHandle):
                 logger.warning("session runtime: stop-path dispose failed", exc_info=True)
 
         self._loop.create_task(_dispose_in_place())
+
+    def _note_deliberate_stop(self) -> None:
+        """Record that the USER ended this turn, before anything tears it down.
+
+        ONE place for the three deliberate rungs of this handle (``stop``,
+        ``abort``, ``cancel``), because the verdict has to be written while the
+        act is still knowable: ``Session.dispose()`` notes ``disposed``
+        unconditionally, and an un-noted dispose therefore publishes the user's
+        own cancel as ``kind=error`` / ``cause=disposed`` (review round 1,
+        BLOCKER-1). ``abort`` is the phone's stop button and ``cancel`` its
+        supervised sibling; both are a person or a supervisor saying "stop",
+        and each was one teardown away from being reported as a failure.
+
+        Refused while a retirement is latched, matching ``request_stop``: the
+        runtime is already ending that turn for its own reason (a build flip)
+        and the cut-off verdict for it belongs to the retire path, which
+        recorded it when it latched. Non-raising by contract — it runs inside a
+        stop, and a stop must not fail because a host session has no say in its
+        own taxonomy.
+        """
+        if self._retiring_cause:
+            return
+        note = getattr(self._session, "note_deliberate_stop", None)
+        if callable(note):
+            note()
 
     def _deny_pending_gates(self) -> None:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -1896,6 +1917,11 @@ class ServingSessionHandle(SessionHandle):
         started it), so they are named too rather than implied stopped.
         """
         self._check_loop_thread()
+        # The phone's stop button is the user's own act, so the verdict is
+        # recorded before the turn is cut (see `_note_deliberate_stop`): the
+        # turn ends aborted either way, and what this decides is whether that
+        # abort reads as the user's stop or as a failure.
+        self._note_deliberate_stop()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
@@ -2038,6 +2064,11 @@ class ServingSessionHandle(SessionHandle):
         request = getattr(self._session, "request_graceful_cancel", None)
         if not callable(request):
             raise ValueError("this session cannot cancel at a tool boundary")
+        # A supervisor's cancel is deliberate too, and it ends the turn the same
+        # way (`harness/loop.py` ends it aborted) — so it records the same
+        # verdict as the user's own stop rather than letting a later teardown
+        # publish it as a cut-off failure (review round 1, BLOCKER-1).
+        self._note_deliberate_stop()
         request(reason)
         return "cancelling at the next tool boundary"
 

@@ -258,8 +258,8 @@ _HINTS: dict[str, str] = {
 #: half-replaced install). ``runtime-shutdown`` covers an ordinary termination
 #: signal, ``runtime-killed`` a process that vanished without exiting cleanly,
 #: and ``owner-lost`` the viewer-side verdict that the runtime it was bound to
-#: disappeared. ``user-stop`` is the one DELIBERATE cause, and it is what keeps
-#: a user's own cancel from being reported as an error.
+#: stopped answering. ``user-stop`` is the one DELIBERATE cause, and it is what
+#: keeps a user's own cancel from being reported as an error.
 CUT_OFF_CAUSES: dict[str, str] = {
     "user-stop": "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
@@ -270,7 +270,13 @@ CUT_OFF_CAUSES: dict[str, str] = {
     "install-mid-update": (
         "a local-operator install was being replaced on disk while this turn was running"
     ),
-    "owner-lost": "the session's runtime went away while this turn was running",
+    # Deliberately about what the VIEWER can verify, not about what happened to
+    # the process. The arm that paints this is the recovery loop's give-up,
+    # which fires both for an owner whose record is gone and for a live-but-
+    # silent one (the record is there, its pid is alive, and nothing answers) —
+    # "went away" asserted a death that arm cannot establish (review round 1,
+    # MINOR-3). "stopped answering" is the fact both shapes share.
+    "owner-lost": "the session's runtime stopped answering while this turn was running",
     "disposed": "the session was disposed while this turn was running",
 }
 

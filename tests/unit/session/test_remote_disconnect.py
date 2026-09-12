@@ -315,7 +315,15 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
         "a dead runtime on the terminal surface left the turn spinning: "
         f"ends={ends} attempts={len(takeover_attempts)}"
     )
-    assert ends[0].aborted is True and ends[0].error is None
+    # The VERDICT, which is now a named cut-off rather than the bare abort a
+    # user's Esc produces: this arm is the one the watched TUI session takes
+    # (``_can_go_cold`` is False for every viewer built through ``connect()``),
+    # and reporting a runtime death as the user's own cancel was the reported
+    # bug (QA round 1, Q-1 / UX U1). The deliberately-not-taken desktop exit
+    # below is what this test has always been about.
+    assert ends[0].aborted is False
+    assert ends[0].cut_off_cause == "owner-lost"
+    assert "cut off" in str(ends[0].error)
     assert remote.is_streaming is False
     assert remote._suspect_generation is None
     # The legacy contract is preserved: the loop keeps CHASING a successor
