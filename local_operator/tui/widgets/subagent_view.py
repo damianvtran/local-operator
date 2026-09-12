@@ -1030,11 +1030,11 @@ class InstructionBlock(UserBlock):
         Binding("enter", "toggle_brief", "Expand instruction", show=False),
     ]
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, fold_width: int = 0) -> None:
         #: Set before `super().__init__`, which builds immediately.
         self._expanded = False
         self._hidden_rows = 0
-        super().__init__(text)
+        super().__init__(text, fold_width=fold_width)
         self.add_class("instruction-block")
 
     def _rows(self, body: int) -> list[str]:
@@ -1158,13 +1158,20 @@ def entry_block(
     its paragraph breaks, until the child eventually exits.
     """
     if entry.kind == "prompt":
-        return InstructionBlock(entry.text)
+        # The width goes to CONSTRUCTION for the kinds that wrap inside
+        # `__init__` (`InstructionBlock`/`UserBlock`/`NoticeBlock`/`WorkingBlock`)
+        # — a hint set after they are built is a width nothing will read (see
+        # `UserBlock.__init__`) — and through `set_fold_hint` for the kinds that
+        # author through the ladder on a later call (`AssistantBlock`,
+        # `ToolCard`). Every constructor clamps a zero itself, so the value is
+        # passed unconditionally rather than guarded here: two spellings of
+        # "no width" in one function is how the two drift apart.
+        return InstructionBlock(entry.text, fold_width=fold_width)
     if entry.kind in ("user", "parent_message"):
-        return UserBlock(entry.text)
+        return UserBlock(entry.text, fold_width=fold_width)
     if entry.kind in ("text", "subagent_message"):
         block = AssistantBlock()
-        if fold_width:
-            block.set_fold_hint(fold_width)
+        block.set_fold_hint(fold_width)
         block.update_text(entry.text)
         if entry.complete or settled:
             block.finalize_text()
@@ -1172,11 +1179,10 @@ def entry_block(
     if entry.kind == "notice":
         if entry.key == "__working__":
             activity = entry.text or "thinking"
-            return WorkingBlock(activity, activity)
-        return NoticeBlock(entry.text, entry.notice_kind)
+            return WorkingBlock(activity, activity, fold_width=fold_width)
+        return NoticeBlock(entry.text, entry.notice_kind, fold_width=fold_width)
     card = ToolCard("", entry.tool_name, entry.tool_args, entry.intent)
-    if fold_width:
-        card.set_fold_hint(fold_width)
+    card.set_fold_hint(fold_width)
     if entry.outcome == "error":
         card.restore(
             state="error",

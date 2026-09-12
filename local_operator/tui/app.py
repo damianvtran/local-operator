@@ -9249,6 +9249,50 @@ class OperatorApp(App[None]):
         from local_operator.tui.session_presentation import project_settled_rows
 
         session = self._session
+        # The width every block this pass builds is about to be GIVEN, asked of
+        # the view they are about to be mounted into.
+        #
+        # Derived HERE rather than at each call site because every caller of
+        # this method projects into the live transcript — cold resume's tail
+        # (`:8512`), the reconnect gap replay (`on_history_rows_settled`), the
+        # sidebar commit's top-up (`:6113`/`:6127`) and the older-page collect —
+        # so the destination is one question with one answer, and a caller left
+        # to remember it is a caller that can forget it.
+        #
+        # Knowable HERE only while the transcript is LAID OUT, which is the case
+        # this exists for: the view is laid out before the first block is built,
+        # so the region is the eventual destination and not a pre-layout zero.
+        # Measured by spying on this method at boot — 96 at 100x30, 142 at
+        # 146x40, 146 at 150x40 — with the previous cut of this comment having
+        # quoted the 146x40 figure against the 100x30 label (review round 2,
+        # M5): a number in a comment has to be traceable to the run that read
+        # it, or the next reader cannot tell a measurement from a guess.
+        #
+        # OFF-LAYOUT the region is 0, and that is deliberate, not overlooked
+        # (QA round 2, Q2): with `display = False` — the subagent view and the
+        # org chart — the view reports `region=0 view=0` (measured at every grid
+        # above, restored to 96/142/146 on the way back), so a
+        # `HistoryRowsSettled` that lands in that state still authors at the 80
+        # column fallback and is repaired by the restore's resize. That is a
+        # wasted build, not a painted frame: measured on the base revision and
+        # this one alike, the first paint after the restore carries no
+        # fallback-authored block.
+        #
+        # NOT repaired with a cached last-known width, which is the obvious next
+        # idea and is worse than the zero: a cache outlives the pane that set
+        # it, and a width from a WIDE pane pinned as a fold inside a NARROW one
+        # clips rows that can no longer re-wrap — missing text, where the zero
+        # costs one off-screen build of rows that are then re-authored before
+        # anything is painted.
+        #
+        # Without any of this the whole tail projection is folded at the
+        # fallback and the FIRST PAINT of a resumed conversation is a narrow
+        # one: prose wrapped at 78 cells inside a 96-cell pane, with blank space
+        # to its right — the operator's reported frame, and the reason the
+        # paging fix alone did not close the report. Measured on `87240c118` at
+        # 100x30: one paint carrying 80 blocks at `box=96 built=80`, rows ending
+        # at cell 81 of 96 (QA round 1, Q1). The same paint on this branch
+        # carries no fallback-authored block.
         # Snapshot the in-flight calls BEFORE the fold: the answer can change
         # mid-projection, and replay reads only this set. The seed is the
         # gate-free set (`live_projection_call_ids` documents the pending
@@ -9257,7 +9301,31 @@ class OperatorApp(App[None]):
         # same subtracted question for a target that never seeded.
         self._projection_live_call_ids = live_projection_call_ids(session)
         try:
-            projected = project_settled_rows(self, history, bound=bound)
+            # Inside the guard, with the projection it serves. `_transcript_view()`
+            # raises `NoMatches` once `#transcript` is gone — the case `_shutdown`'s
+            # own docstring records (`_adopt_session` → `_render_resumed_history` →
+            # `_transcript_view()`, the crash the pre-prune worker cancel closed) —
+            # and the `finally` below resets the projection bookkeeping, so a read
+            # placed ahead of the `try` skipped those resets for a projection that
+            # never ran.
+            #
+            # The read is DEFENSIVE, not a live path. QA round 3 drove the teardown
+            # 8 times per tree and never entered it: 0 projection entries during
+            # teardown, with the painter workers cancelled before Textual prunes
+            # the tree. What is observable is the leak on the previous head,
+            # reached through the same raise: there `_projection_message_id` and
+            # `_projection_skipped_live` survived it, and the NEXT appended block
+            # inherited the stale anchor; on this head all three fields reset and
+            # the next block gets none.
+            #
+            # Named by FUNCTION, not by line, and the other citations in this
+            # comment were re-resolved against this tree on the way past: adding
+            # 29 comment lines above shifted the case this sentence is about, which
+            # is how the previous citation came to point at
+            # `_stop_multiplexer_broadcast` instead. A line number in a comment
+            # survives only until the next edit above it.
+            fold_width = self._transcript_view().scrollable_content_region.width
+            projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
             # must be able to settle when the turn dies.
@@ -10073,6 +10141,18 @@ class OperatorApp(App[None]):
         collected: list[Any] = []
         self._block_sink = collected
         try:
+            # The width these blocks are about to be given is NOT passed here:
+            # `_project_settled_rows` asks the live transcript for it, so the
+            # page and the tail cannot disagree about the destination, and the
+            # hint reaches each block before it authors its rows — the half
+            # `insert_blocks` cannot do for rows that already exist. Measured at
+            # 150x40 over three wheel-driven page mounts on base `633baf258`:
+            # this branch's `scripts/resume_paging_probe.py fold ordinary 150x40`
+            # (the `fold` mode is part of this change, so it is run against that
+            # tree rather than checked out with it) reported 108 authoring folds
+            # with 72 of them at the 80-column fallback, and 6 painted frames
+            # with a fallback-folded block inside the viewport; on this branch
+            # the same command reports 72 folds, 0 at the fallback, 0 frames.
             self._project_settled_rows(page)
         finally:
             self._block_sink = None
@@ -10167,11 +10247,16 @@ class OperatorApp(App[None]):
         )
 
     def _replay_tool_call(
-        self, call: Any, results: dict[str, Any], *, user_run: bool = False
+        self,
+        call: Any,
+        results: dict[str, Any],
+        *,
+        user_run: bool = False,
+        fold_width: int = 0,
     ) -> None:
         from local_operator.tui.session_presentation import replay_tool_call
 
-        return replay_tool_call(self, call, results, user_run=user_run)
+        return replay_tool_call(self, call, results, user_run=user_run, fold_width=fold_width)
 
     def _on_boot_failed(self, error: Exception) -> None:
         """Report a session that never constructed, WITHOUT retiring the splash.
@@ -23671,11 +23756,15 @@ class OperatorApp(App[None]):
             self._sync_boot_layout()
 
     def _append_image_blocks(
-        self, images: list[ImageContent], *, marker_text: str | None = None
+        self,
+        images: list[ImageContent],
+        *,
+        marker_text: str | None = None,
+        fold_width: int = 0,
     ) -> list[ImageBlock]:
         from local_operator.tui.session_presentation import append_image_blocks
 
-        return append_image_blocks(self, images, marker_text=marker_text)
+        return append_image_blocks(self, images, marker_text=marker_text, fold_width=fold_width)
 
     # -- slash commands -----------------------------------------------------
     def _notice(self, body: str, kind: NoticeKind = "info") -> None:
