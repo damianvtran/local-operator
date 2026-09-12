@@ -241,6 +241,11 @@ class FakeAdapter:
         self.fail_after = fail_after or {}
         self.calls: list[str] = []
         self.terminated = False
+        # The supervisor surface the failure path inspects for the worker's
+        # drained stderr (``EpisodeRunner._adapter_stderr``). ``None`` models a
+        # launch seam with no tail at all; a test that wants one attaches a
+        # stub exposing ``settled()``/``bytes()``.
+        self.stderr_tail: Any = None
         self.sequence = 0
         self.current = observation(episode_id, 0)
         self._counts: dict[str, int] = {}

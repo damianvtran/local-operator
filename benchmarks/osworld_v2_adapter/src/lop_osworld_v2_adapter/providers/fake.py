@@ -29,7 +29,12 @@ from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_SCHEDULE_ABSENT,
     EVIDENCE_SCHEDULE_DELETED,
 )
-from lop_osworld_v2_adapter.observation import NATIVE_SCREEN, write_png_rgb
+from lop_osworld_v2_adapter.observation import (
+    NATIVE_SCREEN,
+    SCREENSHOT_CAUSE_KEY,
+    write_png_rgb,
+)
+from lop_osworld_v2_adapter.providers.base import bounded_observation_cause
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
@@ -44,6 +49,7 @@ class FakeProvider:
         fail_evaluate: bool = False,
         blind_observations: int = 0,
         blind_after_observe_calls: int = 0,
+        blind_cause: str | None = None,
         has_user_simulator: bool = False,
         simulator_answer: str = "simulated user answer",
     ) -> None:
@@ -60,6 +66,13 @@ class FakeProvider:
         # a test that blinded the very first read would exercise a different
         # (and easier) failure than the one that cost five paid episodes.
         self._blind_after_observe_calls = blind_after_observe_calls
+        # WHY the blinded read has no frame, as the provider's bounded account.
+        # The real provider derives this from upstream's own failed-attempt
+        # logging (``providers.aws``); the fake takes it from the test so a
+        # bundle assertion can prove the cause reaches the sealed error detail.
+        # ``None`` is the provider that knows nothing: it reproduces upstream's
+        # silent ``None`` exactly, so the absent-cause path is unchanged.
+        self._blind_cause = blind_cause
         self._has_user_simulator = has_user_simulator
         self._simulator_answer = simulator_answer
         # The in-memory registry stands in for EC2: ref -> state. Teardown
@@ -112,12 +125,15 @@ class FakeProvider:
         self.observe_calls += 1
         if self._blind_observations > 0 and self.observe_calls > self._blind_after_observe_calls:
             self._blind_observations -= 1
-            return {
+            blind: dict[str, Any] = {
                 "screenshot": None,
                 "accessibility_tree": None,
                 "terminal": None,
                 "instruction": "fake instruction",
             }
+            if self._blind_cause is not None:
+                blind[SCREENSHOT_CAUSE_KEY] = bounded_observation_cause(self._blind_cause)
+            return blind
         return {
             "screenshot": self._frame(),
             "accessibility_tree": None,
