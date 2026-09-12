@@ -78,7 +78,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
-from local_operator.session.attachments import AttachmentStore
+from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -524,6 +524,131 @@ def _restored_job_rows(jobs: Sequence[Any]) -> list[Any]:
             continue
         rows.append(job.model_copy(update={"restored": True}))
     return rows
+
+
+def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
+    """Rebuild the viewer's ``AskQuestion`` from the projected ask card.
+
+    The wire is TOLERANT and the harness model is STRICT, so the version-skew
+    reconciliation lives here rather than at either end. ``AskQuestion._shape``
+    rejects ``recommended`` on a secret question (nothing to recommend), a bare
+    ``persist`` (nothing to persist), and an out-of-range index — and a
+    ``ValidationError`` is a ``ValueError``, which is NOT in ``_run_ask``'s
+    ``except`` clause. An unguarded rebuild would therefore escape as an
+    unretrieved-task traceback and the user's question would never mount, which
+    is strictly worse than a missing badge. Dropping the offending marker keeps
+    the card on screen.
+
+    ``options`` arrive ALREADY HOISTED and ``recommended`` indexes them as
+    received, so nothing here re-sorts or re-rotates them: doing so would move
+    the badge to the wrong row.
+
+    ``id`` fidelity is NOT restored here and cannot be: the rebuilt question
+    carries the ``request_id`` the gate routes on, not the authoring
+    ``AskQuestion.id`` (``OPENAI_API_KEY``), which the projection does not
+    carry — ``_pending_question_ids`` maps it back on the OWNER side. So
+    ``persist`` fidelity is half a faithful copy: a future viewer-side "this
+    will be saved permanently" affordance would name the request id rather
+    than the credential key, and needs the key carried before it can render.
+    """
+    try:
+        return _validated_ask_question(pending)
+    except ValueError:
+        # The explicit guards in the helper cover the combinations a SKEWED
+        # owner produces. What lands HERE is the residue: shapes the tolerant
+        # wire permits and the strict model refuses. The REACHABLE one is an
+        # empty option label — ``AskOptionWire.label`` has no minimum,
+        # ``AskOption.label`` has ``min_length=1``, so
+        # ``_projection_from_json`` accepts what ``AskQuestion`` rejects. A
+        # ``ValidationError`` is a ``ValueError`` and ``_run_ask`` catches only
+        # (CancelledError, RuntimeError, ConnectionError), so letting one out
+        # of here means an unretrieved-task traceback and a question that NEVER
+        # MOUNTS. A degraded card beats no card.
+        #
+        # REPAIR rather than blank the card: a free-text fallback is not
+        # available on a non-secret ask (the model demands at least two
+        # answers, and zero options is only legal with ``secret=True``, which
+        # would MASK an answer the user meant to be read). Naming an
+        # unlabelled row by its position keeps every choice on screen and
+        # answerable — the answer travels by label, so a repaired label is the
+        # one the owner matches on.
+        logger.debug(
+            "ask card %s did not satisfy AskQuestion; repairing",
+            pending.request_id,
+            exc_info=True,
+        )
+        return _repaired_ask_question(pending)
+
+
+def _repaired_ask_question(pending: PendingRequest) -> AskQuestion:
+    """Rebuild ``pending`` with the ONE repair that is safe to make.
+
+    Only an empty option label is repaired, because it is the only escape a
+    real owner can produce (the wire's ``AskOptionWire.label`` has no minimum,
+    the model's ``AskOption.label`` has ``min_length=1``) and because a row
+    with no name is unreadable anyway — naming it by position loses nothing a
+    user could have acted on.
+
+    Nothing else is "fixed" here. Inventing a second option to satisfy the
+    two-answer rule would put a choice on screen the agent never offered, and
+    blanking the card to a free-text ask would take away choices the agent
+    DID offer. A residue that is still invalid re-raises, and ``_run_ask``'s
+    ``ValueError`` arm turns it into a clean no-card instead of a traceback.
+    """
+    options = [
+        AskOption(
+            label=(
+                (option.get("label", "") if isinstance(option, Mapping) else option.label)
+                or f"Option {index + 1}"
+            ),
+            description=(
+                option.get("description", "") if isinstance(option, Mapping) else option.description
+            ),
+        )
+        for index, option in enumerate(pending.options)
+    ]
+    recommended = pending.recommended
+    if pending.secret or not options:
+        recommended = None
+    elif recommended is not None and not 0 <= recommended < len(options):
+        recommended = None
+    return AskQuestion(
+        id=pending.request_id,
+        question=pending.title,
+        options=options,
+        secret=pending.secret,
+        recommended=recommended,
+        persist=pending.persist and pending.secret,
+    )
+
+
+def _validated_ask_question(pending: PendingRequest) -> AskQuestion:
+    """The strict rebuild, split out so the fallback above has one thing to
+    guard and the happy path stays readable."""
+    options = [
+        AskOption(
+            label=(option.get("label", "") if isinstance(option, Mapping) else option.label),
+            description=(
+                option.get("description", "") if isinstance(option, Mapping) else option.description
+            ),
+        )
+        for option in pending.options
+    ]
+    recommended = pending.recommended
+    if pending.secret or not options:
+        recommended = None
+    elif recommended is not None and not 0 <= recommended < len(options):
+        # A payload from a newer or odd owner cannot be trusted to index THIS
+        # list; drop the marker rather than fail the whole card.
+        recommended = None
+    return AskQuestion(
+        id=pending.request_id,
+        question=pending.title,
+        options=options,
+        secret=pending.secret,
+        recommended=recommended,
+        persist=pending.persist and pending.secret,
+    )
 
 
 class AttachedSession:
@@ -3123,6 +3248,16 @@ class AttachedSession:
             if page.status == "full_required":
 
                 def replay() -> list[Any]:
+                    # ``Transcript``'s own store is the env default
+                    # (``AttachmentStore()`` == ``config_dir()/attachments``).
+                    # That is the same root ``store_for_transcript_dir``
+                    # derives for this session in every shipped caller — the
+                    # session's config dir comes from ``config_dir()`` (see the
+                    # AttachedSession construction sites) — so read root ==
+                    # write root here today. Left as the env default
+                    # deliberately: it is the write path's own expression, and
+                    # the construction sites, not this call, are what keep the
+                    # two equal.
                     transcript = Transcript(self._config_dir / "sessions" / self._session_id)
                     return (
                         transcript.build_llm_history(through_id=window.through_id)
@@ -3228,7 +3363,22 @@ class AttachedSession:
                 # the file START without meeting the cursor, so this is the
                 # same "id is not in the journal" the whole-file parse saw.
                 cut = None
-            return replay_entries(suffix.entries, AttachmentStore(directory), through_id=cut)
+            # Resolve externalized media against the store that OWNED this
+            # journal (``<config>/attachments``), derived from the session
+            # directory rather than from this reader's environment — the
+            # sidebar's saved-preview reader and this cold replay both know
+            # the config dir that owns the transcript, and only the co-located
+            # root is the writer's root by construction. The obvious-looking
+            # alternative, a per-session store at ``<config>/sessions/<id>``,
+            # was the bug (#694): NOTHING ever writes there, so every digest
+            # resolved to None and a live, on-disk screenshot replayed as
+            # "image unavailable — no longer in the transcript".
+            # ``store_for_transcript_dir`` owns that rule for both readers.
+            return replay_entries(
+                suffix.entries,
+                store_for_transcript_dir(directory),
+                through_id=cut,
+            )
 
         return await asyncio.to_thread(_replay)
 
@@ -3828,25 +3978,7 @@ class AttachedSession:
             client = self._client
             if handler is None or client is None:
                 return
-            options = [
-                AskOption(
-                    label=(
-                        option.get("label", "") if isinstance(option, Mapping) else option.label
-                    ),
-                    description=(
-                        option.get("description", "")
-                        if isinstance(option, Mapping)
-                        else option.description
-                    ),
-                )
-                for option in pending.options
-            ]
-            question = AskQuestion(
-                id=pending.request_id,
-                question=pending.title,
-                options=options,
-                secret=pending.secret,
-            )
+            question = _ask_question_from_pending(pending)
             answer = await handler([question])
             if not self._gate_reply_is_current(pending, client):
                 return
@@ -3865,6 +3997,19 @@ class AttachedSession:
             # Same three outcomes as the approval gate above, including the
             # stop path's dead-owner post (round-6 NIT-3).
             pass
+        except ValueError:
+            # A ``ValidationError`` IS a ``ValueError``, and without this arm
+            # one escapes the task entirely: "Task exception was never
+            # retrieved" in the log and no card on the user's screen, with no
+            # indication of why. `_ask_question_from_pending` repairs the one
+            # skew a real owner produces; this is the backstop for a shape
+            # neither it nor the model will accept, so the failure is at least
+            # logged and bounded to this one gate.
+            logger.warning(
+                "ask gate %s could not be rendered from the owner's card",
+                pending.request_id,
+                exc_info=True,
+            )
         finally:
             if (
                 self._gate_key == self._gate_identity(pending)
@@ -5747,6 +5892,16 @@ def _pending_request(state: Any) -> PendingRequest | None:
         secret=state.secret,
         question_index=state.question_index,
         question_total=state.question_total,
+        # `PendingGateState` is `extra="allow"`, so these ride the frontend-state
+        # contract as extras rather than declared fields — but this rebuild
+        # enumerates, so anything not named here is dropped. This is the path
+        # `_maybe_start_gate` feeds `_run_ask` from on the DEFAULT detached
+        # topology (the projection fold is the phone's path), so a field missing
+        # here never reaches the terminal picker however well the projection
+        # carries it. `getattr` with the dataclass default keeps an older owner's
+        # gate state (which has neither key) safe.
+        recommended=(raw if isinstance(raw := getattr(state, "recommended", None), int) else None),
+        persist=bool(getattr(state, "persist", False)),
     )
 
 

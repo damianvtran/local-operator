@@ -25,6 +25,8 @@ from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
     EXPAND_HINT,
     OUTPUT_INDENT,
+    ROW_INDENT,
+    ToolCard,
 )
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
@@ -247,7 +249,10 @@ async def test_an_expanded_wake_copy_strips_the_icon_and_keeps_the_prompt() -> N
         wake.toggle_expanded()
         await pilot.pause()
 
-        assert wake.copy_gutter(0) == 2  # the icon field, like ToolCard
+        # The summary's gutter is the icon field PLUS the row's left inset:
+        # the shared ledger spine, so it leaves with the copy for the same
+        # reason the icon does.
+        assert wake.copy_gutter(0) == ROW_INDENT + ToolCard.ICON_COLS
         assert wake.copy_gutter(1) == OUTPUT_INDENT
 
         app.screen.selections = {wake: Selection(None, None)}

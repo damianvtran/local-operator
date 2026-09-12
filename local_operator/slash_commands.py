@@ -405,10 +405,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # command, and the prompt the turn later announces).
     SlashCommand(
         "loop",
-        # Advertises BOTH forms so the goal mode is discoverable from the palette
+        # Advertises all THREE forms so each is discoverable from the palette
         # without reading the source: free text is a goal a judge decides is met,
-        # a number is a bounded iteration count.
-        "Loop toward a goal: /loop <goal text>, or /loop <n> for n turns",
+        # a number is a bounded iteration count, and `stop` is the escape hatch —
+        # which used to appear only in a launch notice or an already-running
+        # refusal, i.e. after the user needed it (UX round 1, U6).
+        "Loop toward a goal: /loop <goal text>, /loop <n>, or /loop stop to cancel",
         consumes_prompt=True,
         desktop_destination="session.loop",
     ),

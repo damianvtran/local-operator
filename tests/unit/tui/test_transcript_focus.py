@@ -541,3 +541,121 @@ async def test_clicking_a_row_with_no_focus_of_its_own_reaches_the_composer() ->
 
         assert app.focused is editor
         assert app.query_one("#input-dock").has_class(COMPOSER_FOCUSED_CLASS)
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_row_above_the_viewport_reveals_its_top() -> None:
+    """Expanding a row the reader has scrolled past brings its top back.
+
+    The row's body grows BELOW its top, and with the tail anchor holding the
+    bottom steady the growth lands above the viewport: the reader presses
+    expand and gets the middle of the body, with the heading and the first
+    fields off-screen and no key that reaches them (design round 1, D3).
+    Reveal-then-act is this ledger's existing convention for a key that acts on
+    a row it may have left off-screen.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        cards = _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+
+        card = cards[0]
+        assert card.virtual_region.y < view.scroll_y, "premise: the row is above the fold"
+        card.toggle_expanded()
+        await pilot.pause()
+        assert card.expanded is True
+        assert view.scroll_y <= card.virtual_region.y + 0.5
+
+
+_LONG_REFUSAL = "\n".join(
+    [
+        "edit aborted: 2 of 2 hunks did not match; nothing was written "
+        "(a call applies all its hunks or none)."
+    ]
+    + ["File: /tmp/doc.md — 677 lines, 118203 bytes."]
+    + [
+        f"  hunk {n}: old_text not found (exact and whitespace-tolerant matchers both failed)."
+        for n in (1, 2)
+    ]
+    + [
+        f"    {line}| the file's own text, row {line} of the diagnosis body"
+        for line in range(1, 26)
+    ]
+)
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_long_card_at_the_tail_reveals_its_top() -> None:
+    """A card TALLER than the viewport, expanded while following the tail.
+
+    The immediate reveal cannot fire here: at the instant of the toggle the card
+    is still in view (its top is at the viewport's top), and only the refresh
+    that follows the toggle moves the extent — the tail anchor then holds the
+    BOTTOM, so the headline and the `File:` line land above the fold and no key
+    reaches them (design round 2, D3). The reveal is re-asked once the layout
+    has settled.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+
+        card = ToolCard("t", "edit", {"path": "local_operator/tools/builtin.py"})
+        app._append_block(card)
+        card.mark_failed(_LONG_REFUSAL)
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y >= view.max_scroll_y - 1, "premise: following the tail"
+
+        card.toggle_expanded()
+        for _ in range(6):
+            await pilot.pause()
+
+        assert card.expanded is True
+        top = card.virtual_region.y
+        assert (
+            card.virtual_region.height > view.size.height - 4
+        ), "premise: taller than the viewport"
+        assert view.scroll_y <= top + 0.5, "the reader must land on the card's top, not mid-body"
+
+        # ... and a new message must not move a view the reader is holding.
+        held = view.scroll_y
+        extra = ToolCard("x", "bash", {"command": "true"})
+        app._append_block(extra)
+        extra.mark_done("done")
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y == held, "a new message moved a held view"
+        assert view.max_scroll_y > held
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_row_at_the_tail_still_follows_the_tail() -> None:
+    """The reveal is for rows ABOVE the fold only; the tail keeps the bottom.
+
+    Expanding the newest row must not yank the view back to its top: the
+    reader is following the bottom, the growth is below their eyes, and the
+    tail anchor is what holds the offset there.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 24)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        view = app.query_one(TranscriptView)
+        cards = _seed_cards(app, 40)
+        for _ in range(4):
+            await pilot.pause()
+        assert view.scroll_y >= view.max_scroll_y - 1, "premise: following the tail"
+
+        cards[-1].toggle_expanded()
+        await pilot.pause()
+        assert cards[-1].expanded is True
+        assert view.scroll_y >= view.max_scroll_y - 1
