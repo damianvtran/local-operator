@@ -19,8 +19,10 @@ The rungs, in ink-pitch order. Each is a DIFFERENT way to buy the same row of
 air, and they do not look alike on a filled frame even though the arithmetic
 says they cost the same:
 
-* ``default``     — 1-row card, 1 ground row. Pitch 2. The reported state.
+* ``flush``       — 1-row card, 1 ground row. Pitch 2. The REPORTED state,
+  i.e. what the ledger looked like before this pad shipped.
 * ``pad-below``   — 2-row card, the pad row BELOW the summary. Pitch 3.
+  This is what the sheet now ships by default.
 * ``pad-above``   — 2-row card, the pad row ABOVE the summary. Pitch 3.
 * ``double-gap``  — 1-row card, TWO ground rows between neighbours. Pitch 3.
 * ``comfortable`` — ``display.comfortable_rows``: 3-row card. Pitch 4.
@@ -32,11 +34,22 @@ That distinction is the whole design question here (see the ``.comfortable-rows`
 comment in the stylesheet on a fill that "terminated on an inked line"), and it
 is invisible in a height number, which is why this script rasterizes.
 
-Rungs other than the tree's own default are applied as INLINE styles on the
+EVERY rung is applied as an EXPLICIT, SELF-CONTAINED inline override on the
 widgets rather than by editing the sheet, so one process can render the whole
 ladder and a rung is never confused with what the repository ships. Inline
-styles beat the sheet's rules, so what is captured for a rung is that rung —
-but ``default`` is genuinely untouched, and therefore tracks the sheet.
+styles beat the sheet's rules, so what is captured for a rung is that rung.
+
+Self-contained is the load-bearing word, and it is the correction of a real
+defect in this script's first version. That version left one rung deliberately
+un-styled so it would "track the sheet" — which worked only while the sheet was
+flush. The moment the pad shipped, that rung became a duplicate of
+``pad-below``, the ladder lost the before-picture it exists to show, and
+``double-gap``'s margin-only override STACKED on the sheet's new pad and
+measured pitch 4 instead of the pitch-3 alternative the design argument
+rejects. A ladder rung that inherits anything from the thing it is supposed to
+be compared against is not a rung. So each one now pins height, padding AND
+margin outright, and every rung stays reproducible across any future change to
+the sheet's own density.
 """
 
 from __future__ import annotations
@@ -79,37 +92,63 @@ CALLS: list[tuple[str, dict[str, object], float]] = [
 #: whether a rung fits a working session rather than a demo.
 LONG_RUN = 12
 
-RUNGS = ("default", "pad-below", "pad-above", "double-gap", "comfortable")
+RUNGS = ("flush", "pad-below", "pad-above", "double-gap", "comfortable")
+
+#: Per-rung card geometry: ``(height, padding, extra gap rows)``.
+#:
+#: Written as DATA rather than as branches so the three quantities a rung is
+#: made of are visible side by side and cannot drift apart — the defect this
+#: table replaces was exactly a rung whose margin was set without its height,
+#: so it inherited the sheet's padding and stopped being the rung it named.
+#: ``height`` is the BORDER box (Textual sizes a fixed-height widget including
+#: its padding), so it is always ``1 + pad-top + pad-bottom`` or the summary
+#: clips instead of gaining air.
+_RUNG_STYLES: dict[str, tuple[int, tuple[int, int, int, int], int]] = {
+    # The reported state: ink edge to edge on a one-cell slab, one ground row.
+    "flush": (1, (0, 0, 0, 0), 0),
+    # What the sheet now ships: the pad row below the summary.
+    "pad-below": (2, (0, 0, 1, 0), 0),
+    # The rejected twin of `pad-below` — same cost, fill ends on an inked line.
+    "pad-above": (2, (1, 0, 0, 0), 0),
+    # The rung that buys its row from the GROUND instead of the card: a flush
+    # card, with the adaptive gap widened to two rows.
+    "double-gap": (1, (0, 0, 0, 0), 1),
+}
 
 
 def _apply_rung(app: OperatorApp, rung: str) -> None:
-    """Put the app into ``rung``'s density, on top of whatever the sheet says.
+    """Put the app into ``rung``'s density, overriding whatever the sheet says.
 
     Inline styles rather than a stylesheet edit: the whole ladder has to be
     renderable from one tree so the frames differ in density and in nothing
-    else (font, theme, fixture, Textual version). ``height`` and ``padding``
-    are set together for the reason the sheet's own comment gives — Textual
-    sizes a fixed-height widget INCLUDING its padding, so a pad row without
-    the matching height clips the summary instead of bracketing it.
+    else (font, theme, fixture, Textual version).
+
+    Every value is written EXPLICITLY, including the ones that happen to match
+    the sheet today. Leaving one implicit is what made the first version of
+    this script stop rendering the before-picture the moment the sheet's own
+    default moved — a rung has to state its whole geometry to stay a fixed
+    point of comparison.
     """
     if rung == "comfortable":
+        # The one rung that IS a shipped app state, so it is applied the way
+        # the app applies it (`_sync_row_density_class`) rather than by
+        # restating its cell counts here and letting the two drift.
         app.screen.add_class(COMFORTABLE_ROWS_CLASS)
         return
+    height, padding, extra_gap = _RUNG_STYLES[rung]
     for card in app.query(ToolCard):
-        if rung == "pad-below":
-            card.styles.height = 2
-            card.styles.padding = (0, 0, 1, 0)
-        elif rung == "pad-above":
-            card.styles.height = 2
-            card.styles.padding = (1, 0, 0, 0)
-        elif rung == "double-gap":
-            # The rung that buys its row from the GROUND instead of the card.
-            # Only rows that already carry the adaptive gap are widened, so
-            # this stays a change to the ledger's rhythm rather than a margin
-            # on every block (the "blank row between everything" regression
-            # the base selectors are kept margin-free to prevent).
-            if card.has_class(GAP_CLASS):
-                card.styles.margin = (2, 0, 0, 0)
+        card.styles.height = height
+        card.styles.padding = padding
+        # Restated on every rung, not only the one that widens it: a margin
+        # left unset would be inherited from the sheet, which is the class of
+        # defect this table exists to prevent.
+        #
+        # Only rows that already carry the adaptive gap are widened, so
+        # `double-gap` stays a change to the ledger's rhythm rather than a
+        # margin on every block (the "blank row between everything"
+        # regression the base selectors are kept margin-free to prevent).
+        top = 1 + extra_gap if card.has_class(GAP_CLASS) else 0
+        card.styles.margin = (top, 0, 0, 0)
 
 
 async def _seed(app: OperatorApp, pilot, count: int) -> None:
@@ -197,6 +236,14 @@ async def _geometry(size: tuple[int, int]) -> None:
 
 
 def main() -> None:
+    # Usage before indexing: the docstring publishes two invocations, and a
+    # bare run answering with an IndexError traceback teaches neither.
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            "usage: ledger_density_shot.py OUT.svg [COLSxROWS] [RUNG] [PALETTE]\n"
+            "       ledger_density_shot.py --geometry [COLSxROWS]\n"
+            f"rungs: {', '.join(RUNGS)}"
+        )
     if sys.argv[1] == "--geometry":
         size = (100, 30)
         if len(sys.argv) > 2:
@@ -209,7 +256,10 @@ def main() -> None:
     if len(sys.argv) > 2:
         cols, rows = sys.argv[2].lower().split("x")
         size = (int(cols), int(rows))
-    rung = sys.argv[3] if len(sys.argv) > 3 else "default"
+    # `pad-below` rather than a rung called "default": the shipped density is
+    # a NAMED rung here, so the ladder keeps a fixed before-picture (`flush`)
+    # no matter what the sheet's own default becomes later.
+    rung = sys.argv[3] if len(sys.argv) > 3 else "pad-below"
     palette = sys.argv[4] if len(sys.argv) > 4 else "dark"
     if rung not in RUNGS:
         raise SystemExit(f"unknown rung {rung!r}; expected one of {', '.join(RUNGS)}")

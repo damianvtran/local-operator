@@ -127,11 +127,30 @@ def test_gap_class_is_the_only_block_spacing_declaration() -> None:
     # vertical-only: the card's horizontal inset is drawn by the row builder,
     # not by the sheet, precisely so it cannot drift from the value the builder
     # sheds at narrow widths.
-    for block in re.findall(r"^(?:ToolCard|WakeBlock)[^{]*\{([^}]*)\}", text, re.MULTILINE):
-        assert not re.search(r"\bmargin\s*:", block), block
-        for pad in re.findall(r"\bpadding\s*:([^;]*);", block):
-            top, right, bottom, left = pad.split()
-            assert right == left == "0", pad
+    #
+    # The optional `.comfortable-rows` prefix is load-bearing coverage, not
+    # tidiness. Anchored at `^(?:ToolCard|WakeBlock)` this loop reached 6 rule
+    # bodies and NEITHER of the two that carry a four-value padding — both of
+    # those sit under the descendant selector — so the vertical-only assertion
+    # guarded one declaration out of three while its docstring claimed all of
+    # them. Those are also the rules most able to drift, since Textual resolves
+    # `padding` as one declaration per rule and each has to RESTATE the zero
+    # left/right rather than inherit it.
+    action_rows = r"^(?:\.comfortable-rows\s+)?(?:ToolCard|WakeBlock)[^{]*\{([^}]*)\}"
+    bodies = re.findall(action_rows, text, re.MULTILINE)
+    paddings = [pad for body in bodies for pad in re.findall(r"\bpadding\s*:([^;]*);", body)]
+    # Pin the COUNT as well as the shape: a rule that stops matching this
+    # pattern would otherwise silently reduce the loop's reach back to the gap
+    # this comment exists to record, and pass by checking nothing.
+    assert len(paddings) == 3, paddings
+    for body in bodies:
+        assert not re.search(r"\bmargin\s*:", body), body
+    for pad in paddings:
+        # Four values required on purpose: the shorthand forms would let a
+        # horizontal value in through a side door, and every action-row rule
+        # in this sheet writes all four precisely so the inset stays visible.
+        top, right, bottom, left = pad.split()
+        assert right == left == "0", pad
 
 
 def test_tool_card_renders_a_single_row() -> None:

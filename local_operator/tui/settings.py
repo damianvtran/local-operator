@@ -39,9 +39,9 @@ _DEFAULT_NOTES: dict[str, Any] = {
     "display.shimmer": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF
-    # by the maintainer. OFF is no longer flush: the sheet pads one row BELOW
-    # every action row for everyone, and this setting adds the row ABOVE, so
-    # it remains strictly the airier of the two densities.
+    # by the maintainer. OFF is no longer flush: the default already pads one
+    # row below every action row, and this adds the matching row above — so
+    # turning it on is always a step airier, never a no-op.
     "display.comfortable_rows": False,
     # Nerd Font glyphs on tool rows. Default is None = AUTO: unset means
     # `tui/glyphs.py` decides from the terminal-emulator env markers (a

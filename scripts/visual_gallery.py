@@ -50,9 +50,11 @@ def cases() -> list[dict[str, Any]]:
                 args += ["100x30", variant]
             elif script == "ledger_density_shot.py":
                 # Its variants are the two densities the app actually ships:
-                # the default and `display.comfortable_rows`. The rejected
-                # rungs stay reachable from the CLI for a density argument,
-                # but the census renders only what a user can land on.
+                # `pad-below` (the default) and `display.comfortable_rows`.
+                # The rungs that exist only for the density ARGUMENT — the
+                # historical `flush` state and the two rejected alternatives —
+                # stay reachable from the CLI, but the census renders only
+                # what a user can land on.
                 args += ["100x30", variant, "dark"]
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]

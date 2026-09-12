@@ -20,6 +20,7 @@ import pytest
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 
 from local_operator.harness.types import ImageContent
 from local_operator.session.naming import ConversationName
@@ -1214,9 +1215,16 @@ async def test_the_inset_is_never_what_tips_a_long_subagent_list_over(
                 # wrapper that queries unguarded raises `NoMatches` out of a
                 # path the app treats as normal — which showed up as a boot-
                 # timing flake here rather than as a defect in the app.
+                #
+                # NARROWER than the production method's bare `except
+                # Exception`, deliberately. There the breadth is the point (a
+                # status surface must not be able to take the app down); here
+                # the only expected failure is the not-yet-composed query, and
+                # a test double that swallowed anything else would hide the
+                # defect it exists to expose.
                 try:
                     band = self.query_one("#band")
-                except Exception:  # not composed yet (early boot)
+                except NoMatches:  # not composed yet (early boot)
                     return
                 band.remove_class("has-slot")
 

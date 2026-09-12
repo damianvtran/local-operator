@@ -135,13 +135,22 @@ def _seam(app: OperatorApp) -> int:
     Still a real assertion rather than a weakened one: the walk stops at the
     first row that is inside a block, so a fix that lost the row entirely, or
     that let a card's own fill reach the composer, still returns 0.
+
+    ``display`` is the only filter, and dropping the ``and block.region``
+    truthiness test that stood beside it is a fix rather than a simplification.
+    ``Region.__bool__`` is false for zero AREA, so it fired on a zero-WIDTH
+    region as readily as on a zero-height one — and a zero-width block with
+    real rows (``Region(x=0, y=5, width=0, height=3)``) does occupy rows 5-7
+    while testing falsy, so the filter could drop a block whose rows then
+    counted as seam. The row-containment test below needs no such guard to
+    begin with: ``region.y <= index < region.bottom`` is vacuously false for
+    any zero-height or unlaid-out region, so such a block contributes nothing
+    either way. Keeping the narrower filter is what made the docstring's claim
+    ("stops at the first row that is inside a block") conditional on a
+    coincidence about widths.
     """
     frame = _frame(app)
-    owned = [
-        block.region
-        for block in app.query_one(TranscriptView).children
-        if block.display and block.region
-    ]
+    owned = [block.region for block in app.query_one(TranscriptView).children if block.display]
     index = app.query_one("#input-shell").region.y - 1
     count = 0
     while index >= 0 and not frame[index].strip():

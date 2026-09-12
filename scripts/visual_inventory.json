@@ -167,7 +167,7 @@
       "default"
     ],
     "ledger_density_shot.py": [
-      "default",
+      "pad-below",
       "comfortable"
     ]
   },
