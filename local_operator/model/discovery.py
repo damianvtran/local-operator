@@ -385,6 +385,9 @@ class DiscoveredModel:
     #: the point of use when its own listing declines to price it.
     routed: bool = False
     supports_images: bool | None = None
+    # Valid fields explicitly supplied by a native endpoint. This distinguishes
+    # zero prices/false flags from omissions through a JSON cache round-trip.
+    authoritative_fields: tuple[str, ...] = ()
     supports_tools: bool | None = None
     reasoning: bool | None = None
     active_context_window: int | None = None
@@ -595,7 +598,7 @@ def _stated_bool(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _effort_ladder(value: object) -> tuple[str, ...] | None:
+def _effort_ladder(value: object, *, preserve_empty: bool = False) -> tuple[str, ...] | None:
     """A listing's effort list as an ASCENDING ladder, or ``None`` when unstated.
 
     Sorted HERE, at ingest, rather than at each reader. ``EFFORT_ORDER`` is the
@@ -632,6 +635,11 @@ def _effort_ladder(value: object) -> tuple[str, ...] | None:
     """
     if not isinstance(value, (list, tuple)):
         return None
+    # An explicitly empty allowlist is a denial, unlike an unrecognised ladder.
+    # Preserve it through disk serialization instead of silently restoring a
+    # static effort knob the provider did not offer.
+    if not value:
+        return () if preserve_empty else None
     known = {
         word.lower() for word in value if isinstance(word, str) and word.lower() in EFFORT_ORDER
     }
@@ -913,8 +921,10 @@ def _row_from_openai_entry(
     reasoning = _mapping(entry.get("reasoning"))
 
     cache_read_price = _per_million(pricing.get("input_cache_read"))
-    effort_ladder = _effort_ladder(reasoning.get("supported_efforts"))
-    return DiscoveredModel(
+    effort_ladder = _effort_ladder(
+        reasoning.get("supported_efforts"), preserve_empty=provider_id == "deepseek"
+    )
+    row = DiscoveredModel(
         id=model_id,
         name=_first_str(entry.get("name"), entry.get("display_name")),
         # OpenRouter also publishes ``input_cache_write_1h`` for the one-hour
@@ -955,7 +965,15 @@ def _row_from_openai_entry(
         ),
         routed=_is_meta_route(model_id, provider_id, pricing),
         cache_read_price=cache_read_price,
-        supports_images=_has_image_input(architecture),
+        supports_images=(
+            _stated_bool(entry.get("supports_images"))
+            if provider_id == "deepseek" and _stated_bool(entry.get("supports_images")) is not None
+            else _has_image_input(architecture)
+        ),
+        supports_tools=(
+            _stated_bool(entry.get("supports_tools")) if provider_id == "deepseek" else None
+        ),
+        reasoning=(_stated_bool(entry.get("reasoning")) if provider_id == "deepseek" else None),
         # A priced cache-read leg is the only machine-readable evidence of prompt
         # caching in these listings; there is no capability flag for it.
         supports_prompt_cache=cache_read_price > 0,
@@ -970,6 +988,24 @@ def _row_from_openai_entry(
         reasoning_efforts=effort_ladder,
         reasoning_default_effort=_effort_default(reasoning.get("default_effort"), effort_ladder),
     )
+    if provider_id != "deepseek":
+        return row
+    # DeepSeek's live /models currently omits all of these. Only PRESENT,
+    # valid fields in the established compatibility schema can replace docs.
+    fields = [name for name in ("context_window", "max_tokens") if getattr(row, name) > 0]
+    for wire, name in (
+        ("prompt", "input_price"),
+        ("completion", "output_price"),
+        ("input_cache_read", "cache_read_price"),
+        ("input_cache_write", "cache_write_price"),
+    ):
+        if _per_million(pricing.get(wire)) > 0 or _stated_zero_price(pricing.get(wire)):
+            fields.append(name)
+    cache_support = _stated_bool(entry.get("supports_prompt_cache"))
+    if cache_support is not None:
+        fields.append("supports_prompt_cache")
+        row = dataclasses.replace(row, supports_prompt_cache=cache_support)
+    return dataclasses.replace(row, authoritative_fields=tuple(fields))
 
 
 def _serves_account_scoped_catalogue(
@@ -1513,6 +1549,8 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         cache_read_price=_positive_float(info.cache_reads_price),
         cache_write_price=_positive_float(info.cache_writes_price),
         supports_images=_stated_bool(info.supports_images),
+        supports_tools=info.supports_tools,
+        reasoning=info.reasoning,
         supports_prompt_cache=bool(info.supports_prompt_cache),
     )
 
@@ -1559,8 +1597,9 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
     else:
         max_tokens = live_max or static_max
 
-    return DiscoveredModel(
+    merged = DiscoveredModel(
         id=row.id,
+        authoritative_fields=row.authoritative_fields,
         name=_merge_name(row.name, info.name, row.id),
         # Only a positive live window beats the registry. A listing that omits the
         # field (a lean OpenAI-compatible gateway, or an Anthropic proxy on an API
@@ -1625,7 +1664,16 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
         # of what the wire said and exactly one function owns the fallback.
         reasoning_efforts=row.reasoning_efforts,
         reasoning_default_effort=row.reasoning_default_effort,
+        supports_tools=(
+            row.supports_tools if row.supports_tools is not None else info.supports_tools
+        ),
+        reasoning=row.reasoning if row.reasoning is not None else info.reasoning,
     )
+    # Native facts beat gateway heuristics (including a real 4096 output cap).
+    overrides = {field: getattr(row, field) for field in row.authoritative_fields}
+    if "input_price" in overrides and "output_price" in overrides:
+        overrides["free"] = row.free
+    return dataclasses.replace(merged, **overrides)
 
 
 def _merge_name(live_name: str, static_name: str, model_id: str) -> str:
@@ -1723,11 +1771,25 @@ def _rows_from_payload(
             continue
         # Computed ONCE and handed to both fields: the default is only valid
         # against its own ladder, so re-deriving it would let the two disagree.
-        stored_ladder = _effort_ladder(entry.get("reasoning_efforts"))
+        stored_ladder = _effort_ladder(entry.get("reasoning_efforts"), preserve_empty=True)
         rows.append(
             DiscoveredModel(
                 id=model_id,
                 name=_first_str(entry.get("name")),
+                authoritative_fields=tuple(
+                    field
+                    for field in (entry.get("authoritative_fields") or [])
+                    if field
+                    in {
+                        "context_window",
+                        "max_tokens",
+                        "input_price",
+                        "output_price",
+                        "cache_read_price",
+                        "cache_write_price",
+                        "supports_prompt_cache",
+                    }
+                ),
                 context_window=_positive_int(entry.get("context_window")),
                 default_context_window=_positive_int(entry.get("default_context_window")) or None,
                 max_context_window=_positive_int(entry.get("max_context_window")) or None,
@@ -2075,7 +2137,10 @@ def _available_models(
     # all and no request issued to recover. Before this path existed the same
     # answer still offered every bundled id, which is the behaviour to keep:
     # upstream schema drift should cost "no new models", never "no models".
-    authoritative_live = account_scoped and bool(live_rows)
+    # DeepSeek documents /models as its complete current inventory, not a partial
+    # entitlement snapshot. Keep legacy aliases only for offline fallback/manual
+    # selectors; unioning them here resurrects retired models after a good fetch.
+    authoritative_live = (account_scoped and bool(live_rows)) or provider_id == "deepseek"
     merged = merge_models(
         rows,
         live_rows,

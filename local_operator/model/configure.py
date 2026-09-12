@@ -599,7 +599,18 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # stops offering `none`/`low` on the OpenRouter route, because the router
     # says those rungs 400 there. A rung we cannot send is not a rung.
     listing_levels = _listing_effort(canonical, model_name)
-    effort_levels = listing_levels if listing_levels else supported_efforts(model_name)
+    # The native endpoint documents none/low/high/max, high by default. Scope
+    # this to the route: aggregators own their own effort gate (and defaults).
+    direct_deepseek = canonical == "deepseek" and model_name in {
+        "deepseek-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    }
+    fallback_levels = (
+        ("none", "low", "high", "max") if direct_deepseek else supported_efforts(model_name)
+    )
+    effort_levels = listing_levels if listing_levels is not None else fallback_levels
     # THE LADDER and THE SEED are two separate questions with two different
     # answers, and conflating them is what made two earlier revisions wrong.
     #
@@ -682,7 +693,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # membership guard is for a listing that NARROWS below the table's
         # default; seed nothing rather than clamping to a neighbouring rung no
         # source stated.
-        table_default = default_effort(model_name)
+        table_default = "high" if direct_deepseek else default_effort(model_name)
+        if canonical == "deepseek" and info is not None and info.reasoning_default_effort:
+            table_default = info.reasoning_default_effort
         reasoning_effort = table_default if table_default in effort_levels else None
     # A model with an effort ladder reasons BY DEFINITION, whatever its name
     # looks like: `claude-opus-5` matches none of the markers below — it says
@@ -692,6 +705,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     reasoning = bool(effort_levels) or any(
         marker in lowered for marker in ("o1", "o3", "reasoner", "thinking", "deep-research")
     )
+    if info is not None and isinstance(getattr(info, "reasoning", None), bool):
+        reasoning = bool(info.reasoning)
+        if not reasoning:
+            effort_levels = ()
+            reasoning_effort = None
     # Keyed on the model, not on the provider that fronts it. `claude-opus-5`
     # returns 200 through OpenRouter only because the aggregator strips the
     # parameters before forwarding — the model never honoured them on either
@@ -804,7 +822,11 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         default_context_window=getattr(info, "default_context_window", None),
         max_context_window=getattr(info, "max_context_window", None),
         max_output_tokens=max_output,
-        supports_tools=True,
+        supports_tools=(
+            bool(info.supports_tools)
+            if info is not None and isinstance(getattr(info, "supports_tools", None), bool)
+            else True
+        ),
         supports_images=supports_images,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
@@ -1445,11 +1467,7 @@ def _info_from_discovery(
     putting that on the import path would cost every CLI invocation.
     """
     try:
-        from local_operator.model.discovery import (
-            DEFAULT_TIMEOUT_S,
-            available_models,
-            sane_listing_max_tokens,
-        )
+        from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
 
         secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(provider)
         rows, status = available_models(
@@ -1479,6 +1497,20 @@ def _info_from_discovery(
     if row is None:
         logger.debug("%s listing (%s) has no entry for %s", provider, status, model_name)
         return fallback
+
+    return info_from_discovered_model(provider, model_name, row, fallback)
+
+
+def info_from_discovered_model(
+    provider: str, model_name: str, row: "DiscoveredModel", fallback: ModelInfo
+) -> ModelInfo:
+    """Project an already authenticated listing without another credential lookup.
+
+    The HTTP catalogue and runtime resolution must share field precedence. A
+    second fetch here could use a different account than the route's dependency
+    and silently replace the inventory the caller was actually authorized for.
+    """
+    from local_operator.model.discovery import sane_listing_max_tokens
 
     # Keyed on the id the CALLER asked for, not on ``row.id``: the match above
     # may have gone through id normalisation, and ``build_model_spec`` looks the
@@ -1523,7 +1555,27 @@ def _info_from_discovery(
         # already carries ``Optional[bool]`` with the same meaning, and
         # ``build_model_spec`` reads ``is not None`` before trusting it.
         info.supports_images = row.supports_images
+    if row.supports_tools is not None:
+        info.supports_tools = row.supports_tools
+    if row.reasoning is not None:
+        info.reasoning = row.reasoning
+    if provider == "deepseek" and row.reasoning_default_effort is not None:
+        info.reasoning_default_effort = row.reasoning_default_effort
     info.supports_prompt_cache = info.supports_prompt_cache or row.supports_prompt_cache
+    # Presence survives the listing cache: zero-price/false flags and valid
+    # small output limits must not turn into static guesses at this last hop.
+    native_fields = {
+        "context_window": "context_window",
+        "max_tokens": "max_tokens",
+        "input_price": "input_price",
+        "output_price": "output_price",
+        "cache_read_price": "cache_reads_price",
+        "cache_write_price": "cache_writes_price",
+        "supports_prompt_cache": "supports_prompt_cache",
+    }
+    for field in row.authoritative_fields:
+        if field in native_fields:
+            setattr(info, native_fields[field], getattr(row, field))
     return info
 
 
@@ -1825,7 +1877,7 @@ def _resolve_model_info_cached(
                 "max_context_window": None,
             }
         )
-    if oauth or _listing_can_correct(info):
+    if oauth or canonical == "deepseek" or _listing_can_correct(info):
         # EVERY provider, not just the aggregators. The gate used to be
         # `canonical in LISTING_PROVIDERS`, which left a hole that the model picker
         # turned into a routine path: the picker offers whatever a provider's live
@@ -1838,7 +1890,9 @@ def _resolve_model_info_cached(
         # Reached when the registry is missing the window or BOTH prices, and ALSO
         # when its limits are a dated transcription of this very listing — see
         # `_listing_can_correct`. A row that is complete and first-hand still costs
-        # nothing: no HTTP call, no cache read, no listing scan.
+        # nothing: no HTTP call, no cache read, no listing scan. DeepSeek is an
+        # exception: /models owns inventory/capabilities even when our documented
+        # fallback is complete. Its cached listing must get first refusal.
         #
         # The two cases get different budgets. Missing data is BLOCKING — the
         # session has no context window until the listing answers — so it keeps the
@@ -1857,7 +1911,10 @@ def _resolve_model_info_cached(
             timeout=None if _needs_enrichment(info) else _REFRESH_TIMEOUT_S,
         )
     route_context = (info.context_window, info.default_context_window, info.max_context_window)
-    if _needs_enrichment(info):
+    if _needs_enrichment(info) and canonical != "deepseek":
+        # DeepSeek's missing fields use documented native fallbacks, not an
+        # aggregator route's prices or capabilities. Unknown future ids stay
+        # unknown until the provider publishes those details.
         # STILL incomplete after the provider's own listing had its turn, which for
         # every DIRECT provider is the normal outcome rather than a failure: none of
         # them quote money in `/v1/models`, and for an id the registry has not been
