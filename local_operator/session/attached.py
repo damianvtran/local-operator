@@ -102,7 +102,6 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
-from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
 from local_operator.session.transcript import (
     Transcript,
     read_replay_suffix,
@@ -137,51 +136,38 @@ UNIDENTIFIED_STEER_ID = "remote-steer"
 #: legacy attach path still recovers by taking over (see ``_can_go_cold``).
 COLD_FALLBACK_S = 8.0
 
-#: The SECOND, longer bound on recovery — the one that applies when the viewer
-#: cannot go cold at ``COLD_FALLBACK_S`` (``_can_go_cold`` is False, i.e. every
-#: terminal ``connect()`` viewer, which is what the TUI builds).
+#: The SECOND bound on recovery used to live here: ``RECOVERY_GIVE_UP_S = 2 *
+#: HEARTBEAT_TIMEOUT_S`` (90 s), for the LIVE-BUT-SILENT owner — a record is
+#: found on every pass, the socket accepts, the canonical sync never lands.
 #:
-#: It exists because that path had NO bounded exit at all. ``COLD_FALLBACK_S``
-#: returns only for a viewer that may go cold; the legacy arm beneath it ends
-#: the in-flight turn and keeps looping, and the takeover that arm is written
-#: to reach lives in the no-record ``else`` branch — so an owner that is LIVE
-#: BUT SILENT (a record is found every pass, the socket accepts, the canonical
-#: sync never lands) kept the loop cycling forever with no verdict to offer.
-#: ``_recovering`` is set for the whole of that loop, so what latches is not a
-#: cosmetic flag: it is the state that REFUSES ``/model``, ``/goal``,
-#: ``/rename``, ``/effort``, ``/compact``, ``/fork`` and ``/credential`` with
-#: ``_RECONNECTING_SLASH_NOTICE``, and that PARKS ``prompt`` silently on
-#: ``_runtime_ready`` with no message and no spinner resolution. Reported from
-#: the field as a session whose model could not be switched by any number of
-#: retries or ``/resume``s.
+#: DELETED, and the reason matters: it was one bound too many, and it bounded
+#: the wrong thing. Whatever the registry would eventually conclude about that
+#: owner, the VIEWER has already concluded it at ``COLD_FALLBACK_S`` — that is
+#: where the in-flight turn is ended locally with a named ``owner-lost``
+#: cut-off. What the 90 s then bought was 82 more seconds of ``_recovering``,
+#: which REFUSES ``/model``, ``/goal``, ``/rename``, ``/effort``, ``/compact``,
+#: ``/fork`` and ``/credential`` with ``_RECONNECTING_SLASH_NOTICE`` and PARKS
+#: ``prompt`` silently on ``_runtime_ready`` with no message, no spinner
+#: resolution and no advice. Measured with a discoverable-but-silent owner: the
+#: verdict landed at t+8.1 s, the user typed at t+8.6 s, and the message was
+#: served at t+50.4 s — 41.75 s of ``streaming=True, recovering=True`` and
+#: nothing on screen (UX round 1, U2).
 #:
-#: DERIVED from ``HEARTBEAT_TIMEOUT_S`` rather than written as a literal 90.0,
-#: because the question this bounds is the owner's own liveness contract: the
-#: registry classifies a record ``wedged`` rather than ``live`` after one
-#: heartbeat timeout, and a viewer must not conclude an owner is unreachable
-#: FASTER than the registry concludes it is wedged — a turn-boundary stall
-#: inside that window is normal (see ``FRONTEND_SYNC_BACKSTOP_S`` on the
-#: 15-vs-45 s window). Two of them also buys ~6 genuine attempts at the
-#: measured silent-owner cadence of one redial per ``FRONTEND_SYNC_BLOCKED_S``.
-#: A bare literal would silently stop tracking that contract if the heartbeat
-#: moved.
+#: What it did NOT buy was the chase. The exit is COLD AND REBINDABLE rather
+#: than failed (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``:
+#: the transcript stays, ``_runtime_ready`` is set, and the next action
+#: re-engages through ``_ensure_bound`` against that very same record), so a
+#: released caller re-dials what the loop was dialing, and a released prompt is
+#: served or reports its failure instead of parking. Nor can the early release
+#: double-bind or double-spawn: ``engage_runtime`` short-circuits on a
+#: discoverable record and otherwise waits rather than spawning while a live pid
+#: holds the lease.
 #:
-#: SCOPED TO A RECORD HAVING BEEN SEEN. This bound answers "an owner is there
-#: and will not answer", never "no owner is there": the latter is the DEAD
-#: shape, whose contract is to keep chasing a successor through the takeover
-#: arm, and it keeps that contract unchanged. ``_recover_runtime`` tracks the
-#: sighting across passes (``record_seen``) because the deadline is necessarily
-#: evaluated before the pass reads a record.
-#:
-#: The terminal state is COLD AND REBINDABLE, not failed: the exit sets
-#: ``_can_go_cold`` before ``_go_cold`` (see ``_recover_runtime``), so the
-#: transcript stays on screen, ``_runtime_ready`` is set, and the next prompt
-#: re-engages through ``_ensure_bound`` against this very same live record.
-#: That rebind is the whole repair, and it is why no user-facing copy was added
-#: for this state: a typed ``/model p/id`` on the resulting facade is diverted
-#: by ``OperatorApp._needs_runtime_first`` into ``_bind_then_dispatch``, which
-#: performs exactly that retry and reports its outcome.
-RECOVERY_GIVE_UP_S = 2 * HEARTBEAT_TIMEOUT_S
+#: So the rule is now ONE rule for every arm that has not produced a usable
+#: runtime — no-record and record-seen alike — and it is the cold window that a
+#: runtime restarting after ``kill -9`` has to republish in anyway. A successor
+#: that IS coming is still caught: the loop reattaches the moment a record it
+#: can use appears, and the give-up's own rebind catches a slower one.
 
 #: Backoff ceiling for ``_recover_runtime``'s DIAL-FAILURE arm specifically.
 #:
@@ -890,6 +876,14 @@ class AttachedSession:
         # the app can warn instead of leaving the user to press Enter on a
         # composer whose text is still queued (a silent double-send).
         self._recall_resolution: Callable[[str], None] | None = None
+        # The recall seam's sibling, for the OTHER way a queued steer can fail:
+        # the bind itself. `steer_message` is fire-and-forget, so a refused bind
+        # used to surface only as "Task exception was never retrieved" in the
+        # log while the transcript kept a row promising a delivery that never
+        # came (`still queued — sends with that next message`). Called with the
+        # message id so the app can lift the steer back into the composer and
+        # say what happened (QA round 2, Q-1).
+        self._steer_failure: Callable[[str], None] | None = None
         #: Held ONLY to keep a strong reference — asyncio does not, and a
         #: garbage-collected task would drop the refusal the app is waiting
         #: for. Deliberately not awaited or cancelled in `dispose`, matching
@@ -2073,6 +2067,42 @@ class AttachedSession:
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
             await self._consume_model_override()
+
+    async def _await_owner_ready(self) -> None:
+        """Bind, wait out any recovery, and BIND AGAIN if recovery released us.
+
+        The one seam every writer path opens with (``prompt``,
+        ``prompt_and_wait``, ``steer_message``), because the second bind is what
+        makes the give-up repair real rather than described.
+
+        The first ``_ensure_bound`` is a no-op for the whole of a recovery
+        (``_recovering`` refuses it), so a caller that arrives mid-recovery
+        parks on ``_runtime_ready`` — and the wait has two possible endings, not
+        one. The common ending is that recovery ATTACHED this facade to a
+        successor, and the flags are consistent on its own. The other is
+        ``_give_up_recovery``, which deliberately RELEASES the facade into a
+        cold state that can bind again; without the second call the released
+        caller finds no client and reports a transport error for a session it
+        could have started a runtime for — the operator's reported symptom,
+        where a message typed after a cut-off was accepted and never served
+        (UX round 2, U7).
+
+        Nothing is sent twice: every caller of this seam sends only AFTER it
+        returns, so a prompt that never reached the wire is exactly the case
+        this repairs.
+        """
+        await self._ensure_bound()
+        await self._runtime_ready.wait()
+        # NO YIELD IS NEEDED BETWEEN THE WAIT AND THE SECOND BIND, and an earlier
+        # revision's ``await asyncio.sleep(0)`` here was removed rather than
+        # kept as a belt: the give-up exit ``return``s immediately after
+        # ``_give_up_recovery`` with no ``await`` between, so this loop's
+        # ``finally`` clears ``_recovering`` synchronously and the event loop
+        # cannot resume THIS waiter until the facade is already consistent. The
+        # comment that stood here described a scheduling gap that cannot occur
+        # (review round 1, NIT-2), and a comment describing a mechanism nobody
+        # can reproduce is worse than no comment at all.
+        await self._ensure_bound()
 
     @asynccontextmanager
     async def _bind_lock_for(self, *, foreground: bool) -> AsyncIterator[None]:
@@ -4217,6 +4247,14 @@ class AttachedSession:
             # `cut_off_cause="owner-lost"` on a row that was never cut off
             # (review round 1, MINOR-3).
             end = end.model_copy(update={"cut_off_cause": cause_from_reason(error)})
+            # A CUT-OFF VERDICT, and only a cut-off verdict, is also journalled
+            # for every other surface rather than only painted in the frame this
+            # viewer owns (UX round 2, U6). A `turn failed` placeholder carries
+            # no cause — the event's error is not a cut-off sentence — so the
+            # hook stays off it: this facade has no standing to publish an
+            # outcome for an end it cannot name.
+            if end.cut_off_cause:
+                self._journal_witnessed_cut_off(cause=str(end.cut_off_cause))
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -4239,6 +4277,60 @@ class AttachedSession:
         finally:
             self._streaming = False
             self._suspect_generation = None
+
+    def _journal_witnessed_cut_off(self, *, cause: str) -> None:
+        """Journal the cut-off this viewer just witnessed, off the loop.
+
+        WHY. The durable outcome a sidebar row reads is written by
+        ``bootstrap_transcript`` — the same classifier the next boot runs — and
+        until something ran it, a session whose runtime died mid-turn read
+        ``Working`` and then ``Recent`` in active sessions, never ``errored``:
+        the operator's requirement is literally "so at least we see it in
+        active sessions as errored", and it was unmet for every session nobody
+        had opened yet (UX round 2, U6). A viewer that has just DELIVERED the
+        cut-off verdict is the one place that knows both that it happened and
+        which directory to classify, and it is ONE classification per death —
+        not the per-row orphan scan on the refresh path whose cost is the
+        reason this was deferred.
+
+        The CLASSIFIER's verdict is published, never this facade's own
+        ``owner-lost`` — except where the classifier CANNOT run, which is the
+        one case ``cause`` is for (review round 1, MINOR-2). Opening the same
+        session runs exactly this classifier and gets ``runtime-killed`` (or the
+        no-evidence sentence); two sentences for one death, depending on which
+        surface you looked at, is the divergence the taxonomy exists to prevent.
+        But when a record on disk still points at a live pid, the classifier's
+        in-flight arm publishes NOTHING by design — it cannot tell a dead owner
+        behind a recycled pid from a healthy run — so the give-up arm that ends
+        a live-but-silent chase used to leave the sidebar row un-errored while
+        the terminal carried a named ``owner-lost`` verdict.
+
+        PUBLISHED PROVISIONALLY, WHICH IS WHAT MAKES THAT SAFE. The record this
+        writes is ``provisional_anchor(token)``, so the live owner's real
+        outcome — same token, real anchor — SUPERSEDES it
+        (``AttentionStore._supersedes_provisional``), and a viewer that mistook
+        a stall for a death cannot leave a wrong row behind. Meanwhile the
+        surfaces a live session is showing are exactly where a provisional
+        ``error`` is suppressed while it is still busy, which is why the wrong
+        row cannot outrank work in progress.
+
+        Fire-and-forget on the default executor, fully guarded, and deliberately
+        so: this is a notice for OTHER surfaces, and nothing about painting this
+        viewer's own verdict may wait on a transcript read or fail because the
+        attention store is locked.
+        """
+        try:
+            from local_operator.session.attention import AttentionStore
+            from local_operator.session.transcript import Transcript
+
+            directory = self._config_dir / "sessions" / self._session_id
+            store = AttentionStore(self._config_dir / "attention.db")
+            transcript = Transcript(directory)
+            asyncio.get_running_loop().run_in_executor(
+                None, _journal_witnessed_cut_off, transcript, store, cause
+            )
+        except Exception:  # noqa: BLE001 — a notice must not break the verdict
+            logger.debug("journalling the witnessed cut-off failed", exc_info=True)
 
     def _settle_suspect_turn(self) -> None:
         """Decide what a mid-turn disconnect meant, now that recovery rebound.
@@ -4554,10 +4646,6 @@ class AttachedSession:
         # the next message engages a fresh runtime. Without a bound the loop
         # would redial forever against a session nobody is running.
         cold_deadline = time.monotonic() + COLD_FALLBACK_S
-        # The second, longer bound for the surface that cannot take the branch
-        # above. See ``RECOVERY_GIVE_UP_S`` for why it is derived from the
-        # heartbeat contract rather than calibrated here.
-        #
         # READ ONCE HERE, DELIBERATELY, and not re-derived per pass. A deadline
         # recomputed inside the loop is a deadline that resets every pass and
         # therefore never fires — the exact never-terminates shape this bound
@@ -4566,22 +4654,43 @@ class AttachedSession:
         # correct: the constant is static in production, and a live change to a
         # bound already being waited on has no defined meaning (review round 1,
         # R4).
-        give_up_deadline = time.monotonic() + RECOVERY_GIVE_UP_S
-        # Whether ANY pass of this loop has found a discoverable owner record.
+        # ONE BOUND FOR EVERY ARM THAT HAS NOT PRODUCED A USABLE RUNTIME, and it
+        # is the cold one. There used to be a second, longer deadline here
+        # (``RECOVERY_GIVE_UP_S``, 90 s = two heartbeat timeouts) for the
+        # LIVE-BUT-SILENT owner — a record found on every pass, the socket
+        # accepting, the canonical sync never landing — scoped by a
+        # ``record_seen`` sighting so it could not fire for a genuinely dead
+        # owner, and a third condition for the takeover arm that cannot run.
         #
-        # The give-up exit below is scoped to the live-but-silent shape — an
-        # owner that keeps publishing a record and never answers — and must not
-        # fire for an owner that is genuinely DEAD, whose contract is to keep
-        # chasing a successor through the takeover arm. The check has to sit at
-        # the top of the pass (that is where a deadline can be evaluated before
-        # the pass spends its time on a dial that may block), which is BEFORE
-        # ``find_runtime_record`` runs, so the exit cannot consult this pass's
-        # record. It consults the previous passes' instead: one sighting is
-        # enough, because a record seen at all is what distinguishes "an owner
-        # is there and silent" from "nothing is there". Without this the exit
-        # fired for a no-record viewer too, marking a dead runtime as merely
-        # unresponsive (QA round 1 Q849-1, review round 1 R3).
-        record_seen = False
+        # The longer bound was the WRONG twenty seconds to be strict about.
+        # Whatever the registry would eventually conclude about that owner, the
+        # VIEWER has already concluded it here: the cold deadline below is where
+        # the in-flight turn is ended with a named ``owner-lost`` cut-off. The
+        # 90 s then bought 82 more seconds of ``_recovering``, which refuses
+        # every mutation seam and parks ``prompt`` on ``_runtime_ready`` with
+        # nothing on screen — measured with a discoverable-but-silent owner, the
+        # verdict landed at t+8.1 s, the user typed at t+8.6 s and the message
+        # was served at t+50.4 s (UX round 1, U2).
+        #
+        # It bought no chase either: the exit is COLD AND REBINDABLE
+        # (``_give_up_recovery`` sets ``_can_go_cold`` before ``_go_cold``), so
+        # the released caller re-dials the very same record through
+        # ``_ensure_bound`` and a released prompt is served or reports its
+        # failure. A successor that IS coming is still caught — by the
+        # give-up's own REBIND, not by this loop, and that distinction is
+        # measured rather than rhetorical (review round 2, MINOR-2). The
+        # deadline is tested at the top of a pass and ``paced()`` parks the
+        # loop AT it, so a successor that publishes inside the final sleep is
+        # never dialled from here: with the bound monkeypatched to 0.5 s and a
+        # record appearing at t+0.49 s, the loop released at 0.506 s having
+        # dialled that record ZERO times. What catches it is the released
+        # caller's next action, which re-enters through ``_ensure_bound``
+        # against the very same record. An earlier draft of this comment
+        # claimed the loop itself reattached "the moment a record it can use
+        # appears", which the boundary case falsifies. The early release
+        # cannot double-bind or double-spawn because ``engage_runtime``
+        # short-circuits on a discoverable record and otherwise waits rather
+        # than spawning while a live pid holds the lease.
 
         def paced(seconds: float) -> float:
             """``seconds``, shortened so the loop wakes AT the cold deadline.
@@ -4610,17 +4719,19 @@ class AttachedSession:
                         )
                         self._go_cold()
                         return
-                    # The LEGACY attach surface does not go cold at THIS bound
-                    # (``_can_go_cold`` is desktop-only) because its contract is
-                    # to keep chasing a successor. It does now go cold at a
-                    # second, longer one — see the give-up branch below; this
-                    # comment used to say it had "no cold state to fall into"
-                    # at all, which is how the forever-latch survived review.
-                    # But the turn must still reach a
-                    # verdict: with the abort deferred to recovery, a genuine
-                    # owner death whose takeover keeps failing (lease held by
-                    # another follower, or any raise — both retry forever by
-                    # design) left the working line spinning with nothing able
+                    # The LEGACY attach surface does not go cold at the FIRST
+                    # branch above (``_can_go_cold`` is desktop-only) because its
+                    # contract is to keep chasing a successor — but it reaches a
+                    # cold state HERE, through ``_give_up_recovery``, at the same
+                    # bound. That comment used to say this surface had "no cold
+                    # state to fall into" at all, which is how the forever-latch
+                    # survived review.
+                    #
+                    # The turn must still reach a verdict: with the abort
+                    # deferred to recovery, a genuine owner death whose takeover
+                    # keeps failing (lease held by another follower, or any
+                    # raise — both retry forever by design) left the working line
+                    # spinning with nothing able
                     # to clear it. That is strictly worse than the false
                     # "interrupted" this PR removes — review round 1,
                     # BLOCKER-1. The same ``COLD_FALLBACK_S`` bound applies:
@@ -4651,90 +4762,53 @@ class AttachedSession:
                             error=format_cut_off_notice("owner-lost"),
                         )
                     # ...and AFTER that verdict, the loop itself must reach one.
-                    # Ending the turn left ``_recovering`` set, and the only
-                    # other exits are the cold branch above (unreachable here)
-                    # and the takeover in the no-record ``else`` — which a
-                    # LIVE BUT SILENT owner never reaches, because a record is
-                    # found on every pass. So the chase had no terminal state:
-                    # ``/model`` and every other mutation seam refused forever
-                    # and ``prompt`` parked silently on ``_runtime_ready``.
+                    # Ending the turn left ``_recovering`` set, and the other
+                    # exits are the cold branch above (unreachable here) and the
+                    # takeover in the ``else`` below — which a LIVE BUT SILENT
+                    # owner never reaches, because a record is found on every
+                    # pass, and which `lop`'s own TUI cannot reach either, since
+                    # ``cli.py`` wires a takeover factory whose body raises BY
+                    # CONSTRUCTION (a terminal must never win the transcript
+                    # lease). Measured on ``main`` (95fccacda): a watched SIGKILL
+                    # left ``_recovering`` latched and the next message accepted
+                    # and never served, the band spinning with a live clock at
+                    # 242 s and counting, with no error, no timeout and no advice
+                    # (UX round 2, U7).
                     #
-                    # SCOPED TO ``record_seen``, which is what makes the
-                    # paragraph below true rather than merely intended. The
-                    # condition cannot be "this pass found a record" — the
-                    # deadline is evaluated before ``find_runtime_record`` runs —
-                    # so it is "some pass did", which selects the same class:
-                    # an owner that is discoverable at all is the live-but-
-                    # silent shape, and one that never was is the dead shape the
-                    # takeover arm below is written for.
+                    # So the loop stops claiming a chase it cannot finish, on the
+                    # SAME bound for every arm. No record at all, a record this
+                    # viewer cannot use, a record that never answers, and a
+                    # takeover that never runs are ONE class from the user's
+                    # seat: no runtime this viewer can use. Each arm used to
+                    # carry its own deadline and its own scoping rule
+                    # (``record_seen``, ``takeover_attempts`` /
+                    # ``takeover_progress``), which is how the surface the
+                    # operator actually uses ended up with no reachable exit.
+                    #
+                    # An IN-FLIGHT takeover is untouched by this: the deadline is
+                    # checked at the top of a pass, and a factory that is still
+                    # working is inside its own await, so a slow-but-real
+                    # takeover still completes and returns above.
                     #
                     # Going cold here does not weaken the chase contract, which
                     # is written for a DEAD owner and is vacuous for a live one:
                     # ``acquire_session_lease`` raises ``SessionLeaseHeldError``
-                    # unless the holder is proven dead, so a live owner cannot
-                    # be taken over even if this arm did reach the factory. Nor
-                    # does it engage a second runtime for a session that has
-                    # one: ``engage_runtime`` short-circuits on a discoverable
-                    # record and, failing that, waits rather than spawning while
-                    # a live pid holds the lease. ``_takeover_factory`` stays
-                    # armed for a LATER genuine death — a subsequent owner loss
-                    # re-enters this loop and, with the record gone by then,
-                    # takes the else-branch exactly as it always has.
-                    if record_seen and time.monotonic() >= give_up_deadline:
-                        logger.info(
-                            "no usable state from the runtime for %s after %.0fs; "
-                            "unbinding — the conversation stays and the next action "
-                            "reconnects",
-                            self._session_id,
-                            RECOVERY_GIVE_UP_S,
-                        )
-                        # LOAD-BEARING, and it must precede ``_go_cold``.
-                        # ``_ensure_bound`` returns immediately when this flag
-                        # is False, so clearing ``_recovering`` while leaving it
-                        # unset would produce a viewer that reports ``is_cold``
-                        # and can NEVER bind again — a silent no-op in place of
-                        # today's honest refusal, which is the worse bug.
-                        # Mirrors the refresh arm of ``_go_cold``, which flips
-                        # the same flag with the same reasoning: from here on
-                        # this facade is a viewer.
-                        self._can_go_cold = True
-                        # BELT, not a live repair: verified unreachable with a
-                        # stamped pid today, because this check runs at the TOP
-                        # of a pass and every way the previous pass could fail
-                        # (failed dial, refused sync, timeout) routes through
-                        # ``_discard_rejected_client``, which clears it. It is
-                        # kept because the invariant it upholds is not local:
-                        # ``_go_cold`` does NOT clear the identity ``_dial``
-                        # stamps on entry, while ``runtime_pid`` promises None
-                        # while cold, and ``take_unannounced_cleanup`` reads
-                        # that pid to decide notice ownership — a stale match
-                        # claims another runtime's notice and blanks the
-                        # terminal that should have shown it (the F3 hazard the
-                        # dial-failure arm below documents). Any future exit
-                        # added between a successful dial and this check would
-                        # reintroduce it silently. Cleared locally rather than
-                        # inside ``_go_cold`` to keep this off the desktop path.
-                        self._runtime_pid = None
-                        # NO "recovery was exhausted" FLAG IS STAMPED HERE, and
-                        # the absence is deliberate. An earlier revision set one
-                        # so the TUI could pick a different sentence for this
-                        # cold state; the sentence turned out to be unreachable
-                        # (see the note in ``OperatorApp._activate_resolved_
-                        # model``), which left the flag with no consumer — and a
-                        # consumerless flag that LATCHES is not inert. It was
-                        # cleared only on ``_bind_to``'s success tail, while
-                        # this loop's own reattach arm below rebinds inline
-                        # without going through ``_bind_to``, so a viewer that
-                        # gave up once and then recovered still reported the
-                        # give-up verdict against every later, genuinely dead
-                        # owner (review round 1, R2). Deleted rather than fixed
-                        # with two more clear-sites: state whose only defence is
-                        # remembering to clear it everywhere is state that will
-                        # latch again the next time an exit is added.
-                        self._go_cold()
-                        # ``finally`` clears ``_recovering``: the refusals lift
-                        # and the parked prompt is released by ``_runtime_ready``.
-                        return
+                    # unless the holder is proven dead OR UNVERIFIABLE — the
+                    # premise an earlier revision of this comment got wrong — so a
+                    # live owner cannot be taken over even if this arm did reach
+                    # the factory. Nor does it engage a second runtime for a
+                    # session that has one: ``engage_runtime`` short-circuits on a
+                    # discoverable record and, failing that, waits rather than
+                    # spawning while a live pid holds the lease.
+                    # ``_takeover_factory`` stays armed for a LATER genuine
+                    # death — a subsequent owner loss re-enters this loop and,
+                    # with the record gone by then, takes the else-branch exactly
+                    # as it always has.
+                    self._give_up_recovery(
+                        after=COLD_FALLBACK_S,
+                        because="no runtime this viewer could use appeared",
+                    )
+                    return
                 # A stop by someone else while we watched: the transcript's
                 # ``stopped_at`` marker plus no live owner is the deliberate
                 # shape. Read it once at the top of each pass — cheap (one
@@ -4753,14 +4827,6 @@ class AttachedSession:
                     and record.protocol >= 5
                     and FRONTEND_CAPABILITY in record.capabilities
                 ):
-                    # Stamped on the SAME condition that selects the reattach
-                    # arm, not on ``record is not None``: a record this viewer
-                    # cannot use (an older protocol, no frontend capability)
-                    # falls through to the takeover ``else`` and belongs to the
-                    # dead-owner contract, so counting it as a sighting would
-                    # let the give-up exit fire for a chase that never had a
-                    # reattach to give up ON.
-                    record_seen = True
                     try:
                         pending_sync = await self._dial(record)
                     except (ConnectionError, OSError, TimeoutError):
@@ -4864,9 +4930,37 @@ class AttachedSession:
                         local = await self._takeover_factory()
                     except SessionLeaseHeldError:
                         # Another follower won the kernel-arbitrated stale
-                        # recovery lock. Back off, then discover its fresh
-                        # registrant record and reattach.
-                        pass
+                        # recovery lock. Back off and re-dial on the next pass:
+                        # its fresh registrant record is what this loop is
+                        # waiting for, and the SAME cold deadline above bounds
+                        # the wait.
+                        #
+                        # WHAT A LEASE HOLDER ACTUALLY PROVES (review round 1,
+                        # MINOR-1 — an earlier comment here, and the PR body,
+                        # asserted "a live process", which is not what the
+                        # exception means). ``SessionLeaseHeldError`` is raised
+                        # for "another live OR UNVERIFIABLE process"
+                        # (``session_lease.py``): ``_pid_state`` returns
+                        # ``"uncertain"`` for any unexpected ``OSError``, the
+                        # legacy ``.session.pid`` mirror raises merely because a
+                        # pid is NOT DEAD, and an unreadable claim raises with
+                        # ``pid=None``. None of those implies a process that will
+                        # ever publish a record — a recycled pid or a candidate
+                        # publishing an unattachable one (protocol < 5, no
+                        # ``FRONTEND_CAPABILITY``) reaches this raise forever.
+                        #
+                        # That shape used to latch the facade indefinitely,
+                        # because this raise was counted as PROGRESS and
+                        # progress disabled the give-up arm. It does not any
+                        # more: the deadline is evaluated at the top of every
+                        # pass and does not consult this flag, so an unprobeable
+                        # holder is bounded exactly like every other arm — and
+                        # the release is rebindable, so if that holder IS alive
+                        # and eventually publishes, the next action re-dials it.
+                        logger.debug(
+                            "remote takeover: another follower holds the lease for %s",
+                            self._session_id,
+                        )
                     except Exception:
                         logger.debug("remote takeover attempt failed", exc_info=True)
                     else:
@@ -4901,6 +4995,77 @@ class AttachedSession:
                 delay = min(delay * 1.7, 0.5)
         finally:
             self._recovering = False
+
+    def _give_up_recovery(self, *, after: float, because: str) -> None:
+        """Stop chasing an owner that cannot be reached, and stay REBINDABLE.
+
+        The single exit for every arm that has not produced a usable runtime
+        within the cold window: no record at all, a record this viewer cannot
+        use, a record that never answers, and a takeover arm that cannot run in
+        this viewer (``_takeover_factory`` raising on every pass — UX round 2,
+        U7). One method rather than a copy per branch, because the ordering rule
+        below is load-bearing and a second copy is how it gets forgotten.
+
+        ``after`` is the bound that expired, and it is only logged: the bound
+        differs per arm at most in which constant is named, and the log line is
+        what lets a reader tell which arm released the facade without reading
+        the source.
+
+        LOAD-BEARING, and it must precede ``_go_cold``: ``_ensure_bound``
+        returns immediately when ``_can_go_cold`` is False, so clearing
+        ``_recovering`` while leaving that flag unset would produce a viewer that
+        reports ``is_cold`` and can NEVER bind again — a silent no-op in place of
+        today's honest refusal, which is the worse bug. Mirrors the refresh arm
+        of ``_go_cold``, which flips the same flag with the same reasoning: from
+        here on this facade is a viewer.
+
+        The terminal state is COLD AND REBINDABLE, not failed: the transcript
+        stays on screen, ``_runtime_ready`` is set, and the next action engages
+        through ``_ensure_bound``. No user-facing copy is added for the state
+        itself, because it would have to describe where the user is not: they
+        see either the named cut-off verdict already painted above them (when a
+        turn was live) or, for an idle owner death, the ordinary cold session
+        the next message starts a fresh runtime from.
+        """
+        logger.info(
+            "giving up recovery for %s after %.0fs: %s; unbinding — the "
+            "conversation stays and the next action reconnects",
+            self._session_id,
+            after,
+            because,
+        )
+        self._can_go_cold = True
+        # BELT, not a live repair: verified unreachable with a stamped pid
+        # today, because this check runs at the TOP of a pass and every way the
+        # previous pass could fail (failed dial, refused sync, timeout) routes
+        # through ``_discard_rejected_client``, which clears it. It is kept
+        # because the invariant it upholds is not local: ``_go_cold`` does NOT
+        # clear the identity ``_dial`` stamps on entry, while ``runtime_pid``
+        # promises None while cold, and ``take_unannounced_cleanup`` reads that
+        # pid to decide notice ownership — a stale match claims another
+        # runtime's notice and blanks the terminal that should have shown it
+        # (the F3 hazard the dial-failure arm documents). Any future exit added
+        # between a successful dial and this check would reintroduce it
+        # silently. Cleared locally rather than inside ``_go_cold`` to keep this
+        # off the desktop path.
+        self._runtime_pid = None
+        # NO "recovery was exhausted" FLAG IS STAMPED HERE, and the absence is
+        # deliberate. An earlier revision set one so the TUI could pick a
+        # different sentence for this cold state; the sentence turned out to be
+        # unreachable (see the note in ``OperatorApp._activate_resolved_model``),
+        # which left the flag with no consumer — and a consumerless flag that
+        # LATCHES is not inert. It was cleared only on ``_bind_to``'s success
+        # tail, while this loop's own reattach arm rebinds inline without going
+        # through ``_bind_to``, so a viewer that gave up once and then recovered
+        # still reported the give-up verdict against every later, genuinely dead
+        # owner (review round 1, R2). Deleted rather than fixed with two more
+        # clear-sites: state whose only defence is remembering to clear it
+        # everywhere is state that will latch again the next time an exit is
+        # added.
+        self._go_cold()
+        # The CALLER ``return``s: the loop's ``finally`` then clears
+        # ``_recovering`` (lifting the refusals) and ``_go_cold`` has already
+        # released anything parked on ``_runtime_ready``.
 
     async def load_job_trajectory(self, job_id: str) -> bool:
         """Fetch one child's retained event window from the owner, in pages.
@@ -5627,8 +5792,7 @@ class AttachedSession:
         This also works with older owners that implement the existing ID/epoch/
         generation contract, without a new scheduler or longer RPC timeout.
         """
-        await self._ensure_bound()
-        await self._runtime_ready.wait()
+        await self._await_owner_ready()
         if self._takeover_target is not None:
             await self.prompt(text, images=images, message_id=message_id)
             return
@@ -5713,9 +5877,9 @@ class AttachedSession:
         """
         # The cold-to-attached seam: a viewer that has been LOOKING at a
         # session starts working in it here, which is the first moment a
-        # runtime is actually owed. A no-op once attached.
-        await self._ensure_bound()
-        await self._runtime_ready.wait()
+        # runtime is actually owed. A no-op once attached, and run again after
+        # the wait for the reason ``_await_owner_ready`` documents.
+        await self._await_owner_ready()
         target = self._takeover_target
         if target is not None:
             # A takeover means a real in-process Session now owns the
@@ -5755,15 +5919,51 @@ class AttachedSession:
         asyncio.create_task(self._send_steer_when_ready(message))
 
     async def _send_steer_when_ready(self, message: Message) -> None:
-        await self._ensure_bound()
-        """Retain a queued steer across silent reattach/takeover."""
-        await self._runtime_ready.wait()
+        """Retain a queued steer across silent reattach/takeover.
+
+        THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
+        other caller of ``_await_owner_ready`` runs inside a worker whose
+        exception the app catches and turns into a notice and a composer
+        restore; this one is spawned by ``steer_message`` and never awaited, so
+        a refused bind died as an unretrieved task exception while its row went
+        on promising the ride-along. That is the shape QA round 2 (Q-1)
+        measured on the released-cold path: the give-up wakes this waiter into a
+        bind against the same unreachable record, the bind raises, and the
+        user's already-accepted message is silently gone — falsifying both the
+        row and U3's "nothing is lost".
+
+        So the failure is RETRIEVED here and reported through
+        ``_steer_failure``, whose app-side handler lifts the steer's rows and
+        hands the text back (``OperatorApp._on_steer_undeliverable``). The
+        message must never be dropped on the floor: it is text the app already
+        echoed as sent, and a steered message has no other owner to fail it.
+
+        A DISPOSED facade is the one silent return, here and above: the app
+        that would paint the warning is gone with it.
+        """
+        try:
+            await self._await_owner_ready()
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            # `ConnectionError` is the documented failure of `_ensure_bound`
+            # (an unreachable owner, an engage that produced no runtime, the
+            # stopped-session refusal), and it is the only class the path is
+            # known to raise. Caught broadly anyway, for the reason
+            # `_resolve_recall` gives about the same seam: an unknown raise
+            # would otherwise become the very unretrieved-exception bug this
+            # block exists to remove.
+            self._report_steer_failure(message, str(error))
+            return
         target = self._takeover_target
         if target is not None:
             target.steer_message(message)
             return
         client = self._client
         if client is None or not client.connected:
+            # Same fact as the raise above, reached through the other door: the
+            # bind returned but left nothing that can carry the message. The
+            # row must stop promising for it too, or this is the silent drop
+            # again with a different stack.
+            self._report_steer_failure(message, "the bind returned with no connected client")
             return
         command = ContinuationCommand(
             command_id=message.id,
@@ -5775,7 +5975,56 @@ class AttachedSession:
                 if isinstance(block, ImageContent)
             ],
         )
-        await client.send_command(command, streaming=True)
+        # THE THIRD DOOR, and the one the two checks above cannot close:
+        # `client.connected` is a SNAPSHOT taken one line earlier and the send
+        # is a socket round trip, so an owner that dies in between raises HERE
+        # (review round 3, MINOR-3 — read, not raced: three kill offsets from a
+        # live driver failed to land in the window, which is why the unit cells
+        # below force the raise instead). Left unguarded this is the shape QA
+        # round 2 (Q-1) filed, one line lower: nothing awaits this task, so the
+        # raise is an unretrieved task exception while the row still promises
+        # `sends with that next message`.
+        #
+        # ITS AMBIGUITY, stated rather than hidden: the raise can come FROM
+        # `_request_frame` before the frame is written ("not attached", an
+        # oversized request) or AFTER it (`OwnerAckTimeout`, a lost connection),
+        # and the second shape cannot prove the owner did not receive the
+        # message. Handing the text back is still the right gesture — the
+        # alternative is the silent drop this method exists to remove — and a
+        # user who resends a message the owner already had is the cheaper error.
+        try:
+            await client.send_command(command, streaming=True)
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            self._report_steer_failure(message, str(error))
+            return
+
+    def _report_steer_failure(self, message: Message, detail: str) -> None:
+        """Report a steer nothing can carry, through the app's failure seam.
+
+        ONE ACTION FOR ALL THREE DOORS of ``_send_steer_when_ready`` — the bind
+        that raised, the bind that returned with no client, and the send itself
+        — because they leave the app in one state: a message that was echoed as
+        sent and is not going anywhere. The seam is what hands the text back
+        and lifts the rows that claimed otherwise.
+
+        Logged BEFORE the report, and the report is skipped when the resolver is
+        unarmed: the log line is then the only trace of the failure, which is
+        strictly better than the unretrieved exception every door here used to
+        produce. A DISPOSED facade reports nothing at all: the app that would
+        paint the warning is gone with it (`_send_steer_when_ready`'s one silent
+        return).
+        """
+        if self._disposed:
+            return
+        logger.info(
+            "steer %s could not be delivered for %s: %s",
+            message.id,
+            self._session_id,
+            detail,
+        )
+        resolver = self._steer_failure
+        if resolver is not None:
+            resolver(str(message.id))
 
     def queued_steering(self) -> list[Any]:
         return [
@@ -5837,6 +6086,16 @@ class AttachedSession:
             resolver = self._recall_resolution
             if resolver is not None:
                 resolver(command_id)
+
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Install the app's handler for a steer whose bind was refused.
+
+        Called with the undelivered message's id. The steer twin of
+        :meth:`set_recall_resolution` and armed the same way, on adoption,
+        because the failure arrives asynchronously on a task the app never
+        awaits — there is no synchronous press to install a resolver in.
+        """
+        self._steer_failure = resolver
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """Install the app's handler for a recall the owner did NOT honour.
@@ -6095,6 +6354,33 @@ async def _await_handler(result: Any) -> None:
     sync-or-async handler contract without weakening types at the call site.
     """
     await result
+
+
+def _journal_witnessed_cut_off(transcript: Any, store: Any, cause: str) -> None:
+    """Publish a witnessed cut-off's durable outcome, on a worker thread.
+
+    The executor body of :meth:`AttachedSession._journal_witnessed_cut_off`,
+    kept module-level so the read-heavy work (a registry scan plus a transcript
+    parse) cannot reach back into the facade and so the whole thing is one
+    testable call. Never raises: a sidebar notice is not worth a task
+    exception in the operator's log.
+
+    ``cause`` is the viewer's own verdict token, and it is only used when the
+    classifier refuses to classify — see the caller's docstring for why that is
+    safe (the record it writes is provisional and the live owner's real outcome
+    supersedes it).
+    """
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import bootstrap_transcript
+
+    try:
+        bootstrap_transcript(
+            transcript,
+            store,
+            witnessed_cut_off=(cause, render_cut_off_reason(cause)),
+        )
+    except Exception:  # noqa: BLE001 — the verdict it describes is already painted
+        logger.debug("journalling the witnessed cut-off failed", exc_info=True)
 
 
 def _pending_request(state: Any) -> PendingRequest | None:

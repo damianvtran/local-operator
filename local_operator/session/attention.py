@@ -186,7 +186,11 @@ def _supersedes_provisional(
 
 
 def bootstrap_transcript(
-    transcript: Any, store: AttentionStore | None = None
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Import a conversation's durable outcome; NEVER fatal to the caller.
 
@@ -207,9 +211,22 @@ def bootstrap_transcript(
     orphaned run (or ``None``), so the caller that owns a ``Session`` can
     journal the cut-off once. A failure also returns ``None``: a swallowed
     problem journals nothing rather than half-narrating one.
+
+    ``witnessed_cut_off`` is passed straight through; see
+    :func:`_import_transcript_outcome` for the one caller that uses it and why
+    the record it writes is provisional.
+
+    ``reaped_owner`` is the record a caller's OWN reap has already deleted from
+    the run directory; see :func:`_classify_orphaned_run` for why the evidence
+    has to be handed in rather than re-read.
     """
     try:
-        return _import_transcript_outcome(transcript, store)
+        return _import_transcript_outcome(
+            transcript,
+            store,
+            witnessed_cut_off=witnessed_cut_off,
+            reaped_owner=reaped_owner,
+        )
     except Exception as exc:  # noqa: BLE001 — attention must never block a boot
         # `getattr` so the handler cannot itself raise on a transcript that
         # never grew a `.directory` (a stub, a partially constructed instance)
@@ -322,7 +339,9 @@ def _record_detail(record: Any) -> str:
 
     Kept to the record's own facts (build, pid, started-at) rather than prose,
     because these are the fields a reader would otherwise have to reconstruct
-    from the log to answer "which runtime was this".
+    from the log to answer "which runtime was this". The started-at is ONE
+    token rather than two — see the note on its format below (design round 3,
+    D7).
     """
     build = str(getattr(record, "version", "") or "")
     ref = str(getattr(record, "source_ref", "") or "")
@@ -330,14 +349,25 @@ def _record_detail(record: Any) -> str:
     started = getattr(record, "started_at", None)
     when = ""
     if isinstance(started, (int, float)) and not isinstance(started, bool) and started:
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        # THE DATE AND THE TIME ARE ONE TOKEN, joined by a NON-BREAKING space,
+        # because the wrap is what made them read as two facts. Measured on the
+        # real `NoticeBlock` at 60 columns (56 content cells): with a plain
+        # space the boundary landed between them — `… started 2026-09-12` /
+        # `05:15:53)`, a 9-cell orphan line under a timestamp the reader has to
+        # reassemble. The non-breaking space carries the value whole on the last
+        # line at 60, and moves nothing anywhere else: 4/3/2/2 lines at
+        # 60/80/100/120 before and after, with the split removed (design round
+        # 3, D7 — the one-character fix it named).
+        when = time.strftime("%Y-%m-%d\u00a0%H:%M:%S", time.localtime(started))
     parts = [
         part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
     ]
     return f" ({', '.join(parts)})" if parts else ""
 
 
-def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
+def _classify_orphaned_run(
+    directory: Path, *, reaped_owner: Any | None = None
+) -> tuple[str, str, str]:
     """``(kind, cause, reason)`` for a started run whose owner is gone.
 
     The taxonomy's default flips here: "no evidence" used to mean
@@ -352,6 +382,20 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
 
+    ``reaped_owner`` IS THAT SECOND RUNG'S EVIDENCE WHEN SOMEBODY ALREADY TOOK
+    IT. ``registry.scan`` deletes a stale record as it reports it, so a caller
+    whose own sweep is what proved the pid dead — the mobile daemon's discovery
+    loop — destroys the evidence before classifying and landed every one of
+    those deaths on the no-evidence arm, i.e. "the cause could not be
+    determined" for the exact shape that HAD a determined cause (review round 2,
+    MINOR-1; the designer's D6 measured the same sentence at the same moment on
+    the phone). The record the caller is holding is passed in and preferred to a
+    fresh read, which by then finds nothing. Only the DEAD rung uses it: the
+    deliberate-stop marker above is still read from disk, and the caller's
+    live-owner gate (:func:`_run_record_evidence` inside
+    :func:`_import_transcript_outcome`) has already run, so a successor that
+    published while the record was being reaped still wins.
+
     THE NO-EVIDENCE ARM CARRIES NO CAUSE AND ITS OWN SENTENCE. It used to read
     the ``runtime-killed`` sentence with a ``(the cause could not be determined)``
     parenthetical bolted on, and every surface that prints the reason made that
@@ -363,11 +407,21 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
     ``cause_from_reason(reason)`` — the inverse every reader relies on —
     agreeing with the reason instead of naming a mechanism nobody observed.
     """
-    from local_operator.incidents import CUT_OFF_UNKNOWN, render_cut_off_reason
+    from local_operator.incidents import (
+        CUT_OFF_UNKNOWN,
+        DELIBERATE_CUT_OFF_CAUSE,
+        render_cut_off_reason,
+    )
 
     if _stopped_marker(directory):
-        return "interrupted", "user-stop", render_cut_off_reason("user-stop")
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
+        )
     _, dead = _run_record_evidence(directory)
+    if dead is None:
+        dead = reaped_owner
     if dead is not None:
         return (
             "error",
@@ -378,7 +432,11 @@ def _classify_orphaned_run(directory: Path) -> tuple[str, str, str]:
 
 
 def _import_transcript_outcome(
-    transcript: Any, store: AttentionStore | None = None
+    transcript: Any,
+    store: AttentionStore | None = None,
+    *,
+    witnessed_cut_off: tuple[str, str] | None = None,
+    reaped_owner: Any | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Explicit one-time import; never called by GET, SSE or focus observation.
 
@@ -395,6 +453,14 @@ def _import_transcript_outcome(
     written for a healthy run would be a wrong ``error`` row that every
     surface's ``busy`` suppression HIDES rather than corrects, so the guard
     removes the class instead of relying on every front end's suppression.
+    ``witnessed_cut_off`` is the ONE caller that may override that guard, and
+    only a caller holding POSITIVE evidence the owner is gone: a ``(cause,
+    reason)`` pair from a viewer that has just DELIVERED a cut-off verdict after
+    the whole cold window of failed dials and syncs. It publishes a PROVISIONAL
+    record for the run's token, so the live owner's real outcome supersedes it
+    when it lands (``_supersedes_provisional``) — which is what lets a
+    live-but-silent stop reach the sidebar without inventing a second, permanent
+    verdict (review round 1, MINOR-2).
 
     Old baselines were memory-only. Unknown historical work keeps that no-flood
     baseline, while a persisted seen stamp older than the actual final assistant
@@ -402,6 +468,11 @@ def _import_transcript_outcome(
     """
     store = store or AttentionStore()
     identity = conversation_identity(transcript.directory)
+    # Imported here rather than at module scope for the same reason
+    # ``_classify_orphaned_run`` does it: a broken ``incidents`` import must not
+    # stop a session from booting (see the guard around the bootstrap call).
+    from local_operator.incidents import is_cut_off_cause, is_deliberate_cause
+
     saved = transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
     started = transcript.latest_custom("attention_started")
     if (
@@ -412,13 +483,44 @@ def _import_transcript_outcome(
         token = started["token"]
         live_owner, _ = _run_record_evidence(transcript.directory)
         if live_owner is not None:
-            # In flight. Publish NOTHING: the live runtime will publish the real
-            # outcome when the turn ends, and a marker written here would be a
-            # provisional row it then has to supersede — or, worse, a row no
-            # later writer ever corrects if the turn completes with an anchor
-            # this classifier did not predict.
-            return None
-        kind, cause, reason = _classify_orphaned_run(transcript.directory)
+            if witnessed_cut_off is None:
+                # In flight. Publish NOTHING: the live runtime will publish the real
+                # outcome when the turn ends, and a marker written here would be a
+                # provisional row it then has to supersede — or, worse, a row no
+                # later writer ever corrects if the turn completes with an anchor
+                # this classifier did not predict.
+                return None
+            # A WITNESSED death the classifier cannot classify. The record on disk
+            # points at a pid that is still alive (or unverifiable), so the branch
+            # above has to assume a live run — and a viewer that already told the
+            # user the turn was cut off is the one party that KNOWS otherwise. The
+            # record is written PROVISIONALLY for exactly that reason: the live
+            # owner's own outcome for the same token replaces it with the real
+            # anchor and kind, so the worst case is a row that corrects itself
+            # (review round 1, MINOR-2).
+            cause, reason = witnessed_cut_off
+            # KIND FROM THE CAUSE, not hardcoded, which is what makes the
+            # witnessed writer agree with the two other writers that read this
+            # vocabulary (`daemon._projection_frame`'s fill and the narration
+            # guard below both route through `is_deliberate_cause`). The cause is
+            # always our own — the viewer that watched the turn end supplies it —
+            # so a deliberate one here must land `interrupted` and an involuntary
+            # one `error`; writing `error` for whatever arrived would have been
+            # the single place the taxonomy's deliberate half was not consulted
+            # (review round 2, NIT-2).
+            kind = "interrupted" if is_deliberate_cause(cause) else "error"
+            store.publish(
+                identity,
+                token,
+                provisional_anchor(token),
+                kind,
+                reason=reason,
+                cause=cause,
+            )
+            return kind, cause, reason, str(token)
+        kind, cause, reason = _classify_orphaned_run(
+            transcript.directory, reaped_owner=reaped_owner
+        )
         store.publish(identity, token, provisional_anchor(token), kind, reason=reason, cause=cause)
         return kind, cause, reason, str(token)
     if isinstance(saved, dict) and saved.get("conversation_id") == identity:
@@ -438,7 +540,7 @@ def _import_transcript_outcome(
                 reason=reason,
                 cause=cause,
             )
-            if kind == "error" and cause:
+            if kind == "error" and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
                 # `_journal_cut_off_once` is refused by `journal_incident`'s
                 # `_disposed` guard — the dispose rung sets that flag before
@@ -450,13 +552,32 @@ def _import_transcript_outcome(
                 # `[session incident]` rather than a model re-guessing what its
                 # last half-delivered request did.
                 #
-                # A `cause` is required rather than merely expected, and the
-                # `kind` is read rather than re-derived: only a cut-off carries
-                # a token from `CUT_OFF_CAUSES` (`_publish_attention_outcome`
-                # stores `cause=""` for a provider error and `user-stop` for a
-                # recorded stop), and narrating a provider error or a user's own
-                # `/stop` as a cut-off incident would be the taxonomy's own
-                # misclassification committed by the reader meant to repair it.
+                # MEMBERSHIP, not the presence of a cause (review round 2, Q3),
+                # AND not one token's identity (review round 1, NIT-1). The guard
+                # used to be `cause` truthiness, which narrates a marker carrying
+                # ANY string into the model's history — measured on a hand-written
+                # marker with `cause='not-a-real-cause'`: one `session_incident`
+                # card, and the malformed token imported as the durable outcome.
+                # So `is_cut_off_cause` decides: the VOCABULARY says this build
+                # can render the token, and `DELIBERATE_CUT_OFF_CAUSES` says
+                # understanding a token is not enough to call the turn a cut-off.
+                # Both halves are sets, so a future DELIBERATE cause joins a set
+                # instead of becoming a second comparison nobody remembers to
+                # write — which is how a user's own `/stop` would have been
+                # narrated as a cut-off the moment its token was coined.
+                # `kind` is still READ rather than re-derived: the dying
+                # runtime's marker is replayed verbatim.
+                #
+                # The cost is stated rather than hidden: a NEWER runtime's cause
+                # token is not narrated to the model by this build, because this
+                # build cannot say what it means. The durable outcome is still
+                # imported above — kind, cause and reason as recorded — so every
+                # surface reads the truth; only the `[session incident]` card,
+                # which is the model-facing form of a cause this build can
+                # render, is withheld. Reachability today is a corrupted marker
+                # (every in-tree `note_cut_off` caller passes a vocabulary token),
+                # which is why this is a claim-vs-code correction and not a live
+                # operator bug.
                 return kind, cause, reason, str(saved["token"])
         return None
     if store.state(identity)["completion_token"]:

@@ -135,6 +135,7 @@ from local_operator.harness.wake import (
 )
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
+    DELIBERATE_CUT_OFF_CAUSE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
@@ -1830,7 +1831,9 @@ class Session:
         # exercises.
         #
         # Initialised BEFORE the attempt so a failure leaves it ``None`` rather
-        # than unset: ``_journal_restored_cut_off`` reads it on every boot.
+        # than unset: ``_journal_restored_cut_off`` reads it on every boot — and
+        # clears it once narrated, which is what makes the attention tick's
+        # rescan a one-off (review round 2, NIT-1).
         self._restored_cut_off: tuple[str, str, str, str] | None = None
         try:
             from local_operator.session.attention import bootstrap_transcript
@@ -6228,11 +6231,25 @@ class Session:
         )
 
     async def _journal_restored_cut_off(self) -> None:
-        """Narrate the cut-off this boot repaired, once per orphaned run."""
+        """Narrate the cut-off this boot repaired, ONCE, and stop asking.
+
+        MEMOISED BY CLEARING, which is the whole point of the clear rather than
+        housekeeping (review round 2, NIT-1). This is called from every attention
+        tick (1 Hz, ``refresh_attention``) and from ``async_init``, and
+        ``_journal_cut_off_once`` dedupes by SCANNING the transcript for the
+        token — measured at 0.71 ms per call on a 20k-entry transcript, paid
+        forever for a tuple that can only ever describe the one run this boot
+        already repaired.
+
+        Cleared BEFORE the await, not after: a tick that arrives while the
+        persist is in flight would otherwise start a second scan, and the second
+        narration is the duplicate the token dedupe exists to prevent.
+        """
         restored = self._restored_cut_off
         if restored is None:
             return
         _kind, cause, reason, token = restored
+        self._restored_cut_off = None
         await self._journal_cut_off_once(token, reason, cause)
 
     def _note_import_failure(self, exc: BaseException, module: str) -> bool:
@@ -6369,7 +6386,7 @@ class Session:
             cause = self._cut_off_cause
             reason = render_cut_off_reason(cause, detail=self._cut_off_detail)
         elif kind == "interrupted":
-            cause = "user-stop"
+            cause = DELIBERATE_CUT_OFF_CAUSE
             reason = render_cut_off_reason(cause)
         else:
             cause = ""

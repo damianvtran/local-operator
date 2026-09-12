@@ -9,14 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import local_operator.session.attached as remote_module
-from local_operator.harness.types import AgentEndEvent, AgentStartEvent
+from local_operator.harness.types import (
+    AgentEndEvent,
+    AgentStartEvent,
+    Message,
+    TextContent,
+)
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FrontendSessionState
+from local_operator.session.transcript import Transcript
+from local_operator.session_lease import SessionLeaseHeldError
 
 
 def _facade(tmp_path, monkeypatch, *, can_go_cold: bool = False) -> AttachedSession:
@@ -260,14 +268,17 @@ async def test_rebind_after_an_idle_runtime_posts_turn_ended(tmp_path, monkeypat
 async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
     tmp_path, monkeypatch
 ) -> None:
-    """Review round 1, BLOCKER-1: a real death must not spin forever on the TUI.
+    """Review round 1, BLOCKER-1 + UX round 2, U7: a real death must reach a
+    bound on the TUI, not merely a verdict.
 
     The 8 s cold deadline only fired for ``_can_go_cold`` (desktop). The
     ordinary TUI attach viewer — ``tui/app.py`` calls ``connect()`` without
     ``surface``, so ``surface == "terminal"`` and ``_can_go_cold`` is False —
-    could therefore never reach a verdict once the abort moved to recovery:
-    a takeover that keeps failing retries forever by design, so nothing was
-    left to end the turn.
+    could therefore never reach a verdict once the abort moved to recovery,
+    and (U7) could never leave the loop either: its takeover factory raises by
+    construction, so the arm retried forever while the give-up exit's
+    ``record_seen`` scope was unsatisfiable. The message that followed a
+    watched cut-off was accepted and never served.
 
     THIS TEST LETS THE REAL LOOP RUN. Every other verdict test here hand-calls
     ``_settle_suspect_turn`` / ``_go_cold``, and that test shape is what let
@@ -275,14 +286,15 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
     test ever drove ``_recover_runtime`` itself on that surface.
 
     ``COLD_FALLBACK_S`` is monkeypatched so the bound is exercised in
-    milliseconds; the assertion is on the VERDICT, never on elapsed time.
+    milliseconds; every assertion is on the VERDICT and the STATE, never on
+    elapsed time.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     takeover_attempts: list[int] = []
 
     async def failing_takeover() -> Any:
         takeover_attempts.append(1)
-        raise RuntimeError("the lease is held by another follower")
+        raise RuntimeError("a viewer never takes over a session")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = AttachedSession(
@@ -303,11 +315,14 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
 
     remote._on_disconnected("owner exited")
     assert remote._recovery_task is not None
-    # Wait on the PUBLICATION (the synthesised end), never on the clock.
-    for _ in range(400):
-        if any(isinstance(event, AgentEndEvent) for event in received):
+    # Wait on the STATE the loop settles into, never on the clock.
+    for _ in range(600):
+        if not remote._recovering:
             break
         await asyncio.sleep(0.01)
+    latched = remote._recovering
+    can_go_cold = remote._can_go_cold
+    cold_calls = list(went_cold)
     await _cancel_recovery(remote)
 
     ends = [event for event in received if isinstance(event, AgentEndEvent)]
@@ -319,35 +334,159 @@ async def test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer(
     # user's Esc produces: this arm is the one the watched TUI session takes
     # (``_can_go_cold`` is False for every viewer built through ``connect()``),
     # and reporting a runtime death as the user's own cancel was the reported
-    # bug (QA round 1, Q-1 / UX U1). The deliberately-not-taken desktop exit
-    # below is what this test has always been about.
+    # bug (QA round 1, Q-1 / UX U1).
     assert ends[0].aborted is False
     assert ends[0].cut_off_cause == "owner-lost"
     assert "cut off" in str(ends[0].error)
     assert remote.is_streaming is False
     assert remote._suspect_generation is None
-    # The legacy contract is preserved: the loop keeps CHASING a successor
-    # instead of taking the desktop-only cold exit, which would have stopped
-    # recovery and fired the went-cold callback.
-    assert went_cold == [], "the terminal surface took the desktop cold exit"
-    assert takeover_attempts, "the loop stopped retrying after ending the turn"
+    # ...and the LOOP must reach a bound too (UX round 2, U7). It is given the
+    # whole window first — the arm is tried before the bound — and is then
+    # RELEASED: `_can_go_cold` flips so the next action can bind again, and the
+    # cold verdict reaches the host. Riding the latch past the bound is what
+    # made a watched cut-off terminal for the rest of the process's life.
+    assert takeover_attempts, "the loop never tried the takeover arm at all"
+    assert latched is False, (
+        "the no-record arm latched: the factory raises by construction and the "
+        f"give-up exit is scoped to record_seen (attempts={len(takeover_attempts)})"
+    )
+    assert can_go_cold is True, "the viewer can never bind again"
+    assert cold_calls == ["cold"], "the cold verdict never reached the host"
+
+
+@pytest.mark.asyncio
+async def test_a_viewer_that_cannot_take_over_gives_up_at_the_cold_bound(
+    tmp_path, monkeypatch
+) -> None:
+    """U7, on the exact production shape, with nothing else going on.
+
+    ``lop``'s TUI wires ``cli.py``'s takeover factory, whose body is
+    ``raise RuntimeError("a viewer never takes over a session")``. The
+    no-record arm therefore had no reachable exit: no record ever appeared, so
+    ``record_seen`` stayed False and the give-up exit could never fire, while
+    the takeover it was written to reach raised on every pass. ``_recovering``
+    latched — refusing ``/model``, ``/goal``, ``/fork`` and every other seam -
+    and ``prompt`` parked on ``_runtime_ready`` with no message and no spinner
+    resolution (measured at 242 s and counting, no error, no timeout, no
+    advice).
+
+    Fails on the pre-fix tree: ``latched`` stays True and the cold callback
+    never fires.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+    attempts: list[int] = []
+
+    async def viewer_takeover() -> Any:
+        attempts.append(1)
+        raise RuntimeError("a viewer never takes over a session")
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(config_dir=tmp_path, session_id="s1", takeover_factory=viewer_takeover)
+    assert remote._can_go_cold is False, "the premise: the terminal viewer surface"
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    received: list[Any] = []
+    remote.subscribe(received.append)
+    went_cold: list[str] = []
+    remote.set_went_cold_callback(lambda: went_cold.append("cold"))
+
+    remote._on_disconnected("owner exited")
+    for _ in range(600):
+        if not remote._recovering:
+            break
+        await asyncio.sleep(0.01)
+    # SAMPLED BEFORE TEARDOWN: cancelling runs the loop's ``finally``, which
+    # clears ``_recovering`` and makes a broken tree look green.
+    latched = remote._recovering
+    can_go_cold = remote._can_go_cold
+    runtime_pid = remote.runtime_pid
+    cold_calls = list(went_cold)
+    await _cancel_recovery(remote)
+
+    assert latched is False, (
+        "the no-record arm latched against a factory that cannot take over: "
+        f"attempts={len(attempts)}"
+    )
+    assert attempts, "the arm was never tried before the bound"
+    ends = [event for event in received if isinstance(event, AgentEndEvent)]
+    assert len(ends) == 1, f"expected one named verdict, got {ends}"
+    assert (
+        ends[0].cut_off_cause == "owner-lost"
+    ), "the release cost the user the named cause they had been given"
+    assert can_go_cold is True, "the viewer can never bind again"
+    assert runtime_pid is None, f"a stale owner pid outlived the unbind: {runtime_pid}"
+    assert cold_calls == ["cold"], "the cold verdict never reached the host"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_parked_by_recovery_binds_again_after_the_give_up(
+    tmp_path, monkeypatch
+) -> None:
+    """U7's second half: the RELEASED writer has to be able to bind.
+
+    The give-up exit is only half a repair. ``_await_owner_ready`` opens every
+    writer path and its first bind is refused for the whole of a recovery, so a
+    prompt that arrives mid-recovery parks on ``_runtime_ready``; if that seam
+    did not bind AGAIN after the wait, the released caller would find no client
+    and report a transport error for a session it could have started a runtime
+    for — the reported "accepted and never served", wearing an error message.
+
+    Asserts on the second bind's LATCH STATE rather than on its effect: the
+    effect (an engaging, attachable runtime) is what the e2e cell drives with
+    real processes.
+    """
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+
+    async def viewer_takeover() -> Any:
+        raise RuntimeError("a viewer never takes over a session")
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(config_dir=tmp_path, session_id="s1", takeover_factory=viewer_takeover)
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    binds: list[bool] = []
+
+    async def spy_bind(*, foreground: bool = True) -> None:
+        binds.append(remote._recovering)
+
+    monkeypatch.setattr(remote, "_ensure_bound", spy_bind)
+    remote._on_disconnected("owner exited")
+    waiter = asyncio.create_task(remote._await_owner_ready())
+    for _ in range(100):
+        if binds:
+            break
+        await asyncio.sleep(0.01)
+    assert binds == [True], "the premise: the first bind is refused by the latch"
+    await waiter
+    await _cancel_recovery(remote)
+
+    assert len(binds) == 2, f"the released writer never bound again: {binds}"
+    assert binds[1] is False, "bound again under a latch that is about to lift"
 
 
 @pytest.mark.asyncio
 async def test_the_terminal_bound_does_not_fire_when_no_turn_was_live(
     tmp_path, monkeypatch
 ) -> None:
-    """The bound ends a SUSPECT turn only: an idle viewer synthesises nothing."""
+    """The bound ends a SUSPECT turn only: an idle viewer synthesises nothing.
+
+    ...and it still RELEASES the facade (U7). Both halves matter: an idle owner
+    death produces no verdict to disclose, so synthesising an end event here
+    would be inventing a turn — but leaving ``_recovering`` latched would make
+    the very next message unservable, which is the reported defect.
+    """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
 
-    async def failing_takeover() -> Any:
-        raise RuntimeError("no successor yet")
+    async def viewer_takeover() -> Any:
+        raise RuntimeError("a viewer never takes over a session")
 
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     remote = AttachedSession(
         config_dir=tmp_path,
         session_id="s1",
-        takeover_factory=failing_takeover,
+        takeover_factory=viewer_takeover,
     )
     remote._ready_for_events = True
     remote._streaming = False  # nothing was running when the socket dropped
@@ -355,12 +494,18 @@ async def test_the_terminal_bound_does_not_fire_when_no_turn_was_live(
     remote.subscribe(received.append)
 
     remote._on_disconnected("owner exited")
-    for _ in range(30):
+    for _ in range(600):
+        if not remote._recovering:
+            break
         await asyncio.sleep(0.01)
+    latched = remote._recovering
+    can_go_cold = remote._can_go_cold
     await _cancel_recovery(remote)
 
     assert [event for event in received if isinstance(event, AgentEndEvent)] == []
     assert remote._suspect_generation is None
+    assert latched is False, "an idle owner death latched the viewer"
+    assert can_go_cold is True, "the released viewer can never bind again"
 
 
 @pytest.mark.asyncio
@@ -452,6 +597,83 @@ async def test_a_recall_with_no_client_declines_instead_of_claiming_success(
     await _cancel_recovery(remote)
 
 
+@pytest.mark.asyncio
+async def test_a_witnessed_cut_off_is_journalled_without_an_open(tmp_path, monkeypatch) -> None:
+    """UX round 2, U6: other surfaces learn the death without opening the session.
+
+    The operator's requirement is "so at least we see it in active sessions as
+    errored", and until this the durable outcome existed only after something
+    OPENED the conversation: the sidebar read ``Working`` and then ``Recent``
+    for a session whose runtime had died (measured to t=60 s), and flippped to
+    ``Unseen error — <reason>`` only when a successor booted. The viewer that
+    delivered the verdict is the one place that knows both the fact and the
+    directory, and it is one classification per death rather than the per-row
+    orphan scan on the refresh path whose cost is why this was deferred.
+
+    Asserts the DURABLE row through the same store the sidebar's catalog reads,
+    with a REAL attention marker and REAL identity — the shape every surface in
+    the product actually keys on.
+    """
+    import uuid as _uuid
+
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
+
+    async def viewer_takeover() -> Any:
+        raise RuntimeError("a viewer never takes over a session")
+
+    session_id = "s1"
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    token = str(_uuid.uuid4())
+    await transcript.append_custom(
+        "attention_started",
+        {"conversation_id": conversation_identity(directory), "token": token},
+    )
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="half a reply")])
+    )
+    # The premise, pinned BEFORE anything classifies it: the store has no row
+    # for this conversation at all, which is the state every surface read for
+    # the whole session whose runtime had just died.
+    identity = conversation_identity(directory)
+    assert not AttentionStore(tmp_path / "attention.db").state(identity)["kind"]
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path, session_id=session_id, takeover_factory=viewer_takeover
+    )
+    remote._streaming = True
+    remote._generation = 7
+    remote._ready_for_events = True
+    remote._on_disconnected("owner exited")
+
+    # The journal lands on the default executor, so wait for the STATE it
+    # produces rather than for the clock.
+    deadline = time.monotonic() + 5.0
+    state: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        state = AttentionStore(tmp_path / "attention.db").state(identity)
+        if state["kind"]:
+            break
+        await asyncio.sleep(0.01)
+    await _cancel_recovery(remote)
+
+    assert state["kind"] == "error", (
+        "a witnessed cut-off left no durable outcome for the sidebar: " f"{state}"
+    )
+    # The CLASSIFIER's verdict, not the facade's own `owner-lost`: this fixture
+    # has no dead run record, so the honest sentence is the no-evidence one and
+    # the cause is empty. That is exactly what an OPEN of this session would
+    # publish a second later, which is the property that matters — one death
+    # cannot read two ways depending on which surface looked first.
+    assert state["cause"] == "", state
+    assert "could not be determined" in state["reason"], state
+    assert state["unseen"] is True, state
+
+
 # --- the live-but-silent owner: recovery must reach a verdict ---------------
 #
 # An owner that is LIVE (a record is found on every pass) but SILENT (the
@@ -494,7 +716,6 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[AttachedSession, list[f
 
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
     monkeypatch.setattr(remote_module, "FRONTEND_SYNC_BLOCKED_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = AttachedSession(
@@ -662,33 +883,36 @@ async def test_the_parked_prompt_is_released_by_the_bound(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
-    tmp_path, monkeypatch
-) -> None:
-    """Guard against over-reach: the chase contract survives for a DEAD owner.
+async def test_a_lease_held_chase_is_bounded_at_the_cold_window(tmp_path, monkeypatch) -> None:
+    """A lease holder no longer buys an UNBOUNDED wait (UX round 1, U2; MINOR-1).
 
-    The give-up exit is scoped to a record having been SEEN (`record_seen` in
-    `_recover_runtime`). With no record the loop must still reach
-    `_takeover_factory` and keep chasing, exactly as
-    ``test_the_real_recovery_loop_bounds_the_turn_on_a_terminal_viewer`` pins.
+    ``SessionLeaseHeldError`` used to be counted as EVIDENCE OF PROGRESS —
+    "another follower won the kernel-arbitrated lock, so a record is on its
+    way" — and progress disabled the give-up arm entirely. What that exception
+    actually proves is weaker: ``session_lease.py`` raises it for "another live
+    OR UNVERIFIABLE process" (``_pid_state`` returns ``"uncertain"`` on an
+    unexpected ``OSError``, the legacy ``.session.pid`` mirror raises merely
+    because a pid is NOT DEAD, and an unreadable claim raises with
+    ``pid=None``), and none of those implies a process that will ever publish.
+    With a raising factory and no record ever appearing, the latch was
+    reachable: ``record_seen`` stayed False and ``takeover_progress`` stayed
+    True, so NEITHER give-up arm could fire and ``_recovering`` held every
+    mutation seam while ``prompt`` parked on ``_runtime_ready`` with no message
+    and no spinner resolution.
 
-    WATCHES PAST ITS OWN BOUND, and that is the whole guard. Sampling at an
-    attempt COUNT is what made the first version of this test unable to fail:
-    three takeover attempts arrive at ~0.28 s against a monkeypatched 0.3 s
-    `RECOVERY_GIVE_UP_S`, so it stopped watching ~20 ms before the deadline it
-    exists to prove is never reached, and it stayed green against a tree that
-    took the exit (QA round 1, Q849-2). The wait below is therefore expressed
-    as a multiple of the bound rather than as a number of attempts, and the
-    assertions are read after it has comfortably elapsed.
+    The bound is now the SAME cold window every other arm uses, and the release
+    is REBINDABLE (``_give_up_recovery`` flips ``_can_go_cold`` before
+    ``_go_cold``), so the chase is not abandoned — the next action re-dials the
+    very same record. Watched WELL PAST the monkeypatched bound rather than to
+    an attempt count, which is the blindness QA round 1 Q849-2 measured.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
     attempts: list[int] = []
 
     async def failing_takeover() -> Any:
         attempts.append(1)
-        raise RuntimeError("the lease is held by another follower")
+        raise SessionLeaseHeldError(Path("/tmp/s1"), 99999)
 
     remote = AttachedSession(
         config_dir=tmp_path,
@@ -702,42 +926,39 @@ async def test_a_genuinely_dead_owner_still_takes_the_legacy_takeover_path(
     remote.set_went_cold_callback(lambda: went_cold.append("cold"))
 
     remote._on_disconnected("owner exited")
-    # Watch WELL PAST the bound, never to an attempt count. Three attempts land
-    # before the deadline, so breaking on them samples a loop that has not yet
-    # had the chance to take the exit — the blindness Q849-2 measured. The wait
-    # is a multiple of the monkeypatched bound, so compressing the bound
-    # compresses the test with it and no wall-clock literal is asserted on.
-    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    deadline = time.monotonic() + remote_module.COLD_FALLBACK_S * 8
     while time.monotonic() < deadline:
         if not remote._recovering:
-            break  # the loop returned: the exit was taken, which is the failure
+            break
         await asyncio.sleep(0.01)
     still_chasing = remote._recovering
     cold_calls = list(went_cold)
     attempt_count = len(attempts)
+    can_go_cold = remote._can_go_cold
     await _cancel_recovery(remote)
 
-    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
-    assert still_chasing is True, "the no-record branch took the give-up exit"
-    assert cold_calls == [], "a dead owner took the give-up cold exit"
+    assert attempt_count >= 1, "the takeover arm was never reached"
+    assert still_chasing is False, (
+        "a lease holder still latches the facade: every /model, /fork, /compact "
+        "is refused and prompt parks on _runtime_ready"
+    )
+    assert cold_calls == ["cold"], "the release left the viewer in neither state"
+    assert can_go_cold is True, "the viewer can never bind again"
 
 
 @pytest.mark.asyncio
-async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
-    tmp_path, monkeypatch
-) -> None:
-    """A record this viewer cannot ATTACH to belongs to the dead-owner contract.
+async def test_an_unusable_record_is_bounded_at_the_cold_window(tmp_path, monkeypatch) -> None:
+    """A record this viewer cannot ATTACH to is one of the "no usable runtime" arms.
 
-    `record_seen` is stamped on the same condition that selects the reattach
-    arm — protocol >= 5 with `FRONTEND_CAPABILITY` — rather than on `record is
-    not None`. A record failing either check falls through to the takeover
-    `else`, so counting it as a sighting would arm the give-up exit for a chase
-    that never had a reattach to give up on: the loop would go cold instead of
-    chasing a successor, which is the over-reach Q849-1 measured wearing a
-    different hat.
+    A pre-frontend owner (protocol < 5, no ``FRONTEND_CAPABILITY``) falls
+    through to the takeover ``else``: this viewer can never bind it, and the
+    only thing it could wait for is a successor. It is therefore the same class
+    as "nothing is there" from the user's seat, and is bounded on the same cold
+    window — the release is rebindable, so a successor that does appear is
+    re-dialled by the next action, and a viewer that keeps waiting does not get
+    to refuse every mutation seam in the meantime.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 0.05)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 0.3)
 
     stale = _live_record()
     stale.protocol = 4  # a pre-frontend owner: discoverable, not attachable
@@ -746,7 +967,7 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
 
     async def failing_takeover() -> Any:
         attempts.append(1)
-        raise RuntimeError("the lease is held by another follower")
+        raise SessionLeaseHeldError(Path("/tmp/s1"), 99999)
 
     remote = AttachedSession(
         config_dir=tmp_path,
@@ -760,7 +981,7 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
     remote.set_went_cold_callback(lambda: went_cold.append("cold"))
 
     remote._on_disconnected("owner exited")
-    deadline = time.monotonic() + remote_module.RECOVERY_GIVE_UP_S * 3
+    deadline = time.monotonic() + remote_module.COLD_FALLBACK_S * 8
     while time.monotonic() < deadline:
         if not remote._recovering:
             break
@@ -768,11 +989,13 @@ async def test_an_unusable_record_is_not_a_sighting_for_the_give_up_exit(
     still_chasing = remote._recovering
     cold_calls = list(went_cold)
     attempt_count = len(attempts)
+    can_go_cold = remote._can_go_cold
     await _cancel_recovery(remote)
 
-    assert attempt_count >= 3, f"the loop stopped chasing a successor: {attempt_count}"
-    assert still_chasing is True, "an unattachable record armed the give-up exit"
-    assert cold_calls == [], "an unattachable record took the give-up cold exit"
+    assert attempt_count >= 1, "the takeover arm was never reached"
+    assert still_chasing is False, "an unattachable record still latches the facade"
+    assert cold_calls == ["cold"], "an unattachable record left the viewer nowhere"
+    assert can_go_cold is True, "the viewer can never bind again"
 
 
 @pytest.mark.asyncio
@@ -786,7 +1009,6 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
     against wall time.
     """
     monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 60.0)
-    monkeypatch.setattr(remote_module, "RECOVERY_GIVE_UP_S", 60.0)
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (_live_record(), None))
 
     remote = AttachedSession(
@@ -837,3 +1059,188 @@ async def test_the_dial_failure_backoff_reaches_the_recovery_cap(tmp_path, monke
         "the bind retry ceiling moved; a longer cap here only adds latency to "
         "a bind a caller is waiting on"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_undeliverable_steer_is_reported_instead_of_dying_in_a_task(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 2, Q-1: the ONE fire-and-forget writer nobody could report for.
+
+    The give-up releases every waiter parked on ``_runtime_ready``. A prompt has
+    a worker whose exception the app turns into a notice and a composer restore;
+    a steer is spawned by ``steer_message`` and never awaited, so a released
+    steer's refused bind existed only as "Task exception was never retrieved" in
+    the log while its row went on promising a ride-along that never came. Both
+    halves are asserted here: the report reaches the seam, and the task itself
+    does not raise into the loop (which no caller would ever observe).
+    """
+    reports: list[str] = []
+
+    async def refusing_bind(*, foreground: bool = True) -> None:
+        raise ConnectionError("owner socket unreachable: [Errno 61] Connect call failed")
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._streaming = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", refusing_bind)
+
+    # (a) with NO resolver installed — the shape that used to be a log line only.
+    # The task must still end quietly: a raise here IS the unretrieved-exception
+    # bug, and nothing in production awaits this task to notice it.
+    unarmed = Message(role="user", content=[TextContent(text="first")])
+    before = asyncio.all_tasks()
+    remote.steer_message(unarmed)
+    spawned = asyncio.all_tasks() - before
+    assert len(spawned) == 1, f"expected one spawned steer task, got {spawned}"
+    await next(iter(spawned))
+
+    # (b) armed — the app is told which message it has to give back.
+    remote.set_steer_failure(reports.append)
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "the steer's failure never reached the app"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_bind_left_no_client_is_reported_too(tmp_path, monkeypatch) -> None:
+    """The other door into the same silent drop.
+
+    ``_ensure_bound`` can return having bound nothing (a disposed facade, a
+    race it declines to enter) and the old code returned WITHOUT sending and
+    without saying so — the row kept its promise either way. The two doors now
+    report the same fact through the same seam.
+    """
+    reports: list[str] = []
+
+    async def no_bind(*, foreground: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", no_bind)
+    remote._client = None
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="still there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "a bind that left no client was reported as delivered"
+
+
+class _FakeAttachClient:
+    """The minimum `attach_client` surface `_send_steer_when_ready` touches.
+
+    Only the third door is under test here, so `_ensure_bound` is a no-op and
+    this object IS the bind's result: `connected` is the snapshot the send
+    trusts, and `send_command` is the round trip that can raise after it.
+    """
+
+    def __init__(self, *, send_error: Exception | None = None) -> None:
+        self.connected = True
+        self.sent: list[Any] = []
+        self._send_error = send_error
+
+    async def send_command(self, command: Any, streaming: bool = False) -> None:
+        if self._send_error is not None:
+            raise self._send_error
+        self.sent.append(command)
+
+
+async def _steer_against(client: _FakeAttachClient, tmp_path, monkeypatch):
+    """A viewer whose bind succeeds and whose client is ``client``."""
+
+    async def no_bind(*, foreground: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", no_bind)
+    # `setattr`, not a direct assignment: this fake is deliberately not an
+    # `AttachClient`, and the type checker is right to say so.
+    monkeypatch.setattr(remote, "_client", client)
+    return remote
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_send_raises_is_reported_instead_of_dying_in_a_task(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 3, MINOR-3: the THIRD door, one line past the other two.
+
+    `client.connected` is read a line above the send and the send is a socket
+    round trip, so an owner that dies in the gap raises out of `_request_frame`
+    — and nothing awaits this task, so before this guard the shape QA round 2
+    (Q-1) filed came back one line lower: an unretrieved task exception in the
+    log while the row still promised `sends with that next message`. The window
+    could not be won by killing a live driver at three offsets (QA round 3 tried
+    and so did the reviewer), so it is FORCED here: what matters is that any
+    raise at that door is retrieved and reported rather than dropped.
+    """
+    reports: list[str] = []
+    client = _FakeAttachClient(
+        send_error=ConnectionError("owner socket unreachable: [Errno 61] Connect call failed")
+    )
+    remote = await _steer_against(client, tmp_path, monkeypatch)
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    assert len(spawned) == 1, f"expected one spawned steer task, got {spawned}"
+    # Awaiting is the assertion that the task ended QUIETLY: a re-raise here is
+    # the unretrieved-exception bug, and nothing in production awaits this task
+    # to notice it.
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "a send that raised was treated as delivered"
+    assert client.sent == [], "the failed send was recorded as sent"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_send_succeeds_is_not_reported(tmp_path, monkeypatch) -> None:
+    """The mirror, so the guard cannot pass by reporting every send.
+
+    A delivered steer must leave the seam untouched: the app's hand-back lifts
+    the row and puts the text back in the composer, which would be a lie about a
+    message the owner already has.
+    """
+    reports: list[str] = []
+    client = _FakeAttachClient()
+    remote = await _steer_against(client, tmp_path, monkeypatch)
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [], "a delivered steer was reported as undeliverable"
+    assert len(client.sent) == 1, client.sent

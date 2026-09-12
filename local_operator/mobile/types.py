@@ -621,7 +621,21 @@ class SessionProjection:
     # (the user/agent stopped it) — the phone's "interrupted — tap to resume"
     # affordance reads THIS, never an inference from streaming flipping,
     # because a finished turn also flips it. Empty until the first turn ends.
+    #
+    # "aborted" covers TWO acts, which is why ``cut_off`` rides BESIDE it
+    # rather than replacing it: a deliberate stop AND an involuntary cut-off. A
+    # third value here is the obvious move and the wrong one — an older phone
+    # bundle gates the whole affordance on ``=== "aborted"``, so a new token
+    # would silently remove the only way back into a cut-off session for every
+    # phone that had not been updated (design round 2, D7).
     stop_reason: str = ""
+    #: Whether the turn ``stop_reason`` describes was CUT OFF by the harness
+    #: rather than stopped on purpose. The composer's button reads it, so the
+    #: action agrees with the danger notice above it instead of calling one act
+    #: two things. Additive and defaulted False: an older phone ignores it and
+    #: keeps today's word, and an older runtime never sends it — correct,
+    #: because an older runtime cannot produce a cut-off at all.
+    cut_off: bool = False
     queued_count: int = 0  # user messages waiting for the turn boundary
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable

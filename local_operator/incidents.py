@@ -260,8 +260,30 @@ _HINTS: dict[str, str] = {
 #: and ``owner-lost`` the viewer-side verdict that the runtime it was bound to
 #: stopped answering. ``user-stop`` is the one DELIBERATE cause, and it is what
 #: keeps a user's own cancel from being reported as an error.
+#: The ONE deliberate cause in :data:`CUT_OFF_CAUSES`. Exported so the readers
+#: that have to tell a recorded stop apart from a cut-off do not re-spell the
+#: token: the restore seam's journaling guard and the durable-outcome writer are
+#: both answering that question, and a hard-coded copy on either side is one
+#: rename away from silently admitting a user's own ``/stop`` into the cut-off
+#: vocabulary.
+DELIBERATE_CUT_OFF_CAUSE = "user-stop"
+
+#: The DELIBERATE causes, as a SET rather than a token to compare against.
+#:
+#: WHY A SET AND NOT ``cause != DELIBERATE_CUT_OFF_CAUSE``: every reader that
+#: has to tell a recorded stop apart from a cut-off asks the same question, and
+#: an identity comparison against ONE token answers it only for the deliberate
+#: causes that existed when the comparison was written. A future deliberate
+#: token (a user-cancelled ``/fork``, a scripted ``lop stop --all``) added to
+#: :data:`CUT_OFF_CAUSES` with the old comparison in place would be narrated to
+#: the model as an involuntary cut-off — the exact misclassification the guard
+#: exists to prevent — from the moment it was coined. Here it is admitted by
+#: ADDING it to this set, so the two halves of the taxonomy cannot drift
+#: (review round 1, NIT-1).
+DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE})
+
 CUT_OFF_CAUSES: dict[str, str] = {
-    "user-stop": "the session was stopped by the user",
+    DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     "runtime-killed": (
@@ -284,6 +306,26 @@ CUT_OFF_CAUSES: dict[str, str] = {
 #: runtime's token reaching an older viewer. Naming the gap is honest; guessing
 #: a cause would not be, and a refusal to render would hide the cut-off.
 CUT_OFF_UNKNOWN = "the turn was cut off and the cause could not be determined"
+
+
+def is_cut_off_cause(cause: str) -> bool:
+    """True iff ``cause`` names an INVOLUNTARY cut-off this build can render.
+
+    Membership AND kind, not identity: the vocabulary decides that the token is
+    one this build understands, and :data:`DELIBERATE_CUT_OFF_CAUSES` decides
+    that understanding a token is not enough to call the turn a cut-off.
+    """
+    return cause in CUT_OFF_CAUSES and not is_deliberate_cause(cause)
+
+
+def is_deliberate_cause(cause: str) -> bool:
+    """True iff ``cause`` is a recorded DELIBERATE act rather than a cut-off.
+
+    The single place the deliberate half of the taxonomy is read, so a surface
+    that needs "was this the user's own act?" (the phone's frame fill, the
+    journal guard) cannot answer it with a comparison that goes stale.
+    """
+    return cause in DELIBERATE_CUT_OFF_CAUSES
 
 
 def render_cut_off_reason(cause: str, *, detail: str = "") -> str:

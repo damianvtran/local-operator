@@ -1026,6 +1026,14 @@ class ProjectionFold:
             # `aborted` alone.
             cut_off = bool(event.cut_off or event.cut_off_cause)
             p.stop_reason = "aborted" if (event.aborted or cut_off) else "completed"
+            # ...and the phone's BUTTON needs to know which of the two it was:
+            # "aborted" is both a deliberate stop and a cut-off, and pairing a
+            # `Stopped with an error — ...` notice with a button reading
+            # `interrupted — tap to resume` names one act two ways (design round
+            # 2, D7). Deliberately a separate flag rather than a third
+            # `stop_reason` value: the affordance is gated on `=== "aborted"`,
+            # so a new token would strip it from every bundle not yet updated.
+            p.cut_off = cut_off
             self._close_open_message()
             if event.error:
                 self._append(

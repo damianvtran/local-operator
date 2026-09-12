@@ -1693,6 +1693,12 @@ class SubagentView(Vertical):
         #: the first ``show`` (an early repaint on a freshly mounted page)
         #: cannot raise on a missing attribute.
         self._paused = False
+        #: Whether the run was CUT OFF rather than stopped on purpose, from
+        #: ``AsyncJob.cut_off_cause`` (design round 2, D8). Initialised for the
+        #: same reason ``_paused`` is, and read only by the title's word — the
+        #: glyph and the ink are shared with ``interrupted``, because the mark
+        #: means "rehydrated and resumable" and that is true of both.
+        self._cut_off = False
         self._elapsed = "0s"
         #: The child's ROLE and effort TIER, recorded on the job at launch
         #: (``AsyncJob.agent_role``/``effort``). Shown in the title so the page
@@ -1834,6 +1840,7 @@ class SubagentView(Vertical):
         queued: bool,
         elapsed: str,
         paused: bool = False,
+        cut_off: bool = False,
         outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
@@ -1881,6 +1888,11 @@ class SubagentView(Vertical):
         self._label = strip_control_sequences(label or job_id)
         self._status = status
         self._queued = queued
+        # A cut-off reads as ``interrupted`` on the job row (that is the only
+        # word the roster has for a run that never settled); only the cause
+        # distinguishes it from a stop the user chose, and the page must not
+        # name the same child two things (design round 2, D8).
+        self._cut_off = cut_off
         # A pause is mechanically a cancel, so ``status`` reads ``cancelled``
         # and only the comms graph knows the difference. Carried here so the
         # page's title and the dock row it was opened from cannot name the
@@ -3250,7 +3262,11 @@ class SubagentView(Vertical):
             return row
 
         glyph, word, token = status_glyph(
-            self._status, queued=self._queued, spinner_glyph=spinner, paused=self._paused
+            self._status,
+            queued=self._queued,
+            spinner_glyph=spinner,
+            paused=self._paused,
+            cut_off=self._cut_off,
         )
         if (
             self._status == "cancelled"
