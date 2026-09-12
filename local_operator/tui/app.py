@@ -117,7 +117,6 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_COMPOSING,
     ACTIVITY_PHASE_RESPONDING,
     ACTIVITY_PHASE_RUNNING,
-    ACTIVITY_PHASE_THINKING,
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 
@@ -299,7 +298,12 @@ from local_operator.tui.widgets.toast import (
     format_mcp_startup,
 )
 from local_operator.tui.widgets.todo_panel import TodoPanel
-from local_operator.tui.widgets.tool_card import ToolCard, clean_intent, parse_duration
+from local_operator.tui.widgets.tool_card import (
+    START_UNKNOWN,
+    ToolCard,
+    clean_intent,
+    parse_duration,
+)
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
@@ -9222,6 +9226,16 @@ class OperatorApp(App[None]):
         A caller that passes nothing still gets the repaint (the state is
         honest at the moment it is painted) but keeps the old exposure, which is
         why the only caller that omits it is the test seam.
+
+        **``session`` is load-bearing and must be the session that OWNS the
+        rows being painted.** Every fact the two arms read — the pending ids,
+        the executing ids, and the start epochs — is read off it, so a session
+        belonging to another conversation answers for another conversation's
+        calls: the wrong rows go live, and ``live_tool_start_epochs(session)``
+        hands them another turn's instants. It is a parameter rather than
+        ``self._session`` for the same reason ``live_cards`` is: the two
+        prepare-time callers paint a presentation that is not (yet) the
+        visible one, so ``self`` is precisely the wrong answer there.
         """
         pending = getattr(session, "pending_display_tool_ids", None)
         call_ids: set[str] = set()
@@ -35006,12 +35020,23 @@ class OperatorApp(App[None]):
                 None,
                 self._folded_phase_epoch(ACTIVITY_PHASE_RESPONDING),
             )
+        # The FALLBACK labels are not the phase the fold models, and that is the
+        # whole point of the gate rather than an oversight to be smoothed over.
+        # `on_compaction_started` and `on_retry_started` set this label and
+        # re-derive; the fold models no compaction or retry edge, so its phase
+        # is still whatever preceded the pass. Asking for the label we just
+        # derived therefore WITHHOLDS the clock for those two — correct, since
+        # the folded zero belongs to the previous phase — while leaving the
+        # ordinary `thinking` case working, where the label and
+        # `ACTIVITY_PHASE_THINKING` are the same string. Passing the constant
+        # instead failed OPEN: the equality held, and a `retrying (attempt 2)`
+        # row wore the age of the attempt that had just failed.
         return (
             self._working_fallback,
             self._working_fallback,
             True,
             None,
-            self._folded_phase_epoch(ACTIVITY_PHASE_THINKING),
+            self._folded_phase_epoch(self._working_fallback),
         )
 
     def _folded_phase_epoch(self, phase: str) -> float | None:
@@ -35606,12 +35631,21 @@ class OperatorApp(App[None]):
             # re-delivered to a rebuilt transcript — would otherwise mount a
             # fresh card whose clock begins here, which is the reported reset
             # wearing the other hat: the row is new, the CALL is not.
+            #
+            # And when NOBODY stamped the call, there is no instant to seed
+            # from — which is not the same as "the call begins now". The row is
+            # being mounted for work already in flight, so it mounts CLOCKLESS
+            # (`START_UNKNOWN`) and stays that way until an event dates it,
+            # rather than printing an age counted from the viewer's arrival.
+            # `restore` and `_mark_pending_tool_rows` already read a missing
+            # epoch as "withheld"; this was the one seam that read it as zero,
+            # and it is the same rule as theirs rather than a fourth one.
             card = ToolCard(
                 event.tool_call_id,
                 event.tool_name,
                 event.args,
                 event.intent,
-                started_at=started_at,
+                started_at=START_UNKNOWN if started_at is None else started_at,
             )
             self._append_block(card)
         self._tool_cards[event.tool_call_id] = card

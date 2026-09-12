@@ -405,7 +405,10 @@ def _tool_start_event(
 
     Stamped with ``time.time()``, not ``time.monotonic()``, because the value
     crosses a process boundary: ``live_events`` is serialized onto the attach
-    wire and into checkpoints, where a monotonic reading means nothing.
+    wire, where a monotonic reading means nothing. It deliberately does NOT
+    cross the durable boundary — ``FrontendSessionState.checkpoint()`` strips
+    the folded map — so this stamp reaches an ATTACHING viewer and never a
+    resumed session; a reader must not look for it as durable state.
     Readers convert the AGE once and tick on their own monotonic clock (see
     ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
     move a counter that is already running.

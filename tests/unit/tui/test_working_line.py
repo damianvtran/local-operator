@@ -52,6 +52,7 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
     CompactionStarted,
+    RetryStarted,
     ToolComposing,
     ToolEnded,
     ToolStarted,
@@ -460,7 +461,14 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app.post_message(TurnStarted())
-        app.post_message(_started("c0", "await_job", job_id="7a73c97ffc54"))
+        # The producer's own stamp is what makes the start knowable. Supplied
+        # here because that is what a live call ALWAYS carries (one factory in
+        # `harness/loop.py` stamps all three dispatch sites), and because an
+        # epoch-less start event is by definition a call whose start nothing on
+        # this surface knows — QA round 1, Q1: it mounts clockless rather than
+        # dating itself from the viewer's arrival, and an undateable batch
+        # withholds the band (D6).
+        app.post_message(_started("c0", "await_job", epoch=time.time(), job_id="7a73c97ffc54"))
         await pilot.pause()
         line = _working(app)
         assert line is not None
@@ -475,9 +483,9 @@ async def test_the_band_shows_no_clock_for_a_tool_it_cannot_date() -> None:
 
         line.set_content = spy  # type: ignore[method-assign]
 
-        # A tool this viewer WATCHED start: its own zero is knowable, so the
-        # clock is true and must still be shown. Wound back rather than slept,
-        # the way the sibling clock tests do it — and wound back on the CARD,
+        # A tool the producer STAMPED: its own zero is knowable, so the clock
+        # is true and must still be shown. Wound back rather than slept, the
+        # way the sibling clock tests do it — and wound back on the CARD,
         # because a running batch's clock counts from the oldest call's own
         # start rather than from the phase change (design round 3, D9).
         card = app._tool_cards["c0"]
@@ -605,6 +613,69 @@ async def test_the_thinking_clock_resumes_its_true_age_after_a_switch(
 
 
 @pytest.mark.asyncio
+async def test_a_fallback_phase_the_fold_does_not_model_withholds_the_seed() -> None:
+    """Review round 1, R1: the fallback arm must ask for the phase it DERIVED.
+
+    ``compacting context`` and ``retrying (attempt N)`` are whole-turn labels
+    with no phase of their own: the fold models no compaction or retry edge, so
+    its phase is still whatever preceded the pass. The gate that supplies
+    ``clock_from_epoch`` is phase EQUALITY by string, and while that arm asked
+    for ``ACTIVITY_PHASE_THINKING`` by name, the equality held for these labels
+    too — so the previous phase's zero was handed to a line that was NOT in that
+    phase. A freshly started ``retrying`` row printed the age of the attempt
+    that had just failed, and a ``compacting context`` row printed the age of
+    what preceded the pass, which is the plausible-wrong-age class this whole
+    change exists to refuse.
+
+    The fix is that the arm asks for the phase it derives
+    (``self._working_fallback``). The ordinary fallback is unaffected, because
+    there the label and the folded phase ARE the same string; asserted first,
+    so a fix cannot pass by withholding every fallback.
+    """
+    aged = 27.0  # the reviewer's probe used 10m to make the number unmissable;
+    # any seed older than the 5s bound below fails the same way, and `27s`
+    # keeps `_clock_seconds` reading the row's own grammar (a 10m reading is
+    # `10m`, not `600s`).
+    session = _PhaseSession("thinking", time.time() - aged)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._session = session
+        app.post_message(TurnStarted())
+        app.post_message(AssistantMessageStart())
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None
+        assert _activity(app) == DEFAULT_ACTIVITY
+        # The ordinary case: label == folded phase, so the seed is the row's own
+        # and must still be used.
+        assert _clock_seconds(line._clock_text()) >= aged
+        # ``compacting context``: the fold has no such phase, so its zero is NOT
+        # this label's and must not be handed over. The row then counts from the
+        # phase it just entered — the start of the pass — which is the honest
+        # reading for a pass that has just begun.
+        app.post_message(CompactionStarted("auto"))
+        await pilot.pause()
+        assert _activity(app) == "compacting context"
+        shown = _clock_seconds(line._clock_text())
+        assert shown < 5, (
+            f"a freshly started `compacting context` row reads {shown}s: the fold's "
+            "thinking zero was supplied for a label the fold does not derive"
+        )
+
+        # ``retrying (attempt N)`` is the same shape and over-reported by the
+        # whole failed attempt, which is a real misread of "is this stuck".
+        app.post_message(RetryStarted(2, "upstream exploded", None))
+        await pilot.pause()
+        assert _activity(app) == "retrying (attempt 2)"
+        shown = _clock_seconds(line._clock_text())
+        assert shown < 5, (
+            f"a freshly started retry row reads {shown}s: the previous attempt's "
+            "zero was supplied for a label the fold does not derive"
+        )
+
+
+@pytest.mark.asyncio
 async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
     """Design round 3, D9. The phase outlives the work its label names.
 
@@ -632,7 +703,12 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         app.post_message(TurnStarted())
-        app.post_message(_started("old", "await_job", job_id="7a73c97ffc54"))
+        # Both cards carry the producer's own stamp, as a live batch always
+        # does (one factory in `harness/loop.py` stamps every dispatch site).
+        # An epoch-less start event would mount clockless instead (QA round 1,
+        # Q1) and there would be no batch clock to be truthful about; the
+        # properties asserted below are about the ANCHOR, not about provenance.
+        app.post_message(_started("old", "await_job", epoch=time.time(), job_id="7a73c97ffc54"))
         await pilot.pause()
         line = _working(app)
         assert line is not None
@@ -642,7 +718,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # back rather than slept, as the sibling clock tests do it.
         aged = 14.0
         app._tool_cards["old"]._started = time.monotonic() - aged
-        app.post_message(_started("new", "read", path="a.py"))
+        app.post_message(_started("new", "read", epoch=time.time(), path="a.py"))
         await pilot.pause()
         app._refresh_working_activity()
         # The batch's clock is the OLDEST call's age: both cards date
@@ -657,7 +733,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
 
         survivor = app._tool_cards["new"]
         survivor_started = survivor.started_at
-        assert survivor_started is not None, "the survivor watched its own start"
+        assert survivor_started is not None, "the survivor's own start is known"
         survivor_age = time.monotonic() - survivor_started
         shown = line._clock_text()
         # THE ASSERTION THAT FAILS ON THE OLD CODE, which showed ~14s here.
@@ -672,7 +748,7 @@ async def test_the_bands_clock_stays_truthful_as_a_batch_sheds_calls() -> None:
         # clock. The survivor's own zero is unchanged by its sibling settling,
         # so a batch losing a call every twenty seconds still shows a number
         # past twenty — the "has this been stuck" question the clock answers.
-        app.post_message(_started("third", "bash", command="ls"))
+        app.post_message(_started("third", "bash", epoch=time.time(), command="ls"))
         await pilot.pause()
         app._refresh_working_activity()
         assert line._clock_text() == format_duration(time.monotonic() - survivor_started), (
