@@ -36,6 +36,7 @@ from __future__ import annotations
 import pytest
 
 from local_operator.compaction.api import CompactionSettings
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
 from local_operator.compaction.marker import build_compaction_marker
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.types import (
@@ -99,19 +100,8 @@ def leaked_user_rows(entries_or_messages) -> list[Message]:
         for message in entries_or_messages
         if isinstance(message, Message)
         and message.role == "user"
-        and (message.provider_payload or {}).get("harness_injected")
+        and (message.provider_payload or {}).get(RENDERED_INJECTION_KEY)
     ]
-
-
-async def wait_for(predicate, attempts: int = 200) -> None:
-    """Let the session's journalling settle — those producers are fire-and-forget."""
-    import asyncio
-
-    for _ in range(attempts):
-        if predicate():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition never became true")
 
 
 @pytest.mark.asyncio
