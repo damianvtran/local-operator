@@ -187,38 +187,38 @@
       ]
     },
     {
-      "widget": "NoticeBlock",
-      "id": null,
-      "region": [
-        2,
-        2,
-        116,
-        1
-      ],
-      "content_region": [
-        2,
-        2,
-        116,
-        1
-      ],
-      "size": [
-        116,
-        1
-      ],
-      "virtual_size": [
-        116,
-        1
-      ],
-      "scrollbar": [
-        false,
-        false
-      ]
-    },
-    {
       "widget": "CompactionMarkerBlock",
       "id": null,
       "region": [
         2,
+        2,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        2,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
         4,
         116,
         1
@@ -243,45 +243,17 @@
       ]
     },
     {
-      "widget": "ToolCard",
-      "id": null,
-      "region": [
-        2,
-        6,
-        116,
-        1
-      ],
-      "content_region": [
-        2,
-        6,
-        116,
-        1
-      ],
-      "size": [
-        116,
-        1
-      ],
-      "virtual_size": [
-        116,
-        1
-      ],
-      "scrollbar": [
-        false,
-        false
-      ]
-    },
-    {
       "widget": "AssistantBlock",
       "id": null,
       "region": [
         2,
-        8,
+        6,
         116,
         2
       ],
       "content_region": [
         2,
-        8,
+        6,
         116,
         2
       ],
@@ -303,13 +275,13 @@
       "id": null,
       "region": [
         2,
-        11,
+        9,
         116,
         1
       ],
       "content_region": [
         2,
-        11,
+        9,
         116,
         1
       ],
@@ -331,13 +303,13 @@
       "id": null,
       "region": [
         2,
-        13,
+        11,
         116,
         2
       ],
       "content_region": [
         2,
-        13,
+        11,
         116,
         2
       ],
@@ -348,6 +320,34 @@
       "virtual_size": [
         116,
         2
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    {
+      "widget": "ToolCard",
+      "id": null,
+      "region": [
+        2,
+        14,
+        116,
+        1
+      ],
+      "content_region": [
+        2,
+        14,
+        116,
+        1
+      ],
+      "size": [
+        116,
+        1
+      ],
+      "virtual_size": [
+        116,
+        1
       ],
       "scrollbar": [
         false,
@@ -383,45 +383,17 @@
       ]
     },
     {
-      "widget": "ToolCard",
-      "id": null,
-      "region": [
-        2,
-        18,
-        116,
-        1
-      ],
-      "content_region": [
-        2,
-        18,
-        116,
-        1
-      ],
-      "size": [
-        116,
-        1
-      ],
-      "virtual_size": [
-        116,
-        1
-      ],
-      "scrollbar": [
-        false,
-        false
-      ]
-    },
-    {
       "widget": "AssistantBlock",
       "id": null,
       "region": [
         2,
-        20,
+        18,
         116,
         3
       ],
       "content_region": [
         2,
-        20,
+        18,
         116,
         3
       ],
@@ -443,13 +415,13 @@
       "id": null,
       "region": [
         2,
-        24,
+        22,
         116,
         1
       ],
       "content_region": [
         2,
-        24,
+        22,
         116,
         1
       ],
@@ -471,13 +443,13 @@
       "id": null,
       "region": [
         2,
-        26,
+        24,
         116,
         1
       ],
       "content_region": [
         2,
-        26,
+        24,
         116,
         1
       ],

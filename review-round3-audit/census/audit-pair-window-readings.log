@@ -1,0 +1,9 @@
+== round-2 head (9992708fc): capture with the window readings ==
+audit   : notice_rows=4 painted_by_the_fold=4
+on screen (audit): user rows that are notices = 4
+transcript window (audit): scroll_y=8 viewport=35 content=43 blocks=14 screen=118x42 screen_virtual=118x42
+
+== this head: same capture ==
+audit   : notice_rows=8 painted_by_the_fold=0
+on screen (audit): user rows that are notices = 0
+transcript window (audit): scroll_y=0.0 viewport=35 content=35 blocks=10 screen=118x42 screen_virtual=118x42

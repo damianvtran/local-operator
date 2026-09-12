@@ -179,39 +179,11 @@
       ],
       "virtual_size": [
         116,
-        45
+        43
       ],
       "scrollbar": [
         false,
         true
-      ]
-    },
-    {
-      "widget": "NoticeBlock",
-      "id": null,
-      "region": [
-        2,
-        -8,
-        116,
-        1
-      ],
-      "content_region": [
-        2,
-        -8,
-        116,
-        1
-      ],
-      "size": [
-        116,
-        1
-      ],
-      "virtual_size": [
-        116,
-        1
-      ],
-      "scrollbar": [
-        false,
-        false
       ]
     },
     {
