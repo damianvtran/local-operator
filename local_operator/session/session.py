@@ -2875,7 +2875,8 @@ class Session:
         context already anonymised by an older build is NOT healed here — it
         heals on the next resume, where replay rehydrates the custom entries —
         which is stated rather than implied because the alternative looks like
-        an omission.
+        an omission. Each id is re-seated at most once, so two kept rows that
+        share a custom's id cannot collapse onto a single object.
         """
         sources: dict[str, CustomMessage] = {
             message.id: message
@@ -2883,9 +2884,21 @@ class Session:
             if isinstance(message, CustomMessage)
         }
         restored: list[AgentMessage] = []
+        re_seated: set[str] = set()
         for message in kept:
             source = sources.get(message.id)
-            if source is not None and self._transcript.has_entry(message.id):
+            # ``re_seated`` is why the substitution is once per id: two kept rows
+            # can carry the same id (a duplicated delivery, a render emitted for
+            # both halves of a split), and collapsing both onto one object would
+            # silently drop the second row's content from the model's context —
+            # the one loss this whole pass must never cause. The second row keeps
+            # its rendered form, which is what it already is.
+            if (
+                source is not None
+                and message.id not in re_seated
+                and self._transcript.has_entry(message.id)
+            ):
+                re_seated.add(message.id)
                 restored.append(source)
             else:
                 restored.append(message)
@@ -9090,11 +9103,15 @@ class Session:
             # resume and ``/export`` keep their frames; this keeps the LIVE
             # context honest too. The strip still applies to what the next
             # request SENDS (``_render_history`` re-renders on the way out).
-            kept = self._restore_custom_sources(
-                self._render_for_compaction(keep_images=True)[plan.cut :]
-            )
-            if not kept:
-                kept = plan.llm_history[plan.cut :]
+            rendered = self._render_for_compaction(keep_images=True)[plan.cut :]
+            if not rendered:
+                # The fallback is the plan's STRIPPED history, so it goes through
+                # the same identity restore as the render above — the two paths
+                # must not differ in whether a receipt survives a pass, and a
+                # fallback that skipped it would be invisible until a delivery
+                # happened to land on it.
+                rendered = plan.llm_history[plan.cut :]
+            kept = self._restore_custom_sources(rendered)
             summary, preserve_data = (
                 summarized
                 if summarized is not None
