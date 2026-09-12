@@ -1361,6 +1361,30 @@ def test_the_static_conformance_anchor_still_exists() -> None:
     )
 
 
+def test_both_session_shapes_answer_the_live_clock_accessors() -> None:
+    """The two clock anchors are declared on the protocol and answered by BOTH.
+
+    A per-call start epoch plus the working line's phase zero are what let a
+    front end that attaches mid-turn date the work in flight, and both session
+    shapes have to answer them: the local owner is the producer of those
+    instants, and an attached viewer folds them off the same events. Declared
+    on the protocol so pyright checks the SIGNATURES at
+    ``_static_conformance_is_checked_by_pyright``; what is asserted here is the
+    runtime half that isinstance cannot see — that neither shape raises on a
+    store it has not built yet.
+
+    The unsynchronized answers are the point rather than a technicality:
+    ``{}`` and ``("", None)`` both reduce to "withhold the clock", which is
+    what every consumer does with a missing entry. A facade that raised here
+    instead would take down a repaint, and one that defaulted to its own
+    arrival instant would print an age nobody measured.
+    """
+    for klass in (Session, AttachedSession):
+        shape = klass.__new__(klass)
+        assert shape.live_tool_start_epochs() == {}, klass.__name__
+        assert shape.activity_phase_clock() == ("", None), klass.__name__
+
+
 def test_every_registered_session_binding_still_matches_the_source() -> None:
     """Each (host, binding) pair in ``_SCANNED`` must derive at least one member.
 

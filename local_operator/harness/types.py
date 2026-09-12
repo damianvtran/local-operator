@@ -1387,6 +1387,34 @@ class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     tool_name: str
     args: dict[str, Any] = Field(default_factory=dict)
     intent: str | None = None
+    #: The WALL-CLOCK instant this call began executing, stamped by the
+    #: producer because no consumer can recover it afterwards.
+    #:
+    #: Without it a frontend has only its own arrival instant, and the only
+    #: frontend that notices is one that attaches to work already in flight —
+    #: a sidebar switch back to a conversation whose tool is still running, a
+    #: re-attach, a `/resume` onto a live turn. Those widgets are constructed
+    #: at the switch, so the live row's elapsed clock restarts there and counts
+    #: up from a zero belonging to the viewer rather than to the call: the
+    #: reported frame was a `bash` row reading `27s` and this event's true
+    #: start being half an hour earlier.
+    #:
+    #: ``None`` is a REAL answer rather than a missing value to be defaulted.
+    #: The field is additive, so every event an older runtime produced lacks
+    #: it, and a consumer that substituted its own fold or arrival instant
+    #: would print an age it invented — exactly the failure the widgets' blank
+    #: column exists to refuse. Consumers withhold the clock instead.
+    #:
+    #: Epoch rather than monotonic on purpose: this value crosses a process
+    #: boundary (``live_events`` is serialized onto the attach wire), and a
+    #: monotonic reading is not comparable across processes. It does NOT cross
+    #: the durable boundary: ``FrontendSessionState.checkpoint()`` strips the
+    #: folded map, so a resumed session never sees a stamp and withholds, which
+    #: is why absence above is described as a real answer rather than an
+    #: oversight. Readers convert the AGE once and then tick on their own
+    #: monotonic clock, so a later system-clock adjustment cannot move a
+    #: counter that is already running.
+    started_at_epoch: float | None = None
 
 
 class ToolExecutionUpdateEvent(AgentEvent[Literal["tool_execution_update"]]):
