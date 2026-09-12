@@ -620,17 +620,25 @@ def test_a_future_wake_is_named_even_when_another_is_overdue(
     """
     from local_operator.cli import wake_command
 
+    # NOT the module-level `NOW_MS`, which is captured at IMPORT: a CI shard
+    # can run for 17 minutes, and a wake armed "one minute from import" is
+    # long overdue by the time this executes — which lands in the very branch
+    # the test exists to distinguish from. An hour off a fresh reading is
+    # future under any plausible shard duration.
+    now_ms = int(time.time() * 1000)
     _arm(
         tmp_path,
         "d19late0001",
         cwd=str(tmp_path),
-        schedules=[{"id": "w1", "message": "late watch", "next_due_at": NOW_MS - 600_000}],
+        schedules=[{"id": "w1", "message": "late watch", "next_due_at": now_ms - 600_000}],
     )
     _arm(
         tmp_path,
         "d19soon0001",
         cwd=str(tmp_path),
-        schedules=[{"id": "w1", "message": "release-owner check", "next_due_at": NOW_MS + 60_000}],
+        schedules=[
+            {"id": "w1", "message": "release-owner check", "next_due_at": now_ms + 3_600_000}
+        ],
     )
 
     assert wake_command(_args()) == 0
