@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import os
 from typing import Any, Callable
+from unittest import mock
 
+from local_operator import references
 from local_operator.references import SCAN_CANDIDATE_LIMIT, scan_directory
 
 
@@ -147,3 +149,91 @@ def test_exactly_one_directory_is_scanned_per_keystroke(tmp_path):
 
     assert choices, "the fixture must produce rows, or the count below is vacuous"
     assert counter.counts["scandir"] == 1
+
+
+def test_the_cap_bounds_the_per_entry_work_not_just_the_row_count(tmp_path):
+    """The cap must bound the EXPENSIVE work, asserted structurally.
+
+    ``scan_directory`` used to sort every entry and then ``break`` at the cap,
+    so ``SCAN_CANDIDATE_LIMIT`` bounded the returned list while the per-entry
+    work still scaled with the directory. Measured at 10,000 entries: 20-22 ms
+    per keystroke against a 16.7 ms frame budget, with a 40-entry directory at
+    0.33 ms.
+
+    THE BOUND IS COUNTED, NOT TIMED, and that is deliberate — ``AGENTS.md``'s
+    "prefer a structural invariant to a numeric one" is binding here, and the
+    sibling test ``test_exactly_one_directory_is_scanned_per_keystroke`` already
+    counts ``scandir`` for the same reason. A wall-clock ceiling on a laptop is
+    worthless on a loaded CI box; "at most one ``stat`` per RETURNED row" is a
+    fact about the algorithm that cannot flake.
+
+    ``_entry_detail`` is the right thing to count: it is the per-row builder,
+    and it makes a ``DirEntry.stat()`` syscall for the size and mtime columns.
+    Before the fix it ran once per ENTRY; now it runs only for the rows that
+    survive the cap.
+
+    NOTE it is counted by wrapping the function rather than through
+    ``_counting()``: that helper patches ``os.stat``/``os.lstat``, while
+    ``_entry_detail`` calls the ``stat`` METHOD on the ``DirEntry`` the kernel
+    already returned. Asserting on ``counter.counts["stat"]`` here measures
+    nothing — it was 4 against a limit of 2000, true no matter what the code
+    does — which is exactly the vacuous-guard shape ``AGENTS.md`` warns about.
+    """
+    for index in range(SCAN_CANDIDATE_LIMIT * 5):
+        (tmp_path / f"entry_{index:06d}.txt").write_text("x", encoding="utf-8")
+    calls = 0
+    real_detail = references._entry_detail
+
+    def counting_detail(entry, is_dir):
+        nonlocal calls
+        calls += 1
+        return real_detail(entry, is_dir)
+
+    with _counting() as counter:
+        with mock.patch.object(references, "_entry_detail", counting_detail):
+            choices = scan_directory("", str(tmp_path))
+
+    assert len(choices) == SCAN_CANDIDATE_LIMIT
+    # The whole point: 10,000 entries on disk, at most 2,000 rows BUILT.
+    assert calls <= SCAN_CANDIDATE_LIMIT
+    # And the one-directory guarantee still holds alongside it.
+    assert counter.counts["scandir"] == 1
+
+
+def test_the_cap_keeps_the_alphabetically_first_rows(tmp_path):
+    """Capping before the sort must not change WHICH rows are returned.
+
+    ``heapq.nsmallest`` replaced sort-then-truncate, so this pins that the two
+    agree: the picker's ordering is a user-visible contract, and a cap that
+    returned an arbitrary 2,000 would be a different feature.
+    """
+    for index in range(SCAN_CANDIDATE_LIMIT + 500):
+        (tmp_path / f"entry_{index:06d}.txt").write_text("x", encoding="utf-8")
+
+    names = _names(scan_directory("", str(tmp_path)))
+
+    assert names == sorted(names)
+    assert names[0] == "entry_000000.txt"
+    assert names[-1] == f"entry_{SCAN_CANDIDATE_LIMIT - 1:06d}.txt"
+
+
+def test_a_dotenv_entry_is_flagged_by_name_not_only_by_directory(tmp_path):
+    """``alert`` marks a row the operator should look twice at.
+
+    The same prefix-only gap the resolver had: a name ENDING in ``.env`` was
+    not flagged. Pinned here too because the picker's paint and the resolver's
+    approval gate must agree about what counts as sensitive — a row the picker
+    shows as ordinary and the resolver then prompts for is a confusing pair.
+    """
+    for name in ("workspace.env", "prod.env", ".env", ".env.local"):
+        (tmp_path / name).write_text("TOKEN=placeholder\n", encoding="utf-8")
+    (tmp_path / "ordinary.txt").write_text("x", encoding="utf-8")
+
+    alerts = {choice.name: choice.alert for choice in scan_directory("", str(tmp_path))}
+
+    assert alerts["workspace.env"] is True
+    assert alerts["prod.env"] is True
+    assert alerts["ordinary.txt"] is False
+    # Dotfiles are excluded from the picker entirely, so `.env` itself is not a
+    # row here — the resolver's gate is what covers a hand-typed `@.env`.
+    assert ".env" not in alerts
