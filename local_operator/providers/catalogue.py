@@ -67,6 +67,7 @@ def picker_rows(
             provider=entry.provider,
             model_id=entry.model_id,
             label=entry.label,
+            listing_name=entry.listing_name,
             context_window=(
                 entry.default_context_window
                 if entry.provider == "openai"

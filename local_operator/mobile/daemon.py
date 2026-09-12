@@ -30,9 +30,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import gzip
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import time
 import uuid
@@ -2618,7 +2620,7 @@ def build_app(daemon: MobileDaemon):
             models = await asyncio.to_thread(_list_models)
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
-        return JSONResponse({"models": models})
+        return _maybe_gzip(request, JSONResponse({"models": models}))
 
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
@@ -2798,6 +2800,141 @@ def _provider_display_name(provider_id: str) -> str:
     return definition.name if definition is not None else provider_id
 
 
+#: Below this, compression costs more than it saves: the gzip header and the CPU
+#: on both ends are not repaid by a few hundred bytes, and every small JSON
+#: response on this daemon is well under it.
+_GZIP_MIN_BYTES = 1024
+
+
+def _maybe_gzip(request: Any, response: Any) -> Any:
+    """Gzip ``response`` in place when the client accepts it and it is worth it.
+
+    PER-ROUTE, not a middleware, and that is the whole design constraint.
+    ``GZipMiddleware`` wraps every response including
+    ``/api/sessions/{id}/events``, which is a Server-Sent Events stream: gzip
+    buffers, so the stream the phone relies on for live turn output would stop
+    arriving event-by-event and arrive in compressed blocks instead — trading a
+    transfer saving on one endpoint for a broken realtime surface on another.
+    Applying it at the one route whose body is large and one-shot keeps the
+    streaming routes byte-for-byte untouched.
+
+    ``/api/models`` is that route: the sheet's catalogue is ~234 KB of JSON that
+    compresses to ~20 KB, and the phone is typically on a mobile link through a
+    tunnel, where that difference is seconds of an empty sheet.
+    """
+    accept = request.headers.get("accept-encoding", "")
+    if "gzip" not in accept.lower():
+        return response
+    body = getattr(response, "body", b"")
+    if not body or len(body) < _GZIP_MIN_BYTES:
+        return response
+    response.body = gzip.compress(body, compresslevel=6)
+    response.headers["content-encoding"] = "gzip"
+    response.headers["content-length"] = str(len(response.body))
+    # Caches and proxies keyed only on the URL would otherwise hand a gzipped
+    # body to a client that never asked for one.
+    response.headers["vary"] = "Accept-Encoding"
+    return response
+
+
+class _UnreadableAuthStore:
+    """A store that answers "I hold no rows" to the one question asked of it.
+
+    Used ONLY when ``AuthStore()`` itself could not open the database, to build
+    the cached catalogue that degradation serves. It exists so that path reaches
+    ``usable_providers``'s own documented degradation instead of restating the
+    rule: with no rows, no provider is claimed connected, and
+    ``picker_rows(usable=None)`` lists everything rather than asserting the owner
+    owns nothing.
+
+    Every member but the listing raises, which is deliberate rather than lazy.
+    This stand-in must never be mistaken for a working store: the only
+    legitimate use is the read-only catalogue build below, and a caller that
+    tries to log in or persist a credential through it has a bug that should be
+    loud rather than silently written to nowhere. The members are spelled out
+    (not a ``__getattr__`` catch-all) so it structurally satisfies
+    ``ControllerAuthStore`` and a future addition to that protocol fails the
+    type check here instead of at runtime on a degraded phone.
+    """
+
+    def _unavailable(self, operation: str) -> RuntimeError:
+        return RuntimeError(
+            f"the credential store is unreadable; {operation} is not available on "
+            "the catalogue-only fallback"
+        )
+
+    def list_credentials(self, provider: str | None = None) -> list[Any]:
+        return []
+
+    def upsert_credential(self, provider: str, credential: dict[str, Any]) -> Any:
+        raise self._unavailable("upsert_credential")
+
+    def delete_credentials_for_provider(self, provider: str, disabled_cause: str = "") -> int:
+        raise self._unavailable("delete_credentials_for_provider")
+
+    def disable_credential(self, credential_id: int, cause: str) -> None:
+        raise self._unavailable("disable_credential")
+
+    def active_local_credential(self, provider: str, endpoint: str) -> Any:
+        raise self._unavailable("active_local_credential")
+
+    async def get_oauth_access(self, provider: str) -> Any:
+        raise self._unavailable("get_oauth_access")
+
+    async def list_oauth_accesses(self, provider: str) -> list[Any]:
+        raise self._unavailable("list_oauth_accesses")
+
+    def list_oauth_identities(self, provider: str) -> list[Any]:
+        raise self._unavailable("list_oauth_identities")
+
+    async def get_api_key(self, provider: str) -> str | None:
+        raise self._unavailable("get_api_key")
+
+
+def _model_rows(rows: "list[Any]") -> list[dict[str, Any]]:
+    """Serialize ranked picker rows into the sheet's wire objects.
+
+    The field set is what the phone RENDERS, deliberately. Shipping the whole
+    row was 301 KB over a tunnel, 159 KB of which was
+    ``context_window``/``input_price``/``output_price``/``routed`` — fields no
+    ``.tsx`` in the bundle reads. A forward-looking payload is not free when the
+    consumer is a phone on a mobile link; re-add a field here when a surface
+    actually renders it.
+    """
+    return [
+        {
+            "selector": row.selector,
+            "provider": row.provider,
+            "model_id": row.model_id,
+            # ``name`` is pre-existing and keeps its meaning: a DISPLAY name for
+            # this model. It is sourced from ``listing_name`` — the listing's OWN
+            # human name — rather than from ``label``, because ``label`` is the
+            # picker's resolved form and ``naming._unambiguous_name`` refuses a
+            # RESELLER's name there (the two shipped aggregators share ~398 of
+            # ~400 names, so a name alone cannot say which route answers, and the
+            # route is what differs in price and quota). That refusal is right on
+            # the TUI, whose row paints a separate selector column; here the row
+            # has two slots and the provider slot ALREADY carries the route, so
+            # the same rule left 916 of 996 rows rendering ``anthropic/claude-
+            # opus-5`` where the desktop renders ``Claude Opus 5``. Falling back
+            # through ``label`` and then the id keeps a row that named nothing
+            # rendering exactly as it did.
+            "name": (
+                row.listing_name
+                or (row.label if row.label and row.label != row.selector else "")
+                or row.model_id
+            ),
+            # ``label`` stays EXACTLY as the TUI spells it, unresolved names and
+            # all — it is the parity contract, not a display fallback, and a
+            # surface comparing the two must see the same string the desktop got.
+            "label": row.label,
+            "connected": row.connected,
+            "aggregated": row.aggregated,
+        }
+        for row in rows
+    ]
+
+
 def _list_models() -> list[dict[str, Any]]:
     """The model sheet's rows: what the owner can run, ranked exactly as ``/model``.
 
@@ -2825,10 +2962,16 @@ def _list_models() -> list[dict[str, Any]]:
     environment must never add an account to a picker reachable over a tunnel,
     which is exactly the rung that separates that method from ``usable_providers``.
 
-    ``initial_catalogue()`` first, then the live refresh, mirroring the picker's
-    stale-then-update: the disk-cached listings make the sheet complete even if
-    the network answers slowly, and the live pass adds what shipped too late for
-    the registry. It asks for :data:`PICKER_TTL_S` rather than discovery's 24 h
+    ONE catalogue per request, chosen by whether the credential question could
+    be answered — NOT the picker's stale-then-update. The TUI paints
+    ``initial_catalogue()`` and repaints on the live result because it has two
+    frames to spend; this endpoint answers a single synchronous HTTP request, so
+    a first catalogue would never be rendered and building one on the normal path
+    is pure cost (measured: 1455 entries, 18 ms, discarded). The cached catalogue
+    is therefore built only where it is the ANSWER — when the store could not be
+    read and a live fetch would be unauthorized guessing.
+
+    The live pass asks for :data:`PICKER_TTL_S` rather than discovery's 24 h
     default for the same reason the TUI does — opening the sheet is the one
     moment a fresh list is worth a request — and the fetch runs off the relay's
     event loop, which must never block on a provider round trip.
@@ -2849,17 +2992,47 @@ def _list_models() -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001 — an unreadable config must not empty the sheet
         settings = {}
     use_max_context = _openai_use_max_context_window(settings)
-    with closing(AuthStore()) as store:
+    try:
+        store = AuthStore()
+    except (sqlite3.Error, OSError) as exc:
+        # The store could not be OPENED. This is the same rung
+        # ``persisted_providers`` documents as ``None`` — "cannot tell" — and it
+        # has to be caught HERE because that is where the read happens:
+        # ``AuthStore.__init__`` connects eagerly, so an unreadable ``auth.db``
+        # raised out of the constructor before the method with the degradation
+        # was ever called, and the phone got a 502 carrying a raw SQLite string
+        # instead of the cached list. 502-ing claims less than the app knows —
+        # the disk cache still describes the catalogue — so the degradation
+        # runs the same way the documented one does: show the cached models,
+        # fetch nothing, because "which accounts may I speak for" is exactly the
+        # question that just failed.
+        logger.warning("credential store unreadable; serving the cached catalogue: %s", exc)
+        # ``_UnreadableAuthStore`` rather than a bespoke branch: it makes
+        # ``usable_providers()`` take its OWN documented degradation, so this
+        # path produces exactly the catalogue an unreadable store already
+        # produces one layer down — every model listed, none claimed
+        # unconnected — instead of a second, drifting statement of that rule.
+        controller = ProviderController(_UnreadableAuthStore())
+        cached_rows, _cached_hidden = picker_rows(
+            controller.initial_catalogue(),
+            usable=None,
+            use_max_context=use_max_context,
+        )
+        return _model_rows(cached_rows)
+    with closing(store):
         controller = ProviderController(store, CredentialManager(config_dir=directory))
         admitted = controller.persisted_providers()
-        entries = controller.initial_catalogue()
         statuses: dict[str, str] = {}
         if admitted is None:
             # The credential store could not be READ. Serving the cached
             # catalogue is right — an empty sheet would claim the owner owns no
             # models — but a live fetch is not, because "which accounts may I
-            # speak for" is the question that just failed to resolve.
-            pass
+            # speak for" is the question that just failed to resolve. This is
+            # the ONE path that wants the cached catalogue, which is why it is
+            # built here rather than unconditionally above: on every normal
+            # request the live pass replaces it wholesale, so building it there
+            # cost 1455 entries and ~18 ms per request for a value nothing read.
+            entries = controller.initial_catalogue()
         else:
             # ``asyncio.run`` is safe here: ``api_models`` offloads this whole
             # synchronous helper to a worker thread, so there is no running loop
@@ -2892,32 +3065,7 @@ def _list_models() -> list[dict[str, Any]]:
                 f"Model catalogue unavailable for {', '.join(unavailable)}; "
                 "retry or log in again"
             )
-    return [
-        {
-            "selector": row.selector,
-            "provider": row.provider,
-            "model_id": row.model_id,
-            # ``name`` is pre-existing and keeps its meaning: a DISPLAY name for
-            # this model. ``label`` is the picker's resolved form, which is the
-            # selector itself whenever no name can be vouched for — for an
-            # aggregator that is always, because ``naming._unambiguous_name``
-            # refuses a reseller's listing name (the two shipped aggregators
-            # share 398 of ~400 names, so none of them can say which route is
-            # answering, and the route is what differs in price and quota).
-            # Letting that fall through would put the whole selector in the name
-            # slot and render it twice on one row, so it degrades to the id —
-            # exactly what the TUI paints for the same row.
-            "name": (row.label if row.label and row.label != row.selector else row.model_id),
-            "label": row.label,
-            "connected": row.connected,
-            "aggregated": row.aggregated,
-            "routed": row.routed,
-            "context_window": row.context_window,
-            "input_price": row.input_price,
-            "output_price": row.output_price,
-        }
-        for row in rows
-    ]
+    return _model_rows(rows)
 
 
 #: The login page is server-rendered (not part of the SPA) so the auth gate

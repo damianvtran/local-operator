@@ -29543,7 +29543,7 @@ class OperatorApp(App[None]):
         # order and cannot import a textual widget to get it. Everything below
         # this call is session-shaped and stays here: a daemon has no sticky
         # serving spec and no runtime catalogue to merge.
-        rows, hidden = picker_rows(
+        rows, _hidden = picker_rows(
             entries,
             usable=usable,
             current=current,

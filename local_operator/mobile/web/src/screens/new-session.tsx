@@ -9,6 +9,7 @@ import { Button } from "../components/ui/button";
 import { Sheet } from "../components/ui/sheet";
 import { cn } from "../lib/cn";
 import { basename, shortenHome } from "../lib/format";
+import { filterModels } from "../lib/model-filter";
 import { navigate } from "../router";
 import type { Directories, ModelEntry } from "../types";
 
@@ -36,17 +37,18 @@ export function NewSessionScreen() {
 			});
 	}, []);
 
-	/* Order-PRESERVING, over the same string the server ranks on — see the long
-	   note in `components/model-sheet.tsx`. This list led with ~445 aggregated
+	/* A reopened picker starts from the full ranked list — same reason as the
+	   in-session sheet, which runs the identical reset in its own `[open]`
+	   effect. */
+	useEffect(() => {
+		if (modelSheetOpen) setFilter("");
+	}, [modelSheetOpen]);
+
+	/* Order-PRESERVING, over the same predicate the in-session sheet uses — the
+	   shared one in `lib/model-filter`. This list led with ~445 aggregated
 	   Radient rows for the same reason the sheet did, and `Array.filter` keeps
 	   the daemon's ranking intact so the direct route leads every query. */
-	const filtered = useMemo(() => {
-		const q = filter.trim().toLowerCase();
-		if (!q) return models;
-		return models.filter((m) =>
-			`${m.selector} ${m.name}`.toLowerCase().includes(q),
-		);
-	}, [models, filter]);
+	const filtered = useMemo(() => filterModels(models, filter), [models, filter]);
 
 	/* The tagged quick-pick rows: home first, then the temp dir (a common
 	   scratch root the daemon now admits), then recent working directories.
@@ -247,6 +249,17 @@ export function NewSessionScreen() {
 							</span>
 						</button>
 					))}
+					{filtered.length === 0 ? (
+						/* Without this the picker answered a non-matching query with
+						   the bare `default` row and empty space, which does not tell
+						   "nothing matched" from "the list failed to load". Same copy
+						   as the in-session sheet: the two pickers filter alike and
+						   should account for themselves alike. */
+						<p className="px-3 py-2 text-body-sm text-ink-dim">
+							no matching models — try a provider (anthropic, xai) or a
+							model name (opus, glm)
+						</p>
+					) : null}
 				</div>
 			</Sheet>
 		</div>

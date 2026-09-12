@@ -86,37 +86,32 @@ def test_cold_radient_oauth_models_refresh_parse_and_cache_off_loop(monkeypatch,
         client.post("/login", data={"password": "fixture-password"})
         first = client.get("/api/models")
         assert first.status_code == 200, first.json()
-        # The payload now carries what the picker ranks on, and the rows arrive
-        # in the picker's own order rather than the registry's. ``name`` falls
-        # back to the id for an aggregator because ``naming`` refuses a
-        # reseller's listing name — the TUI paints the same row the same way.
+        # The payload carries what the phone RENDERS, and the rows arrive in the
+        # picker's own order rather than the registry's. ``name`` is the
+        # listing's OWN name even for an aggregator — the row's provider slot
+        # already says which route answers, so suppressing the name there (which
+        # is right for the TUI, whose row paints a separate selector column) left
+        # the phone showing a slug. ``label`` still degrades to the selector for
+        # a reseller, unchanged, because that is the string the TUI got.
         assert first.json() == {
             "models": [
                 {
                     "selector": "radient/anthropic/mobile-fixture",
                     "provider": "radient",
                     "model_id": "anthropic/mobile-fixture",
-                    "name": "anthropic/mobile-fixture",
+                    "name": "Mobile fixture",
                     "label": "radient/anthropic/mobile-fixture",
                     "connected": True,
                     "aggregated": True,
-                    "routed": False,
-                    "context_window": 0,
-                    "input_price": -1.0,
-                    "output_price": -1.0,
                 },
                 {
                     "selector": "radient/auto",
                     "provider": "radient",
                     "model_id": "auto",
-                    "name": "auto",
+                    "name": "Automatic",
                     "label": "radient/auto",
                     "connected": True,
                     "aggregated": True,
-                    "routed": True,
-                    "context_window": 0,
-                    "input_price": -1.0,
-                    "output_price": -1.0,
                 },
             ]
         }
@@ -295,3 +290,131 @@ def test_admitted_empty_set_fetches_nothing_at_all(monkeypatch):
     assert entries == []
     assert statuses == {}
     assert calls == []
+
+
+def test_an_aggregated_row_shows_its_human_name_and_keeps_the_desktop_label(monkeypatch):
+    """The phone renders the listing's NAME; ``label`` stays what the TUI got.
+
+    The row has two slots — name and provider — so the provider slot already
+    says which route answers. Sourcing the name from ``label`` therefore paid
+    for that disambiguation twice and spent the whole name slot doing it:
+    ``model_label`` refuses a reseller's listing name, so 916 of 996 rows
+    rendered ``anthropic/claude-opus-5`` where the desktop rendered ``Claude
+    Opus 5``. ``label`` is the parity contract and must NOT move.
+    """
+    with contextlib.closing(AuthStore()) as store:
+        store.upsert_credential("radient", {"type": "oauth", "access": "fixture-access"})
+
+    def models(_transport, request):
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "anthropic/claude-opus-5", "name": "Claude Opus 5"}]},
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", models)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        rows = client.get("/api/models").json()["models"]
+
+    row = next(r for r in rows if r["selector"] == "radient/anthropic/claude-opus-5")
+    assert row["aggregated"] is True
+    assert row["name"] == "Claude Opus 5"
+    # Unchanged: a reseller's label still degrades to the selector, which is
+    # exactly the string the desktop picker receives for this row.
+    assert row["label"] == "radient/anthropic/claude-opus-5"
+
+
+def test_models_are_served_gzipped_when_the_client_accepts_it(monkeypatch):
+    """The catalogue is the one large one-shot body on this daemon.
+
+    Per-route rather than ``GZipMiddleware`` because that wraps the SSE stream
+    too, and gzip buffers — the phone's live turn output would arrive in blocks
+    instead of event-by-event. The compressed body must decode to the identical
+    JSON: a transfer encoding that changes the payload is not a transfer
+    encoding.
+    """
+    with contextlib.closing(AuthStore()) as store:
+        store.upsert_credential("radient", {"type": "oauth", "access": "fixture-access"})
+
+    def models(_transport, request):
+        return httpx.Response(
+            200,
+            json={"data": [{"id": f"vendor/model-{n}", "name": f"Model {n}"} for n in range(200)]},
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", models)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        compressed = client.get("/api/models", headers={"Accept-Encoding": "gzip"})
+        plain = client.get("/api/models", headers={"Accept-Encoding": "identity"})
+
+    assert compressed.status_code == 200
+    assert compressed.headers["content-encoding"] == "gzip"
+    assert compressed.headers["vary"] == "Accept-Encoding"
+    # httpx decodes the transfer encoding itself, so a readable body here IS the
+    # round trip: the gzip stream decompressed to valid JSON. What it cannot show
+    # is the size on the wire, which is what `content-length` carries.
+    assert compressed.json() == plain.json()
+    assert "content-encoding" not in plain.headers
+    wire = int(compressed.headers["content-length"])
+    assert wire < int(plain.headers["content-length"])
+    assert wire < len(plain.content)
+
+
+def test_gzip_cannot_touch_a_streaming_response():
+    """The structural reason the gzip above is applied per-route.
+
+    ``GZipMiddleware`` would wrap ``/api/sessions/{id}/events`` too, and gzip
+    buffers — a phone watching a turn would stop seeing events arrive one at a
+    time. The helper is only called from ``api_models``, and this pins the
+    second line of defence: handed a streaming body it has nothing to compress
+    and must add no encoding header, so wiring it somewhere it does not belong
+    degrades to a no-op rather than to a silently buffered stream.
+    """
+    from starlette.responses import StreamingResponse
+
+    from local_operator.mobile.daemon import _maybe_gzip
+
+    async def body():
+        yield b"event: sessions\n\n"
+
+    class _Request:
+        headers = {"accept-encoding": "gzip"}
+
+    response = StreamingResponse(body(), media_type="text/event-stream")
+    assert _maybe_gzip(_Request(), response) is response
+    assert "content-encoding" not in response.headers
+
+
+def test_an_unopenable_store_serves_the_cached_catalogue_not_a_502(monkeypatch):
+    """ "I could not look" is not "you own nothing", on the path that actually raises.
+
+    ``persisted_providers`` documents a ``None`` "cannot tell" rung, but
+    ``AuthStore.__init__`` connects EAGERLY, so an unreadable ``auth.db`` raised
+    out of the constructor before that method ran and the phone got a 502
+    carrying a raw SQLite string. The degradation now happens where the read is.
+    """
+    import sqlite3
+
+    from local_operator.providers import auth_store as auth_store_module
+
+    def explode(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(auth_store_module.AuthStore, "__init__", explode)
+    calls = []
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda *a: calls.append(a))
+
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        response = client.get("/api/models")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["models"]
+    # The shipped catalogue still describes the models; claiming an empty
+    # inventory would assert something the app never established.
+    assert len(rows) > 0
+    # And no provider was contacted: which accounts we may speak for is exactly
+    # the question that just failed to resolve.
+    assert calls == []
+    assert "unable to open database file" not in response.text

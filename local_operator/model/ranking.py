@@ -65,6 +65,17 @@ class ModelRow:
     #: the selector itself, never a name two models answer to. Empty means the
     #: caller had none; the row then shows its selector and nothing more.
     label: str = ""
+    #: The source listing's own human name, carried past ``label``'s honesty
+    #: rule for a consumer that disambiguates the route some other way — see
+    #: ``CatalogueEntry.listing_name``. Nothing in the RANKING reads it: scoring
+    #: and ordering are on ``label`` and the selector exactly as before, so this
+    #: is display payload travelling through, not a new sort input.
+    #:
+    #: Keyword-only so it cannot disturb the POSITIONAL argument order this row
+    #: is widely constructed with (the TUI's tests build it positionally); a new
+    #: field in the middle of that sequence silently re-binds every caller's
+    #: arguments.
+    listing_name: str = dataclasses.field(default="", kw_only=True)
     context_window: int = 0
     default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     max_context_window: int | None = dataclasses.field(default=None, kw_only=True)

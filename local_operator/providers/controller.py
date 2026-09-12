@@ -41,8 +41,8 @@ from local_operator.providers.registry import (
     AGGREGATOR_PROVIDERS,
     PROVIDER_REGISTRY,
     ProviderDefinition,
+    credential_file_names,
     credential_provider_id,
-    env_key_name,
     get_provider_definition,
     list_login_providers,
     resolve_env_key,
@@ -115,6 +115,25 @@ class CatalogueEntry:
     connected: bool
     default_context_window: int | None = dataclasses.field(default=None, kw_only=True)
     max_context_window: int | None = dataclasses.field(default=None, kw_only=True)
+    #: The listing's OWN human name for this model, before ``model_label``'s
+    #: honesty rule decides whether it may stand alone. Empty when the source
+    #: named nothing.
+    #:
+    #: WHY this is carried beside ``label`` rather than recovered from it. That
+    #: rule (``naming._unambiguous_name``) returns "" for a RESELLER, so a
+    #: reseller's ``label`` degrades to the selector — deliberately, because the
+    #: two shipped aggregators share ~398 of ~400 names and a name alone cannot
+    #: say which route is answering. That is right for the TUI, whose row paints
+    #: a separate selector column, and wrong for a surface with two slots (name,
+    #: provider) where the route is ALREADY spelled by the provider slot: there
+    #: the same rule leaves the name slot holding a slug, which is how 916 of 996
+    #: phone rows came to read ``anthropic/claude-opus-5`` where the desktop
+    #: reads ``Claude Opus 5``.
+    #:
+    #: So the name is carried, not re-derived. A consumer that can disambiguate
+    #: the route by other means renders this; one that cannot keeps using
+    #: ``label``. Nothing about ``label`` or the ranking changes.
+    listing_name: str = dataclasses.field(default="", kw_only=True)
     #: This provider RESELLS the model rather than serving it. The picker ranks
     #: the direct route first when the same model is reachable both ways.
     aggregated: bool = False
@@ -376,11 +395,16 @@ class ProviderController:
             if storage in stored:
                 persisted.add(definition.id)
                 continue
-            # Alias-aware for the same reason ``resolve_env_key`` is: a login
-            # flavour declares no key name of its own, but the provider it
-            # stores under does, and that name is what the legacy file holds.
-            name = env_key_name(definition.id) or env_key_name(storage)
-            if name and name in legacy:
+            # ``credential_file_names`` rather than ``env_key_name`` because the
+            # latter answers only the plain-string ``env_keys`` form and returns
+            # ``None`` for the callable one — ``anthropic`` — so a key written by
+            # ``lop credential update ANTHROPIC_API_KEY`` matched no rung here
+            # and the phone served an empty sheet to an install the desktop
+            # listed 18 models for. It is alias-aware for the same reason
+            # ``resolve_env_key`` is: a login flavour declares no key name of its
+            # own, but the provider it stores under does, and that name is what
+            # the legacy file holds.
+            if any(name in legacy for name in credential_file_names(definition.id)):
                 persisted.add(definition.id)
         return persisted
 
@@ -1478,6 +1502,7 @@ class ProviderController:
                         provider=definition.id,
                         model_id=model_id,
                         label=model_label(definition.id, model_id, info.name or "").full,
+                        listing_name=info.name or "",
                         context_window=max(0, info.context_window or 0),
                         default_context_window=info.default_context_window,
                         max_context_window=info.max_context_window,
@@ -1515,6 +1540,7 @@ class ProviderController:
                             provider=definition.id,
                             model_id=model.id,
                             label=model_label(definition.id, model.id, model.name or "").full,
+                            listing_name=model.name or "",
                             context_window=max(0, model.context_window),
                             default_context_window=model.default_context_window,
                             max_context_window=model.max_context_window,
@@ -1532,6 +1558,7 @@ class ProviderController:
                             provider=definition.id,
                             model_id=model_id,
                             label=model_label(definition.id, model_id, info.name or "").full,
+                            listing_name=info.name or "",
                             context_window=max(0, info.context_window or 0),
                             default_context_window=info.default_context_window,
                             max_context_window=info.max_context_window,
@@ -1603,6 +1630,7 @@ class ProviderController:
             provider=definition.id,
             model_id=model_id,
             label=model_label(definition.id, model_id, name).full,
+            listing_name=name,
             context_window=context_window,
             default_context_window=default_window,
             max_context_window=maximum_window,
@@ -1752,6 +1780,7 @@ class ProviderController:
                         provider=definition.id,
                         model_id=model.id,
                         label=model_label(definition.id, model.id, model.name or "").full,
+                        listing_name=model.name or "",
                         context_window=max(0, model.context_window),
                         default_context_window=model.default_context_window,
                         max_context_window=model.max_context_window,

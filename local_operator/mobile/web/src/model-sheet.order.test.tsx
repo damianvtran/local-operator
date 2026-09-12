@@ -7,12 +7,23 @@
 // thrown away on arrival. A user hunting for `anthropic/claude-opus-5` scrolled
 // ~445 rows, roughly 45 phone screens, past a router's catalogue to reach it.
 //
-// Both halves of the fix are asserted HERE, against a real captured slice of the
-// daemon's ranked payload rather than a hand-written one: the server's order is
-// preserved by the render, and filtering preserves it too. This is also the
-// substitute for a pixel screenshot — see the PR: the browser extension is not
-// connected on this host, so the rendered DOM ORDER is what was actually
-// inspected, and no screenshot is claimed.
+// Both halves of the fix are asserted HERE, against rows captured from the
+// daemon's real ranked payload rather than hand-written ones: the server's order
+// is preserved by the render, and filtering preserves it too.
+//
+// THE FIXTURE'S PROVIDERS ARE INTERLEAVED ON PURPOSE, and that is load-bearing.
+// An earlier fixture held each provider in one contiguous run, which made
+// "group by provider" an IDENTITY transform on it — so the test named for the
+// regrouping regression could not observe it. Proven by mutation: re-inserting
+// the exact `byProvider` grouping the fix removed left all six tests green.
+// With providers interleaved (`xai, anthropic, zai, xai, …` within the direct
+// tier and the two routers alternating below it) grouping necessarily reorders
+// the list and the mutant fails. The direct-before-aggregated split is kept
+// intact so the ranking invariants stay real.
+//
+// These rows ARE real payload rows; only their sequence is arranged, because a
+// verbatim slice of `/api/models` is provider-contiguous (`rank_rows` sorts by
+// provider within a tier for an empty query) and so cannot catch this class.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -173,6 +184,99 @@ describe("filtering the sheet", () => {
 	);
 });
 
+describe("provider-qualified queries", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		document.body.innerHTML = "";
+	});
+
+	// The regression these cover: the predicate was a single `includes` over
+	// `` `${selector} ${name}` ``, and `selector` carries a SLASH, so the
+	// provider-then-model form a user naturally types on a headerless list
+	// matched nothing at all — `xai grok` went from 30 rows to 0, `anthropic
+	// claude` from 19 to 0. Both fail against a selector-only substring
+	// predicate and pass against the shared token matcher.
+	it.each([
+		["xai grok", "xai"],
+		["anthropic claude", "anthropic"],
+	])("finds rows for %s and leads with the direct route", async (query, provider) => {
+		render(
+			<ModelSheet
+				open
+				onClose={() => {}}
+				pid="1"
+				projection={projection}
+			/>,
+		);
+		await screen.findByText(models[0].name);
+
+		fireEvent.change(screen.getByPlaceholderText("filter models"), {
+			target: { value: query },
+		});
+
+		const order = renderedOrder();
+		expect(order.length).toBeGreaterThan(0);
+		expect(order[0].split("/")[0]).toBe(provider);
+		expect(lastDirectIndex(order)).toBeLessThan(firstAggregatedIndex(order));
+	});
+
+	it("narrows with each token rather than widening", async () => {
+		render(
+			<ModelSheet
+				open
+				onClose={() => {}}
+				pid="1"
+				projection={projection}
+			/>,
+		);
+		await screen.findByText(models[0].name);
+
+		const input = screen.getByPlaceholderText("filter models");
+		fireEvent.change(input, { target: { value: "claude" } });
+		const broad = renderedOrder().length;
+		fireEvent.change(input, { target: { value: "claude opus" } });
+		const narrow = renderedOrder().length;
+
+		expect(narrow).toBeGreaterThan(0);
+		expect(narrow).toBeLessThan(broad);
+	});
+});
+
+describe("the model row's text", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		document.body.innerHTML = "";
+	});
+
+	// D1: an aggregated row used to render its raw slug, because the row was
+	// labelled from `CatalogueEntry.label` and `model_label()` deliberately
+	// refuses a reseller's name there. The phone's row carries the provider
+	// separately, so it renders the human name and keeps `label` as the TUI
+	// spells it — the parity contract, which this asserts is unchanged.
+	it("shows an aggregated row's human name, not its slug", async () => {
+		const aggregated = models.find((m) => m.aggregated);
+		expect(aggregated).toBeDefined();
+		if (!aggregated) return;
+		// The daemon sends the listing's own name; `label` still degrades to the
+		// selector for a reseller, exactly as the desktop receives it.
+		expect(aggregated.name).not.toContain("/");
+		expect(aggregated.label).toBe(aggregated.selector);
+
+		render(
+			<ModelSheet
+				open
+				onClose={() => {}}
+				pid="1"
+				projection={projection}
+			/>,
+		);
+		await screen.findByText(models[0].name);
+
+		expect(screen.getAllByText(aggregated.name).length).toBeGreaterThan(0);
+		expect(screen.queryByText(aggregated.selector)).toBeNull();
+	});
+});
+
 describe("the new-session model picker", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -189,5 +293,30 @@ describe("the new-session model picker", () => {
 		const order = renderedOrder();
 		expect(order).toEqual(models.map((m) => m.selector));
 		expect(AGGREGATORS.has(order[0].split("/")[0])).toBe(false);
+	});
+
+	it("uses the same provider-qualified matching as the sheet", async () => {
+		render(<NewSessionScreen />);
+		fireEvent.click(await screen.findByText("default"));
+
+		fireEvent.change(await screen.findByPlaceholderText("filter models"), {
+			target: { value: "xai grok" },
+		});
+
+		const order = renderedOrder();
+		expect(order.length).toBeGreaterThan(0);
+		expect(order[0].split("/")[0]).toBe("xai");
+	});
+
+	it("accounts for an empty result instead of rendering a bare default row", async () => {
+		render(<NewSessionScreen />);
+		fireEvent.click(await screen.findByText("default"));
+
+		fireEvent.change(await screen.findByPlaceholderText("filter models"), {
+			target: { value: "zzzznomatch" },
+		});
+
+		expect(renderedOrder()).toHaveLength(0);
+		expect(screen.getByText(/no matching models/)).toBeTruthy();
 	});
 });

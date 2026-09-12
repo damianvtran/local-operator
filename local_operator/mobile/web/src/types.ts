@@ -277,28 +277,30 @@ export interface SlashCommand {
  *
  * The fields below `name` are additive; `selector`, `provider`, `model_id` and
  * `name` keep the meanings they always had, so a stale cached bundle still
- * renders against a current daemon. */
+ * renders against a current daemon.
+ *
+ * The field set is deliberately WHAT THE PHONE RENDERS. An earlier revision also
+ * shipped `routed`, `context_window`, `input_price` and `output_price` as a
+ * forward contract; no `.tsx` read any of them and they cost 159 KB of a 301 KB
+ * response on a mobile link. Add a field back here and on the daemon's row when
+ * a surface actually renders it — a payload is not free just because it is
+ * additive. */
 export interface ModelEntry {
 	selector: string;
 	provider: string;
 	model_id: string;
-	/** The model's display name, falling back to its id. */
+	/** The model's display name — the listing's own, falling back to its id. */
 	name: string;
-	/** The picker's resolved label — equal to `selector` when no name can be
-	    vouched for (always so for a reseller, whose listing names cannot say
-	    which route is answering). */
+	/** The picker's resolved label, exactly as the desktop spells it — equal to
+	    `selector` when no name can be vouched for (always so for a reseller,
+	    whose listing names cannot say which route is answering). This is the
+	    parity contract, not a display string; render `name`. */
 	label?: string;
 	/** Whether the provider has a credential that can run this model now. */
 	connected?: boolean;
 	/** The provider RESELLS this model rather than serving it; the direct route
 	    for the same model ranks ahead of it. */
 	aggregated?: boolean;
-	/** A META-ROUTE whose price depends on the model it dispatches to. */
-	routed?: boolean;
-	context_window?: number;
-	/** Per-million-token prices. `-1` means unknown, `0` means free. */
-	input_price?: number;
-	output_price?: number;
 }
 
 export interface PastSession {

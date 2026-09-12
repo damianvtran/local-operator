@@ -2338,8 +2338,22 @@ def test_persisted_providers_includes_a_stored_login(controller, store, monkeypa
     assert "anthropic" in persisted
 
 
+@pytest.mark.parametrize(
+    ("key_name", "provider_id"),
+    [
+        # The plain-string ``env_keys`` form.
+        ("OPENROUTER_API_KEY", "openrouter"),
+        ("OPENAI_API_KEY", "openai"),
+        # The CALLABLE form. Parametrizing over both forms is the point of this
+        # case rather than tidiness: a reader built on ``env_key_name`` alone
+        # resolves every string provider and silently drops the callable one, so
+        # a single string-keyed case passes over a reader that loses the only
+        # provider using the other form.
+        ("ANTHROPIC_API_KEY", "anthropic"),
+    ],
+)
 def test_persisted_providers_includes_a_legacy_credential_manager_key(
-    controller, monkeypatch, tmp_path
+    controller, monkeypatch, tmp_path, key_name, provider_id
 ) -> None:
     """``lop credential update`` writes the legacy file, ``/login`` writes auth.db.
 
@@ -2351,12 +2365,12 @@ def test_persisted_providers_includes_a_legacy_credential_manager_key(
     for name in _USAGE_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     manager = CredentialManager(tmp_path)
-    manager.set_credential("OPENROUTER_API_KEY", "sk-or-persisted")
+    manager.set_credential(key_name, "sk-persisted")
     controller.credential_manager = manager
 
     persisted = controller.persisted_providers()
     assert persisted is not None
-    assert "openrouter" in persisted
+    assert provider_id in persisted
 
 
 def test_persisted_providers_ignores_an_empty_legacy_value(

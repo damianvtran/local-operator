@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getModels, sendCommand } from "../api";
 import { cn } from "../lib/cn";
+import { filterModels } from "../lib/model-filter";
 import type { ModelEntry, SessionProjection } from "../types";
 import { Sheet } from "./ui/sheet";
 
@@ -34,32 +35,32 @@ export function ModelSheet({
 
 	useEffect(() => {
 		if (!open) return;
+		/* A reopened sheet starts from the FULL ranked list. The filter is
+		   component state that used to survive a close, so selecting a model and
+		   reopening restored the previous query and its short subset — which on a
+		   phone reads as the very bug this surface exists to fix (a short,
+		   unrepresentative list), arrived at by another route. */
+		setFilter("");
+		setError("");
 		getModels()
-			.then((r) => setModels(r.models))
-			.catch(() => setModels([]));
+			.then((r) => {
+				setModels(r.models);
+			})
+			.catch((e) => {
+				/* The daemon's message, not an empty list. It composes a precise,
+				   actionable one — "Model catalogue unavailable for Radient; retry
+				   or log in again" — and discarding it rendered a 502 as "no
+				   matching models", telling a user whose token expired that their
+				   filter matched nothing. */
+				setModels([]);
+				setError(String((e as Error).message ?? e));
+			});
 	}, [open]);
 
-	/* An order-PRESERVING substring filter over the selector — `Array.filter`
-	   keeps the server's ranking, so the best route for a query still leads.
-	   Matched on `selector` because that is the string the user is typing
-	   toward (`opus`, `anthropic/`, `glm`) and the same string the server ranks
-	   on; the name is included so a model findable by its display name stays
-	   findable.
-
-	   The desktop picker's SUBSEQUENCE fallback (which resolves `anthopus` and
-	   `sonnet4`) is deliberately not ported. It is the tie-breaking half of a
-	   ranking, and re-implementing scoring here would be a second, drifting
-	   copy of `model/ranking.py`; substring alone already leads every query
-	   with the direct route because the server ordered the array. A query that
-	   needs fuzzy matching is one keystroke from a substring match on a phone
-	   keyboard, which is not the trade a duplicated ranker is worth. */
-	const filtered = useMemo(() => {
-		const q = filter.trim().toLowerCase();
-		if (!q) return models;
-		return models.filter((m) =>
-			`${m.selector} ${m.name}`.toLowerCase().includes(q),
-		);
-	}, [models, filter]);
+	/* Order-PRESERVING: `Array.filter` keeps the server's ranking, so the best
+	   route for a query still leads. The predicate itself lives in
+	   `lib/model-filter` because `#/new` needs the identical one. */
+	const filtered = useMemo(() => filterModels(models, filter), [models, filter]);
 
 	const choose = async (m: ModelEntry) => {
 		try {
@@ -100,10 +101,16 @@ export function ModelSheet({
 							onClick={() => void choose(m)}
 							className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 						>
+							{/* The slot is always reserved so nothing shifts, but only
+							    the CURRENT row paints a dot. The inert `bg-hairline`
+							    dot sat a few values off the sheet surface — barely
+							    separable from the background, so the column read as an
+							    8px indent rather than a state column — while giving
+							    the one meaningful dot 995 decoys to compete with. */}
 							<span
 								className={cn(
 									"size-2 shrink-0 rounded-full",
-									current ? "bg-accent" : "bg-hairline",
+									current && "bg-accent",
 								)}
 								aria-hidden
 							/>
@@ -122,8 +129,13 @@ export function ModelSheet({
 					);
 				})}
 				{filtered.length === 0 ? (
+					/* Name the recovery rather than stating a verdict: with the
+					   provider headers gone there is no visible inventory left to
+					   scan as a fallback, so "no matching models" alone leaves
+					   guessing at another query as the only way out. */
 					<p className="px-3 py-2 text-body-sm text-ink-dim">
-						no matching models
+						no matching models — try a provider (anthropic, xai) or a
+						model name (opus, glm)
 					</p>
 				) : null}
 			</div>
