@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamModelEvent,
     StreamReasoningDelta,
     StreamStartEvent,
+    StreamUsageEvent,
 )
 from local_operator.model.effort import EFFORT_ORDER, resolve_effort_in
 
@@ -215,6 +216,45 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
     "readtimeout",
     "writetimeout",
     "remoteprotocolerror",
+)
+
+#: The only stream events that may be forwarded WITHOUT making an attempt
+#: non-retryable inside :func:`stream_with_failover`.
+#:
+#: ``forwarded_any`` means exactly one thing: the caller has been handed output
+#: that cannot be un-shown, so replaying this attempt would stream it twice.
+#: Every member here fails that test — it carries NOTHING the caller has seen:
+#:
+#: * ``StreamStartEvent`` is a boundary marker announcing that the provider
+#:   began. Counting it would make every failure landing after acceptance but
+#:   before the first token non-retryable (Anthropic 529s, in-band error chunks
+#:   on a 200 stream), bypassing credential rotation and the whole fallback
+#:   chain. It would also misreport a pre-content transport death as a
+#:   MID-STREAM loss, which is what :func:`is_mid_stream_connectivity_loss`
+#:   infers from this very flag.
+#: * ``StreamReasoningDelta`` carries the model's private reasoning, which
+#:   NOTHING renders: the loop appends text only for its visible channel, no
+#:   frontend handler exists, and the transcript never sees it. Counting it
+#:   re-breaks the case above for the reasoning families this harness runs.
+#: * ``StreamUsageEvent`` carries the provider's token accounting for the call
+#:   so far, which is METADATA and not content: it renders nothing, joins no
+#:   transcript, and its consumers document it as one report per provider call
+#:   (see ``Session.complete_aside``) — so a retry that reports again is
+#:   reporting a second real call, not repeating the first. Only the
+#:   OpenAI-compatible and Responses clients emit usage before the end of a
+#:   stream, which bounds where a lone event can be the FIRST thing forwarded.
+#:
+#: An ALLOWLIST of "safe to retry", deliberately, rather than a list of the
+#: events that count as seen: the two differ in how a FUTURE event type fails.
+#: An unlisted type counts as seen, so a type nobody listed costs at most the
+#: pre-existing behaviour — a retry that was available but not taken — never a
+#: delta the user reads twice. Add a member only after checking every consumer
+#: on the caller's side of the driver for a render, a transcript entry, or
+#: another durable effect.
+_RETRY_SAFE_STREAM_EVENTS: tuple[type[StreamEvent], ...] = (
+    StreamStartEvent,
+    StreamReasoningDelta,
+    StreamUsageEvent,
 )
 
 
@@ -2720,31 +2760,11 @@ async def stream_with_failover(
                     # ``forwarded_any`` gates retry, and it means exactly one
                     # thing: the caller has SEEN output that cannot be un-shown,
                     # so replaying this attempt would stream deltas twice.
-                    # Two events show the user nothing and are carved out for
-                    # that reason:
-                    #
-                    # * ``StreamStartEvent`` is a boundary marker announcing that
-                    #   the provider began. Counting it would make every failure
-                    #   that lands after acceptance but before the first token
-                    #   non-retryable (Anthropic 529s, in-band error chunks on a
-                    #   200 stream), bypassing credential rotation and the whole
-                    #   fallback chain. It would also misreport a pre-content
-                    #   transport death as a MID-STREAM loss, which is what
-                    #   ``is_mid_stream_connectivity_loss`` infers from this very
-                    #   flag.
-                    # * ``StreamReasoningDelta`` carries the model's private
-                    #   reasoning, which NOTHING renders: the loop appends text
-                    #   only for its visible channel, no frontend handler exists,
-                    #   and the transcript never sees it. Counting it would
-                    #   reintroduce exactly the bug above, but only for models
-                    #   that think before they answer -- the reasoning families
-                    #   this harness runs -- so a pre-content 5xx after the first
-                    #   reasoning chunk would stop rotating credentials and stop
-                    #   walking the fallback chain, and a pre-content transport
-                    #   death would be misreported as a mid-stream loss.
-                    #
-                    # Nothing has been rendered, so nothing blocks a retry.
-                    if not isinstance(event, (StreamStartEvent, StreamReasoningDelta)):
+                    # ``_RETRY_SAFE_STREAM_EVENTS`` names the only events that
+                    # carry nothing the caller has seen and therefore block
+                    # nothing; it holds the criterion, the members and the reason
+                    # the test is an allowlist rather than a list of what counts.
+                    if not isinstance(event, _RETRY_SAFE_STREAM_EVENTS):
                         forwarded_any = True
                     yield stamped
                 # This selector just answered: from here on an unknown-model
