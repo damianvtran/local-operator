@@ -9,6 +9,7 @@ import {
 import { Markdown } from "../components/markdown";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
+import { Button } from "../components/ui/button";
 import { WorkingLine } from "../components/working-line";
 import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
@@ -461,12 +462,14 @@ interface LazyTranscript {
 	/** A fetch is in flight and nothing has landed yet: the body shows its
 	 * loading affordance instead of a blank window (U2). */
 	loading: boolean;
-	/** The (single, for a settled child) fetch failed and no entries are shown:
-	 * the body must surface an error + retry rather than a silent blank (U1). */
+	/** The (single, for a settled child) fetch failed: the body must surface an
+	 * error + retry under whatever rows exist, rather than a silent blank (U1).
+	 * Mutually exclusive with ``unavailable``, so the newest fetch decides. */
 	failed: boolean;
 	/** The route answered 404: this child has no readable transcript (the daemon
 	 * could not resolve its session dir). Terminal, not a link drop — a retry
-	 * can never succeed, so the body must say so instead of offering one. */
+	 * can never succeed, so the body must say so instead of offering one.
+	 * Mutually exclusive with ``failed`` (see the catch branch). */
 	unavailable: boolean;
 	/** Imperative re-pull for the retry affordance. */
 	retry: () => void;
@@ -545,7 +548,13 @@ function useLazySubagentTranscript(
 					setFailed(false);
 					return;
 				}
+				/* The two flags are mutually exclusive so neither sticks: a transient
+				   drop is a fact about this link, not about the child, and the LAST
+				   fetch is what the body must describe (NIT-1). Without this clear a
+				   child that 404'd once kept the terminal card — and lost its Retry —
+				   even after the route started answering again. */
 				setFailed(true);
+				setUnavailable(false);
 			}
 		};
 		void pull();
@@ -566,6 +575,7 @@ function useLazySubagentTranscript(
 	const retry = () => {
 		setLoading(true);
 		setFailed(false);
+		setUnavailable(false);
 		setAttempt((n) => n + 1);
 	};
 	if (inlined) {
@@ -574,12 +584,12 @@ function useLazySubagentTranscript(
 	return { entries: fetched, loading, failed, unavailable, retry };
 }
 
-/** The body shown when a settled child's single transcript fetch failed and no
- * entries are on screen (U1). Without this the body was a permanent blank on a
- * transient link drop, with no signal anything failed and no way to recover
- * short of navigating away — the exact flaky-link case this surface targets.
- * The Outcome/todos tail still renders below via ``tailContent``; this only
- * fills the empty transcript window with a reason and an in-place retry.
+/** The body shown when the child's own transcript is not on screen, whether
+ * that is a fetch in flight, a dropped fetch, or a terminal 404 (U1/U2).
+ * Without this the body was a permanent blank on a transient link drop, with no
+ * signal anything failed and no way to recover short of navigating away — the
+ * exact flaky-link case this surface targets. The Outcome/todos tail still
+ * renders below it, because that tail is detail, not transcript.
  *
  * ``unavailable`` is the terminal sibling: a 404 means there is nothing to
  * fetch, so the same card must not offer a Retry that cannot succeed — it says
@@ -598,36 +608,38 @@ function TranscriptFetchError({
 }) {
 	if (unavailable) {
 		return (
-			<div role="alert" className="flex flex-col items-start gap-2 py-4">
-				<p className="text-body-sm font-medium text-ink">Conversation not available.</p>
-				<p className="text-meta text-ink-dim">
-					This agent has no saved transcript to show.
-				</p>
-				<button
-					type="button"
-					onClick={() => navigate(parentPath)}
-					className="min-h-11 rounded-sm border border-control px-3 text-body-sm active:bg-elevated"
-				>
-					Back to parent
-				</button>
+			<div className="flex flex-col items-start gap-2 py-4">
+				{/* The live region is the TEXT, not the card: wrapping the card put
+				   the button inside an alert with an empty accessible name (D4),
+				   which announces a control as part of the message. The same shape
+				   ``AgentUnavailable`` uses. */}
+				<div role="alert">
+					<p className="text-body-sm font-medium text-ink">No transcript for this agent.</p>
+					<p className="text-meta text-ink-dim">
+						Its conversation steps couldn't be read, so only the result and activity below
+						are shown.
+					</p>
+				</div>
+				{/* ``navigateUp``, not ``navigate``: the identically-labelled control in
+				   the header replaces the hierarchy fallback rather than pushing it
+				   (router.ts documents the rule), so on a deep-linked child the dead
+				   child must not stay as the predecessor the phone's Back key returns
+				   to (D2). */}
+				<Button onClick={() => navigateUp(parentPath)}>Back to parent</Button>
 			</div>
 		);
 	}
 	return (
-		<div role="alert" className="flex flex-col items-start gap-2 py-4">
-			<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
-			<p className="text-meta text-ink-dim">
-				{connected
-					? "The conversation steps didn't load. Retry to pull them again."
-					: "You're offline. Reconnecting will retry automatically."}
-			</p>
-			<button
-				type="button"
-				onClick={onRetry}
-				className="min-h-11 rounded-sm border border-control px-3 text-body-sm active:bg-elevated"
-			>
-				Retry
-			</button>
+		<div className="flex flex-col items-start gap-2 py-4">
+			<div role="alert">
+				<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
+				<p className="text-meta text-ink-dim">
+					{connected
+						? "The conversation steps didn't load. Retry to pull them again."
+						: "You're offline. Reconnecting will retry automatically."}
+				</p>
+			</div>
+			<Button onClick={onRetry}>Retry</Button>
 		</div>
 	);
 }
@@ -669,12 +681,22 @@ export function AgentConversation({
 		[detail, transcript],
 	);
 	const entries = useMemo(() => agentConversationEntries(detailForRender), [detailForRender]);
-	// The transcript body owns three off-happy-path states when the wire carries
-	// no entries: a fetch in flight (loading affordance, not a blank window —
-	// U2), a settled child whose one fetch failed (visible error + retry so it is
-	// recoverable in place, never a silent blank — U1), or genuinely empty. The
-	// header/outcome above stay put; only the BODY reflects these.
-	const emptyBody = unavailable ? (
+	// The transcript body owns three off-happy-path states when the child's own
+	// transcript is not on screen: a fetch in flight (loading affordance, not a
+	// blank window — U2), a settled child whose one fetch failed (visible error +
+	// retry so it is recoverable in place, never a silent blank — U1), or
+	// genuinely empty. The header/outcome above stay put; only the BODY reflects
+	// these.
+	//
+	// Keyed on the FETCH, never on whether rows are on screen. The parent's
+	// launch prompt is synthesized into a ``parent_message`` head row by
+	// ``agentConversationEntries``, so a launched child — i.e. nearly every child
+	// this screen exists for — renders a row even while its transcript is
+	// unreadable or still in flight. Deriving these states from an empty body
+	// made the terminal card and the Retry card unreachable for exactly that
+	// shape (D1/Q1, Q2), so ``emptyContent`` is now only for a body with nothing
+	// in it at all and the rows get the state underneath them.
+	const fetchState = unavailable ? (
 		<TranscriptFetchError
 			connected={connected}
 			unavailable
@@ -693,6 +715,7 @@ export function AgentConversation({
 			<TranscriptLoading connected={connected} />
 		</div>
 	) : null;
+	const hasRows = entries.length > 0;
 	return (
 		<>
 			<AgentHeader
@@ -710,8 +733,16 @@ export function AgentConversation({
 				pid={sessionId}
 				jobId={jobId}
 				entries={entries}
-				tailContent={<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />}
-				emptyContent={emptyBody}
+				tailContent={
+					<>
+						{/* The notice belongs to the rows it explains, so it sits after them
+						   and above the result/activity tail (D1); the launch row stays as
+						   context rather than being suppressed to make room for it. */}
+						{hasRows ? fetchState : null}
+						<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />
+					</>
+				}
+				emptyContent={hasRows ? null : fetchState}
 			/>
 			{detail.status === "running" ? (
 				<footer className="flex min-h-11 items-center justify-between border-t border-hairline bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">

@@ -1308,9 +1308,14 @@ class ServingSessionHandle(SessionHandle):
         # the next event arrives this push is all a freshly attached phone
         # renders, and a settled turn never sends another: without this an
         # already-finished child stays unroutable (``session_id=None``) for as
-        # long as the session is quiet. ``_refresh_state`` is idempotent and
-        # only fills non-None fields, so seeding here cannot clobber the
-        # identity fields the projection already carries.
+        # long as the session is quiet. Seeding cannot clobber the identity
+        # fields the projection already carries, but not because of
+        # ``set_state``'s None-skipping — ``set_subagent_details`` assigns every
+        # roster field unconditionally, ``row.session_id`` included, and bumps
+        # the version. It is safe because both sides read the SAME registry: the
+        # fold's rows and the seed's nodes each describe one child from
+        # ``SubagentComms``, so the republish writes the values the row already
+        # held.
         self._refresh_state()
         return unsubscribe
 
