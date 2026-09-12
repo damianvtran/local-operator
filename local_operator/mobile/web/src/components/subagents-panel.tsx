@@ -142,7 +142,29 @@ export function AgentRoster({
 				embedded ? "pt-1" : "px-3",
 			)}
 			header={
-				<span className="text-body-sm text-ink-muted">
+				/* A FLEX line, not inline text, so the row has an explicit order of
+				   who yields first. Held shut, this row carries three claims on one
+				   44px line — label + running count, the failure count, and the
+				   `· answer first` hint — and at 360px wide (a supported viewport)
+				   they add up to within ~6px of the width. Something has to give. As
+				   inline text nothing could: `truncate` needs a block box to clip, so
+				   the label just wrapped, and the LAST inline content — the danger
+				   count — was what broke across two lines at a two-digit count
+				   (`· 10 failed`), the one glyph U5 and D4 exist to protect. Flex lets
+				   the label absorb the pressure instead.
+
+				   `relative` restores the PAINT ORDER that inline text got for free.
+				   Below the viewport ladder the column is height-starved, this panel's
+				   container collapses to ~12px and the pending card — a LATER sibling —
+				   overlaps the row. As inline content the header always drew above that
+				   card's background, because CSS paints in-flow block backgrounds before
+				   inline content. Flex blockifies these children and moves them into the
+				   block phase, where tree order decides and the later card wins:
+				   measured at 320x568, the count went to 0 painted danger-red pixels
+				   while keeping its box. Positioning lifts the row back above in-flow
+				   block backgrounds; no z-index, since paint phase is the whole
+				   problem. */
+				<span className="relative flex min-w-0 items-baseline gap-1 text-body-sm text-ink-muted">
 					{/* The held-shut dim is applied per PART, and the failure count
 					    is deliberately a SIBLING of the dimmed span rather than a
 					    child of it: opacity composites the whole subtree, so a dim
@@ -150,16 +172,25 @@ export function AgentRoster({
 					    measured from the painted frame (design D4). The label and
 					    running count may fade, because a pending card already
 					    implies the roster is held; a failed fan-out may not, and it
-					    matters most while a decision is waiting. */}
-					<span className={cn(forceCollapsed && HELD_DIM)}>
+					    matters most while a decision is waiting.
+
+					    `min-w-0 truncate` makes the label the span that YIELDS: it is
+					    the only one here that degrades gracefully, because a clipped
+					    label still reads and the tail it loses is recoverable by
+					    opening the panel. This is the mechanism the hint's `shrink-0`
+					    in `disclosure.tsx` already assumes exists. */}
+					<span className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
 						{label}{" "}
 						<span className="font-mono text-mono-sm text-ink-dim">
 							{running}/{direct.length} running
 						</span>
 					</span>
 					{failed > 0 ? (
-						<span className="font-mono text-mono-sm text-danger">
-							{" "}· {failed} failed
+						/* `shrink-0 whitespace-nowrap`: the count is the row's least
+						   expendable token, so it neither shrinks nor breaks between
+						   `10` and `failed`. Undimmed at 7.08:1 per D4. */
+						<span className="shrink-0 font-mono text-mono-sm whitespace-nowrap text-danger">
+							· {failed} failed
 						</span>
 					) : null}
 				</span>

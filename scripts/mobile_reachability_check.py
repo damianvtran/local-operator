@@ -194,6 +194,28 @@ PIN_COLUMN_JS = """
 """
 
 
+# Undo PIN_COLUMN_JS. A re-`goto` cannot do this: the app is a hash-router SPA,
+# so navigating to the same `#/s/...` is a SAME-DOCUMENT navigation that never
+# reloads, and the pin — inline style on a live DOM node — survives it
+# (measured: the column stayed 508px after the re-goto). Clearing the property
+# and the custom property is the only thing that actually restores the column,
+# and the caller asserts the restore rather than trusting it, because a pin that
+# silently outlives its block makes every later measurement read a stale column.
+UNPIN_COLUMN_JS = """
+(() => {
+  const col = document.querySelector('[class*="h-dvh"]');
+  if (!col) return JSON.stringify({ ok: false });
+  col.style.removeProperty('height');
+  col.style.removeProperty('--lo-vvh');
+  return JSON.stringify({
+    ok: true,
+    clientH: col.clientHeight,
+    innerH: window.innerHeight,
+  });
+})()
+"""
+
+
 def reach_detail(got: dict[str, Any] | None) -> str:
     """Render a control's reachability so a FAIL says which half failed.
 
@@ -204,7 +226,7 @@ def reach_detail(got: dict[str, Any] | None) -> str:
     """
     if not got:
         return "control absent"
-    detail = f"{got['visible']}/{TAP_FLOOR}px visible (height {got['h']}px)," f" hit={got['hit']}"
+    detail = f"{got['visible']}/{TAP_FLOOR}px visible (height {got['h']}px), hit={got['hit']}"
     if not got["hit"]:
         detail += f" — centre lands on {got['hitText']!r}"
     return detail
@@ -285,8 +307,16 @@ def main() -> None:
                     f" column clientH={m['column'] and m['column']['clientH']}",
                 )
             # Unpin, so the R1 block below starts from the same state it always
-            # did rather than inheriting this block's last keyboard.
-            page.goto(f"{base}/#/s/approval")
+            # did rather than inheriting this block's last keyboard. Checked,
+            # not assumed: R1's first act happens to re-pin, so a reset that
+            # silently did nothing would go unnoticed here and mislead whoever
+            # inserts a check between the two blocks.
+            unpinned = json.loads(page.js(UNPIN_COLUMN_JS))
+            check(
+                f"R2 {vp} column unpinned before R1",
+                unpinned["ok"] and unpinned["clientH"] == unpinned["innerH"],
+                f"column clientH={unpinned.get('clientH')} innerH={unpinned.get('innerH')}",
+            )
 
             # R1: the keyboard divergence, driven the way the app drives it.
             for kb in KEYBOARD_HEIGHTS:
