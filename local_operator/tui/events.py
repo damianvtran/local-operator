@@ -106,10 +106,18 @@ class TurnEnded(SessionEvent):
         context_tokens: int = 0,
         usage: Any = None,
         context_is_estimate: bool = False,
+        cut_off: bool = False,
     ) -> None:
         super().__init__()
         self.aborted = aborted
         self.error = error
+        #: True when the session CLASSIFIED this end as an involuntary cut-off
+        #: (``AgentEndEvent.cut_off_cause``). A distinct fact from ``aborted``,
+        #: and the only one that can tell a runtime death apart from the user's
+        #: own cancel: the taxonomy reports both as an aborted end, with the
+        #: cut-off carrying an error notice beside it. Consumers that need the
+        #: WORD (the stranded ledger cards) read this.
+        self.cut_off = cut_off
         self.context_tokens = context_tokens
         self.usage = usage
         self.context_is_estimate = context_is_estimate
@@ -784,6 +792,11 @@ class EventController:
                 context_tokens=(settled_context if settled_context is not None else context_tokens),
                 usage=usage,
                 context_is_estimate=settled_context is not None,
+                # The classifier's verdict, carried beside the outcome it
+                # rewrote: `_classify_cut_off` reports a cut-off as
+                # `aborted=False, error=<notice>`, so the fact that this was an
+                # involuntary stop exists nowhere else on the wire.
+                cut_off=bool(getattr(event, "cut_off_cause", "") or getattr(event, "cut_off", "")),
             )
         )
 

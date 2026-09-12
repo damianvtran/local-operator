@@ -3417,6 +3417,11 @@ class OperatorApp(App[None]):
         #: dropped, because a row from a conversation the user can no longer
         #: see must never be stamped with a later outcome's anchor.
         self._own_interrupt_notice: NoticeBlock | None = None
+        #: The outcome kind the held notice was painted for, so the adoption
+        #: can refuse a publication about a DIFFERENT outcome. Carried with the
+        #: block through the presentation (see
+        #: ``SessionPresentation.own_interrupt_kind``).
+        self._own_interrupt_kind: str = ""
         #: Controllers that were replaced by a swap which KEPT the transcript,
         #: so a steer receipt still in flight from one of them is about a row
         #: this app is still holding and must still settle it (review round 1,
@@ -4903,6 +4908,7 @@ class OperatorApp(App[None]):
             deferred_steer_notices=self._deferred_steer_notices,
             held_steer_blocks=self._held_steer_blocks,
             own_interrupt_notice=self._own_interrupt_notice,
+            own_interrupt_kind=self._own_interrupt_kind,
             welcome=self._welcome,
             welcome_visible=self._welcome_visible,
         )
@@ -4936,6 +4942,7 @@ class OperatorApp(App[None]):
         # outcome anchor is still coming, and an app that forgot it would let
         # the poller print a second `Interrupted` under the live row on return.
         self._own_interrupt_notice = presentation.own_interrupt_notice
+        self._own_interrupt_kind = presentation.own_interrupt_kind
         self._welcome = presentation.welcome
         self._welcome_visible = None
         # Gesture tasks belong to the abandoned viewport, not its history.
@@ -11340,6 +11347,7 @@ class OperatorApp(App[None]):
         # where the other row references are dropped rather than relying on a
         # downstream guard to notice.
         self._own_interrupt_notice = None
+        self._own_interrupt_kind = ""
         # And the takeover allowance, which only ever protects rows: with the
         # rows gone there is nothing left for a superseded controller's receipt
         # to settle, and an entry outliving them would re-open the very race
@@ -19100,6 +19108,7 @@ class OperatorApp(App[None]):
         # waiting for has nothing left to land on. Dropped here for the same
         # reason as the rows above: a reference outliving its widget.
         self._own_interrupt_notice = None
+        self._own_interrupt_kind = ""
         # Same reason as the swap path: the allowance exists only to let a
         # takeover's in-flight receipt reach a row that is still on screen.
         self._superseded_steer_controllers.clear()
@@ -19775,16 +19784,28 @@ class OperatorApp(App[None]):
     def _adopt_own_interrupt_notice(self, kind: str, anchor: str) -> bool:
         """Stamp a published outcome onto the row this app already painted.
 
-        Returns True when the held `interrupted` row IS the announcement of
-        this outcome, so the caller must not append its own. The row keeps its
-        own wording (`interrupted`, `warning`): it is the live, turn-scoped
-        statement and restating it as the poller's dimmer `Interrupted` would
-        rewrite a row the user has already read for no gain.
+        Returns True when the held outcome row IS the announcement of this
+        outcome, so the caller must not append its own. The row keeps its own
+        wording (the live `interrupted`/error sentence): it is the live,
+        turn-scoped statement and restating it as the poller's dimmer
+        `Interrupted`/`Stopped with an error` would rewrite a row the user has
+        already read for no gain.
 
-        ONLY for `interrupted`. An `error` outcome is a different fact and the
-        live row for it says something else, so a stopped-with-an-error
-        publication must still get its own row rather than silently borrowing
-        the interruption's.
+        BOTH KINDS, and the kind must MATCH. This used to accept only
+        `interrupted`, on the reasoning that an `error` outcome "is a different
+        fact" whose live row says something else — true, but it left the live
+        error row and the poller's `Stopped with an error` both standing, so
+        every turn that ended with a provider error painted the failure TWICE.
+        The duplicate is not a new defect of the cut-off work: it is the same
+        one-interruption-two-rows shape the aborted branch already fixed, on the
+        branch that never got the fix (`_own_interrupt_notice` was only ever
+        set in the aborted branch). Adopting an error row is correct for the
+        same reason it is correct for an interruption: one outcome, one row.
+
+        The kind guard stays, because a MISMATCH is a real disagreement — a held
+        `interrupted` row must not be stamped with an error's anchor, or the
+        poller's error notice would be suppressed in favour of a row that says
+        something else.
 
         The row must still be MOUNTED. A `/clear` or a session swap removes it
         while this reference survives to the next tick, and stamping an anchor
@@ -19800,7 +19821,9 @@ class OperatorApp(App[None]):
         outcome was on screen the whole time.
         """
         block = self._own_interrupt_notice
-        if kind != "interrupted" or block is None:
+        if kind not in {"interrupted", "error"} or block is None:
+            return False
+        if self._own_interrupt_kind and self._own_interrupt_kind != kind:
             return False
         if block not in self._transcript_view().blocks():
             # NOT consumed. Clearing the reference before this test burnt it on
@@ -19815,6 +19838,7 @@ class OperatorApp(App[None]):
         # Consumed only once it has actually been stamped: one outcome, one
         # adoption, and a later publication must get its own row.
         self._own_interrupt_notice = None
+        self._own_interrupt_kind = ""
         block.completion_anchor_id = anchor
         return True
 
@@ -20517,6 +20541,7 @@ class OperatorApp(App[None]):
         self.run_worker(run(), group="background-notify")
 
     async def _poll_completion_attention(self) -> None:
+        from local_operator.harness.rows import completion_notice
         from local_operator.tui.attention import terminal_is_foreground
 
         # BEFORE the guards below, which are about the ATTACHED session's read
@@ -20566,9 +20591,17 @@ class OperatorApp(App[None]):
                     # away, where no live row was ever painted here.
                     if self._adopt_own_interrupt_notice(state["kind"], anchor):
                         return  # Let the committed frame paint before measuring it.
-                    block = NoticeBlock(
-                        "Stopped with an error" if state["kind"] == "error" else "Interrupted"
+                    # The words AND the tier come from `harness/rows.py`, the
+                    # module that owns this row on both surfaces. Passing no kind
+                    # painted the error branch in the quiet `info` tier — a
+                    # cut-off came back as a dim `·` whisper, in the ink of the
+                    # routine `Interrupted` control one branch down, while the
+                    # live row for the same event is `✗` danger (design review
+                    # round 1, D1; UX U4).
+                    text, severity = completion_notice(
+                        str(state["kind"]), str(state.get("reason") or "")
                     )
+                    block = NoticeBlock(text, cast(NoticeKind, severity))
                     block.completion_anchor_id = anchor
                     self._append_block(block)
                     return  # Let the committed frame paint before measuring it.
@@ -26408,6 +26441,20 @@ class OperatorApp(App[None]):
         session = self._session
         if session is None or not session.owns_runtime:
             return
+        # THE DELIBERATE VERDICT IS RECORDED WHERE THE DELIBERATE ACT IS KNOWN
+        # — here, and BEFORE the dispose below. `Session.dispose()` notes
+        # `disposed` unconditionally (it is the involuntary-teardown default),
+        # so without this the very next end event is classified as an error
+        # with `cause=disposed`: a bare `/stop` on the user's own TUI-owned
+        # session published a FALSE FAILURE reading "the session was disposed
+        # while this turn was running" (review round 1, BLOCKER-1). The socket
+        # rung has recorded it since the taxonomy landed (`serving.py`
+        # `request_stop`); this in-process rung is the one bare `/stop` and a
+        # peer's `lop stop` (through `TuiSessionHandle.request_stop`) actually
+        # take, which is why the suite's blind spot sat on the DEFAULT path.
+        note_stop = getattr(session, "note_deliberate_stop", None)
+        if callable(note_stop):
+            note_stop()
         # Detach the session FIRST, before any await: this coroutine can be
         # entered twice for one session (a peer's ``stop`` op through
         # ``TuiSessionHandle.request_stop`` racing a local ``/stop all``),
@@ -35640,6 +35687,7 @@ class OperatorApp(App[None]):
         # last one, which would leave the new outcome with no row at all while
         # marking an older one read.
         self._own_interrupt_notice = None
+        self._own_interrupt_kind = ""
         # A deferred completion belongs to the turn that finished, and a NEW
         # turn supersedes it: the session is working again, so "task complete"
         # would announce a finish while the agent is mid-stream — and the new
@@ -35773,10 +35821,31 @@ class OperatorApp(App[None]):
             cost=cost_text,
         )
         if message.error:
-            self._append_block(NoticeBlock(self._with_recovery_hint(message.error), "error"))
+            notice = NoticeBlock(self._with_recovery_hint(message.error), "error")
+            self._append_block(notice)
+            # HELD for the same reason `_finalize_turn` holds the interrupted
+            # row: the attention poller reads the same durable outcome back a
+            # tick later and dedupes only by `completion_anchor_id`, which this
+            # row cannot carry at paint time (the anchor is minted when the
+            # session publishes). Without the hold the live error and the
+            # poller's `Stopped with an error` announced ONE failure twice —
+            # a pre-existing defect on the provider-error path, fixed here by
+            # the same mechanism the aborted branch already used.
+            self._own_interrupt_notice = notice
+            self._own_interrupt_kind = "error"
         # NOT `elif`: `_finalize_turn` owns the "interrupted" notice now, so
         # this handler's chain ends at the error notice.
-        self._finalize_turn(aborted=message.aborted, error=message.error, source="agent_end")
+        self._finalize_turn(
+            aborted=message.aborted,
+            error=message.error,
+            source="agent_end",
+            # The turn's own verdict on WHY it stopped, which only the end event
+            # carries. Passed rather than inferred from `aborted`/`error`: the
+            # whole taxonomy flip is that a cut-off arrives as
+            # `aborted=False, error=<notice>`, so an inference here would read
+            # every cut-off as a completion (design review round 1, D2).
+            cut_off=message.cut_off,
+        )
 
     def on_turn_abandoned(self, message: TurnAbandoned) -> None:
         """Retire a turn whose worker returned without a terminal ``agent_end``.
@@ -35913,8 +35982,16 @@ class OperatorApp(App[None]):
         error: str | None,
         source: str,
         outcome_known: bool = True,
+        cut_off: bool = False,
     ) -> None:
         """Retire the turn. The ONE exit, however the turn ended.
+
+        ``cut_off`` says the end marker was an INVOLUNTARY stop rather than a
+        completion or the user's own cancel. It is the end event's own verdict
+        (``AgentEndEvent.cut_off_cause``), passed rather than re-derived here,
+        and its one use is the wording of the stranded tool cards: a turn cut
+        off says ``cut off`` on each card instead of ``interrupted``, which is
+        now reserved for a recorded stop (design review round 1, D2).
 
         Every terminal side effect a turn owes the user lives here — the
         working line, the band, the waiting latch, the per-turn cost accrual,
@@ -36051,7 +36128,7 @@ class OperatorApp(App[None]):
         # decision below reads; a bare assignment would reset it to 0 and an
         # aborted turn would regain the duplicate standalone "interrupted"
         # notice that the per-card marks exist to replace.
-        self._interrupted_cards += self._retire_live_tool_cards()
+        self._interrupted_cards += self._retire_live_tool_cards(cut_off=cut_off)
         if was_open and aborted and not self._interrupted_cards:
             # Only when NOTHING was in flight. A stopped turn already says so on
             # each card it stopped (`⊘ interrupted`), and that per-card mark is
@@ -36074,6 +36151,7 @@ class OperatorApp(App[None]):
             # from here and `· Interrupted` from the poll, which is the
             # reported defect. See `_adopt_own_interrupt_notice`.
             self._own_interrupt_notice = interrupted
+            self._own_interrupt_kind = "interrupted"
         self._interrupted_cards = 0
         # EVERY turn end reconciles its queued rows, because the invariant is
         # simply stated: a row still held when a turn ends is one this turn did
@@ -36626,8 +36704,17 @@ class OperatorApp(App[None]):
         self._interrupted_cards = self._retire_live_tool_cards()
         self._refresh_working_activity()
 
-    def _retire_live_tool_cards(self) -> int:
+    def _retire_live_tool_cards(self, *, cut_off: bool = False) -> int:
         """Settle every card still claiming to be live, and say how many.
+
+        ``cut_off`` is the TURN's verdict, passed in by the one caller that
+        knows it (:meth:`_finalize_turn`, from the end event): with it, the
+        stranded rows say ``cut off`` rather than ``interrupted``, so a card and
+        the ``✗ turn cut off`` notice below it describe one death in one word
+        instead of re-opening the ambiguity the taxonomy removed (design review
+        round 1, D2). Every other caller — a reload, a session swap, a
+        deliberate ``/stop`` — leaves it False, which prints the historical
+        word for the historical meaning.
 
         Composing rows count too: a turn that ends while the model is still
         dictating a call leaves a row that will never start, and leaving it
@@ -36663,7 +36750,7 @@ class OperatorApp(App[None]):
         """
         cards = list(self._tool_cards.values()) + list(self._composing_cards.values())
         for card in cards:
-            card.mark_interrupted()
+            card.mark_interrupted(cut_off=cut_off)
         self._tool_cards.clear()
         self._composing_cards.clear()
         return len(cards)

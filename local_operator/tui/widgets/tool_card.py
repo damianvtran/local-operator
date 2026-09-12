@@ -1077,6 +1077,15 @@ class ToolCard(ExpandableActionBlock):
         self._clock_timer: Timer | None = None
         self._duration: float | None = None
         self._error: str = ""
+        #: The word this card's ``interrupted`` state prints. Set by
+        #: :meth:`mark_interrupted` from the turn's verdict — an involuntary
+        #: cut-off earns ``cut off``, because ``interrupted`` is now reserved for
+        #: a positively recorded stop and a stranded ``interrupted`` row beside a
+        #: ``turn cut off`` notice re-states the exact ambiguity the taxonomy
+        #: removed (design review round 1, D2). Defaulted to the historical word
+        #: because every other route into this state (a replayed row with no
+        #: result, a viewer teardown that knows no verdict) still means it.
+        self._interrupt_label: str = "interrupted"
         #: When THIS card's execution began, or ``None`` when the card cannot
         #: know. ``None`` is the replay case and it is not a missing value to
         #: be defaulted: a card rebuilt by a surface that is re-painting a
@@ -1248,8 +1257,15 @@ class ToolCard(ExpandableActionBlock):
         self._refresh_row()
         self.finalize()
 
-    def mark_interrupted(self) -> None:
-        """Turn ended before this tool completed: dim 'interrupted' state.
+    def mark_interrupted(self, *, cut_off: bool = False) -> None:
+        """Turn ended before this tool completed: dim state, and WHY it ended.
+
+        ``cut_off`` selects the word from the TURN's verdict, which is knowledge
+        only the caller has: a turn cut off by anything but a deliberate stop
+        prints ``cut off`` here, so the stranded row agrees with the ``✗ turn cut
+        off`` notice under it instead of calling the same death ``interrupted``
+        (design review round 1, D2). The glyph and the dim tier do not move — the
+        word was the ambiguity.
 
         Takes NO ``measured_s``, unlike :meth:`mark_done` and
         :meth:`mark_failed`, and the asymmetry is a property of the path rather
@@ -1281,6 +1297,7 @@ class ToolCard(ExpandableActionBlock):
             self._summary = f"never sent · {self._compose_facts}"
         self._duration = self._elapsed()
         self._state = "interrupted"
+        self._interrupt_label = "cut off" if cut_off else "interrupted"
         self.remove_class("tool-running")
         self.add_class("tool-interrupted")
         self._refresh_row()
@@ -2856,7 +2873,7 @@ class ToolCard(ExpandableActionBlock):
         if self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
             # keeps `dim`, not a hue: see its note.
-            glyph, reason = ICON_INTERRUPTED, "interrupted"
+            glyph, reason = ICON_INTERRUPTED, self._interrupt_label
             tint = bindings.style("tool.status.interrupted")
             abbreviates = False
         else:

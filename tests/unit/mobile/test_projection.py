@@ -1233,3 +1233,36 @@ def test_a_repeated_supersession_does_not_disturb_an_already_rekeyed_row() -> No
     assert len(tool_rows) == 1
     assert tool_rows[0].tool_call_id == "real_0"
     assert tool_rows[0].details["argument_bytes"] == 30
+
+
+def test_a_cut_off_turn_still_offers_the_phones_resume_affordance() -> None:
+    """MAJOR-1: a cut-off must not read as "completed" on the phone.
+
+    ``stop_reason`` is the wire fact ``composer.tsx`` gates
+    ``interrupted — tap to resume`` on, and the taxonomy flip reports a cut-off
+    as ``aborted=False, error=<notice>`` — so folding ``aborted`` alone told the
+    phone the turn had FINISHED and silently removed the only recovery
+    affordance for exactly the sessions the operator reports losing. A cut-off
+    did not complete; it was cut off, which is what ``cut_off``/``cut_off_cause``
+    states.
+    """
+    from local_operator.incidents import format_cut_off_notice, render_cut_off_reason
+
+    fold = ProjectionFold(SessionProjection(session_id="cutoff-phone", pid=1))
+    fold.fold_event(
+        AgentEndEvent(
+            generation=1,
+            aborted=False,
+            error=format_cut_off_notice("owner-lost"),
+            cut_off=render_cut_off_reason("owner-lost"),
+            cut_off_cause="owner-lost",
+        )
+    )
+    assert fold.projection.streaming is False
+    assert fold.projection.stop_reason == "aborted"
+
+    # The control: a clean end still reads as a completion, or every finished
+    # turn would offer a pointless resume.
+    clean = ProjectionFold(SessionProjection(session_id="clean-phone", pid=1))
+    clean.fold_event(AgentEndEvent(generation=1))
+    assert clean.projection.stop_reason == "completed"
