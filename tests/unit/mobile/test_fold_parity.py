@@ -558,8 +558,7 @@ def test_both_surfaces_strip_the_reference_block() -> None:
     An `@` reference is expanded ONCE at submit and the file rides the message
     as an `<operator-references>` block. The model needs it; a transcript row
     must not show it, or a one-line question about a file paints as the whole
-    file — and, because a session is titled from its first user turn, titles the
-    thread after the file's first line too.
+    file.
 
     Asserted through `user_row_text` because that is the ONE function both
     surfaces paint through (`tui/session_presentation.py:922` and
@@ -567,13 +566,21 @@ def test_both_surfaces_strip_the_reference_block() -> None:
     a rule the TUI had and the other did not, which is the divergence this whole
     file exists to prevent — so the test lives here rather than in a new
     `test_rows.py` beside it.
+
+    THE FIXTURE IS THE RESOLVER'S REAL OUTPUT, preamble included. It used to
+    build `<file path="auth.py">`, a shape nothing emits — the strip is
+    shape-blind, so the test passed either way and the fixture was a fiction
+    that would mislead the next reader into thinking `<file>` was the contract.
     """
     from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
 
     typed = "what does @auth.py do?"
     sent = (
-        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n"
-        '<file path="auth.py">\ndef login():\n    return SECRET\n</file>\n'
+        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n\n"
+        "The operator's message references these paths. "
+        "Content is included below.\n\n"
+        '<reference path="auth.py" typed="@auth.py" bytes="31" lines="2">\n'
+        "def login():\n    return SECRET\n\n</reference>\n\n"
         f"{REFERENCE_BLOCK_CLOSE}"
     )
 
@@ -596,3 +603,57 @@ def test_an_unexpanded_message_is_untouched_by_the_reference_strip() -> None:
     """
     assert user_row_text("just a question about @ signs") == "just a question about @ signs"
     assert user_row_text("plain prose") == "plain prose"
+
+
+def test_a_message_that_QUOTES_the_block_marker_keeps_all_its_words() -> None:
+    """Quoting the tag is ordinary prose, and must not truncate the row.
+
+    The marker is part of the product's visible vocabulary, so an operator
+    asking about this feature, quoting a log line, or pasting a prompt will type
+    it. An unanchored `text.find(REFERENCE_BLOCK_OPEN)` treated every one of
+    those as the start of a block and dropped the rest of the sentence —
+    silently, with no notice, on BOTH surfaces. R4 says the transcript shows
+    what the operator typed; it showed strictly less.
+
+    The sibling rule this is modelled on is the same one
+    `test_a_wake_receipt_headline…` asserts for `(alarm)`: a message that merely
+    MENTIONS the marker keeps its own words.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    quoted = f"why does my message contain {REFERENCE_BLOCK_OPEN} in it?"
+    assert user_row_text(quoted) == quoted
+
+    mid = f"explain {REFERENCE_BLOCK_OPEN} and then tell me about the resolver"
+    assert user_row_text(mid) == mid
+
+    # A CLOSER with no opener is half a quoted tag, not a block. Guessing a span
+    # for it would be the same defect in the other direction.
+    closer_only = f"what does {REFERENCE_BLOCK_CLOSE} mean?"
+    assert user_row_text(closer_only) == closer_only
+
+
+def test_a_real_block_is_still_stripped_when_the_prose_also_quotes_the_marker() -> None:
+    """The case that makes the anchor a rule rather than a special case.
+
+    A message can legitimately do both: ask about the tag AND carry a real
+    expansion. Only the appended block may go, and the operator's own sentence —
+    marker and all — must survive intact. Taking the LAST opener rather than the
+    first is what buys this.
+    """
+    from local_operator.references import REFERENCE_BLOCK_CLOSE, REFERENCE_BLOCK_OPEN
+
+    typed = f"what is {REFERENCE_BLOCK_OPEN} for? see @auth.py"
+    sent = (
+        f"{typed}\n\n{REFERENCE_BLOCK_OPEN}\n\n"
+        "The operator's message references these paths. "
+        "Content is included below.\n\n"
+        '<reference path="auth.py" typed="@auth.py" bytes="31" lines="2">\n'
+        "def login():\n    return SECRET\n\n</reference>\n\n"
+        f"{REFERENCE_BLOCK_CLOSE}"
+    )
+
+    row = user_row_text(sent)
+
+    assert row == typed
+    assert "SECRET" not in row

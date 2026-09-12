@@ -114,14 +114,38 @@ def reference_block_stripped(text: str) -> str:
     An ``@path`` reference is expanded ONCE, at submit, and the expansion is
     appended to the message as a block. The model needs that block; the
     transcript must not show it, or a one-line question about a file paints as
-    the whole file — and, because a session is titled from its first user turn,
-    titles the thread after the file's first line too. Exactly the failure
-    :func:`typed_line_of` exists to prevent for a skill payload.
+    the whole file. Exactly the failure :func:`typed_line_of` exists to prevent
+    for a skill payload.
 
     Stripping HERE rather than in a host is the point (design R5). Both surfaces
     paint through :func:`user_row_text`, so a strip written in the TUI would
     leave the phone showing the block — which is precisely how one surface got
     the skill rule and the other did not.
+
+    ANCHORED TO THE END, and that is the whole of its correctness. The marker is
+    part of the product's visible vocabulary now, so quoting it is an ordinary
+    thing for an operator to type — asking about this feature, pasting a log
+    line, quoting a prompt. An unanchored ``find`` truncated every one of those
+    messages at the word they quoted: "why does my message contain
+    <operator-references> in it?" painted as "why does my message contain",
+    silently, with no notice, on both surfaces. The transcript showing strictly
+    less than what was typed is the failure R4 names.
+
+    The anchor is sound because expansion only ever APPENDS — the resolver
+    never substitutes in place, precisely so the typed token survives for this
+    row to paint — so a real block is the message's SUFFIX and nothing else is.
+    The last opener is taken rather than the first for the same reason: a
+    message that both quotes the marker and carries a real block must lose only
+    the block. A marker inside a reference BODY cannot fool that, because the
+    resolver defuses those on the way in.
+
+    An UNCLOSED block therefore no longer strips anything. It was handled once
+    — truncated history, a message cut mid-write — and the trade has since
+    reversed: an unclosed block is not provably a block, so removing text on
+    its say-so is the unanchored bug in a narrower costume, while the cost of
+    keeping it is a dangling marker on a history that was already truncated.
+    Showing too much is recoverable; showing less than the operator typed, with
+    no notice, is not.
 
     Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
     above and for the same reason: this module stays host-free, and a broken or
@@ -135,16 +159,15 @@ def reference_block_stripped(text: str) -> str:
         )
     except Exception:  # noqa: BLE001 — replay must never fail on this
         return text
-    opened = text.find(REFERENCE_BLOCK_OPEN)
-    if opened == -1:
+    trailing = text.rstrip()
+    if not trailing.endswith(REFERENCE_BLOCK_CLOSE):
         return text
-    closed = text.find(REFERENCE_BLOCK_CLOSE, opened)
-    if closed == -1:
-        # An UNCLOSED block: truncated history, or a message cut mid-write. Drop
-        # from the opener anyway — showing a dangling `<operator-references>`
-        # and the half file under it is worse than showing the typed line alone.
-        return text[:opened].rstrip()
-    return (text[:opened] + text[closed + len(REFERENCE_BLOCK_CLOSE) :]).rstrip()
+    opened = trailing.rfind(REFERENCE_BLOCK_OPEN)
+    if opened == -1:
+        # A closer with no opener is not a block; it is someone quoting half of
+        # one. Nothing to strip, and guessing a span would be the same defect.
+        return text
+    return trailing[:opened].rstrip()
 
 
 def user_row_text(text: str) -> str:
