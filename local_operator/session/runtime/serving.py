@@ -1304,6 +1304,14 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the state (and with it the child roster) ONCE at attach. Until
+        # the next event arrives this push is all a freshly attached phone
+        # renders, and a settled turn never sends another: without this an
+        # already-finished child stays unroutable (``session_id=None``) for as
+        # long as the session is quiet. ``_refresh_state`` is idempotent and
+        # only fills non-None fields, so seeding here cannot clobber the
+        # identity fields the projection already carries.
+        self._refresh_state()
         return unsubscribe
 
     async def prompt(
@@ -4123,6 +4131,21 @@ class ServingSessionHandle(SessionHandle):
             # lifecycle events are authoritative; ``_reconcile_streaming``
             # covers attach and command boundaries.
         )
+        # Publish the child roster beside the session state, the way the TUI
+        # host does (``mobile/tui_handle.py::_refresh_state``). The folded
+        # projection's per-child ``session_id`` is the ONLY route to
+        # ``/api/sessions/{sid}/agents/{job}/history``: the event path cannot
+        # learn a child's session directory (``SubagentStartEvent`` carries no
+        # session id, so those rows are born with ``session_id=None``), and the
+        # registry in ``SubagentComms`` is the only place that knows it. Both
+        # hosts must therefore agree about the same row, or a runtime-hosted
+        # session 404s every child transcript while a TUI-hosted one serves it.
+        # The cost is the one the TUI already pays per folded event (one
+        # registry walk plus a bounded copy); no child transcript ever leaves
+        # with it.
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command
