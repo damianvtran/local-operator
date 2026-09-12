@@ -441,7 +441,11 @@ bounded send (§5.4).
 
 The promotion rule fires when a command exhausted its budget while the link was
 ALSO silent for **1.5 ping intervals** (> 30 s), **or** when a direct, bounded
-liveness solicitation goes unanswered inside that method's own budget.
+liveness solicitation goes unanswered. Bounded, but NOT inside the method's own
+budget: the probe starts after the budget has already expired, so the typed
+answer lands one probe window later — **budget + `PING_PROBE_TIMEOUT_S`**, i.e.
+≤ 25 s on a 20 s method (measured 25.009 s, reproduced 25.007 s; QA Q2-4/Q3-2).
+Size any downstream budget from THAT figure, not from the method's own timeout.
 
 **Why the threshold alone was not enough (recorded from review R2-3 / QA Q2-4).**
 The slack above is the same reasoning the 50 s threshold uses, and it is
@@ -469,8 +473,12 @@ event-loop turn whatever it is doing (§5.4), and the daemon is demonstrably ali
 at the moment it probes — it is running the timeout path — which is precisely the
 ambiguity R1-2 was about. An unanswered SOLICITATION is evidence; an elapsed
 clock is not. The 5 s window is bounded by the same generosity argument as
-`LINK_SEND_TIMEOUT_S`, and it is a magnitude below the smallest method budget,
-which is what "respects each method's budget" has to mean here. The clearly
+`LINK_SEND_TIMEOUT_S`, and it is what makes the rule reachable for the tight
+methods at all — but it is ADDED to their budget rather than fitting inside it.
+This passage claimed the opposite until QA Q3-2 measured the answer at
+**25.009 s on a 20 s `read`** (reproduced 25.007 s): "within the budget plus the
+probe window" is the honest phrasing, and a bound sized from "a magnitude below
+the smallest method budget" would be 5 s short. The clearly
 corroborated case short-circuits on the OR before probing, so a dead peer is
 still severed without the extra wait.
 

@@ -8187,6 +8187,46 @@ def _bridge_liveness() -> tuple[Any, Any]:
         return None, None
 
 
+def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
+    """The demotion diagnostic for a bridge that is UP with no browser attached.
+
+    Reached only when the discovery file shows a daemon whose pid is alive and
+    which remembers an extension from a real handshake (`extension_id`), i.e. the
+    bridge IS installed and was paired — the opposite of the state the generic
+    "set up the bridge" copy describes. Two shapes, because they need different
+    actions from the reader:
+
+    - the daemon has LATCHED a silent link (the incident's window). The worker is
+      mute and only a reload of the extension clears it, so this renders the same
+      copy `format_error` gives for the wire code, with the same typed
+      `error_code`, and the agent can branch on it.
+    - otherwise the browser is simply not attached right now (closed, or the
+      worker idle-suspended and is re-dialling). "install" and "open your
+      browser" are both wrong there; "check the state, then retry" is right, and
+      `lop browser status` is where the difference is visible.
+
+    A separate function rather than inline so both copies are reachable from a
+    unit test without standing up cmux, a daemon or a socket.
+    """
+    from local_operator.browser_bridge.backend import ERROR_MESSAGES
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    if bool(getattr(current, "extension_unresponsive", False)):
+        problem = _error(tool_call_id, "browser", ERROR_MESSAGES[ErrorCode.EXTENSION_UNRESPONSIVE])
+        problem.details = {"error_code": ErrorCode.EXTENSION_UNRESPONSIVE.value}
+        return problem
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"browser extension not attached: the bridge daemon (pid {current.pid}) is running and "
+        "remembers this browser, but nothing is connected to it right now. The extension "
+        "reconnects on its own when the browser is open — run 'lop browser status' to see the "
+        "current state, then retry this action.",
+    )
+    problem.details = {"error_code": ErrorCode.EXTENSION_DISCONNECTED.value}
+    return problem
+
+
 def _bridge_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
     """Why the extension is not being used, when it looked like it should be.
 
@@ -9379,6 +9419,19 @@ async def _execute_browser(
     # cmux. It costs a round-trip only in the stale-but-alive case.
     bridge_available = await bridge_browser_reachable(classified=bridge_liveness)
     if not cmux_available and not bridge_available:
+        # A bridge daemon that is UP but has no browser attached is not an
+        # unconfigured host: "run 'lop browser status' and 'lop browser install'
+        # to set up the bridge" sends a user with an installed, paired bridge to
+        # repair something that is not broken, which is what a session already
+        # recovered into the wedge window was told (design D3-2).
+        #
+        # The file separates the two without a socket: `liveness` answers ABSENT
+        # for both, but only the daemon case carries the extension id it
+        # remembers from a real handshake — and, while a drop for silence is
+        # still latched, the daemon publishes that latch too (see `state.py`).
+        current = bridge_liveness[1] if bridge_liveness is not None else None
+        if current is not None and current.extension_id:
+            return _bridge_absent_result(tool_call_id, current)
         return _error(
             tool_call_id,
             "browser",

@@ -36,6 +36,19 @@ class BridgeState(BaseModel):
     paired: bool = False
     extension_id: str = ""
     browser_name: str = ""
+    #: Whether the daemon has latched "the attached extension stopped answering"
+    #: and dropped its link for it (the same fact `/health` reports as
+    #: `extension_unresponsive`). Published because the reader that needs it most
+    #: cannot ask: `_execute_browser`'s demotion guard runs on the ABSENT side of
+    #: `liveness`, where the contract forbids a socket probe, and since a drop
+    #: writes `extension_connected=false` the file alone would otherwise look
+    #: exactly like a host with no bridge at all — which is how a paired, running
+    #: bridge got told to run `lop browser install` (design D3-2).
+    #:
+    #: Defaults false, so a file written by an older daemon (and every fixture)
+    #: reads as "no latch" — the conservative answer, since a false positive here
+    #: would claim a wedge the daemon never reported.
+    extension_unresponsive: bool = False
     heartbeat_at: float = Field(default_factory=time.time)
     started_at: float = Field(default_factory=time.time)
 

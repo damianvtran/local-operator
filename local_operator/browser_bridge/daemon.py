@@ -546,6 +546,12 @@ class BridgeService:
         # the daemon serializes them behind a per-tab lock so each command runs
         # to completion before the next starts. Concurrent sessions therefore
         # SHARE the tab safely rather than clobbering each other's navigation.
+        # In-flight callers per admission-only lock key (a per-OWNER key or
+        # `__global__`), so an eviction can distinguish "nobody holds it" from
+        # "nobody holds it yet, a queued caller is about to" — `asyncio.Lock`
+        # reports the former during the hand-off window that IS the latter. See
+        # `_release_key` (audit A4).
+        self._key_callers: dict[str, int] = {}
         self._tab_locks: dict[str, asyncio.Lock] = {}
 
     def publish(self) -> None:
@@ -558,6 +564,14 @@ class BridgeService:
         self.state.paired = self.link.paired
         self.state.extension_id = self.link.extension_id
         self.state.browser_name = self.link.browser
+        # The latched "attached but stopped answering" verdict, so the discovery
+        # file can tell a reader what /health would say. It matters because the
+        # demotion guard in `tools/builtin.py` decides from the FILE (a probe on
+        # the ABSENT side is forbidden by `bridge_browser_reachable`'s contract)
+        # and a drop writes `extension_connected=false` — without this the file
+        # is indistinguishable from a host with no bridge, which is how a paired
+        # running bridge got told to run `lop browser install` (design D3-2).
+        self.state.extension_unresponsive = self.link.dropped_unproven()
         state_store.publish(self.state, self.root)
 
     def publish_safely(self) -> bool:
@@ -727,6 +741,49 @@ class BridgeService:
             return False
         return True
 
+    def _wire_loss(self, expected: tuple[WebSocket | None, int]) -> str:
+        """Classify why the wire a command captured is no longer the live one.
+
+        Three answers, because the three need different remedies and the fence's
+        single refusal used to collapse them into one (review R3-4):
+
+        - ``"replaced"``: a handshake installed a NEW socket, which advances the
+          generation. The command died with its own connection, the replacement
+          is answering, so retrying is the whole remedy.
+        - ``"severed"``: THIS daemon severed the link for silence — the latch
+          `_drop_unproven_link` sets is live — and nothing has replaced it. The
+          browser is OPEN and the worker is mute, which is the wedge this PR
+          exists for, and "no browser is attached, ask the user to open it" is
+          then exactly the misdirection design D1 removed. The common
+          multi-session case (two commands timing out on ONE frozen worker)
+          lands here.
+        - ``"gone"``: the socket ended for any other reason — the peer closed it
+          or the pairing was revoked, both of which clear the latch. "No browser
+          is attached" is the honest answer there.
+
+        Compared on (socket, generation) together, the pair the fence itself
+        uses: only a replacement advances the generation, and only a replacement
+        puts a different live socket in place.
+        """
+        if self.link.generation != expected[1] or (
+            self.link.websocket is not None and self.link.websocket is not expected[0]
+        ):
+            return "replaced"
+        if self.link.websocket is None and self.link.dropped_unproven():
+            return "severed"
+        return "gone"
+
+    def _drop_silence(self, measured: float) -> float:
+        """The silence to report for a link this daemon severed.
+
+        The caller measured it on the live link moments earlier; a sibling's
+        drop also LATCHES the figure taken at its own drop, and that one is the
+        truth about why the link went away, so prefer it while the latch is
+        live (review R3-4's sibling case).
+        """
+        latched = self.link.recent_drop_silence()
+        return latched if self.link.dropped_unproven() and latched > 0.0 else measured
+
     async def _drop_unproven_link(
         self,
         reason: str,
@@ -832,11 +889,29 @@ class BridgeService:
         # deliberate revoke would keep reading as "attached but not answering".
         self.link.clear_unproven_drop()
         websocket = self.link.websocket
+        # The socket AND its generation, captured together before the close
+        # below yields: the guard after it asks whether this revoke is still
+        # looking at the live link, not merely whether some socket exists
+        # (audit A1, the revoke/replacement crossing).
+        generation = self.link.generation
         if websocket is not None:
             with suppress(Exception):
                 # 4003 = unpaired, the same code the handshake uses so the
                 # popup renders \"waiting to pair\" rather than a mystery drop.
                 await asyncio.wait_for(websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S)
+            if not self.link.is_authoritative(websocket, generation):
+                # A handshake installed itself while that close was in flight.
+                # The revoke must NOT clear the link it did not close: doing so
+                # tore down the socket that replaced the revoked one and forgot
+                # its state, so the replacement's own re-dial was reported as
+                # gone.
+                #
+                # Preserving that connection is not the same as authorizing it.
+                # The new handshake computed its own `paired` from the pairing
+                # file `reset_pairing` had already removed, so it answers
+                # through the same `not_paired` gate as every other unpaired
+                # peer — nothing here revives a revoked token.
+                return
         self.link.disconnect()
         self.publish_safely()
 
@@ -1000,6 +1075,14 @@ class BridgeService:
         return PairResult(ok=True, token=token)
 
     async def extension(self, websocket: WebSocket) -> None:
+        # The four rejections below (and the ORIGIN one above) close WITHOUT a
+        # deadline, and that is correct rather than an oversight: every one of
+        # them returns BEFORE `attach()`, so no link state exists yet and no
+        # recovery is in flight — there is nothing for a stalled close to park.
+        # Every close AFTER the install IS bounded (`LINK_CLOSE_TIMEOUT_S`),
+        # because there the peer may be mid-teardown for a live link. That is the
+        # whole of the A2 rule; a close site added below this comment must
+        # re-check which side of `attach()` it sits on.
         extension_id = self._origin_extension_id(websocket)
         if not extension_id:
             await websocket.close(code=4004)
@@ -1038,9 +1121,17 @@ class BridgeService:
             # here would wipe the replacement this same block installs.
             self.link.forget_link_state()
         generation = self.link.attach(websocket)
-        if previous is not None:
-            with suppress(Exception):
-                await asyncio.wait_for(previous.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        # ── THE AUTHORITATIVE INSTALL IS ONE UNINTERRUPTED BLOCK ────────────
+        # Nothing between `attach` above and `publish_safely` below may await,
+        # and every write below is a SHARED-state write (identity, pairing,
+        # liveness, latch). The install used to sit after the superseded
+        # socket's bounded close, and `close` is an await: a third handshake
+        # could install itself in that window, after which the suspended one
+        # stamped THIS handshake's verdict — pairing included — onto the newer
+        # link. An unauthenticated peer whose token the daemon had just
+        # rejected was thereby authorized and drove RPCs (audit A1). Ordering
+        # is the whole guard here: a handshake that no longer owns the link has
+        # nothing left to write, because all of its writes already happened.
         self.link.extension_id = extension_id
         self.link.browser = hello.browser
         # A fresh authoritative socket supersedes any latched drop reason from
@@ -1055,6 +1146,22 @@ class BridgeService:
         if not self.link.paired:
             self._ensure_pending(extension_id)
         self.publish_safely()
+        # Only now, with this handshake fully installed, is the socket it
+        # replaced closed: a bounded courtesy to a peer that is already
+        # non-authoritative, whose outcome this handshake's authority must not
+        # depend on (audit A2).
+        if previous is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(previous.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        if not self.link.is_authoritative(websocket, generation):
+            # A newer handshake installed itself while the superseded socket was
+            # being closed, so this one is now the superseded side. It must not
+            # speak: an ack on a wire that is no longer current tells a peer it
+            # is paired with a daemon that has already moved on — the ack half
+            # of the same window as the metadata install above (audit A1).
+            with suppress(Exception):
+                await asyncio.wait_for(websocket.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+            return
         try:
             # Bounded and wire-scoped like every other send on this socket: the
             # handshake answer is the first thing a superseded write would
@@ -1373,23 +1480,28 @@ class BridgeService:
         # `request.id` — so holding the lock across the answer bought nothing and
         # cost every other owner its budget.
         future = self._register_pending(request)
-        wire = self._wire()
-        async with lock:
-            refused = await self._admit(request, future, wire)
-        # Evict a key that is neither shared nor currently held. Without this the
-        # map grows for the daemon's lifetime: a per-OWNER key is minted per
-        # session-resource, which is the same unbounded-growth defect round-3 M1
-        # fixed for the `__await__` keys. Known residual, benign and deliberate:
-        # a waiter that has not woken yet still holds the popped Lock object while
-        # a later request mints a fresh one, so two commands of ONE owner can be
-        # admitted concurrently — admission is a frame write, and the extension's
-        # per-proof lane re-serializes on arrival, so the worst case is "two
-        # frames admitted in an unspecified order".
-        if tab_key != "__global__" and not lock.locked():
-            self._tab_locks.pop(tab_key, None)
-        if refused is not None:
-            return refused
-        return await self._complete(request, future, wire)
+        # Counted BEFORE the lock so `_release_key` can tell "nobody holds it"
+        # from "nobody holds it yet, someone is queued" (see its docstring).
+        self._key_callers[tab_key] = self._key_callers.get(tab_key, 0) + 1
+        try:
+            wire = self._wire()
+            async with lock:
+                refused = await self._admit(request, future, wire)
+            if refused is not None:
+                return refused
+            return await self._complete(request, future, wire)
+        finally:
+            # CANCELLATION-SAFE CLEANUP for the registration → lock → send →
+            # response lifetime (audit A4). Registering the future BEFORE the
+            # lock is what this key shape needs — the answer may arrive while
+            # the caller is still queued — but it also means a caller cancelled
+            # while QUEUED (the ordinary client-disconnect case) never reaches
+            # `_complete`'s finally. Pre-fix it left a future in `link.pending`
+            # for a frame that was never sent and no response can ever answer,
+            # holding its request id until link teardown. The `finally` covers
+            # every exit: admitted, refused, timed out, cancelled.
+            self._forget_pending(request.id, future)
+            self._release_key(tab_key, lock)
 
     async def _dispatch_locked(self, request: Request) -> JSONResponse:
         """Dispatch one command with the caller's key held for its WHOLE life.
@@ -1407,10 +1519,17 @@ class BridgeService:
         # suspended across a reconnect can never sever (or answer on behalf of)
         # the healthy replacement that arrived in the meantime (audit A1).
         wire = self._wire()
-        refused = await self._admit(request, future, wire)
-        if refused is not None:
-            return refused
-        return await self._complete(request, future, wire)
+        try:
+            refused = await self._admit(request, future, wire)
+            if refused is not None:
+                return refused
+            return await self._complete(request, future, wire)
+        finally:
+            # The same cancellation-safe exit as the admission-only path: a
+            # caller that goes away while its frame is being written (or while
+            # the answer is awaited) must not leave its future registered for a
+            # response nobody is left to receive (audit A4).
+            self._forget_pending(request.id, future)
 
     def _wire(self) -> tuple[WebSocket | None, int]:
         """The current link as a fenceable pair (socket identity + generation)."""
@@ -1449,33 +1568,57 @@ class BridgeService:
             # Drop OUR future before the teardown: the teardown fails every
             # pending future with RuntimeError, and this one is never awaited
             # (we return a typed error instead), so leaving it registered would
-            # produce an unretrieved-exception warning at collection time.
-            self.link.pending.pop(request.id, None)
+            # produce an unretrieved-exception warning at collection time. By
+            # identity, not by id — `pending` is id-keyed and a teardown clears
+            # it, so an id-only pop can take a LATER request's future (audit A4).
+            self._forget_pending(request.id, future)
             silent = self.link.silent_for()
             dropped = await self._drop_unproven_link(
                 f"send of {request.method} exceeded {LINK_SEND_TIMEOUT_S:.0f}s",
                 expected=wire,
             )
-            if not dropped:
+            if not dropped and self._wire_loss(wire) == "replaced":
                 # The wire this command was being written to was superseded while
                 # the write was suspended, so the command was never delivered and
                 # there is no unresponsive peer to report — the replacement is
                 # answering. Say what actually happened (audit A1): the session's
                 # connection went away mid-send.
+                #
+                # `phase` is what makes that sayable to a reader: the client's
+                # table lookup returns one copy per CODE, and
+                # `extension_disconnected`'s copy is "no browser is attached, ask
+                # the user to open it" — false here, where the browser is open and
+                # the worker has just re-dialled. The two phase-carrying siblings
+                # below already route this way (design D3-3).
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_DISCONNECTED,
                     f"{request.method} was not delivered: the extension replaced its "
                     "connection while the command was being written",
+                    {"phase": "replaced"},
                 )
+            # Either this caller severed the link, or a sibling already had: both
+            # mean the same wedged peer, so this is the unresponsive answer, not
+            # the replaced one (review R3-4).
             return self._error_response(
                 request.id,
                 ErrorCode.EXTENSION_UNRESPONSIVE,
                 f"{request.method} could not be delivered to the browser extension",
-                {"phase": "send", "link_silent_s": silent},
+                {"phase": "send", "link_silent_s": self._drop_silence(silent)},
             )
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
-            self.link.pending.pop(request.id, None)
+            # A future failed by a SIBLING's severance lands here — that
+            # teardown fails every pending future — and `extension_disconnected`
+            # renders "no browser is attached" for an open, wedged browser: the
+            # same misdirection the fence arm above answers, on the other path
+            # into it (review R3-4).
+            if self._wire_loss(wire) == "severed":
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_UNRESPONSIVE,
+                    f"{request.method} could not be delivered to the browser extension",
+                    {"phase": "send", "link_silent_s": self._drop_silence(0.0)},
+                )
             return self._error_response(request.id, ErrorCode.EXTENSION_DISCONNECTED, str(exc))
         return None
 
@@ -1535,21 +1678,26 @@ class BridgeService:
                     f"{request.method} unanswered with the link silent for {silent:.0f}s",
                     expected=wire,
                 )
-                if not dropped:
+                if not dropped and self._wire_loss(wire) == "replaced":
                     # Same fence as the send deadline: nothing of ours is left to
                     # sever, so the honest answer is the one the failed future
-                    # already carries.
+                    # already carries. `phase` for the same reason as its sibling
+                    # in `_admit`: the code alone would render "no browser is
+                    # attached" (design D3-3).
                     return self._error_response(
                         request.id,
                         ErrorCode.EXTENSION_DISCONNECTED,
                         f"{request.method} was delivered on a connection the extension "
                         "has since replaced",
+                        {"phase": "replaced"},
                     )
+                # This caller severed the link, or a sibling already had — the
+                # same wedged peer either way (review R3-4).
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,
                     f"{request.method} was delivered but the extension stopped answering",
-                    {"phase": "response", "link_silent_s": silent},
+                    {"phase": "response", "link_silent_s": self._drop_silence(silent)},
                 )
             code = (
                 ErrorCode.NAV_TIMEOUT if request.method in ("open", "goto") else ErrorCode.INTERNAL
@@ -1561,10 +1709,74 @@ class BridgeService:
                 {"timeout_s": COMMAND_TIMEOUTS[request.method]},
             )
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
+            # Same sibling case as the send arm: a severed link makes this a
+            # wedged browser, not an absent one (review R3-4).
+            if self._wire_loss(wire) == "severed":
+                return self._error_response(
+                    request.id,
+                    ErrorCode.EXTENSION_UNRESPONSIVE,
+                    f"{request.method} was delivered but the extension stopped answering",
+                    {"phase": "response", "link_silent_s": self._drop_silence(0.0)},
+                )
             return self._error_response(request.id, ErrorCode.EXTENSION_DISCONNECTED, str(exc))
         finally:
-            self.link.pending.pop(request.id, None)
-            self.link.awaiting_origin.pop(request.id, None)
+            self._forget_pending(request.id, future)
+
+    def _forget_pending(self, request_id: str, future: asyncio.Future[Response]) -> None:
+        """Drop THIS request's pending record — by identity, never by id alone.
+
+        `link.pending` is keyed by request id, and a teardown (`forget_link_state`)
+        clears it, so a LATER request may re-use an id an earlier one had. A
+        cleanup that popped the id unconditionally would then strand that
+        unrelated caller's future: its answer would find no waiter and hang
+        until its own timeout (audit A4's identity requirement). The
+        awaiting-origin record goes with it, because both describe one
+        request's lifetime.
+        """
+        if self.link.pending.get(request_id) is future:
+            del self.link.pending[request_id]
+        self.link.awaiting_origin.pop(request_id, None)
+
+    def _release_key(self, tab_key: str, lock: asyncio.Lock) -> None:
+        """Drop one admission-only caller's hold on a key, evicting it if idle.
+
+        A per-OWNER key is minted per session-resource, so without eviction
+        `_tab_locks` grows for the daemon's lifetime — the same unbounded-growth
+        defect round-3 M1 fixed for the `__await__` keys, which is why the
+        eviction exists at all even though the lock held no navigation.
+
+        Eviction is safe only when ALL THREE hold: no caller is queued on the
+        key, nobody holds it, and the map still holds THIS Lock object (an
+        earlier caller may already have evicted it while a later request minted
+        a replacement).
+
+        Why the queued half needs its own counter: `asyncio.Lock.locked()` goes
+        False the instant `release()` hands the lock to the first waiter, so a
+        caller checking only `locked()` evicted a lock another request was
+        ALREADY waiting on. That waiter then ran under a Lock object the map no
+        longer contained, while the next request for the key minted a second
+        one and interleaved with it — mutual exclusion lost for one owner's
+        commands (audit A4). `_key_callers` counts every caller from the moment
+        it captures the key to the moment it releases, so "idle" here really
+        means idle.
+
+        Residual, benign and deliberate (unchanged from the scoping change): two
+        commands of ONE owner can still be admitted concurrently in the window
+        where the key was evicted between them — admission is a frame write, and
+        the extension's per-proof lane re-serializes on arrival, so the worst
+        case stays "two frames admitted in an unspecified order".
+        """
+        remaining = self._key_callers.get(tab_key, 0) - 1
+        if remaining > 0:
+            self._key_callers[tab_key] = remaining
+        else:
+            self._key_callers.pop(tab_key, None)
+        if (
+            not self._key_callers.get(tab_key)
+            and self._tab_locks.get(tab_key) is lock
+            and not lock.locked()
+        ):
+            self._tab_locks.pop(tab_key, None)
 
     async def _await_response(
         self, request_id: str, future: asyncio.Future[Response], base_timeout: float
