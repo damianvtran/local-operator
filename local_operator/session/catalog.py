@@ -432,6 +432,27 @@ CATALOG_SCAN_LIMIT = 200
 #: Newest subagent runs the sidebar's ⌥ layer lists when it is switched on.
 #: One screenful of headroom past the ~38-row window, matching the reasoning
 #: behind CATALOG_SCAN_LIMIT. No paging: the layer answers "what just ran".
+#:
+#: WHAT THIS CAP DOES AND DOES NOT BOUND. The cap bounds the PAGE, not the
+#: selection. The per-row reads on the capped page — `origin.json` and
+#: `session_created_at` — are O(cap): measured flat at 85 `origin.json` reads
+#: with the hidden population at 50, 100, 400 and 800. What is NOT capped is
+#: the step-2 selection sweep in `load_catalog`, which stats every hidden
+#: directory to find the newest CAP of them: that is O(hidden population),
+#: linear at a stable ~6.0 µs/dir measured from 250 to 4000 dirs, and it is
+#: the term that scales.
+#:
+#: So the ON-path delta grows with the store, not with this constant. The
+#: +6.6 ms measured today was ruled ACCEPTED-with-documentation rather than a
+#: regression because the original +2.7 ms budget was set on a 462-hidden
+#: store and the store outgrew it — the sweep is the prescribed algorithm
+#: costing what it costs at a larger population, not a leak of the capped
+#: reads into the population. Memoizing the sweep is the follow-up, and it
+#: becomes worth its own invalidation surface at roughly 2,000 hidden
+#: directories (~12 ms, 0.6% of the 2 s poll), not before.
+#:
+#: The ruling, with the measurements: `BRIEF-sidebar-slice-b.md`,
+#: "## Lead check — round 1".
 SUBAGENT_LAYER_CAP = 40
 
 #: `session_id -> ((activity_mtime, transcript_size), SessionRow)`. A row's
