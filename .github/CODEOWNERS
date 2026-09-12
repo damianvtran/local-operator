@@ -20,9 +20,10 @@
 # syntax against GitHub's own CODEOWNERS validator
 # (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
 # validates the default branch; the pre-change baseline on `main` returned an
-# empty error list). As of 2026-09-11 every handle on the `*` line below has
-# been confirmed a write collaborator that way, so the line is effective in
-# full -- five names, all live.
+# empty error list). As of 2026-09-11 every handle on the `*` line below
+# resolves to a current collaborator with write -- or, for `damianvtran`,
+# admin -- access confirmed through that call, so the line is effective in
+# full: five names, all live.
 #
 # 2026-09-10 ADDITIONS -- `olafagbemi` and `sherman-tsui` were added as
 # owners on 2026-09-10 by explicit operator decision, and each was invited
@@ -43,10 +44,11 @@
 # if and when she accepted. She has now ACCEPTED: invitation 332543898 is
 # consumed (`gh api repos/damianvtran/local-operator/invitations` returns an
 # empty list) and
-# `gh api
-# repos/damianvtran/local-operator/collaborators/SanaKetabchi/permission`
-# returns `write`, so as of 2026-09-11 her handle on the `*` line below is
-# effective. This PR is that promised follow-up, and it closes the deferral.
+# `gh api repos/damianvtran/local-operator/collaborators/<handle>/permission`
+# (with her handle substituted for `<handle>`, exactly as in the 2026-09-10
+# block above) returns `write`, so as of 2026-09-11 her handle on the `*`
+# line below is effective. This PR is that promised follow-up, and it closes
+# the deferral.
 #
 # Handle verification for the 2026-09-10 candidates, in the same
 # evidence-first spirit: all three are listed together in
