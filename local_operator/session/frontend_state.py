@@ -162,7 +162,35 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: 25. Per-row text is the right place to take it from — it is already shared,
 #: already floored at a legible preview, and 128 chars spread across a roster
 #: is invisible, whereas an over-limit frame cannot be sent at all.
-JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
+#:
+#: Reduced again, 119,872 → 119,360, by the UNION of the two per-frame consumers
+#: that arrived either side of a rebase: this branch's attention payload
+#: (``reason`` at :data:`local_operator.session.attention.REASON_WIRE_CHARS`
+#: plus ``cause``, 714 B on every frame) and upstream's ``live_tool_started_at``
+#: (8 concurrently executing calls × 52 B = 416 B). Each fits alone on its own
+#: base — upstream's tree had 147 B of headroom, this branch's 83 B — and the
+#: pair does not, which is what put the ``ran all year`` worst case 416 bytes
+#: over the line. The same shelf pays, for the same reasons: the budget is
+#: elastic, shared, and floored at a legible preview, so 512 chars spread across
+#: a 200-row roster is 3 characters off each row's 599 — invisible — where an
+#: over-limit frame cannot be sent at all.
+#:
+#: Mind the GRANULARITY, because it is why this is a round 512 rather than the
+#: 416 the union overshot by: a row's share is ``BUDGET // len(jobs)``, so a
+#: reduction lands on whole characters per row and no value buys exactly 416.
+#: At the guard's 200 rows, 512 chars moves the share 599 → 596, and three
+#: fields × 3 chars × 200 rows is 1,800 bytes off the frame's FIXED content —
+#: past the overshoot by a margin rather than flush against it, which is the
+#: distinction the 13-byte precedent above did not make. Measure the guard, not
+#: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
+#: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
+#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: the catalogue grown from its 50-row floor to 54). The number that matters is
+#: the one the overshoot was about — whether the FLOOR fits: with the catalogue
+#: held at its floor the frame now has 1,384 B of line where it had 416 B too
+#: little. It is not slack: it bought two fields, and the next per-frame field is
+#: paid for out of here too.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_360
 JOB_TEXT_FLOOR_CHARS = 200
 
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
