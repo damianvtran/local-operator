@@ -129,7 +129,7 @@ the guard deliberately leaving a host that was billing full price for nothing.
 The discovery is not free, and the cost is bounded but real: a conversation
 spends roughly **2-3 full-price turns** finding out its first host does not
 cache before the guard retires it (one warm miss is ordinary, the second
-retires, and the first turn on the replacement host is cold by definition).
+retires, and the first turn on the replacement host has nothing to reuse).
 Closing that gap means preferring known-good hosts up front rather than only
 leaving the worst after it proves itself — the cache-aware host *selection*
 work deliberately deferred out of this change.

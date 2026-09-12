@@ -2591,6 +2591,13 @@ class SessionStreamFn:
     #: Sized at twice the per-turn gap so a genuinely consecutive pair (two
     #: turns each inside the warm window) always counts, while anything that
     #: needed an idle stretch in between does not.
+    #:
+    #: Residual window, noted so it is not re-derived (review round 2,
+    #: MINOR-2): turns served by OTHER hosts neither strike nor clear, so a
+    #: strike can sit for up to this long while the conversation is busy
+    #: elsewhere and then pair with a later miss. Kept anyway — two misses
+    #: inside ten minutes are fair evidence about a host regardless of what ran
+    #: between them, and tightening it would start forgiving real cache death.
     PROVIDER_STRIKE_PAIR_MAX_GAP_S = 600.0
     #: Hard ceiling on retirements per (conversation, model). ``ignore`` is a
     #: HARD filter on OpenRouter's side, so an unbounded set walks a
@@ -2869,6 +2876,20 @@ class SessionStreamFn:
         statement about which host is holding this conversation, and the
         compaction summary is sent to that same host — keeping the conversation
         there across the boundary is the whole point of the feature.
+
+        KNOWN ASYMMETRY, recorded so the next reader does not re-derive it
+        (review round 2, MINOR-1): because this wipes the slate, the first cold
+        turn after a compaction is strike 1, so a host that then suffers ONE
+        ordinary eviction is retired on what is effectively a single genuine
+        miss rather than two. Left as is on evidence that cuts against the
+        pessimistic reading: the first post-boundary turn is usually WARM, not
+        cold — its prefix is the system blocks the host still holds plus the new
+        summary, and the floor is ``max(1024, 2%)``, so above a ~1-2k system
+        prefix that turn clears the floor and CLEARS the record instead of
+        striking it. The blast radius is bounded by ``MAX_RETIRED_PROVIDERS``
+        and the next compaction lifts the bar again, so this is strictly better
+        than not clearing at all — which is the failure that made the clear
+        necessary.
         """
         if not (self._provider_strikes or self._provider_retired):
             return
