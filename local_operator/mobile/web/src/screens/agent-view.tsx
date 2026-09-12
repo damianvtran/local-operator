@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { getSubagentDetail, getSubagentHistory } from "../api";
+import { HttpError, getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
 	AGENT_GLYPH,
@@ -464,6 +464,10 @@ interface LazyTranscript {
 	/** The (single, for a settled child) fetch failed and no entries are shown:
 	 * the body must surface an error + retry rather than a silent blank (U1). */
 	failed: boolean;
+	/** The route answered 404: this child has no readable transcript (the daemon
+	 * could not resolve its session dir). Terminal, not a link drop — a retry
+	 * can never succeed, so the body must say so instead of offering one. */
+	unavailable: boolean;
 	/** Imperative re-pull for the retry affordance. */
 	retry: () => void;
 }
@@ -481,6 +485,9 @@ function useLazySubagentTranscript(
 	const [fetched, setFetched] = useState<TranscriptEntry[]>([]);
 	const [loading, setLoading] = useState(!inlined);
 	const [failed, setFailed] = useState(false);
+	// Terminal 404 (see ``LazyTranscript.unavailable``). Held apart from
+	// ``failed`` so the transient branch keeps its retry affordance.
+	const [unavailable, setUnavailable] = useState(false);
 	// A monotonic nonce the retry button bumps to force the fetch effect to
 	// re-run even when nothing else in its dep list changed (a settled child on
 	// the same connection). Mirrors the detail loader's explicit retry signal.
@@ -492,6 +499,7 @@ function useLazySubagentTranscript(
 		setFetched([]);
 		setLoading(true);
 		setFailed(false);
+		setUnavailable(false);
 	}, [sessionId, jobId]);
 	useEffect(() => {
 		if (inlined) return;
@@ -517,6 +525,7 @@ function useLazySubagentTranscript(
 					setFetched((prev) => (sameTail(prev, entries) ? prev : entries));
 					setLoading(false);
 					setFailed(false);
+					setUnavailable(false);
 				}
 			} catch (err) {
 				/* An aborted request is a teardown/replacement, not a failure:
@@ -526,6 +535,16 @@ function useLazySubagentTranscript(
 				   dropped fetch is terminal and must surface a retry (U1). */
 				if (!alive || (err instanceof DOMException && err.name === "AbortError")) return;
 				setLoading(false);
+				/* A 404 is the daemon saying this child has no transcript to serve
+				   (its route resolved no session dir). No amount of retrying changes
+				   that answer, so the body must not offer one; only the transient
+				   branch keeps its retry. A running child's poll still ticks, so a
+				   route that later becomes readable clears this again. */
+				if (err instanceof HttpError && err.status === 404) {
+					setUnavailable(true);
+					setFailed(false);
+					return;
+				}
 				setFailed(true);
 			}
 		};
@@ -550,9 +569,9 @@ function useLazySubagentTranscript(
 		setAttempt((n) => n + 1);
 	};
 	if (inlined) {
-		return { entries: detail.transcript, loading: false, failed: false, retry };
+		return { entries: detail.transcript, loading: false, failed: false, unavailable: false, retry };
 	}
-	return { entries: fetched, loading, failed, retry };
+	return { entries: fetched, loading, failed, unavailable, retry };
 }
 
 /** The body shown when a settled child's single transcript fetch failed and no
@@ -560,14 +579,40 @@ function useLazySubagentTranscript(
  * transient link drop, with no signal anything failed and no way to recover
  * short of navigating away — the exact flaky-link case this surface targets.
  * The Outcome/todos tail still renders below via ``tailContent``; this only
- * fills the empty transcript window with a reason and an in-place retry. */
+ * fills the empty transcript window with a reason and an in-place retry.
+ *
+ * ``unavailable`` is the terminal sibling: a 404 means there is nothing to
+ * fetch, so the same card must not offer a Retry that cannot succeed — it says
+ * so and points back at the parent instead. All user-facing copy for both
+ * branches lives here, so a design pass edits one place. */
 function TranscriptFetchError({
 	connected,
+	unavailable,
+	parentPath,
 	onRetry,
 }: {
 	connected: boolean;
+	unavailable: boolean;
+	parentPath: string;
 	onRetry: () => void;
 }) {
+	if (unavailable) {
+		return (
+			<div role="alert" className="flex flex-col items-start gap-2 py-4">
+				<p className="text-body-sm font-medium text-ink">Conversation not available.</p>
+				<p className="text-meta text-ink-dim">
+					This agent has no saved transcript to show.
+				</p>
+				<button
+					type="button"
+					onClick={() => navigate(parentPath)}
+					className="min-h-11 rounded-sm border border-control px-3 text-body-sm active:bg-elevated"
+				>
+					Back to parent
+				</button>
+			</div>
+		);
+	}
 	return (
 		<div role="alert" className="flex flex-col items-start gap-2 py-4">
 			<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
@@ -610,7 +655,7 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const { entries: transcript, loading, failed, retry } = useLazySubagentTranscript(
+	const { entries: transcript, loading, failed, unavailable, retry } = useLazySubagentTranscript(
 		sessionId,
 		jobId,
 		detail,
@@ -629,8 +674,20 @@ export function AgentConversation({
 	// U2), a settled child whose one fetch failed (visible error + retry so it is
 	// recoverable in place, never a silent blank — U1), or genuinely empty. The
 	// header/outcome above stay put; only the BODY reflects these.
-	const emptyBody = failed ? (
-		<TranscriptFetchError connected={connected} onRetry={retry} />
+	const emptyBody = unavailable ? (
+		<TranscriptFetchError
+			connected={connected}
+			unavailable
+			parentPath={parentPath}
+			onRetry={retry}
+		/>
+	) : failed ? (
+		<TranscriptFetchError
+			connected={connected}
+			unavailable={false}
+			parentPath={parentPath}
+			onRetry={retry}
+		/>
 	) : loading ? (
 		<div className="py-4">
 			<TranscriptLoading connected={connected} />
