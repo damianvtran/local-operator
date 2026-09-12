@@ -12,18 +12,23 @@ one place — the pagination keys.
    shifting the offset by ONE line changes EVERY viewport row, so each eased step
    of the animation was a full-viewport rewrite.
 2. The four bindings were NOT ``priority=True``, unlike the arrow keys beside
-   them. Focus sits on the scroller, whose ``ScrollView`` base has its own
-   ``pageup``/``pagedown``/``home``/``end`` bindings, so a real key press went to
-   ``Widget.action_page_down`` (again an ``animate=True`` default) and the screen
-   actions above were unreachable on any report tall enough to scroll. Animating
-   them alone would have changed nothing a user could press.
+   them. Focus sits on the scroller, whose base is ``ScrollableContainer``
+   (``ScrollView`` extends it — ``textual/scroll_view.py:15``) and that is where
+   the ``pageup``/``pagedown``/``home``/``end`` bindings live
+   (``textual/containers.py:48-59``; ``scroll_view.py`` defines none of its own),
+   so a real key press went to ``Widget.action_page_down`` (again an
+   ``animate=True`` default) and the screen actions above were unreachable on any
+   report tall enough to scroll. Animating them alone would have changed nothing
+   a user could press.
 
 Measured at 120x45 on ``_tall_report_agg()`` (body region 102x29,
 ``max_scroll_y`` 31), one key press, before either half of the fix: ``pagedown``
-wrote **20 compositor frames, every one of them all 29 body rows**, with the
-offset walking 3 -> 5 -> 7 -> ... -> 29 one line at a time; ``pageup`` 20,
-``end`` 28, ``home`` 25. After it: one frame per key, covering all 29 rows and
-painted from the destination offset.
+wrote **17-26 compositor frames across runs — the count moves with frame
+scheduling and the distance travelled, the order of magnitude does not, so the
+mutation check below reads 17-28 rather than one fixed figure — every one of them
+all 29 body rows**, with the offset walking 3 -> 5 -> 7 -> ... -> 29 one line at
+a time; ``end`` and ``home`` travel furthest and wrote up to 49. After it: one
+frame per key, covering all 29 rows and painted from the destination offset.
 
 **These tests assert the work, not the clock** — the same discipline as
 ``test_analytics_repaint.py`` beside them, for the same reason (AGENTS.md
@@ -311,6 +316,9 @@ def test_the_key_binding_writes_the_same_single_frame(gesture, _action, key, mon
                 f"the frame was painted from y={content[0]['scroll_y']} rather than the "
                 f"destination y={expected}: the move is still easing"
             )
+            assert content[0]["cells"] == scroll.region.width * len(
+                frames.viewport
+            ), "the single frame did not paint the whole body width"
             assert float(scroll.scroll_offset.y) == expected, "the offset did not land"
             assert not app.animator.is_being_animated(scroll, "scroll_y")
             registered = [k for k in app.animator._animations if k[0] == id(scroll)]
