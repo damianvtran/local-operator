@@ -7,7 +7,12 @@ import * as api from "./api";
 import * as store from "./store";
 import type { SessionProjection, SubagentDetail, SubagentRow, TranscriptEntry } from "./types";
 
-vi.mock("./api", () => ({
+/* Spreads the ACTUAL api module so class exports keep their identity: the
+   screen distinguishes a terminal 404 by `instanceof HttpError`, which a
+   partial factory would replace with `undefined`. Network functions are
+   still stubbed per test. */
+vi.mock("./api", async (importOriginal) => ({
+	...(await importOriginal<typeof api>()),
 	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
 	getSubagentDetail: vi.fn(),
@@ -407,6 +412,34 @@ describe("AgentConversation", () => {
 		fireEvent.click(retry);
 		await waitFor(() => expect(screen.getByText("Recovered step")).toBeTruthy());
 		expect(screen.queryByText("Couldn't load the transcript.")).toBeNull();
+	});
+
+	it("treats a 404 child history as terminal, not a retry loop", async () => {
+		/* A child the daemon cannot route has no transcript to serve: the route
+		   answers 404 forever. The body must say so and offer a way back to the
+		   parent instead of a Retry that can never succeed (the console error
+		   this replaced). */
+		const pushState = vi.spyOn(history, "pushState");
+		const { detail, projection } = fixture();
+		const settled = {
+			...detail,
+			status: "completed" as const,
+			transcript: [],
+			prompt: "",
+			launch_message_id: "",
+		};
+		const getSubagentHistory = vi.mocked(api.getSubagentHistory);
+		getSubagentHistory.mockReset();
+		getSubagentHistory.mockRejectedValue(
+			new api.HttpError(404, "subagent history unavailable"),
+		);
+		render(
+			<AgentConversation sessionId="root" jobId="current" projection={projection} connected detail={settled} />,
+		);
+		await waitFor(() => expect(screen.getByText("Conversation not available.")).toBeTruthy());
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "Back to parent" }));
+		expect(pushState).toHaveBeenCalledWith(expect.anything(), "", "#/s/root/a/parent");
 	});
 
 	it("re-pulls a settled child's transcript when the link reconnects (U1)", async () => {
