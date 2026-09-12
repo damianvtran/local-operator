@@ -6,6 +6,12 @@ go-ahead on the flagged decisions at the end.
 Grounded against the tree at the time of writing; file:line citations are load-
 bearing, not decoration.
 
+**Companion document:** `web_fetch_robustness.md` extends this one with the
+retry policy, the anti-bot/challenge taxonomy, the blocked-retry request profile
+and the model-facing diagnostics for a refused or stalled fetch. Read it
+alongside §6 (pipeline), §7 (safety) and §9 (config) — it refines those three
+and contradicts none of them.
+
 ---
 
 ## 1. The problem, as the code actually has it
