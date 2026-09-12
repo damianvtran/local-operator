@@ -1725,3 +1725,191 @@ async def test_a_sibling_teardown_is_not_reported_as_a_replacement(
         service.link.generation == generation
     ), "no replacement attached, which is the fact both answers had to respect"
     assert service.link.dropped_unproven(), "the latched reason is what the answer reports"
+
+
+class _WedgedPeer(_GatedClosePeer):
+    """A paired peer that accepts a command write and never finishes it.
+
+    R4-2's repro needs the peer wedged on BOTH legs at once, because the two are
+    what produce the window: the parked command write is what makes `_admit`'s
+    send deadline fire and call `_drop_unproven_link`, and the parked *close* is
+    what keeps that teardown suspended after it has already cleared both maps.
+    Distinct from `_GatedClosePeer`, which refuses nothing until the handshake
+    asks it to close.
+    """
+
+    def __init__(self, extension_id: str = EXTENSION_ID) -> None:
+        super().__init__(extension_id)
+        self.write_entered = asyncio.Event()
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+        if "method" in payload:
+            self.write_entered.set()
+            await asyncio.Future()  # a write that never completes
+
+
+@pytest.mark.asyncio
+async def test_a_reused_id_does_not_cost_the_new_request_its_approval_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-2 (major): the marker's removal needs the SAME identity proof the future got.
+
+    `_forget_pending` deleted `link.pending` by identity — because a teardown
+    clears that map, so a later request may re-use an id — and then popped
+    `link.awaiting_origin` by id ALONE. Both describe one request's lifetime, but
+    only the identity can prove WHICH request, so the unguarded half deleted a
+    live request's marker. The window needs no hand-inserted state:
+
+    1. a paired peer wedges, an old command's send deadline fires inside `_admit`
+       (which forgets our future and then tears the link down), and the
+       teardown's bounded `websocket.close()` parks on the wedged peer AFTER
+       `forget_link_state()` has cleared both maps;
+    2. the worker genuinely re-dials inside that window and re-pairs through the
+       real `extension()`;
+    3. a NEW request re-using the old id passes the busy guard — the guard reads
+       the map the teardown emptied — reaches the wire, and the extension
+       announces a human approval for it through the real receive loop;
+    4. the old task's parked close finishes, and its `finally` unwinds through
+       `_forget_pending`.
+
+    Pre-fix that unwind took the new marker with it: `NEW_FUTURE_PRESERVED: true,
+    NEW_APPROVAL_MARKER_PRESERVED: false`, so the new request lost the deadline
+    extension `_await_response` exists to give it and failed at its BASE timeout
+    while the user was still looking at the prompt.
+
+    This row is also the only one that can see the FUTURE's identity guard
+    (review R4-4's missing coverage): reverting it to a bare `pop(id)` leaves
+    every other row green.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_SEND_TIMEOUT_S", 0.05)
+    _saved_pairing(tmp_path, "good-token")
+    service = BridgeService(root=tmp_path)
+
+    wedged = _WedgedPeer()
+    wedged.push(_hello(token="good-token"))
+    wedged_task = asyncio.create_task(service.extension(wedged))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.websocket is wedged and service.link.paired)
+
+    old_id = "r-abc123abcdef"
+    old_task = asyncio.create_task(
+        service._dispatch_serialized(
+            Request(id=old_id, method="read", params={"tab": "bridge:1:n"})
+        )
+    )
+    await asyncio.wait_for(wedged.write_entered.wait(), timeout=2.0)
+    # Step 1: the send deadline fired and the teardown is now parked in its
+    # bounded close, with both maps already cleared.
+    await asyncio.wait_for(wedged.close_entered.wait(), timeout=2.0)
+    assert service.link.pending == {}, "precondition: the teardown cleared `pending`"
+    assert service.link.awaiting_origin == {}, "precondition: the teardown cleared the markers"
+
+    # Step 2: the worker re-dials for real and re-pairs. A peer that records
+    # frames without answering them, so the new request's future stays registered.
+    reconnected = _FakePeer()
+    reconnected.push(_hello(token="good-token"))
+    reconnected_task = asyncio.create_task(service.extension(reconnected))  # type: ignore[arg-type]
+    assert await _settles(
+        lambda: service.link.websocket is reconnected and service.link.paired
+    ), "the re-dial did not re-pair"
+
+    # Step 3: a NEW request re-using the old id — a different tab, so it takes a
+    # different key and is not queued behind the old task's per-tab lock.
+    new_task = asyncio.create_task(
+        service._dispatch_serialized(
+            Request(id=old_id, method="read", params={"tab": "bridge:2:m"})
+        )
+    )
+    assert await _settles(
+        lambda: any(frame.get("id") == old_id for frame in reconnected.sent)
+    ), "the new request never reached the wire"
+    new_future = service.link.pending.get(old_id)
+    assert new_future is not None, "the new request registered no future to preserve"
+
+    # ...and the extension announces a genuine human approval for it.
+    reconnected.push({"event": "awaiting_origin", "id": old_id, "origin": "https://example.com"})
+    assert await _settles(lambda: old_id in service.link.awaiting_origin), "no marker was set"
+
+    # Step 4: the old task's parked close finishes and it unwinds.
+    wedged.release_close.set()
+    with suppress(Exception):
+        await asyncio.wait_for(old_task, timeout=2.0)
+
+    assert (
+        service.link.pending.get(old_id) is new_future
+    ), "the old unwind popped a LATER request's future, which its identity guard prevents"
+    assert (
+        old_id in service.link.awaiting_origin
+    ), "the old unwind popped the NEW request's approval marker, so it expires at the base deadline"
+
+    for task in (new_task, reconnected_task, wedged_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_real_replacement_handshake_names_the_replacement(tmp_path: Path) -> None:
+    """R4-3 (minor): `phase: replaced` must cover the arm a re-dial actually reaches.
+
+    The delta gave the phase to the two TIMEOUT fences, but a genuine replacement
+    handshake calls `forget_link_state()`, which fails every pending future with
+    `RuntimeError("extension disconnected")` immediately — so an in-flight command
+    does not reach a timeout at all. It lands in the generic `except Exception`
+    arm, and without a `replaced` test there it fell through to a bare
+    `extension_disconnected` whose rendered copy is "the bridge daemon is running
+    but no browser is attached. Ask the user to open their browser" — for a
+    browser that is demonstrably open, paired and reconnected. That is precisely
+    the misdirection class this PR exists to remove (design D3-3), on the path a
+    worker re-dial takes most often.
+
+    The assertion is on the RENDERED sentence, not the code, because the code is
+    shared and only `phase` selects the copy.
+    """
+
+    _saved_pairing(tmp_path, "good-token")
+    service = BridgeService(root=tmp_path)
+
+    first = _FakePeer()
+    first.push(_hello(token="good-token"))
+    first_task = asyncio.create_task(service.extension(first))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.websocket is first and service.link.paired)
+
+    command_task = asyncio.create_task(
+        service._dispatch_serialized(
+            Request(id="r-inflight", method="read", params={"tab": "bridge:1:n"})
+        )
+    )
+    assert await _settles(
+        lambda: any(frame.get("id") == "r-inflight" for frame in first.sent)
+    ), "the command never reached the wire"
+
+    # A GENUINE replacement handshake, through the production accept path.
+    second = _FakePeer()
+    second.push(_hello(token="good-token"))
+    second_task = asyncio.create_task(service.extension(second))  # type: ignore[arg-type]
+    assert await _settles(
+        lambda: service.link.websocket is second and service.link.paired
+    ), "the replacement did not install"
+
+    response = await asyncio.wait_for(command_task, timeout=2.0)
+    error = json.loads(bytes(response.body).decode("utf-8"))["error"]
+
+    assert error["code"] == ErrorCode.EXTENSION_DISCONNECTED.value, error
+    assert error.get("data", {}).get("phase") == "replaced", (
+        "a replacement handshake answered without naming the replacement, so the "
+        "reader is told to open a browser that is already open: " + json.dumps(error)
+    )
+
+    rendered = format_error(
+        BridgeError(ErrorCode(error["code"]), error["message"], error.get("data"))
+    )
+    assert "no browser is attached" not in rendered, rendered
+    assert "open their browser" not in rendered, rendered
+    assert "retry the action" in rendered, rendered
+
+    for task in (first_task, second_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
