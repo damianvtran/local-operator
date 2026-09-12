@@ -68,15 +68,20 @@ NoticeSeverity = Literal["info", "warning", "error"]
 #: rather than wording, so the id prefix is checked instead.
 #:
 #: The DELIVERY ENVELOPES (``<parent-message>``, ``<subagent-message …>``,
-#: ``<peer-session-message …>``) are deliberately NOT here either, and the
-#: distinction is the reason this list stays short: a delivery row is handled by
-#: its own PARSER (``extract_parent_message``, the panel's own fold), which
-#: renders the sender's receipt, so it never reaches a surface as the user's
-#: words — and it is a shape a person quotes verbatim when asking about it, which
-#: a wording rule would then eat (`test_a_human_quoting_the_envelope_keeps_
-#: their_own_words` pins that). A notice has no parser: nothing about
-#: ``[model switch] …`` is addressable, which is why text is the only test for
-#: one.
+#: ``<peer-session-message …>``) are deliberately NOT here either, and the reason is
+#: what already covers a copy of one rather than a parser: a carried envelope copy
+#: is shed by PROVENANCE — ``cap_preserved_user_turns``' ``injection_ids``, resolved
+#: against the journal, where the stored turn's id names the entry whose
+#: ``custom_type`` is the delivery — so it never needs a wording rule. Measured
+#: fleet-wide (14 sessions): 229 of 233 carried envelope copies are shed that way on
+#: BOTH heads. The remaining four turns — ids that resolve to nothing — paint on
+#: this head as a parent receipt where the previous wording rule shed them; all four
+#: are real ``<parent-message>`` envelopes, the receipt is what that row honestly is,
+#: and user-kind row counts are unchanged. And it is a shape a person quotes
+#: verbatim when asking about it, which a wording rule would then eat
+#: (`test_a_human_quoting_the_envelope_keeps_their_own_words` pins that). A notice
+#: has no such provenance to fall back on: nothing about ``[model switch] …`` is
+#: addressable, which is why text is the only test for one.
 _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[model switch] ",  # incidents.format_model_switch_message
     "[session incident",  # incidents.Incident.render
@@ -84,8 +89,13 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
     "[session-state]\n",  # Session._system_state_message
     # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather
-    # than the shared ``[system] `` prefix: that prefix is short enough that a
-    # person could plausibly type it, and nothing else in the tree mints it.
+    # than the shared ``[system] `` prefix: that prefix is also minted by
+    # ``harness.loop.CONNECTIVITY_CONTINUATION_PROMPT``, so it does not select the
+    # gates. Both gate producers still match here, the connectivity prompt is hidden
+    # by :func:`is_harness_chrome` on every surface regardless, and the narrowing is
+    # therefore display-neutral — with one consequence recorded rather than hidden:
+    # a CARRIED copy of the connectivity prompt is no longer shed by text, so it
+    # returns to the model's context. No receipt changes visibly.
     "[system] The question for ",
     "[system] The approval request for ",
     "<system-reminder>",  # Session._todo_reminder_text
@@ -244,10 +254,11 @@ def is_harness_notice_row(row: Any) -> bool:
     **The cost, stated exactly because it is a trade rather than a free win.** A
     person who pastes a harness notice verbatim loses their display row: the text
     is hidden on every human surface. It is NOT lost anywhere else — the row is
-    still in the journal, still in the model's context, still in the export, and
-    still searchable; only the renderer drops it, exactly as
-    :func:`is_harness_chrome` does for the three loop/continuation prompts, which
-    a person can equally paste verbatim. That precedent is the reason this is
+    still in the journal, and still in the model's context; only the renderer drops
+    it, exactly as :func:`is_harness_chrome` does for the three loop/continuation
+    prompts, which a person can equally paste verbatim. Those two are the verified
+    retention surfaces, and they are named alone because a claim about anywhere
+    else would be one nobody measured. That precedent is the reason this is
     acceptable at all: a display that must decide from text will occasionally
     hide something a person wrote, and the alternative — leaving the harness's own
     words behind the user gutter on a surface that has no other provenance to read
