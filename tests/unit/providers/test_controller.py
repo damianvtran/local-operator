@@ -2002,6 +2002,66 @@ class TestQwenCloudConsoleRoute:
         assert reports[0].limits == []
 
     @pytest.mark.asyncio
+    async def test_the_ticket_reaches_the_api_key_route_with_no_oauth_row(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """The console route must not require a DEAD OAuth row to exist.
+
+        Spending the ticket only at the ``access is None`` point inside
+        ``if expected:`` made the whole feature depend on a present-but-dead
+        grant. The real store holds an ``alibaba-token-plan`` api_key row, so
+        ``lop logout alibaba-token-plan`` drops the OAuth row, leaves the
+        api_key row, and ``/usage`` rendered NOTHING for a valid ticket --
+        the silent-empty-table symptom this feature exists to fix (QA D3).
+        """
+        store.upsert_credential(
+            "alibaba-token-plan", {"key": "fake-inference-key", "type": "api_key"}
+        )
+        self._ticket(store)
+        assert (
+            controller._expected_oauth_identities("alibaba-token-plan") == []
+        ), "no OAuth row: this is the API-key route, not the dead-grant one"
+        expected = UsageReport(provider="alibaba-token-plan", limits=[])
+        calls = self._spy(monkeypatch, controller, report=expected)
+
+        await controller.fetch_usage(["alibaba-token-plan"])
+
+        assert len(calls) == 1
+        assert calls[0]["access"] is None
+        assert calls[0]["extra_creds"] is not None, "the API-key route dropped the ticket"
+        assert calls[0]["extra_creds"]["ticket"] == self.TICKET
+
+    @pytest.mark.asyncio
+    async def test_the_api_key_route_passes_no_ticket_for_other_providers(
+        self, controller, store, monkeypatch
+    ) -> None:
+        """Threading the ticket through the API-key route must not widen it.
+
+        That route is shared by every provider with no OAuth row, so the
+        storage-id guard inside ``_qwencloud_console_creds`` is the only thing
+        keeping a full-account console cookie off another provider's fetch.
+        Asserted by EXECUTION over the whole registry rather than by reading
+        the guard.
+        """
+        self._ticket(store)
+        store.upsert_credential("deepseek", {"key": "fake-deepseek-key", "type": "api_key"})
+        calls = self._spy(monkeypatch, controller, report=UsageReport(provider="deepseek"))
+
+        await controller.fetch_usage(["deepseek"])
+
+        assert len(calls) == 1
+        assert calls[0]["extra_creds"] is None, "deepseek must never carry the console cookie"
+
+        from local_operator.providers.registry import PROVIDER_REGISTRY
+
+        resolved = sorted(
+            definition.id
+            for definition in PROVIDER_REGISTRY
+            if controller._qwencloud_console_creds(definition.id) is not None
+        )
+        assert resolved == ["alibaba-token-plan", "alibaba-token-plan-oauth"]
+
+    @pytest.mark.asyncio
     async def test_another_provider_never_queries_the_ticket_namespace(
         self, controller, store, monkeypatch
     ) -> None:

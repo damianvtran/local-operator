@@ -1419,8 +1419,23 @@ class ProviderController:
                 now_ms=now_ms,
                 force=force_refresh,
             )
+        # The API-key route, reached when the provider has no stored OAuth
+        # identity at all. The console ticket is threaded through HERE TOO, not
+        # only at the dead-grant point above: spending it only inside
+        # `if expected:` made the console window depend on a stored OAuth row
+        # being present-but-dead. A user who runs `lop logout
+        # alibaba-token-plan` drops that row while the api_key row remains, and
+        # `/usage` then rendered NOTHING for a perfectly valid ticket -- the
+        # silent-empty-table symptom this feature exists to fix, wearing the
+        # costume of a plausible degraded state (controller.py:268-278).
+        #
+        # `_qwencloud_console_creds` is already guarded on the storage id and
+        # returns None for every other provider, so this cannot widen any other
+        # provider's fetch; verified by execution, not by reading.
         try:
-            report = await self._fetch_one(client, provider, access=None)
+            report = await self._fetch_one(
+                client, provider, access=None, extra_creds=self._qwencloud_console_creds(provider)
+            )
         except Exception:  # noqa: BLE001
             return []
         if report is None:
