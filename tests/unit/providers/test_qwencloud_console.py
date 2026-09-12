@@ -551,6 +551,102 @@ def test_set_reads_stdin_and_strips_one_trailing_newline(
     assert FAKE_TICKET not in out
 
 
+@pytest.mark.parametrize("command", ["set", "rm"])
+def test_a_ticket_change_drops_the_cached_usage_row(
+    store: AuthStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    """`lop login`/`logout` both invalidate so a credential change shows at
+    once (auth_cli.py:400, :409). The ticket lives in its own namespace, so
+    `_account_fingerprint` never reads it and the cache key is IDENTICAL
+    across a ticket swap -- measured. Without this call a latched
+    `usage unavailable` row is served for up to ~12.5 min after the user has
+    already pasted a working cookie.
+    """
+    store_ticket(store, FAKE_TICKET)
+    invalidated: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.providers.auth_cli._invalidate_cached_usage",
+        lambda provider, auth_store: invalidated.append(provider),
+    )
+
+    class PipedStdin:
+        def isatty(self) -> bool:
+            return False
+
+        def read(self) -> str:
+            return FAKE_TICKET_2
+
+    monkeypatch.setattr("sys.stdin", PipedStdin())
+    assert _run(monkeypatch, store, command) == 0
+    capsys.readouterr()
+    assert invalidated == ["alibaba-token-plan"], command
+
+
+def test_set_actually_drops_the_latched_cache_row_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real cache row, not a patched call.
+
+    The sibling above pins the CALL; this pins the EFFECT, because the whole
+    finding is that nothing else in the system observes a ticket change: the
+    cache key is byte-identical across a swap, so a test that only checked the
+    key would pass while the stale row was still served.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    opened = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        # A credential row so the provider is reportable at all; the ticket
+        # alone never joins this provider's fingerprint.
+        opened.upsert_credential(
+            "alibaba-token-plan", {"key": "fake-inference-key", "type": "api_key"}
+        )
+        store_ticket(opened, FAKE_TICKET)
+
+        from local_operator.providers.controller import ProviderController
+
+        controller = ProviderController(opened, login_callbacks=None)
+        try:
+            key = controller._usage_cache_key("alibaba-token-plan")
+            cache = controller._usage_cache_store()
+            assert cache is not None
+            cache.set(
+                key,
+                "alibaba-token-plan",
+                [],
+                expires_at_ms=int(time.time() * 1000) + 600_000,
+            )
+            assert cache.get(key) is not None, "the row must be latched before the swap"
+        finally:
+            controller.close()
+
+        class PipedStdin:
+            def isatty(self) -> bool:
+                return False
+
+            def read(self) -> str:
+                return FAKE_TICKET_2
+
+        monkeypatch.setattr("sys.stdin", PipedStdin())
+        assert _run(monkeypatch, opened, "set") == 0
+        capsys.readouterr()
+
+        after = ProviderController(opened, login_callbacks=None)
+        try:
+            assert (
+                after._usage_cache_key("alibaba-token-plan") == key
+            ), "the key is expected to be unchanged -- that is the finding"
+            after_cache = after._usage_cache_store()
+            assert after_cache is not None
+            assert after_cache.get(key) is None
+        finally:
+            after.close()
+    finally:
+        opened.close()
+
+
 def test_rm_removes_the_row(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
