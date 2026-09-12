@@ -608,10 +608,15 @@ def test_the_set_receipt_fits_every_ordered_pair_the_ladders_can_form() -> None:
         if first != second
     ]
     assert pairs, "the shipped ladders must offer at least one transition"
-    # The longest words the vocabulary can carry, in both directions: the
-    # receipt's two rung words are independent of each other.
-    longest = max(EFFORT_ORDER, key=cell_len)
-    pairs.extend([(longest, "medium"), ("medium", longest)])
+    # The longest two words the vocabulary can carry, in both directions: the
+    # receipt's two rung words are independent of each other, so the pair that
+    # spends the most cells is the two longest, whichever they are. Derived
+    # rather than named `medium` (review round 3, NIT-2): that word is right
+    # today and would silently stop being the worst if the vocabulary gained a
+    # longer one.
+    by_length = sorted(EFFORT_ORDER, key=cell_len)
+    longest, runner_up = by_length[-1], by_length[-2]
+    pairs.extend([(longest, runner_up), (runner_up, longest)])
 
     def rendered(first: str, second: str) -> str:
         # The SHIPPED string, not a copy of it: the receipt lives in a module

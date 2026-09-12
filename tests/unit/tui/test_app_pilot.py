@@ -9175,11 +9175,18 @@ async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
             await pilot.pause()
             await pilot.pause()
             notices = [block.text() or "" for block in app.query(NoticeBlock)]
-        receipts = [n for n in notices if "default:" in n]
+        # `startswith`, not a substring (review round 3, MINOR-2): three
+        # FAILURE notices contain `default:` — `could not save default:`,
+        # `model switched, but could not save default:` and `could not read the
+        # saved default:` — so the substring form would also have passed had the
+        # success receipt been replaced by a save failure, which is the one
+        # substitution this assertion exists to catch. The sibling budget test in
+        # `test_effort.py` uses the same shape against the same receipt.
+        receipts = [n for n in notices if n.startswith("default: ")]
         assert len(receipts) == 1, notices
         assert not [n for n in notices if "config.yml changed" in n], notices
         # The receipt is the LAST row: nothing followed it.
-        assert "default:" in notices[-1], notices
+        assert notices[-1].startswith("default: "), notices
     finally:
         _reset_for_tests()
 

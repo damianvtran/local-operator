@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from rich.cells import cell_len
+
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
 from local_operator.model.effort import EFFORT_ORDER
@@ -1412,7 +1414,7 @@ class TestTheModelRowsHelpBudget:
         setting = settings_io.resolve_key(key)
         assert setting is not None
         assert setting.help
-        assert len(f"{setting.help} · default: —") <= 74, setting.help
+        assert cell_len(f"{setting.help} · default: —") <= 74, setting.help
 
     def test_the_effort_help_says_what_the_resting_cell_means(self) -> None:
         setting = settings_io.resolve_key("model_effort")
@@ -1430,4 +1432,7 @@ class TestTheModelRowsHelpBudget:
         """
         setting = settings_io.resolve_key("model_effort")
         assert setting is not None
-        assert len(f"{setting.help} · default: —") <= 71, setting.help
+        # `cell_len`, like every other width in this round: the composed line
+        # carries an em dash and a middot, so a character count is not a cell
+        # count (review round 3, NIT-1). It measures the same today.
+        assert cell_len(f"{setting.help} · default: —") <= 71, setting.help
