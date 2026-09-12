@@ -140,8 +140,15 @@ def test_status_reports_overdue_and_stale_counts(
     assert wake_command(_args()) == 0
 
     out = capsys.readouterr().out
-    assert "overdue:     2" in out, out
+    # ONE overdue, not two: the stale row is counted as stale and excluded
+    # from overdue, so "worst" describes a wake that is actually coming
+    # (round 1, D2). Counting it both ways let a wake the supervisor has given
+    # up on dominate the figure an operator reads as "how late am I".
+    assert "overdue:     1" in out, out
     assert "stale:       1 past 7d" in out, out
+    # And `next:` names the FIREABLE wake, never the stale one.
+    next_line = next(line for line in out.splitlines() if line.startswith("next:"))
+    assert "late watch" in next_line, next_line
 
 
 def test_the_json_form_carries_the_machine_readable_state(
@@ -196,11 +203,15 @@ def test_list_marks_overdue_and_stale_schedules(
 
     assert wake_command(_args(wake_command="list", json=False)) == 0
     out = capsys.readouterr().out
-    assert "(OVERDUE)" in out
+    # The DUE column carries the state word now that the listing is a
+    # fixed-width table (round 1, D4): an overdue row reads "10m overdue"
+    # there, and only the stale row needs the explanatory tail.
+    overdue_line = next(line for line in out.splitlines() if "statussess05" in line)
+    stale_line = next(line for line in out.splitlines() if "statussess06" in line)
+    assert "overdue" in overdue_line, overdue_line
     # Stale is the STRONGER statement (the supervisor has stopped trying), so
     # it replaces the overdue mark rather than doubling up on one line.
-    assert "(STALE" in out
-    assert out.count("(OVERDUE)") == 1
+    assert "stale" in stale_line and "overdue" not in stale_line, stale_line
 
 
 def test_the_install_subcommand_reaches_the_repair_path(
@@ -274,3 +285,73 @@ def test_an_unsupervisable_store_never_reports_another_stores_supervisor(
     assert payload["supervisor"]["running"] is False
     assert payload["supervisor"]["pid"] is None
     assert payload["installed"] is False
+
+
+# --- The REAL parser ---------------------------------------------------------
+#
+# Every test above hand-builds an `argparse.Namespace`, which is why round 1's
+# blocker (`lop wake install` and bare `lop wake` dying on `args.json`) was
+# invisible to the whole file: a hand-built namespace supplies exactly the
+# attributes the test author remembered, so it can never catch the dispatcher
+# reading one the PARSER does not define. These walk
+# `build_cli_parser().parse_args(...)` and then run the command, which is the
+# only arrangement that exercises the parser/dispatcher contract.
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["wake"],  # bare: `wake_command` defaults to "status"
+        ["wake", "status"],
+        ["wake", "status", "--json"],
+        ["wake", "install"],
+        ["wake", "list"],
+        ["wake", "list", "--json"],
+    ],
+)
+def test_every_wake_entry_point_survives_the_real_parser(
+    tmp_path: Path, argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The regression test for the round-1 blocker, across the whole surface.
+
+    Not just the reported command: `lop wake status` PRINTS `run 'lop wake
+    install'` as its remedy in several states, so the crash was reachable from
+    the surface's own advice. Parametrised over every route into
+    `wake_command` so a future subcommand that forgets a flag fails here.
+    """
+    from local_operator.cli import build_cli_parser, wake_command
+
+    write_entry(
+        tmp_path,
+        "realparser1",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "watch prod", "next_due_at": NOW_MS + 600_000}],
+    )
+
+    args = build_cli_parser().parse_args(argv)
+
+    # The assertion is that this does not raise. `install` reaches the real
+    # install hook, which under a redirected home writes a plist and declines
+    # to address launchd (see `test_install.py`'s safety contract).
+    assert wake_command(args) == 0
+    assert capsys.readouterr().out, f"{argv} produced no output"
+
+
+def test_the_parser_defines_every_flag_the_dispatcher_reads(tmp_path: Path) -> None:
+    """The structural form of the same bug, stated once.
+
+    `wake_command` reads `json`, `install` and `uninstall` off the namespace
+    for any route that lands in the status branch. Asserting on the parsed
+    namespace rather than on behaviour means a flag added to the dispatcher
+    without a parser default fails here with a message naming it.
+    """
+    from local_operator.cli import build_cli_parser
+
+    parser = build_cli_parser()
+    for argv in (["wake"], ["wake", "status"], ["wake", "install"], ["wake", "list"]):
+        args = parser.parse_args(argv)
+        for flag in ("json", "install", "uninstall"):
+            assert hasattr(args, flag), (
+                f"`lop {' '.join(argv)}` parses without `{flag}`, which `wake_command` "
+                f"dereferences — this is the round-1 blocker's exact shape"
+            )

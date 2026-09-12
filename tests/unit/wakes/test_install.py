@@ -474,3 +474,30 @@ def test_a_store_launchd_cannot_supervise_is_reported_as_unverifiable(
     assert state.running is False, "an isolated store was told about another store's supervisor"
     assert state.pid is None
     assert fake.calls == [], "launchd was addressed on behalf of a store it cannot supervise"
+
+
+def test_a_repeat_install_in_a_foreign_store_does_not_claim_to_be_installed(
+    redirected_home: Path, tmp_path: Path
+) -> None:
+    """Round 1 (Q1): three surfaces must not disagree about one store.
+
+    Under a redirected home the FIRST `wake create` says "plist written;
+    launchd not addressable from here" and `wake status` says "cannot be
+    verified for this store" — but the second create said "already installed",
+    which reads as "a supervisor is in place" for a store nothing supervises.
+    The reason string is the only feedback `wake create` gives, and this PR's
+    whole thesis is that "installed" stops meaning "a file exists".
+    """
+    config = tmp_path / "config"
+
+    first = ensure_supervisor_installed(config)
+    second = ensure_supervisor_installed(config)  # same store, plist now matches
+
+    if not is_supported():
+        assert second.reason == UNSUPPORTED_REASON
+        return
+
+    assert second.installed is False, "a store launchd cannot reach reported as installed"
+    assert "not addressable" in second.reason, second.reason
+    # Both calls answer in the same vocabulary; only the tense differs.
+    assert "not addressable" in first.reason, first.reason

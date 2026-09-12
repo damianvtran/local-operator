@@ -712,6 +712,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Inspect scheduled wakes and the supervisor that fires them",
         parents=[parent_parser],
     )
+    # DEFAULTS ON THE PARENT, so every route into `wake_command` carries the
+    # flags it dereferences. `wake_command` falls back to "status" when no
+    # subcommand is given, and the status branch reads `json`/`install`/
+    # `uninstall` — so bare `lop wake` and `lop wake install` (which define no
+    # such flags of their own) used to reach it and die on `args.json`. A
+    # subparser that declares `--json` still overrides this, and a branch that
+    # gains a new flag inherits a safe default instead of a crash.
+    wake_parser.set_defaults(json=False, install=False, uninstall=False)
     wake_sub = wake_parser.add_subparsers(dest="wake_command")
     wake_status = wake_sub.add_parser(
         "status",
@@ -3001,13 +3009,52 @@ def wake_command(args: argparse.Namespace) -> int:
         if not rows:
             print("no scheduled wakes")
             return 0
+        import shutil
+
         from local_operator.harness.wake import format_duration
         from local_operator.wakes.display import format_wake_time
 
+        # A FIXED-WIDTH TABLE, matching `lop sessions` right next door rather
+        # than inventing a second listing convention. Round 1 (D4): padding a
+        # pre-composed "<abs time> (<rel>)" cell never applies, because that
+        # cell is already 19-31 characters wide, so the id column started at a
+        # different position on every row (measured: 33/27/21/22/29) and a long
+        # message produced a 155-column line that wrapped with no indent.
+        # Splitting the two time facts into their own columns is what makes the
+        # padding mean something.
+        term_width = shutil.get_terminal_size((80, 24)).columns
+        # Widths sized from the real renderings rather than guessed: the
+        # absolute time is "Sep 02 6:10 PM EDT" at its longest (18), the
+        # relative cell "10m overdue" (11), and a session id is 12. Anything
+        # wider is room taken from the message for no gain.
+        when_w, rel_w, id_w = 18, 11, 12
+        # The message takes what is left, never more, so a row cannot wrap.
+        # The floor keeps it readable on a narrow terminal at the cost of
+        # overflowing there — a deliberate trade, since truncating to nothing
+        # would be worse than one wrapped line.
+        message_w = max(24, term_width - (when_w + rel_w + id_w + 3) - 1)
+        print(f"{'WHEN':<{when_w}} {'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
-            when = f'{format_wake_time(row["next_due_at"])} ({_format_due(row["due_in_s"])})'
-            mark = " (dormant — session stopped)" if row["dormant"] else ""
-            name = row["session_id"]
+            when = format_wake_time(row["next_due_at"])[:when_w]
+            # DORMANT WINS, and the overdue/stale marks are suppressed under it
+            # (round 1, Q2/R6). A dormant wake is one nothing is SUPPOSED to
+            # fire, so "(OVERDUE)" — which means "should have fired and did
+            # not" — contradicts it, and "no longer fired by the supervisor" is
+            # true of a dormant wake for an entirely different reason
+            # (reopening the session fires it; nothing revives a stale one).
+            # THE STATE WORD LIVES IN THE DUE COLUMN, and the row carries no
+            # prose repeating it — this is a table, like `lop sessions`, and
+            # the explanation of what "stale" or "dormant" costs belongs on the
+            # `status` summary that has room for a sentence. Keeping both put a
+            # 155-column line in an 80-column terminal (round 1, D4) and
+            # restated on every row what the reader needs told once.
+            if row["dormant"]:
+                state = "dormant"
+            elif row["stale"]:
+                state = "stale"
+            else:
+                state = _format_due(row["due_in_s"])
+            mark = ""
             # `every …` reuses the same renderer the tool listing and the wake
             # panel use, so one wake reads identically wherever it is shown.
             repeat = ""
@@ -3027,17 +3074,38 @@ def wake_command(args: argparse.Namespace) -> int:
                 left = row.get("until_in_s")
                 if left is not None:
                     repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
-            # RELIABILITY MARKS, after the dormant one and in escalating
-            # order: a stale wake is also overdue, and saying so twice on one
-            # line is noise — stale is the stronger statement because it means
-            # the supervisor has stopped trying.
-            if row["stale"]:
-                mark += " (STALE — no longer fired by the supervisor)"
-            elif row["overdue"]:
-                mark += " (OVERDUE)"
+            elif not row.get("every_ms"):
+                # The TUI wake panel says `once` for a non-recurring schedule
+                # and this listing said nothing, so the same wake read
+                # differently in two places (round 1, D9).
+                repeat = " · once"
             if row.get("last_fired_at"):
                 repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
-            print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
+            # THE MESSAGE IS WHAT GETS CLAMPED, never the state tail. Clamping
+            # the composed string instead would silently drop `until in 6d`,
+            # `3/5 fired` or `(stale — …)` off the end of a long row — exactly
+            # the bounds an earlier round added because a user cannot be
+            # expected to remember them (round 5, R6/U16). A user-authored
+            # message is the one part of the row they already know.
+            tail = f"{repeat}{mark}"
+            message = row["message"]
+            room = message_w - len(tail)
+            if len(message) > room:
+                message = message[: max(room - 1, 1)] + "…"
+            detail = f"{message}{tail}"
+            print(
+                f"{when:<{when_w}} {state:>{rel_w}} "
+                f"{row['session_id'][:id_w]:<{id_w}} {detail:<{message_w}}".rstrip()
+            )
+        # ONE legend under the table rather than the same sentence on every
+        # row, and only for the states actually present: what "stale" and
+        # "dormant" COST is the thing a reader needs told, but telling it per
+        # row is what made a single wake occupy 155 columns.
+        if any(row["stale"] and not row["dormant"] for row in rows):
+            print("\nstale    the supervisor no longer fires these; they are delivered")
+            print("         when their session is next opened")
+        if any(row["dormant"] for row in rows):
+            print("\ndormant  the session was stopped; reopening it re-arms its wakes")
         return 0
 
     # status
@@ -3054,10 +3122,13 @@ def wake_command(args: argparse.Namespace) -> int:
         print(f"supervisor: {outcome.reason}")
         return 0
 
-    from local_operator.harness.wake import format_duration
+    # NOT `harness.wake.format_duration` here: the status lines use this
+    # command's own single-unit ladder (`_format_duration`), and importing the
+    # compound one alongside it was dead weight flake8 cannot see through a
+    # function-local import (round 1, R5).
     from local_operator.wakes.supervisor import STALE_AFTER_S
 
-    STALE_AFTER_DAYS = STALE_AFTER_S / 86400.0
+    stale_after_days = STALE_AFTER_S / 86400.0
 
     rows = _wake_rows()
     # `install` as a subcommand and `status --install` are the same operation;
@@ -3084,9 +3155,46 @@ def wake_command(args: argparse.Namespace) -> int:
     if verifiable and state and state.pid:
         uptime_s = _process_uptime_s(state.pid)
 
-    upcoming = [row for row in rows if not row["dormant"]]
-    overdue = [row for row in upcoming if row["overdue"]]
-    stale = [row for row in upcoming if row["stale"]]
+    # FIREABLE is the classification the whole screen now hangs off (round 1,
+    # D2). A wake that is dormant or stale will not be fired by the supervisor,
+    # so counting it as "next" answered "when will my wake fire?" with a date
+    # nine days in the past, on a row that is never coming, while the wake due
+    # in three minutes was absent from the screen entirely.
+    armed = [row for row in rows if not row["dormant"]]
+    dormant = [row for row in rows if row["dormant"]]
+    fireable = [row for row in armed if not row["stale"]]
+    stale = [row for row in armed if row["stale"]]
+    overdue = [row for row in fireable if row["overdue"]]
+    upcoming = fireable  # already sorted soonest-first by `_wake_rows`
+
+    # Probed once per session that has a wake, not per row: `wedged_runtime`
+    # reads the registry, and a session with three schedules is still one
+    # process. Only sessions with something armed are worth asking about — a
+    # dormant session's runtime being wedged is not why its wake is not firing.
+    from local_operator.wakes.supervisor import wedged_runtime
+
+    wedged: list[tuple[str, int, float]] = []
+    for session_id in dict.fromkeys(row["session_id"] for row in armed):
+        found = wedged_runtime(config_dir(), session_id)
+        if found is not None:
+            wedged.append((session_id, found[0], found[1]))
+
+    # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
+    # monitoring consumer branching on `state` had to string-match prose, and
+    # the booleans do not distinguish `stopped` from `not_loaded`.
+    if not is_supported():
+        supervisor_state_name = "unsupported"
+    elif not verifiable:
+        supervisor_state_name = "unverifiable"
+    elif running:
+        supervisor_state_name = "running"
+    elif state and state.loaded:
+        supervisor_state_name = "stopped"
+    elif plist_present:
+        supervisor_state_name = "not_loaded"
+    else:
+        supervisor_state_name = "not_installed"
+
     payload = {
         "supported": is_supported(),
         # Kept as "a supervisor is in place" for readers that already parse
@@ -3094,25 +3202,35 @@ def wake_command(args: argparse.Namespace) -> int:
         "installed": running,
         "plist": str(plist_path()) if is_supported() else "",
         "scheduled": len(rows),
-        "armed": len(upcoming),
+        "armed": len(armed),
+        "dormant": len(dormant),
+        # The soonest FIREABLE wake, which is the only honest answer to "when
+        # will something happen"; `next_due_in_s` used to name the stale row.
         "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
-        # The machine-readable reliability block: the same facts the human
-        # rendering shows, for a monitoring caller that should not scrape it.
         "supervisor": {
             # False whenever the answer would be about another store, so a
             # monitoring caller cannot read this block as a verdict on THIS
             # one. The pid is withheld for the same reason.
             "verifiable": verifiable,
+            "state": supervisor_state_name,
             "running": running,
             "loaded": bool(state and state.loaded and verifiable),
             "plist_present": plist_present,
             "pid": state.pid if (verifiable and state) else None,
             "uptime_s": uptime_s,
-            "state": state.detail if state else "",
+            "detail": state.detail if state else "",
         },
         "overdue": len(overdue),
         "stale": len(stale),
         "max_overdue_s": max((row["overdue_s"] for row in overdue), default=0.0),
+        # The wedged case: a runtime whose process is alive but whose
+        # heartbeat has gone stale holds the transcript lease without serving,
+        # so its wake cannot fire and the supervisor's only trace was an
+        # ordinary timeout. Reported, never repaired — see `wedged_runtime`.
+        "wedged": [
+            {"session_id": session_id, "pid": pid, "heartbeat_age_s": age}
+            for session_id, pid, age in wedged
+        ],
     }
     if args.json:
         print(_json_dumps(payload))
@@ -3129,56 +3247,75 @@ def wake_command(args: argparse.Namespace) -> int:
         print("             (wakes here fire only while a session is open)")
     elif running:
         detail = f"running (pid {state.pid})" if state and state.pid else "running"
-        if uptime_s is not None:
+        # Suppressed under a minute: `up 0s` on a just-started supervisor is
+        # noise, and the pid already says it is there (round 1, D9).
+        if uptime_s is not None and uptime_s >= 60:
             detail += f", up {_format_duration(uptime_s)}"
         print(f"supervisor:  {detail}")
     elif state and state.loaded:
         # The exact state that produced the permanent misses: launchd knows
-        # the job, `launchctl print` returns 0, and nothing is running.
-        print(f"supervisor:  loaded but NOT running ({state.detail or 'stopped'})")
-        print("             (nothing will fire these — run 'lop wake install')")
+        # the job, `launchctl print` returns 0, and nothing is running. The
+        # parenthetical carries the LAUNCHD fact rather than repeating the
+        # state word it was meant to disambiguate (round 1, D9).
+        print("supervisor:  loaded but NOT running (launchd has the job; it has exited)")
     elif plist_present:
         print("supervisor:  not loaded (a plist exists but launchd has no job)")
-        print("             (run 'lop wake install')")
     else:
         print("supervisor:  not installed")
-    installed = running
-    if (
-        installed is False
-        and is_supported()
-        and rows
-        and verifiable
-        and not (state and state.loaded)
-    ):
-        # The ACTIONABLE branch. Round 1 (D4): this command reported "not
-        # installed" beside three armed wakes and an overdue one, which is
-        # precisely the failure the subcommand exists to surface — and then
-        # stopped, leaving the user to find `--help` to act on the one fact it
-        # had just told them. The unsupported branch below already got two
-        # explanatory lines; the fixable one got none.
-        print("             (nothing will fire these while their sessions are")
-        print("              closed — run 'lop wake install')")
+    # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and
+    # the ACTIONABLE branch used to fire in the not-loaded state, printing
+    # `run 'lop wake install'` twice in a four-line block.
+    if is_supported() and verifiable and not running:
+        if rows:
+            print("             (nothing will fire these while their sessions are")
+            print("              closed — run 'lop wake install')")
+        else:
+            print("             (run 'lop wake install')")
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole
         # point of this line.
         print("             (no installer for this platform — wakes fire only while a")
         print("              session is open)")
-    print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
+
+    # DORMANCY IS NAMED (round 1, D3). `scheduled: 1 (0 armed)` with no word of
+    # explanation was a dead end for the operator asking "why has nothing
+    # fired?", while `wake list` did state the reason.
+    counts = f"{len(armed)} armed"
+    if dormant:
+        counts += f", {len(dormant)} dormant"
+    print(f"scheduled:   {len(rows)} ({counts})")
+    if dormant and not armed:
+        print("             (dormant — their sessions were stopped; reopening one re-arms it)")
+
+    # ONE LINE PER DISTINCT STATE (round 1, D5). A single stale wake used to
+    # occupy four lines that restated the same fact, and `next:` promised a
+    # future event while naming something nine days past.
     if upcoming:
-        print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+        soonest = upcoming[0]
+        when = _format_due(soonest["due_in_s"])
+        print(f"next:        {when}  {soonest['message']}")
+    elif armed:
+        # Armed but nothing fireable: every armed wake is stale.
+        print("next:        none — nothing here will fire until its session is opened")
     if overdue:
-        # The headline the operator was missing. A wake being overdue is not
-        # itself a fault (a sweep may be in flight), but "3 overdue, worst 24m"
-        # beside a stopped supervisor is the whole diagnosis on one line.
+        # Counted over FIREABLE rows only, so "worst" is a wake that is
+        # actually coming rather than one the supervisor has given up on.
         worst = max(row["overdue_s"] for row in overdue)
         print(f"overdue:     {len(overdue)} (worst {_format_duration(worst)})")
     if stale:
         print(
-            f"stale:       {len(stale)} past {int(STALE_AFTER_DAYS)}d — the supervisor "
-            "no longer fires these;"
+            f"stale:       {len(stale)} past {int(stale_after_days)}d — delivered when "
+            "their sessions are next opened"
         )
-        print("             they are delivered when their session is next opened")
+    for session_id, pid, age in wedged:
+        # Named on its own line because the remedy is different from every
+        # other state here: nothing the wake subsystem does will help, and the
+        # operator has to decide whether that process is recoverable.
+        print(
+            f"wedged:      {session_id} (pid {pid}) has not heartbeat for "
+            f"{_format_duration(age)}; it holds the lease, so its wake cannot fire"
+        )
     return 0
 
 

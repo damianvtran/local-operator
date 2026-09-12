@@ -373,7 +373,19 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
             # A redirected home: the plist is the only half we own here, and
             # it already matches. Probing launchd would address the REAL
             # domain from a sandbox (see `_launchd_is_addressable`).
-            return InstallOutcome(installed=True, reason="already installed")
+            #
+            # It must NOT claim "already installed" (round 1, Q1). Nothing
+            # supervises this store — the first call in the same store says
+            # "plist written; launchd not addressable from here" and
+            # `wake status` says "cannot be verified for this store", so
+            # answering in the old two-valued vocabulary made three surfaces
+            # disagree about one store. `installed=False` for the same reason:
+            # this PR's whole thesis is that "installed" stops meaning "a file
+            # exists".
+            return InstallOutcome(
+                installed=False,
+                reason="plist already written; launchd not addressable from here",
+            )
         if current == wanted and addressable:
             state = supervisor_state(config_dir)
             if state.running:
