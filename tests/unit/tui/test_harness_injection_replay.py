@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
 from local_operator.tui.app import OperatorApp
@@ -31,6 +34,70 @@ def _injected(text: str) -> Message:
         content=[TextContent(text=text)],
         provider_payload={RENDERED_INJECTION_KEY: True},
     )
+
+
+#: The legacy shape: a notice written before the stamp existed, carried into a
+#: compaction marker's preserved block as a "user turn" and re-seated on every
+#: replay with ``compaction_preserved`` and no stamp. The text is the only
+#: surviving evidence of what wrote it.
+_LEGACY_NOTICE = (
+    "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+    "Reason: provider failure"
+)
+
+
+def _carried_notice(text: str = _LEGACY_NOTICE) -> Message:
+    return Message(
+        role="user",
+        content=[TextContent(text=text)],
+        provider_payload={PRESERVED_USER_TURN_KEY: True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_carried_notice_copy_mounts_no_user_bubble() -> None:
+    """QA Q1: the row a pre-stamp build's marker replays is not the user's.
+
+    A real session carries eight of these, and the missing stamp is exactly why
+    the reported symptom survived the stamp-scoped fix. The same negative
+    control as the injected case applies: a row with the same WORDING and no
+    carried marker is the operator's own (a pasted notice), and still paints.
+    """
+    session = FakeSession()
+    session._history = [
+        Message.user("why does the resume picker look empty?"),
+        _carried_notice(),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+
+    assert "why does the resume picker look empty?" in shown
+    assert "[model switch]" not in shown
+
+
+@pytest.mark.asyncio
+async def test_a_plain_row_with_the_same_wording_still_replays() -> None:
+    """Negative control: no carried marker, so the text is the user's.
+
+    Pasted notices are a realistic prompt, and a fold that matched the wording
+    alone would eat one. The recognition is scoped to rows a compaction pass
+    carried forward (``harness/rows.py``), and this is what keeps that scope
+    honest.
+    """
+    session = FakeSession()
+    session._history = [Message.user(_LEGACY_NOTICE)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+
+    assert "[model switch] You are now running as zai/glm-5.3" in shown
 
 
 @pytest.mark.asyncio

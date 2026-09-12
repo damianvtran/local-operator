@@ -88,7 +88,7 @@ from local_operator.harness.intent import (
 # the comms graph resolves (which the manager's own sweep cannot reach — see
 # `_subagent_roster`), rather than re-deriving one that could drift from it.
 from local_operator.harness.jobs import roster_expired
-from local_operator.harness.rows import is_harness_injection
+from local_operator.harness.rows import is_harness_notice_row
 
 # Free at runtime: `session.protocol` below already imports `harness.types` at
 # module level, so this adds no work to the boot path the lazy-import
@@ -1262,6 +1262,14 @@ def _resume_tail_start(history: list[Any], bound: int) -> int:
         message = history[index]
         role = getattr(message, "role", None)
         custom = getattr(message, "custom_type", None)
+        if is_harness_notice_row(message):
+            # A row the fold paints NOTHING for — a stamped render of a
+            # ``CustomMessage``, or a notice a compaction block carried in — is
+            # not a turn boundary a reader can see. Anchoring on one spends the
+            # first slot of the visible budget on an invisible row and pushes a
+            # real turn out of it, which is the same short-frame failure this
+            # backward walk exists to fix.
+            continue
         if role == "user" or custom in (WAKE_PROMPT_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE):
             return index
     return naive
@@ -8425,14 +8433,17 @@ class OperatorApp(App[None]):
         for message in history:
             if getattr(message, "role", None) != "user":
                 continue
-            if is_harness_injection(message):
-                # A row the harness minted from a ``CustomMessage`` (a failover
-                # model-switch notice, an incident) is not the opening prompt.
-                # The decision is the shared one from ``harness/rows.py``, so
-                # this scan and ``history_window.opener_text`` — the other
-                # thing that reads the first user turn as a title — cannot
-                # disagree about it. Titling a thread "[model switch] You are
-                # now running as …" is the visible form of getting this wrong.
+            if is_harness_notice_row(message):
+                # A row the harness wrote — a stamped render of a
+                # ``CustomMessage`` (a failover model-switch notice, an
+                # incident), or a notice carried in from a compaction block —
+                # is not the opening prompt. The decision is the shared one from
+                # ``harness/rows.py``, so this scan and
+                # ``history_window.opener_text`` — the other thing that reads
+                # the first user turn as a title — cannot disagree about it.
+                # Titling a thread "[model switch] You are now running as …",
+                # or with the elision notice's own prose, is the visible form of
+                # getting this wrong.
                 continue
             text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
