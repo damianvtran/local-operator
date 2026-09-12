@@ -1,0 +1,148 @@
+{
+  "after-390x844-failures-pending": {
+    "failedCount": {
+      "fg": [
+        239,
+        128,
+        120
+      ],
+      "bg": [
+        22,
+        19,
+        14
+      ],
+      "opacity": 1,
+      "painted": [
+        239,
+        128,
+        120
+      ],
+      "contrast": 7.08
+    },
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [
+      {
+        "text": "\u25b8tasks 0/12\u00b7 answer first",
+        "disabled": true,
+        "title": "Held shut while a question is waiting \u2014 answer it to reopen this panel.",
+        "expanded": "false"
+      },
+      {
+        "text": "\u25b8subagents 1/22 running \u00b7 3 failed\u00b7 answer f",
+        "disabled": true,
+        "title": "Held shut while a question is waiting \u2014 answer it to reopen this panel.",
+        "expanded": "false"
+      }
+    ],
+    "footer": {
+      "scrollerBottom": 614,
+      "footerTop": 622,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 674,
+      "padBottom": 11,
+      "cardBottom": 729
+    }
+  },
+  "after-390x844-ask-free": {
+    "failedCount": null,
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [],
+    "footer": {
+      "scrollerBottom": 659.6,
+      "footerTop": 667.6,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 693,
+      "padBottom": 11,
+      "cardBottom": 748
+    }
+  },
+  "after-390x844-approval": {
+    "failedCount": null,
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [],
+    "footer": {
+      "scrollerBottom": 633,
+      "footerTop": 641,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 693,
+      "padBottom": 11,
+      "cardBottom": 748
+    }
+  },
+  "after-360x780-failures-pending": {
+    "failedCount": {
+      "fg": [
+        239,
+        128,
+        120
+      ],
+      "bg": [
+        22,
+        19,
+        14
+      ],
+      "opacity": 1,
+      "painted": [
+        239,
+        128,
+        120
+      ],
+      "contrast": 7.08
+    },
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [
+      {
+        "text": "\u25b8tasks 0/12\u00b7 answer first",
+        "disabled": true,
+        "title": "Held shut while a question is waiting \u2014 answer it to reopen this panel.",
+        "expanded": "false"
+      },
+      {
+        "text": "\u25b8subagents 1/22 running \u00b7 3 failed\u00b7 answer f",
+        "disabled": true,
+        "title": "Held shut while a question is waiting \u2014 answer it to reopen this panel.",
+        "expanded": "false"
+      }
+    ],
+    "footer": {
+      "scrollerBottom": 550,
+      "footerTop": 558,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 610,
+      "padBottom": 11,
+      "cardBottom": 665
+    }
+  },
+  "after-360x780-ask-free": {
+    "failedCount": null,
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [],
+    "footer": {
+      "scrollerBottom": 595.6,
+      "footerTop": 603.6,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 629,
+      "padBottom": 11,
+      "cardBottom": 684
+    }
+  },
+  "after-360x780-approval": {
+    "failedCount": null,
+    "rosterLabel": null,
+    "tasksLabel": null,
+    "headers": [],
+    "footer": {
+      "scrollerBottom": 569,
+      "footerTop": 577,
+      "gapScrollerToFooter": 8,
+      "firstControlTop": 629,
+      "padBottom": 11,
+      "cardBottom": 684
+    }
+  }
+}
