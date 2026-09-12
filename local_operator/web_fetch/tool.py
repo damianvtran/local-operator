@@ -64,11 +64,14 @@ _DESCRIPTION = (
     "cache TTL reuses stored content with no network call. Use this (or "
     "`read <url>`) instead of `browser` for headless, subagent, and server "
     "contexts; use `browser` only when a page needs a real logged-in session or "
-    "JavaScript rendering. Transient failures are retried automatically; when a "
-    "result says the origin's bot protection refused the request, `browser` is "
-    "the named next step and re-fetching the same URL will not help. Need "
-    "several pages? Issue multiple web_fetch calls in one turn — they run in "
-    "parallel instead of one-at-a-time."
+    # The retry/block sentence is deliberately terse: this string is billed on
+    # EVERY turn of every session, and `scripts/bench_context_budget.py` had
+    # ~41 tokens of headroom before this change. It has to say only what the
+    # agent cannot work out from the result itself — that retries already
+    # happened, so a blocked result is final and the named step is the move.
+    "JavaScript rendering. Transient failures retry themselves; a blocked result "
+    "is final, so take the step it names. Need several pages? Issue multiple "
+    "web_fetch calls in one turn — they run in parallel instead of one-at-a-time."
 )
 
 
