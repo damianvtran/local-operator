@@ -725,6 +725,50 @@ def find_runtime_record(
     return None, owner
 
 
+def dialable_record_exists(config_dir: Path, pid: int) -> bool | None:
+    """Whether ``pid`` publishes a record this build could dial.
+
+    `find_runtime_record` collapses two very different states into
+    ``(None, pid)``: an owner that publishes no usable record at all (an older
+    binary, or a registrant that failed to start), and the rebind race — a
+    record for that pid that is dialable but is still stamped with the
+    PREVIOUS ``session_id``, which that function's own docstring describes as a
+    state whose record "is returned anyway and the welcome projection's
+    identity check ... arbitrates". A caller about to tell the user the process
+    is an old one must therefore ask this rather than infer it from the tuple;
+    otherwise it reports a cause the code has not established and skips the
+    pacing the race asks for (review m3).
+
+    A WEDGED RECORD ANSWERS ``True``, because that is the whole of "could this
+    pid's record be dialled" (review round 3, MINOR-2). The registry has a
+    third state — the pid is alive and the heartbeat is older than
+    ``HEARTBEAT_TIMEOUT_S``, i.e. the owner is stuck — and `scan` keeps that
+    record for exactly the reason the redial exists: a stuck owner may recover
+    on its own, which is the transient the budget is sized to outlast. Asking
+    only for ``live`` made a wedged owner answer ``False``, so it earned the
+    older-process sentence AND skipped the pacing: a cause the code had not
+    established, on the one state a redial could have healed. ``stale`` (the
+    pid is gone) is the state that is genuinely absent, and it stays ``False``.
+
+    The threshold is ``2``, the same floor `find_runtime_record` uses to decide
+    a record is usable — deliberately NOT `FRONTEND_ATTACH_MIN_PROTOCOL`: the
+    question here is only "could this pid's record be dialled at all", and a
+    record below the frontend attach protocol is a case
+    `frontend_attach_refusal` already answers with its own sentence.
+
+    ``None`` when the registry could not be read at all. Not a plain bool on
+    purpose: a failed read is not evidence of absence, so the caller must pace
+    rather than refuse on it.
+    """
+    try:
+        for record, state in scan(config_dir):
+            if state in ("live", "wedged") and record.pid == pid and record.protocol >= 2:
+                return True
+    except OSError:
+        return None
+    return False
+
+
 class AttachClient:
     """One authenticated ``attach`` connection to a live session's registrant.
 

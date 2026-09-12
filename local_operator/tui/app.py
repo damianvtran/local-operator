@@ -1725,6 +1725,99 @@ def _sidebar_connect_attempts() -> int:
 #: cover it would buy nothing and cost every click path a longer wait.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
+
+def _resume_connect_limits() -> tuple[float, float]:
+    """`/resume`'s redial budget: (wall-clock cap, outer bound stated to the user).
+
+    THE PRIMARY CAP IS WALL CLOCK, and this derivation exists because the
+    budget it replaces reasoned about the BACKOFF ALONE. A dial of a
+    live-but-silent owner costs the full `FRONTEND_SYNC_FOREGROUND_S`
+    envelope before `AttachedSession.connect` raises
+    `RuntimeUnresponsiveError` — the type whose own docstring says the runtime
+    is still running and the retry is free — so a budget written as an attempt
+    COUNT was really that count times 15 s plus its own backoff. Measured from
+    the shipped numbers: 49 dials and ~14.5 minutes for one `/resume`, against
+    the single 15 s failure the same owner produced before the retry existed,
+    for the one failure mode a redial cannot fix (a wedged runtime stays
+    wedged). The count was measuring the wrong quantity.
+
+    Sized from the transients this loop EXISTS for, not from a round number:
+    a record moving between `live_runtime_pid` and `find_runtime_record`
+    (milliseconds to seconds — a `kill -9` republishes within a second or
+    two), an attach refusal, and a facade mid-recovery for up to
+    `COLD_FALLBACK_S`. The first term is the sidebar's own rule for that
+    window — its paced schedule must outlast `COLD_FALLBACK_S` with a 50%
+    margin — and the second is ONE full attempt envelope, so that a single
+    silent dial cannot spend the whole budget before any paced retry has run.
+    The sum lands in the tens of seconds, and ATTEMPT TIME IS SUBTRACTED from
+    it: an owner that burns a full envelope per dial ends the loop after two
+    of them, not after `RESUME_CONNECT_ATTEMPTS`.
+
+    The SECOND number is what the user is told, and it is the cap plus one
+    envelope: the deadline bounds when a NEW dial may start, while the dial
+    already in flight when it expires can spend one more. Stated rather than
+    rounded down, because the defect this replaces was an understated span —
+    49 x 15 s of dials described as "135.75 s" of backoff.
+
+    IT IS NOT EXACT, AND THE SURFACE DOES NOT PRETEND IT IS (review n4). Every
+    pass re-reads the runtime record at the top of the loop and is charged for
+    that read only after the dial that follows it, so the true worst case is
+    this bound plus one record read; the envelope a connect may spend after its
+    own sync window is not charged either. That is why the row says "about ... s
+    in total" rather than asserting the number: folding the read into the
+    deadline check would narrow the gap by one slice and still not make the
+    figure exact, while the hedge costs one word.
+    """
+    from local_operator.session.attached import (
+        COLD_FALLBACK_S,
+        FRONTEND_SYNC_FOREGROUND_S,
+    )
+
+    wall = COLD_FALLBACK_S * 1.5 + FRONTEND_SYNC_FOREGROUND_S
+    return wall, wall + FRONTEND_SYNC_FOREGROUND_S
+
+
+#: Wall-clock budget for one `/resume`'s redial: the PRIMARY cap, and the one
+#: the loop subtracts each attempt's own duration from. Derivation, the ~14.5
+#: minute regression it closes, and the outer bound below all live on
+#: `_resume_connect_limits`.
+RESUME_CONNECT_WALL_S, RESUME_CONNECT_BOUND_S = _resume_connect_limits()
+
+#: SECONDARY cap: the number of dials the same budget allows when every dial
+#: fails INSTANTLY. A count survives at all only so a schedule retuned to (or a
+#: test patched to) a tiny backoff cannot spin the loop as fast as the CPU
+#: allows before the wall clock is consulted; derived from the SAME span so the
+#: two caps cannot disagree about how long the redial may take. That it lands
+#: well under the old 48 is the point: the old count was sized to outlast
+#: `RECOVERY_GIVE_UP_S` (90 s) of backoff, which is a bound `/resume` does not
+#: have to survive — the transient it must survive is `COLD_FALLBACK_S`.
+RESUME_CONNECT_ATTEMPTS = _attempts_outlasting(RESUME_CONNECT_WALL_S)
+
+
+def _resume_redial_clock() -> float:
+    """The redial's clock reading, as a SEAM rather than a direct call.
+
+    `RESUME_CONNECT_WALL_S` is a wall-clock bound, and a bound like that is
+    only testable if the clock can be moved without sleeping: the test patches
+    this and `_resume_redial_pause`, drives a virtual clock past the deadline,
+    and asserts the loop stopped for the right reason. AGENTS.md's
+    "Timing, flakes" section forbids asserting a duration, and this is the
+    structural alternative — the same shape `session_picker`'s cadence test
+    uses when it patches that widget's own module clock.
+    """
+    return asyncio.get_running_loop().time()
+
+
+async def _resume_redial_pause(seconds: float) -> None:
+    """The redial's ONE sleep point, for the same reason as the clock above.
+
+    Also what makes the backoff's clamp observable: the loop passes
+    `min(backoff, time left in the budget)`, and a test records what this was
+    asked to wait for instead of measuring how long it waited.
+    """
+    await asyncio.sleep(seconds)
+
+
 #: The chord that lifts the aside's full text to the clipboard.
 #:
 #: `omp`, the reference implementation this surface is modelled on, ships copy
@@ -3046,6 +3139,30 @@ class OperatorApp(App[None]):
         # Keep the existing composer visually unchanged, but make its submit
         # boundary atomic so text cannot land in the conversation being left.
         self._session_transition_pending = False
+        #: The session a `/resume` redial is currently reconnecting TO, or "".
+        #:
+        #: Set for exactly the life of `_attach_or_refuse`'s retry loop and
+        #: cleared in its `finally`. It exists because that loop is the ONE
+        #: transition whose source is neither `display_only` nor frame-pending,
+        #: so `composer_submission_refused` had nothing to answer with and a
+        #: typed Enter was silently dropped for the whole window (UX U1). Held
+        #: here rather than on the source because the source is the session
+        #: being LEFT, and naming it would be a false statement about which
+        #: session the app is reconnecting to.
+        self._resume_retry_target = ""
+        #: The row a refused Enter is currently speaking through, or None.
+        #:
+        #: THE ROW THE REFUSAL OWNS, so that the NEXT refusal can restate it
+        #: instead of appending a second one. A durable notice per refused Enter
+        #: was the shape this replaces, and Enter is the user's response to
+        #: silence, so the accumulation was unbounded by construction (UX U1:
+        #: three Enters during one redial put six lines of stale present-tense
+        #: text under the verdict). Retired by `_retire_composer_refusal` the
+        #: moment the state it describes ends — the redial's own exits, and a
+        #: sidebar connect that completed — because the sentence is
+        #: present-progressive about a state the app owns, not a timestamped
+        #: event like a chat message.
+        self._composer_refusal_notice: NoticeBlock | None = None
         #: Session ids that have run `eval`, so a `/move` restarting the
         #: runtime destroys the namespace they built up. Recorded when the call
         #: is drawn rather than re-derived from the transcript, because
@@ -5375,6 +5492,56 @@ class OperatorApp(App[None]):
             and not card.settled
         )
 
+    def _abandon_sidebar_frame(self, error: Exception) -> bool:
+        """Fail a pending sidebar frame with ``error``; report whether one was armed.
+
+        The one seam through which a caller that has PROVEN this frame can never
+        paint releases the connect body's ``await ready`` early, instead of
+        leaving it to sit out ``_await_sidebar_frame``'s 15 s timer. Both
+        points that can learn the answer (the display hook, and the bind->commit
+        half of the same window) go through here so the pending tuple is cleared
+        exactly once and in one place — a second clearer is how a future edit
+        ends up resolving a frame whose future the connect body has already
+        stopped waiting on.
+
+        ``False`` means the frame had already settled, so the caller owns the
+        error: returning success there would publish the very state this exists
+        to refuse.
+        """
+        pending = getattr(self, "_sidebar_ready_frame", None)
+        if pending is None:
+            return False
+        self._sidebar_ready_frame = None
+        future = pending[2]
+        if future.done():
+            return False
+        future.set_exception(error)
+        return True
+
+    def _sidebar_live_frame_owner_gone(self, source: SessionInteraction) -> bool:
+        """Whether this pending frame is a LIVE commit whose owner went cold.
+
+        The gate's first check is ``is_cold``, so this is the one state whose
+        verdict is already known before a single frame is painted: no relayout
+        can ever make it pass, and buying one per frame is what turned a
+        transient owner loss into a 15 s hot spin (measured pre-fix: 1,820
+        refusals, every one of them a recovery relayout, ~127/s).
+
+        ``display_only`` frames are excluded deliberately — their gate branch
+        does not consult ``is_cold`` at all (a saved excerpt is ALLOWED to
+        paint over a cold session), so failing them here would break the
+        preview path rather than the state this guards.
+
+        ``getattr`` for the same reason the gate uses it: the source's session
+        is typed as the general viewer protocol, and only the owner-backed
+        facade declares ``is_cold``.
+        """
+        return (
+            not source.display_only
+            and self._is_current(source)
+            and bool(getattr(source.session, "is_cold", False))
+        )
+
     def _await_sidebar_frame(
         self, source: SessionInteraction, generation: int
     ) -> asyncio.Future[None]:
@@ -5469,6 +5636,46 @@ class OperatorApp(App[None]):
             # update. Only now are the target frame and its input surface ready.
             self._sidebar_ready_frame = None
             future.set_result(None)
+        elif (
+            generation == self._sidebar_navigation.generation
+            and self._sidebar_live_frame_owner_gone(source)
+        ):
+            # A LIVE COMMIT WHOSE OWNER WENT COLD CAN NEVER PAINT, so the one
+            # thing this state must not do is wait out the gate's 15 s timer.
+            # `_sidebar_gate_surface_ready`'s FIRST check is `is_cold`, so the
+            # verdict is already known; the branch below would buy a forced
+            # full-screen relayout for it on every frame (measured pre-fix on
+            # the architect's rig: 15.1 s, 1,820 refusals, every one of them a
+            # recovery, ~127/s) and the timer would then raise
+            # `SurfaceNotReady`, which is terminal-on-first by #883's design —
+            # latching a transient owner loss the reselect healed in 0.17 s.
+            #
+            # THE BOUND IS THE CONNECT BODY'S, NOT THIS CALL SITE'S. The
+            # exception is NOT a `SurfaceNotReady` (it subclasses
+            # `ConnectionError`, see `OwnerWentCold`), so it lands in
+            # `_connect_sidebar_source`'s generic arm — the one that increments
+            # `connect_attempts` and re-arms through the backoff, latching only
+            # when the budget is EXHAUSTED. That is the whole reason it is a
+            # distinct type rather than a faster timer: an arm that re-armed
+            # without spending the budget is the infinite reconnect loop this
+            # codebase already measured once (the `connect_attempts` reset that
+            # made the retry's own re-arm refill it). The cold condition is
+            # bounded by the facade's own recovery (`COLD_FALLBACK_S`), and
+            # `SIDEBAR_CONNECT_ATTEMPTS` is derived to outlast it — so the
+            # budget is spent on a condition that really does end, and a
+            # genuinely unreachable owner still latches with the honest copy.
+            #
+            # Through the shared abandon seam rather than a second `set_exception`
+            # here: ``future`` is provably unsettled at this point (the chain
+            # opens on `if future.done()`), so the helper cannot report a settled
+            # frame, and having ONE clearer is what keeps a future edit from
+            # resolving a frame the connect body has stopped waiting on.
+            from local_operator.tui.session_navigation import (
+                UNREACHABLE_OWNER_MESSAGE,
+                OwnerWentCold,
+            )
+
+            self._abandon_sidebar_frame(OwnerWentCold(UNREACHABLE_OWNER_MESSAGE))
         elif (
             generation == self._sidebar_navigation.generation
             and self._is_current(source)
@@ -6559,6 +6766,39 @@ class OperatorApp(App[None]):
 
         source.connection_task.add_done_callback(settled)
 
+    def _sidebar_connect_failure_fields(
+        self, source: SessionInteraction, *, error: BaseException, elapsed: float
+    ) -> str:
+        """The one diagnostics line for a terminal/latched sidebar connect arm.
+
+        Shared by both arms so a future edit cannot enrich one and leave the
+        other blind, which is how this path ended up with NO log line at all
+        while the user was being told to reselect: everything needed to explain
+        the verdict was already in memory, on the source and its viewer.
+
+        Every field answers a question the investigation had to ask by hand:
+        WHICH arm (named by the caller), WHICH session, how long THIS ROUND
+        waited, how much budget was spent, whether the app still believed it was
+        showing a saved excerpt, and the three pieces of facade state the three
+        falsifiable causes map onto — ``is_cold`` (the owner is gone), ``_recovering``
+        (it is on its way back), ``display_history_current`` (the app can still
+        paint what it holds). ``getattr`` with a default because the source's
+        session is the general viewer protocol and only some facades declare
+        these.
+
+        No secret content: ids, counters, booleans and an exception message.
+        """
+        session = source.session
+        session_id = getattr(session, "session_id", None) or "?"
+        return (
+            f"session={session_id} elapsed={elapsed:.2f}s "
+            f"attempts={source.connect_attempts} display_only={source.display_only} "
+            f"is_cold={bool(getattr(session, 'is_cold', False))!r} "
+            f"recovering={getattr(session, '_recovering', None)!r} "
+            f"display_history_current={getattr(session, 'display_history_current', None)!r} "
+            f"error={type(error).__name__}: {error}"
+        )
+
     async def _connect_sidebar_source(self, source: SessionInteraction) -> None:
         """Reconcile a saved view without holding the navigation coordinator.
 
@@ -6583,6 +6823,8 @@ class OperatorApp(App[None]):
         published false around the wait instead of only in `finally`.
         """
         from local_operator.tui.session_navigation import (
+            UNREACHABLE_OWNER_MESSAGE,
+            OwnerWentCold,
             PreparationInvalidated,
             SurfaceNotReady,
         )
@@ -6590,6 +6832,17 @@ class OperatorApp(App[None]):
         prepared = None
         retry = False
         cancelled = False
+        loop = asyncio.get_running_loop()
+        # THIS ATTEMPT ROUND's own clock, not the sequence's. The retry is
+        # re-armed as a NEW task each round, so that is the only span a round can
+        # measure about itself — and it is the informative one at the arms that
+        # log: the paint arm's elapsed IS the 15 s gate wait. The sequence's size
+        # is carried beside it as `connect_attempts`.
+        started = loop.time()
+        # Snapshotted for the paint arm's deltas: the gate counters are
+        # app-global, so only a delta says how many refusals THIS connect spent.
+        gate_reached_at_entry = self._sidebar_gate_reached
+        gate_recoveries_at_entry = self._sidebar_gate_recoveries
         try:
             session = source.session
             if not _is_viewer(session):
@@ -6625,7 +6878,7 @@ class OperatorApp(App[None]):
                 # The message is the sentence the sync-failure path already
                 # uses, so the two ways a connect can fail read identically to
                 # the user and no new copy is introduced.
-                raise ConnectionError("the runtime is not responding")
+                raise OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
             await session.ensure_display_current()
             if source.retired or not self._is_current(source):
                 return
@@ -6654,6 +6907,43 @@ class OperatorApp(App[None]):
             source.command_frame_pending = True
             ready = self._commit_sidebar_session(session.session_id, prepared, generation)
             prepared = None
+            # THE BELT FOR THE OTHER HALF OF THE WINDOW, AND IT IS NOT
+            # CONDITIONAL ON A FRAME. `post_display_hook` closes the
+            # commit->paint half; an owner lost between the bind postcondition
+            # above and this commit is already cold BY THE TIME the frame is
+            # armed, so re-check it before waiting rather than hoping a display
+            # arrives to notice. Cheap and exact: one property read on the same
+            # session the bind just checked.
+            #
+            # `ready is None` USED TO SKIP THIS ENTIRELY (review m2). That is
+            # `_commit_sidebar_session`'s early return for a prepared replay
+            # that already IS the current transcript view, and it leaves
+            # `display_only = False` set with no frame and no hook left to
+            # refuse a cold body: the commit reports success and
+            # `connect_attempts` is reset below. The return is NOT reachable
+            # from this connect path — both of `_prepare_sidebar_session`'s
+            # early returns are guarded on `not refresh` and this call passes
+            # `refresh=True`, so the prepared view is always a freshly mounted
+            # one and never `self._transcript_view()`, which is what the early
+            # return compares against — and that is pinned by
+            # `test_the_connect_prepares_with_refresh_so_no_frame_return_is_unreachable`.
+            # Kept unconditional anyway, because the cost is one read and the
+            # failure it would otherwise hide is silent: the postcondition this
+            # whole file exists for is "after a connect commits, the session is
+            # not cold", and a belt with a hole in it is not a postcondition.
+            #
+            # Raising here (rather than only failing the frame) is what
+            # keeps the bound: this is a `ConnectionError`, so it falls to
+            # the generic arm below, which spends `connect_attempts` and
+            # re-arms through the backoff. `_abandon_sidebar_frame` must
+            # run first so the pending tuple is cleared and the connect
+            # body is not left waiting on a frame nothing will resolve —
+            # and if it reports no armed frame (the `ready is None` case), the
+            # raise is the only way left to refuse a cold commit.
+            if _is_viewer(session) and session.is_cold:
+                error = OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
+                if not self._abandon_sidebar_frame(error):
+                    raise error
             if ready is not None:
                 await ready
             # REFILL THE BUDGET ONLY ON A COMPLETED CONNECT, and only here at
@@ -6668,6 +6958,17 @@ class OperatorApp(App[None]):
             # and crediting it would hand the next real failure a budget it did
             # not earn.
             source.connect_attempts = 0
+            # THE COMPOSER'S OWN ROW ENDS WHEN THIS STATE DOES. A refused Enter
+            # during the connect wrote "Send unavailable until connected." —
+            # false the moment the commit above lands, and it was durable
+            # (UX U1). Retired only on a COMPLETED connect, for the same reason
+            # the budget is refilled only here: an attempt that returned early
+            # proved nothing about the owner, so the refusal it answered still
+            # describes the state. The block is removed from its own parent, not
+            # from `_transcript_view()`, because the row was written into the
+            # INCOMING session's view and this commit is what made that view
+            # current.
+            self._retire_composer_refusal()
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -6687,6 +6988,21 @@ class OperatorApp(App[None]):
             # firing is itself a signal. The budget exists to outlast
             # `COLD_FALLBACK_S`; a gate timeout is not a thing `COLD_FALLBACK_S`
             # bounds, so spending the budget on it is category error.
+            #
+            # Logged because this path used to be silent in the total: a user
+            # reporting "the session just said Reconnect failed" left nothing to
+            # read, and the ONE number that explains the wait (how many frames
+            # the gate refused, each buying a full-screen relayout) existed only
+            # in the counters.
+            logger.warning(
+                "sidebar connect failed terminally (paint gate did not open): %s "
+                "gate_reached=%d gate_recoveries=%d",
+                self._sidebar_connect_failure_fields(
+                    source, error=error, elapsed=loop.time() - started
+                ),
+                self._sidebar_gate_reached - gate_reached_at_entry,
+                self._sidebar_gate_recoveries - gate_recoveries_at_entry,
+            )
             source.display_only = True
             source.connection_error = str(error) or "Connection unavailable"
             source.connect_attempts = 0
@@ -6720,8 +7036,8 @@ class OperatorApp(App[None]):
             ):
                 retry = True
                 # Empty, so the status renders "Connecting…" rather than
-                # "Connection unavailable · Reselect to retry": the app has not
-                # given up, and telling the user to act while it is still
+                # "Saved · Reconnect failed · Select again to retry": the app
+                # has not given up, and telling the user to act while it is still
                 # working asks them to fix something that is fixing itself.
                 source.connection_error = ""
                 if prepared is not None:
@@ -6747,13 +7063,43 @@ class OperatorApp(App[None]):
                     cancelled = True
                     raise
             else:
+                # THE LATCH, and the only arm the user ever sees as a verdict.
+                # Logged with the same fields as the paint arm: this is the
+                # other half of "the session said Reconnect failed and the logs
+                # say nothing", and the reason it latched (budget spent versus
+                # the source leaving the screen) is a property of THIS arm's
+                # condition, not of the error.
+                why = []
+                if source.connect_attempts > SIDEBAR_CONNECT_ATTEMPTS:
+                    why.append("retry budget exhausted")
+                if source.retired:
+                    why.append("source retired")
+                if not self._is_current(source):
+                    why.append("source left the screen")
+                logger.warning(
+                    "sidebar connect latched (%s): %s",
+                    ", ".join(why) or "not retryable",
+                    self._sidebar_connect_failure_fields(
+                        source, error=error, elapsed=loop.time() - started
+                    ),
+                )
                 source.connection_error = str(error) or "Connection unavailable"
                 # Surrendered, so the counter goes back to zero: the status now
-                # reads "Reselect to retry", and that affordance has to mean a
-                # FULL budget, not one last single-shot attempt. Nothing re-arms
-                # automatically from here (`retry` stays False), so the only
-                # reader of a fresh count is the user's own next selection.
+                # reads "Select again to retry", and that affordance has to mean
+                # a FULL budget, not one last single-shot attempt. Nothing
+                # re-arms automatically from here (`retry` stays False), so the
+                # only reader of a fresh count is the user's own next selection.
                 source.connect_attempts = 0
+                # THE LATCH IS A STATE END, SO THE COMPOSER'S ROW ENDS WITH IT
+                # (UX U1, round 3). This arm is the one that resolves the
+                # connect as a verdict for the user — the band reads "Reconnect
+                # failed · Select again to retry" — and a refusal row left
+                # saying "Reconnecting … it will keep trying" above it makes the
+                # app contradict itself at the exact moment the original defect
+                # is on screen. Called AFTER the two field writes above so the
+                # hint it restates from is the post-latch one.
+                if source is self._interaction:
+                    self._restate_composer_refusal()
         finally:
             if prepared is not None:
                 await self._release_sidebar_preparation(prepared)
@@ -11613,7 +11959,7 @@ class OperatorApp(App[None]):
                 # Discovery scans the filesystem; run it as a worker so the
                 # UI thread never blocks on it, and settle attach-vs-refuse
                 # when the record is in hand.
-                self._run_session_transition(self._attach_or_refuse(config_dir(), concrete, owner))
+                self._run_session_transition(self._attach_or_refuse(config_dir(), concrete))
                 return
         # A navigation entered during /fork must not queue a stop behind its
         # snapshot RPC. The original's ownership guarantee lasts through that
@@ -11868,8 +12214,38 @@ class OperatorApp(App[None]):
         retry is in flight is not what the user should do); nothing had replaced
         it. Now the retry window says the app is working and no action is owed,
         which is the answer, and a spent budget keeps the actionable advice.
+
+        THE FOURTH STATE IS A `/resume` REDIAL, and it is the one the source's
+        own fields cannot describe. That redial runs over a session that is
+        still live, so `connection_error` and `connect_attempts` are both empty
+        and the composer said nothing at all for the whole wait (UX U1) — see
+        `composer_submission_refused`. It names the session it is reconnecting
+        TO, because a user who retyped `/resume <other>` mid-wait is owed the
+        difference. It does NOT restate the bound: the retry row above is
+        already saying one number, and a second spelling of the same wait on the
+        same screen is what design D3 found.
+
+        ASKED FIRST IN THE CHAIN, deliberately. `self._interaction` is, for the
+        current session, the very object the sidebar connect writes (the app
+        assigns the same instance to `self._interaction` and to
+        `self._sidebar_sources[session_id]`), so a latched `connection_error` or
+        a spent `connect_attempts` can sit on the object a live redial is asking
+        about. Ordering by specificity is what keeps the answer true: a redial
+        in flight is a state the app ITSELF set for exactly the life of its
+        loop, and while it is set the honest advice is the redial's —
+        "reselection" is precisely what the retry row above contradicts. UX U3
+        could not drive that combination (both of its attempts healed), so the
+        reachability stayed unstated; the precedence is fixed by construction
+        here and pinned by
+        `test_the_redial_outranks_a_latched_source_in_the_hint` rather than
+        left to the order two fields happen to be tested in.
         """
         source = self._interaction
+        if self._session_transition_pending and self._resume_retry_target:
+            return (
+                f" Reconnecting to session {self._resume_retry_target} — "
+                "switching session stops the wait."
+            )
         if source.connection_error:
             return " Select this session again to retry."
         if source.connect_attempts:
@@ -11877,8 +12253,126 @@ class OperatorApp(App[None]):
         return ""
 
     def composer_submission_refused(self) -> None:
-        if self._interaction.display_only or self._interaction.command_frame_pending:
-            self._notice(f"Send unavailable until connected.{self._unavailable_hint()}", "warning")
+        """Speak on every Enter this app refuses, or the refusal is a swallow.
+
+        `composer_submission_blocked` answers "may this go through"; this answers
+        "then say so". The `/resume` redial is the third state that owes an
+        answer and the one that used to give none: its source is neither
+        `display_only` nor frame-pending (`_attach_or_refuse` is redialling over
+        the still-live previous session), so the guard below was False for the
+        entire window and a typed draft plus a RE-TYPED `/resume target` were
+        both dropped without a word — measured for 136 s, which is precisely long
+        enough for the user to conclude the app had ignored them (UX U1). One
+        branch, reusing the sidebar seam's copy and register.
+
+        ONE ROW, AND NOT A DURABLE ONE. The notice answers a gesture, but its
+        sentence is about a state the app owns, so it is restated by the next
+        refusal instead of stacked and retired by `_retire_composer_refusal`
+        when that state ends — the discipline the redial's own row already
+        follows. The alternative was measured: three Enters during one redial
+        left three two-line blocks of present-tense text under the verdict,
+        each one retracting the sentence above it (UX U1).
+        """
+        if (
+            self._interaction.display_only
+            or self._interaction.command_frame_pending
+            or (self._session_transition_pending and self._resume_retry_target)
+        ):
+            text = f"Send unavailable until connected.{self._unavailable_hint()}"
+            held = self._composer_refusal_notice
+            if held is not None and held.is_attached:
+                # ONE ROW PER STATE, not one row per Enter. Appending a durable
+                # notice made the count unbounded by construction, because Enter
+                # is the user's response to silence: three Enters during one
+                # redial put six lines of stale present-tense text on screen,
+                # and they outlived the verdict (UX U1). Same mechanism as the
+                # redial's own row — restate in place while the state lasts,
+                # retire it when it ends — rather than a second one.
+                held.restate(text, "warning")
+            else:
+                notice = NoticeBlock(text, "warning")
+                self._composer_refusal_notice = notice
+                self._append_block(notice)
+
+    def _retire_composer_refusal(self) -> None:
+        """Take the refusal row down once the state it describes has ended.
+
+        The sentence is present-progressive about a state the app OWNS
+        ("Reconnecting to…"), so it may not outlive that state the way a chat
+        message can: left standing, a refused Enter goes on promising a
+        reconnect beneath the verdict that retires it, which is the reading
+        order UX U1 measured (the stale claim was the LAST thing read). The
+        slot is enough to retire because `composer_submission_refused` restates
+        in place, so there is at most one such row.
+
+        Called from the redial's every exit and from a sidebar connect that
+        COMPLETED — two of the three ways the state the row describes ends; the
+        third is the sidebar's latch, which restates rather than retires (see
+        `_restate_composer_refusal`).
+        """
+        notice = self._composer_refusal_notice
+        self._composer_refusal_notice = None
+        if notice is None or not notice.is_attached:
+            return
+        # The block's OWN parent, not `self._transcript_view()`: for a sidebar
+        # connect the row is written into the INCOMING session's view, which by
+        # the time the connect commits is no longer the current one.
+        parent = notice.parent
+        if isinstance(parent, TranscriptView):
+            parent.remove_block(notice)
+
+    def _restate_composer_refusal(self) -> None:
+        """Settle the refusal row into the state a sidebar LATCH published.
+
+        The latch is the third end of the state the row describes (UX U1,
+        round 3), beside the redial's exits and a completed connect. It is the
+        arm that resolves the connect as a verdict for the user — the band
+        reads "Reconnect failed · Select again to retry" and `connect_attempts`
+        goes back to zero — so a row still saying "Reconnecting … it will keep
+        trying for a few more seconds" above it made the app contradict itself
+        at the exact moment the original defect was on screen. The old bug
+        report is about that moment, which is why the contradiction matters
+        more than the row's grade.
+
+        Restated rather than retired, and through the row's own writer so the
+        two spellings cannot drift: the NEXT Enter already refreshes the row
+        into exactly this register (`Select this session again to retry.`), so
+        going through `composer_submission_refused` is what makes the surface
+        agree whether or not the user presses it. A latch with no row on screen
+        invents none — it is a state end, not a gesture, and only
+        `composer_submission_refused` speaks for gestures.
+        """
+        held = self._composer_refusal_notice
+        if held is None or not held.is_attached:
+            return
+        self.composer_submission_refused()
+
+    def _absorb_into_settled_notice(self, notice: NoticeBlock, text: str) -> bool:
+        """Settle into an identical settled sentence already in the same view.
+
+        Returns True when `notice`'s own view already holds `text`, having
+        retired `notice` in its favour. The redial's cancellation sentence names
+        only the session, so a second abandoned run settled its fresh row into a
+        byte-identical copy of the one already there: two adjacent identical
+        blocks in the current view (design D1, round 3). The sentence already on
+        screen says exactly what this run would have said, so the run
+        contributes no second copy — and the block that goes is this run's own
+        LIVE row, the only thing still promising a dial.
+
+        ONLY the cancellation arm calls it, because that is the sentence with no
+        per-run information: the fall-through for an unexpected raise reuses the
+        give-up sentence, and absorbing a repeat of that would collapse two
+        runs' verdicts into one (the one-row-per-run policy rounds 1-2 approved).
+        The match is therefore on one arm's text and never crosses registers.
+        """
+        parent = notice.parent
+        if not isinstance(parent, TranscriptView):
+            return False
+        for block in parent.blocks():
+            if block is not notice and isinstance(block, NoticeBlock) and block.text() == text:
+                parent.remove_block(notice)
+                return True
+        return False
 
     def composer_submission_blocked(
         self, text: str | None = None, *, shell: bool | None = None
@@ -11897,40 +12391,375 @@ class OperatorApp(App[None]):
         entry = slash_command_for(editor.text if text is None else text)
         return entry is None or f"/{entry.name}" not in self._SAVED_LOCAL_COMMANDS
 
-    async def _attach_or_refuse(self, config_root, concrete: str, owner: int) -> None:
+    async def _attach_or_refuse(self, config_root, concrete: str) -> None:
         """Build a AttachedSession and adopt it like any ordinary resume.
 
-        Protocol <4 has no full event stream. The degraded projection view was
-        deliberately deleted, so a mixed-version owner gets a precise upgrade
-        refusal rather than silently falling back to a divergent UI.
-        """
-        from local_operator.mobile.attach_client import find_runtime_record
-        from local_operator.session.attached import AttachedSession
+        An owner below `FRONTEND_ATTACH_MIN_PROTOCOL` has no full event stream.
+        The degraded projection view was deliberately deleted, so a
+        mixed-version owner gets a precise upgrade refusal rather than silently
+        falling back to a divergent UI — and the threshold is NAMED rather than
+        restated, because a literal here is a second version test for one
+        concept (review n3).
 
-        record, found_owner = await asyncio.to_thread(find_runtime_record, config_root, concrete)
-        if record is None or found_owner != owner or record.protocol < 4:
-            self._system_notice(
-                f"session {concrete} is open in an older Local Operator process "
-                f"(pid {owner}) — update or close that process, then resume again",
-                "warning",
-            )
-            return
+        THE DIAL IS BOUNDED-RETRIED, which this seam was not (#883 fixed the
+        sidebar's connect and left this one one-shot). `AttachedSession.connect`
+        raising used to be printed to the user and accepted as a verdict, so a
+        runtime that was being restarted — the ordinary case, since a `kill -9`
+        republishes its record within a second or two — read as a permanent
+        failure and the user re-typed `/resume` to try again. The record is
+        therefore RE-READ BEFORE EVERY ATTEMPT rather than captured once: a
+        runtime that retired between attempts publishes a new record under a
+        NEW pid, and redialling the dead one would spend the whole budget on a
+        socket that cannot answer.
+
+        THE BUDGET IS WALL CLOCK, NOT AN ATTEMPT COUNT, and every attempt is
+        charged for its own duration — a dial of a live-but-silent owner costs
+        a full `FRONTEND_SYNC_FOREGROUND_S` envelope, so a budget counted in
+        attempts was ~58x longer than it read. See `_resume_connect_limits` for
+        the derivation and for the bound the user is told.
+        """
+        from local_operator.mobile.attach_client import (
+            dialable_record_exists,
+            find_runtime_record,
+        )
+        from local_operator.session.attached import (
+            FRONTEND_ATTACH_MIN_PROTOCOL,
+            AttachedSession,
+            frontend_attach_refusal,
+        )
+        from local_operator.tui.session_navigation import UNREACHABLE_OWNER_MESSAGE
+
         assert self._resume_factory is not None
 
         async def takeover_factory() -> Any:
             assert self._resume_factory is not None
             return await self._resume_factory(concrete)
 
-        try:
-            remote = await AttachedSession.connect(
-                record,
-                concrete,
-                config_dir=config_root,
-                takeover_factory=takeover_factory,
+        # EVERY PATH OUT OF THE REDIAL SETTLES ITS ROW, and there are THREE of
+        # them, not two. A notice per attempt would write a hundred rows into a
+        # durable transcript to say one thing — the same reason
+        # `NoticeBlock.restate` exists — so the row is restated in place rather
+        # than stacked, and the exits are:
+        #
+        #   * give-up and the static refusal — `verdict()` restates it;
+        #   * a successful dial — the adopt below REMOVES it;
+        #   * CANCELLATION, which is the one that used to be missed.
+        #
+        # The sidebar's switch cancels this worker group
+        # (`_select_sidebar_session`), so the loop unwinds on `CancelledError`
+        # straight to `finally` — which cleared the target and left the row
+        # standing: the user came back to a session reading "still trying for up
+        # to 42 s" under a loop that was already dead, one more stranded row per
+        # abandoned run, on the very exit the new composer copy teaches (design
+        # D1 / review m4 / QA Q2 found it independently and it falsified this
+        # comment's claim). A settled flag is what closes it: `verdict()` and the
+        # successful adopt both set it, so the `finally` restates only a row
+        # nothing else has settled. A flag rather than `except CancelledError`,
+        # because the invariant is about exits rather than about one exception
+        # class — any unwind out of the loop owes the row the same ending.
+        retry_notice: NoticeBlock | None = None
+        settled = False
+
+        def narrate(text: str) -> None:
+            nonlocal retry_notice
+            if retry_notice is None or not retry_notice.is_attached:
+                retry_notice = NoticeBlock(text, "warning")
+                self._append_block(retry_notice, ends_empty_state=False)
+            else:
+                retry_notice.restate(text, "warning")
+
+        def verdict(text: str) -> None:
+            """End the redial by RESTATING the row it narrated into the outcome.
+
+            The give-up arm used to post the verdict and `return`, leaving the
+            live row above it still in the present tense: the transcript
+            promised a reconnect that would never happen, and every later
+            `/resume` stranded one more (measured: two runs, four rows, the
+            stale pair frozen at `retry 48 of 48` — design D1, UX U3).
+            Restating in place is the mirror of what the success path already
+            does by removing the row, and it is what keeps the verdict the
+            BOTTOM row — with the `finally`'s retirement of the composer's own
+            refusal row (see below), which is appended BELOW this one and used
+            to leave a present-tense claim under the outcome (UX U1).
+            """
+            nonlocal retry_notice, settled
+            settled = True
+            if retry_notice is not None and retry_notice.is_attached:
+                retry_notice.restate(text, "warning")
+                retry_notice = None
+            else:
+                self._system_notice(text, "warning")
+
+        def gave_up_text(error: Exception) -> str:
+            """The terminal sentence: what failed, WHICH session, and what next.
+
+            The bare `str(error)` this replaces was a state with no session and
+            no next step, for a command the user typed with an explicit id (UX
+            U4). An exhaustion that never saw a record at all reports the app's
+            ONE sentence for an unreachable owner; the older-process advice
+            next door belongs to the older-process case only (design D5).
+
+            THE NEXT STEP IS ITS OWN AUTHORED ROW (design D2). As one flowing
+            paragraph the wrap fell wherever the cells landed, and at 80 columns
+            — a width the original rig never filmed — that put `/resume` and the
+            id the user must type on different lines: the actionable half, split
+            from its own argument (measured 71.4 cells then 23.1). Two authored
+            rows cost nothing at the widths where the text already wrapped, and
+            render exactly as before at 44 columns.
+            """
+            detail = str(error).strip() or UNREACHABLE_OWNER_MESSAGE
+            return (
+                f"could not resume {concrete} — {detail}.\n"
+                f"Run /resume {concrete} again to retry."
             )
-        except Exception as error:
-            self._system_notice(str(error), "warning")
-            return
+
+        def stopped_text(unwound: BaseException | None) -> str:
+            """The sentence for a redial that ended WITHOUT running to a verdict.
+
+            Reachable by cancellation and by any unexpected exception unwinding
+            the loop. Only the row this loop actually narrated is settled by it,
+            so a `/resume` abandoned during its first silent envelope (no row
+            yet) gains no row here.
+
+            THE COPY NAMES NO CAUSE, because the cancellation arm has two and
+            the code cannot tell them apart (review round 3, MINOR-1): the
+            sidebar's switch cancels this worker group, and Textual cancels
+            EVERY worker when the message loop ends (`workers.cancel_all()` in
+            `_process_messages_loop`'s `finally`), so a quit or Ctrl+C mid-redial
+            lands on the same line. The row is durable, so a sentence claiming a
+            switch could be read on the next launch beside a session the user
+            never left. What is true of both is that the resume never completed —
+            said here as a fact rather than as a cause — and the way back is a
+            fresh `/resume`. (Design D2's `switched session` also read as a
+            dropped article, which a cause-neutral sentence does not have to
+            carry.) Anything else gets the give-up sentence, which is true of it:
+            the wait is over and no dial is pending.
+            """
+            if isinstance(unwound, asyncio.CancelledError):
+                return (
+                    f"resume of {concrete} stopped — the wait ended without "
+                    f"connecting.\nRun /resume {concrete} again to retry."
+                )
+            return gave_up_text(unwound if isinstance(unwound, Exception) else ConnectionError())
+
+        def static_text() -> str:
+            """The terminal sentence for a gap no redial can change (UX U2).
+
+            This arm used to pass `str(error)` straight through, so the user was
+            handed the owner's own internal refusal — `owner lacks tui_state_v1;
+            canonical full-TUI attach needs protocol >= 5` — with no session
+            named and no next step, one arm over from the sibling fix that added
+            both. The token is dropped rather than translated because it is not
+            something the user can act on; what they can act on is the process,
+            named in the neighbouring arm's own register. Deliberately NOT a
+            "Run /resume … again to retry": the refusal is a STATIC property of
+            the owner, so a redial would reproduce it identically — which is why
+            this arm does not retry at all.
+            """
+            return (
+                f"could not resume {concrete} — the process hosting it does not serve "
+                "the full TUI session state. Update or restart that process, then "
+                "resume again."
+            )
+
+        # The bound the user is told, in whole seconds: the wall-clock cap plus
+        # the envelope of a dial that may already be in flight when it expires.
+        bound_s = f"{RESUME_CONNECT_BOUND_S:g}"
+
+        attempt = 0
+        remote: Any = None
+        # TAKEN ONCE, AND CHARGED FOR EVERYTHING THE LOOP SPENDS. Each attempt's
+        # own duration comes off this deadline as it is spent and each backoff
+        # is clamped to what is left, so a silent owner cannot buy more dials by
+        # making the loop's own attempts expensive (review M1: the budget that
+        # counted only the waits was 49 dials and ~14.5 minutes, not 135.75 s).
+        deadline = _resume_redial_clock() + RESUME_CONNECT_WALL_S
+        # THE COMPOSER NEEDS A TARGET FOR THE WHOLE OF THIS LOOP. A `/resume`
+        # redials over a session that is still live, so its source is neither
+        # `display_only` nor frame-pending and `composer_submission_refused`
+        # had nothing to say: Enter was silently swallowed for the entire
+        # window (UX U1, measured at 136 s — draft kept, no notice, no band
+        # change, no toast, and a retyped `/resume target` left sitting in the
+        # buffer). Published for exactly the life of the loop and cleared in
+        # `finally`, so a later transition cannot inherit this session's name.
+        self._resume_retry_target = concrete
+        try:
+            while True:
+                record, found_owner = await asyncio.to_thread(
+                    find_runtime_record, config_root, concrete
+                )
+                # THE FIRST ATTEMPT IS THE ONLY ONE THAT MAY REFUSE OUTRIGHT,
+                # and only for a condition no later dial can change.
+                #
+                # `record is None` IS DELIBERATELY NOT ONE OF THEM. An owner
+                # being restarted publishes no record between the old pid
+                # retiring and the new one arriving — `find_runtime_record`
+                # returns `(None, None)` — which is the exact window this redial
+                # exists for, and refusing there told the user the session was
+                # "open in an older Local Operator process" when nothing was
+                # open at all, then returned without trying again: a `/resume`
+                # typed inside the republish gap got a false sentence and no
+                # retry (review m1). The absence worth naming is `(None, pid)`,
+                # an owner whose marker is live but which publishes no dialable
+                # record — an older binary, or a registrant that failed to
+                # start.
+                #
+                # ...AND THAT ABSENCE, TOO, IS ESTABLISHED RATHER THAN INFERRED
+                # (review m3). `(None, pid)` is ALSO what the rebind race looks
+                # like: a record for that pid that is live, protocol-5 and
+                # perfectly dialable, still stamped with the PREVIOUS
+                # `session_id` — the shape `find_runtime_record`'s own docstring
+                # describes as a race whose welcome-projection identity check
+                # arbitrates. Refusing there claimed an age the code never
+                # checked and invited the user to close a healthy
+                # current-version runtime. So the refusal is taken only when a
+                # scan says this pid publishes NO dialable record at all;
+                # anything else — a dialable record, or a registry that could
+                # not be read — is paced, and the timeout's own honest sentence
+                # is the outcome.
+                #
+                # A WEDGED OWNER IS PACED FOR THE SAME REASON (review round 3,
+                # MINOR-2). The registry's third state — pid alive, heartbeat
+                # older than `HEARTBEAT_TIMEOUT_S`, i.e. the owner is stuck — is
+                # a current-version process that may recover, and `scan` keeps
+                # its record for exactly that hope, so `dialable_record_exists`
+                # answers `True` for it. Asking only for `live` printed this
+                # sentence for a merely stuck owner and skipped the very wait
+                # that could have healed it.
+                #
+                # A MOVED OWNER PID IS PACED, NOT REFUSED. `find_runtime_record`
+                # derives its own owner from the same `.session.pid` marker the
+                # caller read, so a mismatch can only mean the marker changed
+                # between the two reads — a republish, which the next attempt
+                # re-reads anyway. The suggested `found_owner != owner` refusal
+                # was implemented and rejected for that reason: it reproduced
+                # m1's own defect (a sentence about a pid, and no retry) for a
+                # different input.
+                #
+                # The threshold is `FRONTEND_ATTACH_MIN_PROTOCOL`, the same one
+                # `frontend_attach_refusal` applies, so one concept has one
+                # version test rather than a literal beside the canonical one
+                # (review n3).
+                if attempt == 0:
+                    older_pid: int | None = None
+                    if record is None:
+                        if found_owner is not None and (
+                            await asyncio.to_thread(
+                                dialable_record_exists, config_root, found_owner
+                            )
+                            is False
+                        ):
+                            older_pid = found_owner
+                    elif record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL:
+                        older_pid = record.pid
+                    if older_pid is not None:
+                        self._system_notice(
+                            f"session {concrete} is open in an older Local Operator "
+                            f"process (pid {older_pid}) — update or close that "
+                            "process, then resume again",
+                            "warning",
+                        )
+                        return
+                if record is None:
+                    # An owner that is not there THIS MOMENT: paced and retried,
+                    # never reported (see the first-attempt block above).
+                    error: Exception = ConnectionError(UNREACHABLE_OWNER_MESSAGE)
+                else:
+                    try:
+                        remote = await AttachedSession.connect(
+                            record,
+                            concrete,
+                            config_dir=config_root,
+                            takeover_factory=takeover_factory,
+                        )
+                        # SETTLED BEFORE THE BREAK: the adopt below is the
+                        # row's other resolution (it REMOVES the row), so the
+                        # `finally` must not restate this as a cancellation.
+                        settled = True
+                        break
+                    except Exception as caught:  # noqa: BLE001 — classified below
+                        error = caught
+                attempt += 1
+                # A CAPABILITY/PROTOCOL GAP IS STATIC, so it is never retried:
+                # every redial would raise the identical refusal and only make
+                # the user wait for a sentence already known. Read off the SAME
+                # record `connect` just refused, so the two cannot disagree.
+                #
+                # ONE DIAL IS STILL SPENT on the capability half of this (QA
+                # Q3: `connect_calls=1 socket_dials=0` on this head and on the
+                # base — `frontend_attach_refusal` is consulted only after the
+                # call). Only a record below the attach protocol is refused
+                # before any dial, at the first-attempt guard above.
+                static = frontend_attach_refusal(record) if record is not None else None
+                remaining = deadline - _resume_redial_clock()
+                if static is not None:
+                    verdict(static_text())
+                    return
+                if attempt >= RESUME_CONNECT_ATTEMPTS or remaining <= 0:
+                    verdict(gave_up_text(error))
+                    return
+                # STATED AS A BOUND, and in the composer's register for the same
+                # wait: no denominator the user cannot act on, no diagnosis the
+                # app has not established, and short enough not to split in the
+                # notice's 75-cell measure with a typical id (design D2). The
+                # bound is anchored as the WHOLE wait's and hedged so it cannot
+                # be read as exact (UX U4, review n4 — see `bound_s`), and the
+                # non-breaking space keeps `42 s` from splitting across a wrap in
+                # the narrower block a sidebar-open layout leaves (design D2).
+                narrate(
+                    f"reconnecting to session {concrete} — still trying, about "
+                    f"{bound_s}\u00a0s in total"
+                )
+                await _resume_redial_pause(min(sidebar_connect_backoff_s(attempt), remaining))
+        finally:
+            self._resume_retry_target = ""
+            # THE CANCELLATION EXIT OWES THE ROW THE SAME ENDING. The sidebar's
+            # switch cancels this worker group, so the loop unwinds on
+            # `CancelledError` without reaching any verdict: without this, the
+            # row the user left behind still promises a dial that is over, in
+            # the session they return to, one more stranded row per abandoned
+            # run (design D1 / review m4 / QA Q2). Textual's own shutdown
+            # cancels every worker the same way (`workers.cancel_all()`), which
+            # is why the sentence below names no cause — see `stopped_text`.
+            # Restating rather than removing keeps the one-row-per-run
+            # guarantee, and `settled` keeps this out of the two exits that
+            # already resolved the row. An unwind that delivered no dial at all
+            # has no row and gains none.
+            if not settled and retry_notice is not None and retry_notice.is_attached:
+                unwound = sys.exc_info()[1]
+                settled_text = stopped_text(unwound)
+                # ONE SETTLED SENTENCE PER CONVERSATION (design D1, round 3):
+                # the cancellation sentence carries no per-run information, so a
+                # SECOND abandoned redial settled its fresh row into a
+                # byte-identical copy of the one already there — two identical
+                # blocks adjacent in the current view. When the view already
+                # holds that exact sentence, it IS this run's outcome, and the
+                # block that goes is this run's own live row.
+                #
+                # Scoped to the CANCELLATION arm on purpose. The fall-through
+                # for an unexpected raise reuses the give-up sentence, and
+                # absorbing a repeat of THAT would collapse two runs' verdicts
+                # into one — the one-row-per-run policy rounds 1-2 approved and
+                # this round was told not to reopen (`_absorb_into_settled_notice`
+                # is the mechanism, called only here).
+                is_cancellation = isinstance(unwound, asyncio.CancelledError)
+                absorbed = is_cancellation and self._absorb_into_settled_notice(
+                    retry_notice, settled_text
+                )
+                if not absorbed:
+                    retry_notice.restate(settled_text, "warning")
+                retry_notice = None
+            # The composer's refusal row describes the same state, so it ends
+            # with the operation on every exit too.
+            self._retire_composer_refusal()
+
+        # The retry row described a dial that is now over; leaving it up would
+        # have the transcript promise a reconnect that already happened. The
+        # refusal row was retired in the `finally` above, before this point, so
+        # what is left on screen after a successful adopt is the adopted session
+        # and nothing that still speaks in the present tense.
+        if retry_notice is not None and retry_notice.is_attached:
+            self._transcript_view().remove_block(retry_notice)
 
         detach_gates = getattr(self._session, "detach_viewer_gates", None)
         if callable(detach_gates):

@@ -651,6 +651,41 @@ def _validated_ask_question(pending: PendingRequest) -> AskQuestion:
     )
 
 
+#: The oldest attach protocol that carries the whole frontend state: below it
+#: there is no canonical full-TUI attach, and the degraded projection view was
+#: deliberately deleted, so the refusal below is the whole story rather than a
+#: fallback.
+FRONTEND_ATTACH_MIN_PROTOCOL = 5
+
+
+def frontend_attach_refusal(record: SessionRecord) -> str | None:
+    """Why ``connect`` would refuse this record, or ``None`` if it would dial.
+
+    ONE RULE, TWO CALLERS. ``connect`` refuses on it; a caller that has to
+    decide whether a failed connect is worth RETRYING must ask the same
+    question of the same record. The question matters because the two failure
+    classes want opposite handling: a capability or protocol gap is a STATIC
+    property of the owner, so every redial raises the identical refusal and a
+    budget spent on it is a longer way to the same sentence, while the
+    transient failures (a socket that is not there yet, an owner that is not
+    answering) are exactly what a budget is for.
+
+    Extracted rather than restated at the far side, because a copy of this
+    version test is one protocol bump away from disagreeing with the guard it
+    mirrors — and the disagreement would be silent, since both spellings would
+    keep compiling.
+    """
+    if (
+        record.protocol < FRONTEND_ATTACH_MIN_PROTOCOL
+        or FRONTEND_CAPABILITY not in record.capabilities
+    ):
+        return (
+            f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs "
+            f"protocol >= {FRONTEND_ATTACH_MIN_PROTOCOL}"
+        )
+    return None
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -1039,10 +1074,9 @@ class AttachedSession:
         display_window: bool = False,
         surface: str = "terminal",
     ) -> "AttachedSession":
-        if record.protocol < 5 or FRONTEND_CAPABILITY not in record.capabilities:
-            raise ConnectionError(
-                f"owner lacks {FRONTEND_CAPABILITY}; canonical full-TUI attach needs protocol >= 5"
-            )
+        refusal = frontend_attach_refusal(record)
+        if refusal is not None:
+            raise ConnectionError(refusal)
         self = cls(
             config_dir=config_dir,
             session_id=session_id,

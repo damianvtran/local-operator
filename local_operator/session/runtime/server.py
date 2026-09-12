@@ -320,6 +320,28 @@ _TUI_SEND_TIMEOUT_S = 5.0
 # reconnect through durable history + canonical frontend_sync instead of drift.
 _EVENT_QUEUE_MAX = 64
 
+#: Drop reasons that are an ordinary part of a client's life, kept at INFO: a
+#: close the runtime itself was asked for (``runtime shutdown``), a peer that
+#: closed first, and a daemon dial that superseded its own predecessor. Every
+#: OTHER reason means the runtime removed a client that had not asked to leave —
+#: an attach-cap eviction, a queue overflow, a send timeout — which is exactly
+#: the event a viewer learns about only as a cold facade, so those are logged at
+#: WARNING. Derived from the call sites rather than guessed: see the eleven
+#: ``_drop_client`` callers, and keep this list beside any new one.
+#:
+#: ``frontend requested but unsupported`` is deliberately NOT in this set, and
+#: the call is a decision rather than an oversight (review n1). It reads like a
+#: client-caused drop, but the level is chosen by what the user sees, and what
+#: they see is identical to an eviction: a viewer that asked to be kept live is
+#: cut off and reads cold next. The cause is also permanent rather than
+#: transient — a runtime whose handler has no ``subscribe_frontend`` refuses
+#: every reconnect the same way — so burying it at INFO would make the one
+#: recurring reason a viewer keeps going cold the one reason the log does not
+#: show without turning INFO on for the whole runtime.
+_GRACEFUL_DROP_REASONS = frozenset(
+    {"runtime shutdown", "reader eof", "reader reset", "daemon replaced"}
+)
+
 # Ops whose answer is structured data (a typed slash result, a cancel count)
 # rather than a one-line receipt: they reply with a ``result`` frame so the
 # invoker renders the outcome locally instead of the owner's transcript
@@ -1629,11 +1651,25 @@ class RuntimeServer:
         # SERVER-GLOBAL state has to honour that contract, or the late second
         # call reaches across to whatever connection replaced this one.
         was_registered = self._clients.pop(id(conn.writer), None) is not None
-        # One INFO per actual removal. The reader loop's ``finally`` always
-        # calls again after a send-path drop; that second call is a no-op and
-        # must not look like a second failure (DEBUG only).
+        # One line per actual removal, at ONE level chosen by WHY it happened.
+        #
+        # A view that went cold and was told to reselect used to leave nothing
+        # in the log to read: the removal was recorded at INFO beside every
+        # routine close, so the reason a watching terminal lost its owner — the
+        # attach cap evicting it, an event queue overflowing, a send timing out
+        # — could not be found without turning INFO on for the whole runtime.
+        # The reasons below that mean "we dropped a client that did not ask to
+        # leave" are therefore WARNING, and the ones that are an ordinary part
+        # of a client's life stay INFO. The reader loop's `finally` always calls
+        # again after a send-path drop; that second call is a no-op and must not
+        # look like a second failure (DEBUG only).
         peer = conn.writer.get_extra_info("peername")
-        log = logger.info if was_registered else logger.debug
+        if not was_registered:
+            log = logger.debug
+        elif reason in _GRACEFUL_DROP_REASONS:
+            log = logger.info
+        else:
+            log = logger.warning
         log(
             "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s",
             conn.kind,
