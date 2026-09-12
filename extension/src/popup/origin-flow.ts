@@ -42,7 +42,31 @@ export interface DecisionAck {
   check: boolean;
 }
 
-/** The acknowledgement each decision renders. Deny is a COMPLETED choice, not
+/** The acknowledgement shown from the CLICK ALONE, while the worker round-trip
+ * is still outstanding.
+ *
+ * It reports RECEIPT, never outcome. The optimistic ack below is right once a
+ * decision has landed, but until the worker answers the popup does not know
+ * that it has: against a mute worker the success copy, the success tone and
+ * the check sat on screen for 4.9s asserting a grant that was never applied
+ * (UX U2), and a popup is dismissed by clicking anywhere outside it — so the
+ * realistic outcome was a user closing it believing the site was allowed.
+ *
+ * Neutral tone and no check, deliberately: those are the two things a user
+ * reads as "done". The verb is progressive for the same reason. `decision` is
+ * named so the in-flight line already says WHICH way the click went — the user
+ * should not have to wait for the confirmation to see what they chose. */
+export function ackInFlight(decision: OriginDecision): DecisionAck {
+  return {
+    title: decision === "deny" ? "Denying…" : "Allowing…",
+    sub: "Waiting for the extension to apply your choice.",
+    tone: "neutral",
+    check: false,
+  };
+}
+
+/** The acknowledgement each decision renders ONCE THE WORKER HAS CONFIRMED it.
+ * Deny is a COMPLETED choice, not
  * a failure, so it takes the neutral register and no check — danger is
  * reserved for states the user must recover from (error/incompatible), and a
  * check over "denied" would read as the wrong verdict. `broadScope` names

@@ -27,15 +27,14 @@
  * the duplication of both is the price of running before the module system.
  */
 (function () {
-  // Keep in sync with PIN_HINT_KEY, PIN_CONNECTED/PIN_PAIRING/PIN_UNRESPONSIVE
-  // and show() in popup.ts.
+  // Keep in sync with PIN_HINT_KEY, PIN_CONNECTED/PIN_PAIRING and show() in
+  // popup.ts.
   //
-  // A PIN PER STATE, not a boolean. Two of the three states this can land on
-  // cannot be told apart by a boolean, and the one a boolean has to collapse is
-  // the wedged-but-paired card this popup exists for: pinned to the connected
-  // height it opened 167.8px short of the card it settled on (design D3-1).
-  // popup.ts writes the pin for the card it just rendered, and this script
-  // reproduces that height before the module runs.
+  // A PIN PER STATE, not a boolean: popup.ts writes the pin for the card it
+  // just rendered and this script reproduces that height before the module
+  // runs. Pins are held only for states that are DURABLE properties of the
+  // browser, because a pin is a bet that the next open repeats this state —
+  // see popup.ts's PIN_BY_STATE block for the measurements behind that rule.
   var KEY = "lop:pin-hint";
   // The boolean key the previous revision wrote. Read once as a fallback so the
   // rename does not cost an existing paired browser a resize; "1" meant the
@@ -43,8 +42,9 @@
   var LEGACY_KEY = "lop:paired-hint";
   var PIN_CONNECTED = "86px";
   var PIN_PAIRING = "219px";
-  var PIN_UNRESPONSIVE = "402px";
-  var PINS = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+  // Only the DURABLE states are pinned — see popup.ts's PIN_BY_STATE for why
+  // the transient wedged card is deliberately absent.
+  var PINS = [PIN_CONNECTED, PIN_PAIRING];
   var pin = null;
   try {
     var stored = localStorage.getItem(KEY);

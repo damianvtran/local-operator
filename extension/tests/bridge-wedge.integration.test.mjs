@@ -171,7 +171,7 @@ function installChrome({ overrides = {}, hangFirstSessionGet = false } = {}) {
     ),
     runtime: {
       getURL: (path) => `chrome-extension://test/${path}`,
-      getManifest: () => ({ version: "0.1.10" }),
+      getManifest: () => ({ version: "0.1.12" }),
       onStartup: { addListener: () => {} },
       onInstalled: { addListener: () => {} },
       onMessage: { addListener: () => {} },
@@ -447,7 +447,7 @@ async function loadWorker({ sendMessage, aliasTabGroups = null } = {}) {
     overrides: {
       runtime: {
         getURL: (path) => `chrome-extension://test/${path}`,
-        getManifest: () => ({ version: "0.1.10" }),
+        getManifest: () => ({ version: "0.1.12" }),
         onStartup: { addListener: () => {} },
         onInstalled: { addListener: () => {} },
         onMessage: { addListener: () => {} },
@@ -762,18 +762,27 @@ test("X3 an unparseable daemon frame does not throw out of the socket handler", 
   const realWarn = console.warn;
   console.warn = (...args) => warnings.push(args.map(String).join(" "));
   try {
-    // A truncated write, a proxy injecting a body, a future protocol version:
-    // whatever the cause, it reaches onmessage as a string JSON.parse rejects.
-    // The old handler let that throw, taking the whole event handler with it.
-    worker.socket.onmessage?.({ data: "{not json" });
+    // Two distinct classes, and the second is the one that survived round 1.
+    // "{not json" fails INSIDE JSON.parse. But `null`, `2`, `"x"`, `true` and
+    // `[]` are all VALID JSON: they parse cleanly and then reach `"method" in
+    // frame`, where `in` throws TypeError on any non-object — an uncaught throw
+    // out of the socket handler reached by exactly the input class that
+    // motivated the parse guard (review F1). Every one is driven here, because
+    // a test that only covers the parse failure is green over the hole.
+    const payloads = ["{not json", "null", "2", '"x"', "true", "[]", "[1,2]"];
+    for (const data of payloads) {
+      worker.socket.onmessage?.({ data });
+      await tick(10);
+    }
     await tick(40);
 
     // The observation is the harness's, not a string grep: nothing escaped.
     assert.deepEqual(rejections, [], "a bad frame escaped as an unhandled rejection");
     assert.deepEqual(uncaught, [], "a bad frame escaped as an uncaught exception");
-    assert.ok(
-      warnings.some((line) => line.includes("unparseable frame")),
-      `expected the drop to be recorded, got ${JSON.stringify(warnings)}`,
+    assert.equal(
+      warnings.filter((line) => line.includes("unparseable frame")).length,
+      payloads.length,
+      `every malformed frame must be recorded as dropped, got ${JSON.stringify(warnings)}`,
     );
 
     // And the SOCKET survives it: the next good frame is still answered, which
