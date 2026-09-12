@@ -305,7 +305,12 @@ def classify_rejection(reason: str) -> str:
         # object was cut off or double-escaped. Keyed on the parser's own
         # reported position and not on the reply text, because this classifier
         # must run over sealed artifacts too, 271 of whose 311 reply sections
-        # carry the placeholder instead of the reply.
+        # carry the placeholder instead of the reply. The envelope decoder's OWN
+        # sentence (``duplicate-free JSON object``) reports no offset -- it is our
+        # wording for a ``json.loads`` failure over the whole string, which is
+        # also how trailing text and duplicate keys fail -- so it lands in the
+        # residual, which is why that half's hint names text outside the object
+        # as one of its causes.
         if _LEADING_DELIMITER_RULE.search(reason):
             return "leading-delimiter"
         return "incomplete-json"
