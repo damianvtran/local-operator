@@ -28,6 +28,12 @@ cursor persists invisibly when the list is unfocused. A pinned row leaves
 whatever section it ranked into and appears under ★ Pinned with a `★` in place
 of its state mark.
 
+Pinned rows are not lifted into view: the list shows one page of its own
+ranking, so a pinned session that ranks below that page is not on screen. When
+that happens the `★ Pinned` section ends with a `+N more pinned` line, so the
+heading never claims to be showing the whole pinned set. That line is chrome —
+clicking it does nothing.
+
 Pins live in `sidebar-pins.json` in the configuration directory
 (`~/.local-operator` unless `LOCAL_OPERATOR_CONFIG_DIR` says otherwise), newest
 pin first, capped at 50. They are durable: a pin survives quitting and
@@ -52,6 +58,19 @@ and `Ctrl+O` expands a collapsed paste.
 the flip applies to the session you pressed it in, and a write would fan out
 through the config watcher to every running `lop` process. A `/settings` change
 does apply live to an already-painted sidebar.
+
+Turning the layer on costs screen space before it shows a single row. Each
+section spends a heading plus the blank line beneath it, and every heading after
+the first takes a separating blank as well, so going from two sections to four
+takes section chrome from 5 lines to 11. On a 30-row terminal that is enough to
+turn a list that fitted into a paged one: the footer then shows a pager
+(`1–16/21`) in place of the `ctrl+b hide` hint. This is accepted and expected,
+not a defect — the blank above a heading is what keeps it from sitting flush
+against the previous group's last row.
+
+When the list pages, the footer keeps `f9 focus` and drops `ctrl+b hide`:
+reaching the list matters more than hiding it, and `f9` is also the gate to the
+two sidebar-scoped chords. `/help` still lists `ctrl+b`.
 
 The layer is capped at 40 rows and does not page. A sub row is labelled by what
 it was delegated to do (`label · role`, degrading to whichever half exists),

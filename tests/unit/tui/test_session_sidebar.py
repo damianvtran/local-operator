@@ -2850,17 +2850,21 @@ async def test_ctrl_o_jumps_to_the_first_subagent_row():
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         entries = [_plain("a1", active=True), _plain("p1"), _sub("s1", label="one", agent="qa")]
-        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=False)
+        sidebar = await _sidebar_with(pilot, app, entries, show_subagents=True)
         await _focus_settled(pilot, sidebar)
         sidebar.cursor_id = "a1"
         await pilot.press("ctrl+o")
         await pilot.pause()
-        assert sidebar.cursor_id == "a1", "the layer is off; there is nothing to reveal"
+        assert sidebar.cursor_id == "s1"
 
-        sidebar.show_subagents = True
+        # With no subagent row to reach, the chord is a genuine no-op — the
+        # layer state is not a reason to refuse, but an empty layer is.
+        plain_only = [entry for entry in entries if not entry.subagent]
+        sidebar.set_entries(plain_only)
+        sidebar.cursor_id = "a1"
         await pilot.press("ctrl+o")
         await pilot.pause()
-        assert sidebar.cursor_id == "s1"
+        assert sidebar.cursor_id == "a1", "there is no subagent row to jump to"
 
 
 @pytest.mark.asyncio
@@ -2877,14 +2881,17 @@ async def test_a_click_lands_on_the_row_it_looks_like(height):
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, height)) as pilot:
         await pilot.pause()
+        # Enough rows that a pinned one falls outside the window at the short
+        # heights, so the `+N more pinned` chrome row is in the frame under
+        # test too — it must hit-test to None like any other chrome.
         entries = (
             [_plain(f"pin{i}", active=True) for i in range(2)]
             + [_plain(f"a{i}", active=True) for i in range(3)]
-            + [_plain(f"p{i}") for i in range(3)]
+            + [_plain(f"p{i}") for i in range(12)]
             + [_sub(f"s{i}", label=f"run {i}", agent="coder") for i in range(3)]
         )
         sidebar = await _sidebar_with(
-            pilot, app, entries, pins=("pin0", "pin1"), show_subagents=True, total=40
+            pilot, app, entries, pins=("pin0", "pin1", "p11"), show_subagents=True, total=40
         )
         lines = sidebar.render().plain.splitlines()
         rows = sidebar._display_rows()
@@ -2902,3 +2909,200 @@ async def test_a_click_lands_on_the_row_it_looks_like(height):
             assert name.split(" · ")[0] in lines[y], f"y={y} does not paint {entry.id!r}"
             painted += 1
         assert painted, "no entry rows were drawn"
+        overflow = [y for y, (kind, _e) in enumerate(rows, title) if kind == "note:pinned-overflow"]
+        for y in overflow:
+            assert sidebar._entry_at(y) is None, f"+N more pinned at y={y} is a click target"
+
+
+# -- amendment round 1: column ownership, honest chrome, cursor safety --------
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_row_keeps_its_urgency_glyph():
+    """D1: pinning must not hide "this needs you".
+
+    `row_state_mark` ranks by URGENCY — needs-you outranks everything, because
+    a person is blocked. The user pins the sessions they care about most, so a
+    pin that ate the state glyph made exactly those sessions the only ones that
+    could not say they were blocked, broken or finished.
+
+    `★` is the DURABLE fact (it does not change while the user looks at it) and
+    the state glyph is the volatile, time-critical one, so `★` is the one that
+    moves: it takes the cursor-prefix slot at columns 0-1 and leaves column 2
+    to the urgency ladder.
+    """
+    from local_operator.tui.widgets.session_picker import row_state_mark
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        now = time.time()
+        entry = CatalogEntry(SessionRow("needsyou", now, "Needs you", pending="approval"))
+        sidebar = await _sidebar_with(pilot, app, [entry], pins=("needsyou",))
+        row = next(line for line in sidebar.render().plain.splitlines() if "Needs you" in line)
+        expected, _ink = row_state_mark(entry.row, sidebar._frame)
+        assert expected == "!", "fixture must be a needs-you row"
+        assert row[2] == "!", f"column 2 lost the urgency glyph: {row!r}"
+        assert row[0] == "★", f"column 0 is not the pin slot: {row!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_busy_row_still_spins():
+    """D1's other half: the flicker fix must not cost the spinner.
+
+    The first cut skipped pinned rows in `_advance_spinner` because `★` lived
+    in the cell the tick patches. With `★` at columns 0-1 that conflict is
+    gone, so a pinned busy row animates like any other — and the pin mark is
+    left alone by a tick that only ever touches column 2.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        now = time.time()
+        entry = CatalogEntry(SessionRow("busy", now, "Working", live_state="busy"))
+        sidebar = await _sidebar_with(pilot, app, [entry], pins=("busy",))
+        seen = set()
+        for _ in range(2):
+            sidebar._advance_spinner()
+            await pilot.pause()
+            row = next(line for line in sidebar.render().plain.splitlines() if "Working" in line)
+            seen.add(row[2])
+            assert row[0] == "★", f"the tick disturbed the pin slot: {row!r}"
+        assert len(seen) == 2, f"column 2 did not animate across two ticks: {seen}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [30, 40])
+async def test_the_pinned_header_never_overclaims(height):
+    """D2: a `★ Pinned` heading over rows that are not all there is.
+
+    Pinned rows are NOT hoisted into the window — that stays deferred — so at a
+    short height a pinned row can rank below the page. The heading then claims
+    to be the pinned set while showing part of it. One honest chrome row says
+    how many are missing rather than silently under-reporting.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        entries = (
+            [_plain(f"a{i}", active=True) for i in range(6)]
+            + [_plain(f"p{i}") for i in range(12)]
+            + [_sub(f"s{i}", label=f"run {i}", agent="coder") for i in range(3)]
+        )
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("a3", "s2"), show_subagents=True, total=40
+        )
+        rows = sidebar._display_rows()
+        rendered = {entry.id for _kind, entry in rows if entry is not None}
+        missing = [pid for pid in sidebar._pins if pid not in rendered]
+        lines = sidebar.render().plain.splitlines()
+        note = [line for line in lines if "more pinned" in line]
+        if missing:
+            assert note, f"{len(missing)} pinned row(s) off-window and no note: {missing}"
+            assert f"+{len(missing)} more pinned" in note[0], note[0]
+        else:
+            assert not note, f"nothing is missing but the note rendered: {note}"
+        assert len(lines) <= sidebar.size.height
+        assert all(cell_len(line) <= sidebar.size.width for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_never_dangles_after_a_layer_drop():
+    """QA D3: `set_entries` adopted `current_id` without checking membership.
+
+    Pre-existing, but `ctrl+a` turns it from "a row aged out of the page" into
+    a routine keystroke that drops up to 40 rows at once. A dangling cursor
+    renders on row 0 while `cursor_id` says otherwise, and ENTER is swallowed
+    by `action_select`'s membership guard — the keystroke does nothing at all.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sub = _sub("s1", label="one", agent="scout")
+        withlayer = [_plain("a1", active=True), sub]
+        sidebar = await _sidebar_with(pilot, app, withlayer, show_subagents=True)
+        # The attached session is NOT itself a catalog row — the shape that
+        # makes the old fallback produce a dangling id.
+        sidebar.current_id = "sess-not-in-list"
+        sidebar.cursor_id = "s1"
+
+        sidebar.set_entries([entry for entry in withlayer if not entry.subagent])
+        await pilot.pause()
+        assert sidebar.cursor_id in {
+            entry.id for entry in sidebar.entries
+        }, f"cursor {sidebar.cursor_id!r} is not a row in the list"
+
+        # ENTER's own precondition, asserted directly: `action_select` refuses
+        # unless `cursor_id` names a row it can find, so a cursor that passes
+        # this is a cursor ENTER will act on. Checked rather than driving the
+        # real handler, which attaches a session and is not what this test is
+        # about.
+        assert sidebar.cursor_id and any(
+            entry.id == sidebar.cursor_id for entry in sidebar.entries
+        ), "action_select's membership guard would swallow ENTER"
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_sub_row_never_ends_on_a_separator():
+    """D4: `label ·…` reads as a rendering fault, not as an ellipsis."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entry = _sub("s1", label="section the sidebar", agent="coder")
+        sidebar = await _sidebar_with(pilot, app, [entry], show_subagents=True)
+        row = next(line for line in sidebar.render().plain.splitlines() if "section the" in line)
+        assert "·…" not in row and "· …" not in row, f"dangling separator: {row!r}"
+        assert "…" in row, "the title is genuinely cut, so it must still say so"
+
+
+@pytest.mark.asyncio
+async def test_the_section_chrome_cost_is_the_accepted_one():
+    """The chrome budget is `len(tiers) * 2 + (len(tiers) - 1)`, ACCEPTED.
+
+    Round 1's design finding proposed collapsing "doubled" separators to buy
+    back three lines. There are no doubled separators: the blank belongs
+    BENEATH each heading, so a section ends on its last entry row and dropping
+    the leading blank puts the next heading flush against it — the collision
+    `_display_rows` documents and two tests defend by name. The finding was
+    withdrawn and the cost accepted as MINOR, documented in
+    `docs/SESSION_SIDEBAR.md` rather than engineered away
+    (`~/workspace/DESIGN-sidebar-r1-D3-ruling.md`).
+
+    Pinned here so the number is a decision on the record rather than
+    something the next round re-derives and re-litigates.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        three = [_plain("pin1", active=True), _plain("a1", active=True), _plain("p1")]
+        sidebar = await _sidebar_with(pilot, app, three, pins=("pin1",))
+        assert sidebar._header_lines() == 8, "three sections must cost 8 chrome lines"
+
+        four = three + [_sub("s1", label="one", agent="coder")]
+        sidebar.set_entries(four)
+        sidebar.show_subagents = True
+        await pilot.pause()
+        assert sidebar._header_lines() == 11, "four sections must cost 11 chrome lines"
+
+
+@pytest.mark.asyncio
+async def test_the_pager_displaces_ctrl_b_not_f9():
+    """D3b: `f9 focus` survives paging; `ctrl+b hide` is what gives way.
+
+    `ctrl+b` hides a list the user is looking at, and `/help` still teaches it.
+    `f9` is how they reach the list they are reading, and it is the gate to the
+    two sidebar-scoped chords — so dropping it exactly when the list grew big
+    enough to page was the wrong thing to lose. It is also 3 cells cheaper,
+    which keeps the worst case inside the content width.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain(f"a{i}", active=True) for i in range(40)]
+        sidebar = await _sidebar_with(pilot, app, entries, total=1520)
+        assert len(sidebar.entries) > sidebar.page_size, "fixture must actually page"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in footer, f"the pager dropped f9: {footer!r}"
+        assert "ctrl+b" not in footer, f"both hints do not fit: {footer!r}"
+        assert "⌥999+" in footer, f"the capped counter was cropped: {footer!r}"
+        assert cell_len(footer) <= sidebar.size.width
