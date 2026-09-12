@@ -295,6 +295,19 @@ agree:
 env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
 ```
 
+**And strip what a `lop` parent exports, because two of its prefixes are read by
+the child product rather than only by a terminal.** `CMUX_*` is the one already
+known here (a headless TUI that inherits `CMUX_WORKSPACE_ID` renames the
+operator's real cmux workspaces). `LOP_*` is the other, and it is quieter:
+`session/runtime/process.py` reads `LOP_MOBILE_CHILD_PROVIDER`, `_MODEL`, `_CWD`
+and `_RESUME`, plus `LOP_RUNTIME_DEFER_MATERIALISE` and `_ADOPT_SESSION`, to
+decide what a child runtime is and what it works on. A cell run from inside
+another session therefore inherits *that* session's provider and model (so it
+silently runs on a provider the fixture never chose) and, with a deferral flag
+inherited, a child can idle-exit with no work at all — a plausible-looking cell
+that proves nothing. QA round 1 lost a cell to exactly this. Strip both prefixes,
+then set the names the cell means to set.
+
 This is worth spelling out because the failure is silent and it produces a
 *plausible* wrong answer rather than an error. It has now cost two separate QA
 rounds a false result in the same way: an "offline" cell resolved a provider

@@ -62,8 +62,8 @@ def is_zombie(pid: int) -> bool:
 
     Deliberately NOT ``psutil``: this module is stdlib-only by contract and
     ``/proc`` does not exist on macOS, so on POSIX the fallback is a ``ps``
-    fork — measured at 2.4-3.9 ms across runs on an M-series box, against
-    ~1 µs for signal-0. Callers therefore spend it only where the answer changes
+    fork — measured at 2.4-4.6 ms across runs on an M-series box, tracking
+    host load, against ~1 µs for signal-0. Callers therefore spend it only where the answer changes
     what they do. Concretely, these are the places that may pay it:
 
     - ``session_lease._pid_state`` — every acquisition and reaper decision, and
