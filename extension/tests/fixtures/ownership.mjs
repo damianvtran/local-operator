@@ -10,8 +10,13 @@ export async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "lop-ownership-"));
   let store = {}; let next = 100;
   const tabs = new Map(); const removed = [];
-  const faults = { navigation: false, remove: false, attach: false, capture: false };
+  const faults = { navigation: false, remove: false, attach: false, capture: false, navigationGate: null };
   globalThis.ownershipFaults = faults;
+  // Counts `chrome.tabs.update` calls so `navigationGate` can park exactly ONE
+  // navigation — the first one, i.e. whichever owner was admitted first. The
+  // admission tests need the first owner parked indefinitely while a second
+  // owner runs to completion, so "holds every navigation" would prove nothing.
+  let navigations = 0;
   globalThis.chrome = {
     storage: { session: {
       get: async () => structuredClone(store),
@@ -20,7 +25,12 @@ export async function fixture() {
     tabs: {
       create: async options => { const tab = { id: next++, ...options }; tabs.set(tab.id, tab); return tab; },
       get: async id => { if (!tabs.has(id)) throw Error(`No tab with id: ${id}`); return tabs.get(id); },
-      update: async (id, options) => { if (faults.navigation) throw Error("net::ERR_CONNECTION_REFUSED"); Object.assign(tabs.get(id), options); return tabs.get(id); },
+      update: async (id, options) => {
+        if (faults.navigation) throw Error("net::ERR_CONNECTION_REFUSED");
+        navigations += 1;
+        if (faults.navigationGate && navigations === 1) await faults.navigationGate;
+        Object.assign(tabs.get(id), options); return tabs.get(id);
+      },
       remove: async id => { if (faults.remove) throw Error("policy denied removal"); removed.push(id); tabs.delete(id); },
     },
   };
@@ -29,10 +39,16 @@ export async function fixture() {
   const mocks = {
     cdp: `import {getSurfaces,removeSurface} from ${JSON.stringify(resolve("src/state.ts"))};
       export class BridgeCommandError extends Error {constructor(code,message,data={}){super(message);this.code=code;this.data=data}}
+      export const isStalled=()=>false;
       export const attach=async()=>{if(globalThis.ownershipFaults.attach)throw Error('attach failed')},detach=async()=>{},cdp=async()=>({result:{value:JSON.stringify({url:'https://example.test/',title:'fixture'})}}),pruneSurface=async(t)=>removeSurface(t),requireSurface=async(t)=>{const s=(await getSurfaces())[t];if(!s)throw new BridgeCommandError('tab_closed','gone');await chrome.tabs.get(s.tabId);return s};`,
     "log-capture": `export const dropLogCapture=()=>{},startLogCapture=async()=>{if(globalThis.ownershipFaults.capture)throw Error('capture failed')};`,
     origins: `export const safeHttpUrl=v=>new URL(v),ensureTopLevelAccess=async()=>({allowed:true}),askOrigin=async()=>true,withOriginGate=async(t,r,fn)=>fn();`,
-    settle: `export const settle=async()=>{};`,
+    // The real helper and its constants are pass-throughs in this harness: the
+    // modules under test still import them by NAME, so the fixture has to
+    // export them or esbuild fails the build ("No matching export in
+    // fixture:settle"). Handing back the op unchanged keeps the harness's
+    // fault injection (which rejects) exactly as it was.
+    settle: `export const settle=async()=>{};export const CHROME_API_DEADLINE_MS=5000;export const deadline=(op)=>op;`,
     "tab-groups": `export const reconcileTabGroup=async()=>{};`,
   };
   const outfile = join(dir, "bundle.mjs");
