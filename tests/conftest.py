@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import suppress
@@ -407,8 +408,158 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     try:
         yield
     finally:
-        item.stash[_SWEEP_ROOT_KEY] = _temp_roots(item)
+        roots = _temp_roots(item)
+        item.stash[_SWEEP_ROOT_KEY] = roots
+        _record_for_session_sweep(roots)
         _reap_brokers_of_this_test(item)
+
+
+#: Config dirs this worker's tests could have started a broker under, kept for
+#: the session-end net below. A module-level set rather than a stash entry
+#: because the net runs after every item's stash is out of reach, and a plain
+#: set of paths is ~100 bytes per entry for a suite that creates a few thousand.
+_SESSION_SWEEP_ROOTS: set[Path] = set()
+
+#: This session's ``basetemp``, captured by the fixture below.
+#:
+#: Captured through the PUBLIC ``tmp_path_factory`` fixture rather than read off
+#: ``config._tmp_path_factory`` at session end: that attribute is private (and
+#: pyright rejects it), and building a second ``TempPathFactory`` from the config
+#: would allocate a DIFFERENT basetemp than the one the tests actually used,
+#: which would make the net walk an empty directory and silently reclaim nothing.
+_SESSION_BASETEMP: Path | None = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _capture_session_basetemp(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Record this session's basetemp for the session-end broker net.
+
+    Session-scoped and autouse so it is resolved once per worker, at the first
+    test, and costs nothing thereafter; ``getbasetemp()`` is what the factory has
+    already computed for ``tmp_path``, so this creates no directory of its own.
+    """
+    global _SESSION_BASETEMP
+    with suppress(Exception):
+        _SESSION_BASETEMP = tmp_path_factory.getbasetemp().resolve()
+
+
+def _record_for_session_sweep(roots: tuple[Path, ...]) -> None:
+    """Remember this test's temp roots for the session-end net, scoped to basetemp.
+
+    THE BASETEMP FILTER IS THE SAFETY PROPERTY, and it is the same one the
+    per-test sweep relies on: a path is recorded only when it lies under this
+    run's own ``basetemp``, so the net can never reach the operator's real
+    ``~/.local-operator`` or another agent's worktree — exactly the processes
+    `stop_secret_brokers_started_by_this_test` documents it must not touch. The
+    isolated HOME is deliberately NOT recorded: `isolate_environment` may point
+    it outside basetemp, and the per-test reap already covers it while it exists.
+    """
+    base = _SESSION_BASETEMP
+    if base is None:
+        return
+    for root in roots:
+        with suppress(ValueError, OSError):
+            if root.resolve().is_relative_to(base):
+                _SESSION_SWEEP_ROOTS.add(root)
+
+
+def _session_sweep_candidates(basetemp: Path | None) -> list[Path]:
+    """Config dirs under ``basetemp`` that a session-end sweep should ask about.
+
+    Two sources, because neither alone is complete:
+
+    * the roots recorded per test, which is the only way to name a directory
+      pytest has since RECLAIMED — a fallback-layout socket outlives its config
+      dir, so the name is still enough to reach the daemon (see `_temp_roots`);
+    * a walk of ``basetemp`` for ``secrets/`` directories, which is the only way
+      to see a config dir that never belonged to any test's ``tmp_path`` at all.
+      A module- or session-scoped fixture takes its directory from
+      ``tmp_path_factory.mktemp``, so it appears in NO test's ``tmp_path`` and no
+      per-test record can contain it. Measured: a broker started in a
+      module-scoped fixture's teardown survived a full inner run.
+
+    ``secrets/`` is the marker because it is what the store actually creates
+    (`keys.secrets_dir`), so the walk names config dirs rather than guessing at
+    directory shapes — the same argument `_secret_config_dirs` records for not
+    hardcoding a list of known layouts. The walk runs ONCE per session, not per
+    test, which is what keeps it affordable.
+    """
+    candidates = set(_SESSION_SWEEP_ROOTS)
+    _SESSION_SWEEP_ROOTS.clear()
+    if basetemp is not None:
+        with suppress(Exception):
+            from local_operator.secrets.keys import SECRETS_DIRNAME
+
+            for marker in basetemp.rglob(SECRETS_DIRNAME):
+                with suppress(OSError):
+                    if marker.is_dir():
+                        candidates.add(marker.parent)
+    return sorted(candidates)
+
+
+def _sweep_session_leftovers(basetemp: Path | None) -> int:
+    """Stop every leftover broker under ``basetemp``; return how many were live.
+
+    **Belt and braces, not the primary mechanism.** The call-phase reap is what
+    stops brokers in practice, and the per-test teardown sweep covers a
+    function-scoped finaliser that restarts one. This exists for what neither can
+    structurally see: a broker whose config dir was never a test's ``tmp_path``
+    (see `_session_sweep_candidates`). Issue #958 asked for a net that also
+    *reports what it reclaimed*, so a non-zero count here is a signal that some
+    path leaks past the per-test reap and should be traced, rather than a number
+    quietly absorbed.
+
+    THE BASETEMP SCOPE IS THE SAFETY PROPERTY, and it is the same one the
+    per-test sweep rests on: every candidate lies under this run's own basetemp,
+    so this can never reach the operator's real ``~/.local-operator`` or another
+    agent's worktree. Without a basetemp there is nothing safe to scope to and
+    the net does nothing at all.
+
+    Returns the number of config dirs that still had a LIVE broker, which is the
+    count worth reporting: candidates that were already clean are the expected
+    case and say nothing.
+    """
+    if not _broker_daemon_is_available():
+        return 0
+    candidates = _session_sweep_candidates(basetemp)
+    if not candidates:
+        return 0
+    try:
+        from local_operator.secrets import client
+    except Exception:  # noqa: BLE001 — a net that cannot load is simply absent
+        return 0
+
+    # `is_running` is the cheap question and the same one `_stop_brokers_in`
+    # asks; counting first is what makes the reported number "reclaimed" rather
+    # than merely "considered".
+    live = []
+    for candidate in candidates:
+        with suppress(Exception):
+            if client.is_running(candidate):
+                live.append(candidate)
+    if live:
+        _stop_brokers_in(live)
+    return len(live)
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Run the session-end broker net and say what it reclaimed.
+
+    Written to ``sys.stderr`` rather than through the terminal reporter: under
+    ``-n auto`` this hook runs in each xdist WORKER, which has no reporter
+    plugin, and the worker's stderr is what ends up in the CI log where an
+    orphaned-process report is actually read. Silent at zero — the expected
+    outcome must not add a line to every run.
+    """
+    del session
+    with suppress(Exception):
+        reclaimed = _sweep_session_leftovers(_SESSION_BASETEMP)
+        if reclaimed:
+            print(
+                f"[broker-sweep] session-end net reclaimed {reclaimed} live broker(s) "
+                "the per-test reap did not stop; see tests/conftest.py",
+                file=sys.stderr,
+            )
 
 
 def _broker_daemon_is_available() -> bool:
