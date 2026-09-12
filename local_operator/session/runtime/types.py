@@ -84,11 +84,15 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: ``_PARKED_DROP_TYPES`` from this constant, so the two cannot drift).
 #:
 #: MEMBERSHIP RULE, all three clauses required: the event carries a fragment of
-#: something in flight, the owner's ``live_events`` seed already accumulates it
-#: (so a reveal rebuilds the same viewport through ``restore_live_projection``),
-#: AND it is emitted UNTHROTTLED, once per token or chunk. The third clause is
-#: what keeps the set finite, and it is why ``tool_call_compose`` is
-#: DELIBERATELY EXCLUDED despite satisfying the first two: it carries partial
+#: something in flight, it leaves the viewport REBUILDABLE after a parked gap —
+#: either folded into the owner's ``live_events`` seed, which
+#: ``restore_live_projection`` replays (``message_update``), or, for the two
+#: types that seed does NOT fold, self-replacing: the first frame after unmute
+#: carries the whole accumulated state again (``tool_execution_update``
+#: re-sends its full output; ``subagent_progress`` describes the child's
+#: current step) — AND it is emitted UNTHROTTLED, once per token or chunk. The
+#: third clause is what keeps the set finite, and it is why ``tool_call_compose``
+#: is DELIBERATELY EXCLUDED despite satisfying the first two: it carries partial
 #: argument bytes of an in-flight call, but the harness already rate-limits it
 #: to one per ``COMPOSE_NOTICE_INTERVAL_S`` (0.2 s), so it is not volume traffic
 #: and muting it would buy nothing while costing a compose preview on reveal.
