@@ -1,0 +1,722 @@
+{
+  "before-390x844-roster-top": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1309
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 367,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": -57,
+      "bottom": -1,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-390x844-roster-bottom": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1309
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 367,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": -57,
+      "bottom": -1,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-390x844-roster-expanded-top": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 844
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 612,
+        "clientH": 612,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": 277,
+      "bottom": 333,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-390x844-roster-expanded-bottom": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 844
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 612,
+        "clientH": 612,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": 277,
+      "bottom": 333,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-390x844-ask-long-top": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1581
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 1485,
+      "scrollH": 1426,
+      "clientH": 1426
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 139,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 11,
+    "lastOption": {
+      "label": "option-10Esc",
+      "top": 1359,
+      "bottom": 1474,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-390x844-ask-long-bottom": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1581
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 1485,
+      "scrollH": 1426,
+      "clientH": 1426
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 139,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 11,
+    "lastOption": {
+      "label": "option-10Esc",
+      "top": 1359,
+      "bottom": 1474,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-390x844-approval-top": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1005
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 909,
+      "scrollH": 850,
+      "clientH": 850
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Rebuild the ",
+      "top": 14,
+      "bottom": 49,
+      "insideViewport": true
+    },
+    "composerVisible": false
+  },
+  "before-390x844-approval-bottom": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 1005
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 909,
+      "scrollH": 850,
+      "clientH": 850
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Rebuild the ",
+      "top": 14,
+      "bottom": 49,
+      "insideViewport": true
+    },
+    "composerVisible": false
+  },
+  "before-390x844-ask-free-top": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 844
+    },
+    "card": {
+      "rectTop": 128,
+      "rectBottom": 748,
+      "scrollH": 618,
+      "clientH": 618
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 87,
+        "clientH": 87,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Load the sta",
+      "top": 66,
+      "bottom": 101,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-390x844-ask-free-bottom": {
+    "viewport": [
+      390,
+      844
+    ],
+    "column": {
+      "clientH": 844,
+      "scrollH": 844
+    },
+    "card": {
+      "rectTop": 128,
+      "rectBottom": 748,
+      "scrollH": 618,
+      "clientH": 618
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 87,
+        "clientH": 87,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Load the sta",
+      "top": 66,
+      "bottom": 101,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-360x780-roster-top": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1309
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 430,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": -78,
+      "bottom": -22,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-360x780-roster-bottom": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1309
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 430,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": -78,
+      "bottom": -22,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-360x780-roster-expanded-top": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 780
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 548,
+        "clientH": 548,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": 319,
+      "bottom": 375,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-360x780-roster-expanded-bottom": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 780
+    },
+    "card": null,
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 548,
+        "clientH": 548,
+        "scrollable": false
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 45,
+        "clientH": 45,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 3,
+    "lastOption": {
+      "label": "Audit every ",
+      "top": 319,
+      "bottom": 375,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-360x780-ask-long-top": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1661
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 1565,
+      "scrollH": 1506,
+      "clientH": 1506
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 139,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 11,
+    "lastOption": {
+      "label": "option-10Esc",
+      "top": 1419,
+      "bottom": 1554,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-360x780-ask-long-bottom": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1661
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 1565,
+      "scrollH": 1506,
+      "clientH": 1506
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 139,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 11,
+    "lastOption": {
+      "label": "option-10Esc",
+      "top": 1419,
+      "bottom": 1554,
+      "insideViewport": false
+    },
+    "composerVisible": false
+  },
+  "before-360x780-approval-top": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1083
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 987,
+      "scrollH": 928,
+      "clientH": 928
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Rebuild the ",
+      "top": 31,
+      "bottom": 66,
+      "insideViewport": true
+    },
+    "composerVisible": false
+  },
+  "before-360x780-approval-bottom": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 1083
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 987,
+      "scrollH": 928,
+      "clientH": 928
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Rebuild the ",
+      "top": 14,
+      "bottom": 49,
+      "insideViewport": true
+    },
+    "composerVisible": false
+  },
+  "before-360x780-ask-free-top": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 814
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 718,
+      "scrollH": 659,
+      "clientH": 659
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Load the sta",
+      "top": 14,
+      "bottom": 49,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  },
+  "before-360x780-ask-free-bottom": {
+    "viewport": [
+      360,
+      780
+    ],
+    "column": {
+      "clientH": 780,
+      "scrollH": 814
+    },
+    "card": {
+      "rectTop": 57,
+      "rectBottom": 718,
+      "scrollH": 659,
+      "clientH": 659
+    },
+    "scrollers": [
+      {
+        "cls": "lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto",
+        "scrollH": 51,
+        "clientH": 16,
+        "scrollable": true
+      },
+      {
+        "cls": "lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent",
+        "scrollH": 24,
+        "clientH": 24,
+        "scrollable": false
+      }
+    ],
+    "optionCount": 1,
+    "lastOption": {
+      "label": "Load the sta",
+      "top": 14,
+      "bottom": 49,
+      "insideViewport": true
+    },
+    "composerVisible": true
+  }
+}
