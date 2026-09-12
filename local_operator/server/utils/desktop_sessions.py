@@ -100,6 +100,14 @@ class DesktopSessionBridge:
         self.watch_lock = asyncio.Lock()
         self.unsubscribers: list[Any] = []
         self.watch_task: asyncio.Task[None] | None = None
+        #: The in-flight speculative engage started by :meth:`warm`, held so
+        #: the event loop keeps a strong reference to it. A bare
+        #: ``create_task`` with no referent may be garbage collected mid-flight
+        #: (asyncio only holds a weak reference), which would make the warm
+        #: silently do nothing on an arbitrary subset of requests — the worst
+        #: possible failure for a latency optimisation, because the slow path
+        #: it leaves behind is the correct one.
+        self.warm_task: asyncio.Task[None] | None = None
         self.attention_task: asyncio.Task[None] | None = None
         self.attention: dict[str, Any] = {}
         self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
@@ -151,6 +159,20 @@ class DesktopSessionBridge:
             with contextlib.suppress(asyncio.CancelledError):
                 await self.watch_task
             self.watch_task = None
+        # BEFORE `dispose()`, and suppressing the task's own failure as well as
+        # the cancellation: an engage that lands after the facade is gone would
+        # otherwise hold a freshly spawned runtime resident with no viewer to
+        # release it. The facade already refuses a disposed bind and closes a
+        # client that arrives late, so this is belt-and-braces — but the TUI
+        # needed exactly this cancel for exactly this reason (a swap's engage
+        # landing afterwards kept the old runtime up for the process's life),
+        # and a bridge detaching mid-warm is the same shape by a different
+        # route.
+        if self.warm_task is not None:
+            self.warm_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self.warm_task
+            self.warm_task = None
         for unsubscribe in self.unsubscribers:
             unsubscribe()
         self.unsubscribers.clear()
@@ -516,6 +538,62 @@ class DesktopSessionBridge:
                     visible=any(s.visible for s in live),
                     can_notify=any(s.can_notify for s in live),
                 )
+
+    async def warm(self) -> str:
+        """Start a runtime for this session without submitting any work.
+
+        Returns the state at RETURN TIME — ``"warm"``, ``"warming"`` — never the
+        eventual outcome, because the caller is a renderer that fired this on a
+        keystroke and has nothing to do with an answer either way.
+
+        FIRE AND FORGET, DELIBERATELY. The engage runs in a detached task so the
+        HTTP response returns in the ~12-40 ms a warm send costs while the spawn
+        proceeds behind it. Awaiting the engage here would not remove the
+        ~1.15 s cold cost, it would only move it from the send to the warm — and
+        onto a request the renderer issues while the user is still typing.
+
+        IDEMPOTENT, AND ITS SAFETY IS THE LOCK'S, NOT THIS CHECK'S. Both early
+        returns are cost avoidance: an already-bound viewer needs no task, and
+        an engage already in flight needs no second one. If two warms raced past
+        ``engage_in_flight`` anyway, ``_ensure_bound``'s ``_bind_lock``
+        serialises them and the loser returns at its own ``is_cold`` check, so
+        two warms can never spawn two runtimes. Do not "strengthen" this into a
+        lock of its own: a second lock beside the one that already decides the
+        question is how the two answers drift apart.
+
+        THE ENGAGE LIVES ONLY AS LONG AS THE BRIDGE, which constrains the
+        CALLER and is not visible from this method alone. A bridge is
+        reference-counted; ``_detach()`` cancels the warm below so a spawn
+        cannot outlive the facade it was started against. The warm request is
+        itself a user of that bridge, so a warm issued while nobody else holds
+        one is cancelled the instant its own request releases — correct, and
+        also useless. It is not a problem for the real caller because the
+        renderer warms from a composer inside a mounted session panel, which
+        holds an events subscription for its whole life. A future change that
+        moves the warm outside that panel, or a probe that warms with no
+        subscription open, gets a warm that does nothing and a send that still
+        pays the full cold engage.
+
+        THERE IS NO ``retire_if_unused`` COUNTERPART HERE, and its absence is a
+        decision rather than an oversight. The TUI offers its runtime back
+        because the TUI QUITS and must hand over before its socket dies. The
+        desktop app does not: a desktop attach only counts as an interactive
+        viewer while its watch lease is live AND the window says visible or
+        notifiable, so a warmed session the user navigates away from stops
+        counting and the runtime's own residency drain reaps it seconds later.
+        Calling ``retire_if_unused`` here would be a second mechanism beside a
+        working one, and a strictly worse one — it answers "no runtime attached"
+        whenever the client is None, which is precisely the state a bridge in
+        the middle of a warm is in.
+        """
+        remote = self.remote
+        assert remote is not None
+        if not remote.is_cold:
+            return "warm"
+        if remote.engage_in_flight:
+            return "warming"
+        self.warm_task = asyncio.create_task(remote.warm_runtime())
+        return "warming"
 
     async def _expire_watches(self) -> None:
         while True:

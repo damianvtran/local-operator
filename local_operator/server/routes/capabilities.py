@@ -27,7 +27,14 @@ async def capabilities():
                 "catalogues": 1,
                 "profile_catalogue": 1,
                 "team_catalogue": 1,
-                "session_catalogue": 2,
+                # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
+                # session's runtime without submitting work to it. A version
+                # bump rather than a new key because this map versions
+                # SUBSYSTEMS, not routes: a key per route would grow without
+                # bound and would tell a client nothing the version does not
+                # already say. A renderer gated on < 3 simply never calls it
+                # and pays the cold engage on its first send, as before.
+                "session_catalogue": 3,
                 # Searching past conversations by their CONTENT (name, id, exact
                 # body, bounded soft match) rather than by the page a client
                 # already holds. Its own key rather than a bump of

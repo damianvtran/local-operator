@@ -162,6 +162,34 @@ class WatchReceipt(BaseModel):
     lease_seconds: Literal[45]
 
 
+class WarmReceipt(BaseModel):
+    """What a speculative engage found, at the moment it answered.
+
+    A STATE, NOT AN OUTCOME. ``warming`` says an engage is under way, and says
+    nothing about whether it will succeed — by the time it settles this request
+    is long finished. The surface that must report an engage failure is the
+    send, which engages again through the same lock and has a user waiting on
+    the answer; reporting it twice would put a spawn error in front of someone
+    who has so far only typed a character.
+
+    ``cold`` is therefore reserved for "nothing was started", not for "something
+    was started and failed", and it rides a 200 like the other two: a warm the
+    user did not request must never become an error they have to read.
+
+    ``cold`` IS CURRENTLY UNREACHABLE, and is published anyway. The bridge
+    starts a task unconditionally once the viewer is cold and no engage is in
+    flight, so today every answer is ``warm`` or ``warming``; whether a runtime
+    could actually start (no provider, no model) is a question only the spawn
+    itself answers, and it answers it after this response is gone. The member
+    stays because it is the honest name for a refusal this route may later
+    learn to make cheaply — and because a client that already accepts three
+    states costs nothing, while widening the union later would be a contract
+    change every renderer has to be taught. Do not narrow it to two.
+    """
+
+    state: Literal["warm", "warming", "cold"]
+
+
 class NotificationClaim(BaseModel):
     """Whether THIS surface may raise the banner for one completion.
 
