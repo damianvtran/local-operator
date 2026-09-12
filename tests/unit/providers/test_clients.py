@@ -21,6 +21,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -176,6 +177,52 @@ async def test_openai_compat_text_tool_usage() -> None:
     assert isinstance(end, StreamEndEvent)
     assert end.stop_reason == "toolUse"
     assert end.usage is not None and end.usage.output_tokens == 7
+
+
+async def test_openai_compat_surfaces_the_reasoning_channel() -> None:
+    """Reasoning is REPLAYED and was never REPORTED, which is a diagnosis hole.
+
+    The client accumulates ``reasoning_content``/``reasoning`` so it can replay
+    the model's own thinking in later requests, but it emitted no event for it,
+    so a caller watching the stream could not tell "the model thought for the
+    whole budget and said nothing" from "we threw away what it said". Both
+    spell an empty reply, and they call for opposite responses. Asserted beside
+    the text channel because the point is that the two are distinguishable: the
+    reasoning fragments surface as reasoning, and the visible text is still only
+    the visible text.
+    """
+
+    body = _sse(
+        [
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"reasoning_content": "weighing "}, "index": 0}],
+            },
+            {"id": "chatcmpl-r1", "choices": [{"delta": {"reasoning": "options"}, "index": 0}]},
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"content": "done"}, "index": 0, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    request = ChatRequest(model=_spec(), system_blocks=["be brief"], messages=[Message.user("hi")])
+
+    events = await _collect(client.stream(request, "sk-test"))
+
+    assert [event.delta for event in events if isinstance(event, StreamReasoningDelta)] == [
+        "weighing ",
+        "options",
+    ]
+    # The reasoning did NOT leak onto the visible channel: nothing renders it.
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["done"]
 
 
 @pytest.mark.parametrize(

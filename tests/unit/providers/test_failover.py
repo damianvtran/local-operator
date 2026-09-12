@@ -19,6 +19,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamUsageEvent,
@@ -546,6 +547,92 @@ async def test_stream_fallback_chain_walks_to_next_model() -> None:
     got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
     assert [s.model_id for s in specs_seen] == ["gpt-4o", "claude-x"]
     assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+
+
+class _FailsAfter:
+    """Emits scripted events, then dies mid-stream (a pre-content death)."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+
+    async def stream(
+        self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        for event in self._events:
+            yield event
+        raise ProviderError(500, "boom", retryable=True)
+
+
+@pytest.mark.parametrize(
+    ("leading", "walks_chain"),
+    [
+        ([], True),
+        ([StreamStartEvent(response_id="r1")], True),
+        ([StreamReasoningDelta(delta="weighing the options")], True),
+        (
+            [StreamStartEvent(response_id="r1"), StreamReasoningDelta(delta="weighing")],
+            True,
+        ),
+        # The control: a VISIBLE delta is output the caller can see, so the
+        # attempt must not be replayed. Without this row, a carve-out that
+        # swallowed every event would pass every row above.
+        ([StreamTextDelta(delta="half an answer")], False),
+    ],
+    ids=["nothing", "start", "reasoning", "start-and-reasoning", "visible-text"],
+)
+async def test_a_pre_content_failure_after_a_reasoning_delta_still_walks_the_chain(
+    leading: list[Any], walks_chain: bool
+) -> None:
+    """What gates a retry is output the caller has SEEN, and reasoning is not.
+
+    ``forwarded_any`` means exactly that: the caller has seen output that cannot
+    be un-shown, so replaying the attempt would stream it twice. A
+    ``StreamStartEvent`` was already carved out for announcing nothing; a
+    ``StreamReasoningDelta`` announces nothing either -- no consumer renders it
+    (no loop branch, no frontend handler, no transcript entry) -- so counting it
+    would gate the retry on the one channel that cannot be seen. The consequence
+    would be confined to reasoning models, which is every model this harness
+    runs on a hard task: a 5xx arriving after the model started thinking would
+    stop credential rotation and the whole fallback chain, and a pre-content
+    transport death would be misreported as a mid-stream loss.
+
+    The last row is the boundary that must not move: a visible delta still
+    blocks the retry, so this cannot degrade into "retry everything".
+    """
+
+    specs_seen: list[ModelSpec] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(spec)
+        if spec.model_id == "gpt-4o":
+            return _FailsAfter(leading)
+        return ScriptedClient(
+            [StreamTextDelta(delta="fallback"), StreamEndEvent(stop_reason="stop")]
+        )
+
+    settings = {"retry": {"baseDelayMs": 1, "fallbackChains": {"default": ["anthropic/claude-x"]}}}
+    auth = FakeAuth({"openai": ["k1"], "anthropic": ["k2"]})
+
+    if not walks_chain:
+        with pytest.raises(ProviderError):
+            async for _ in stream_with_failover(_request(), auth, settings, client_for):
+                pass
+        assert [spec.model_id for spec in specs_seen] == ["gpt-4o"]
+        return
+
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+
+    assert specs_seen[-1].model_id == "claude-x"
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "fallback" for e in got)
+    # The reasoning this attempt produced is still FORWARDED -- carving it out
+    # of the retry gate must not swallow it. Asserted as a set rather than a
+    # count: a pre-content failure is retried on the same target before the
+    # chain is walked, and each of those attempts legitimately re-emits the
+    # channel. How many attempts the ladder burns is the ladder's business.
+    forwarded = {e.delta for e in got if isinstance(e, StreamReasoningDelta)}
+    assert forwarded == {
+        event.delta for event in leading if isinstance(event, StreamReasoningDelta)
+    }
 
 
 async def test_failover_stamps_serving_spec_on_usage() -> None:

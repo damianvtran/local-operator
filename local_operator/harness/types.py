@@ -2176,6 +2176,29 @@ class StreamTextDelta(BaseModel):
     delta: str
 
 
+class StreamReasoningDelta(BaseModel):
+    """A fragment of the provider's private reasoning channel.
+
+    Reasoning has always been COLLECTED -- the OpenAI-compatible wire client
+    accumulates ``reasoning_content``/``reasoning`` to replay it in later
+    requests -- but it was never SURFACED, so a turn that spent its whole
+    output budget thinking looked identical to a client that dropped what it
+    was handed. That ambiguity is not academic: a rejection of "the model
+    emitted nothing" cannot be distinguished from "we discarded the model's
+    output" without it, and the two call for opposite responses (re-prompt the
+    model / fix the client).
+
+    Emitted on the reasoning channel only. It is deliberately NOT reasoning
+    rendered anywhere user-visible: private reasoning never enters the
+    transcript or the model-visible context, and no consumer is required to
+    act on this event. It exists so a caller that wants to know whether the
+    model produced anything can ask.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    delta: str
+
+
 class StreamToolCallDelta(BaseModel):
     type: Literal["tool_call_delta"] = "tool_call_delta"
     index: int
@@ -2219,6 +2242,10 @@ class StreamModelEvent(BaseModel):
 StreamEvent = (
     StreamStartEvent
     | StreamTextDelta
+    # Beside the text delta it is the sibling of: one channel carries the
+    # answer, the other carries the work behind it, and a consumer that
+    # ignores this one sees exactly the stream it saw before.
+    | StreamReasoningDelta
     | StreamToolCallDelta
     | StreamUsageEvent
     | StreamEndEvent

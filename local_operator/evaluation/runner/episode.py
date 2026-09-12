@@ -1042,8 +1042,16 @@ class EpisodeRunner:
             # whether the turn was a mistyped keyboard action or a stray
             # sentence after the JSON. Without the reply, diagnosing a
             # rejection class costs a whole re-run of a paid episode.
+            #
+            # The episode's redaction set is forwarded because this is the one
+            # artifact that publishes raw model output: the scan has to happen
+            # before the bound, and only this side of the boundary holds the
+            # resolved canaries. The class key and stream shape ride along for
+            # a reader counting rejection classes and telling an empty reply
+            # apart from a discarded one.
             detail = self._publish(
-                _rejection_detail(rejected).encode("utf-8"), media_type="text/plain"
+                _rejection_detail(rejected, self._redactions).encode("utf-8"),
+                media_type="text/plain",
             )
             self._append(
                 "error",
@@ -2323,21 +2331,79 @@ def _adapter_stderr_section(adapter_stderr: bytes, redactions: RedactionSet | No
     return "\n\n--- adapter stderr tail ---\n" + text[-MAX_STDERR_TAIL_CHARS:]
 
 
-def _rejection_detail(rejected: Any) -> str:
+def _rejection_detail(rejected: Any, redactions: RedactionSet | None) -> str:
     """The rejection artifact: why the reply was refused AND what it said.
 
-    Two sections rather than one blob, so a reader (or a script mining a batch
-    of bundles for rejection classes) can tell the harness's diagnostic apart
-    from the model's own words. A client that did not capture the reply --
-    every implementation of the protocol is free not to -- degrades to the
-    diagnostic alone rather than emitting an empty section that reads as "the
-    model said nothing".
+    ``redactions`` is REQUIRED rather than defaulted, exactly as in
+    ``_diagnostic``: this is the one artifact that publishes raw model output,
+    so the UNSAFE call -- publishing unscanned -- must not be the shorter one to
+    write. Every call site therefore has to state which of the two cases it is:
+    the episode's set, or an explicit ``None`` meaning "this rendering is
+    in-process only and never reaches evidence".
+
+    Three parts in a fixed order a script can rely on: the harness's model-facing
+    diagnostic, then the CLASS KEY and per-attempt STREAM SHAPE when the client
+    recorded them, and finally the model's own words. The first line is unchanged
+    from before this artifact learned to carry classes, so anything reading a
+    rejection artifact's first line keeps working.
+
+    The class key is what makes a batch of bundles countable: deriving a
+    rejection class from Pydantic prose after the fact is guesswork, and the
+    prose used to be the only thing recorded. The stream shape answers the one
+    question the reply cannot: a refusal whose reply is empty may have been
+    EMPTY or DISCARDED, and the delta counts tell those apart.
+
+    The reply is redaction-scanned and bounded by
+    :func:`rejected_reply_evidence`, which fails closed and WHOLE -- so a reply
+    that cannot be cleared is replaced by a marker rather than being published
+    in part, and the diagnostic above it still makes the rejection readable.
+    A client that did not capture the reply -- every implementation of the
+    protocol is free not to -- degrades to the diagnostic (and class) alone
+    rather than emitting an empty section that reads as "the model said nothing".
     """
 
-    reply = getattr(rejected, "reply", None)
+    from local_operator.evaluation.runner.public_reply import rejected_reply_evidence
+
+    sections = [rejected.diagnostic]
+    class_key = getattr(rejected, "class_key", None)
+    if isinstance(class_key, str) and class_key:
+        sections.append(f"class: {_header_value(class_key)}")
+    shape = getattr(rejected, "stream_shape", None)
+    if shape is not None:
+        sections.append(
+            "stream: "
+            f"content_deltas={shape.content_deltas} "
+            f"reasoning_deltas={shape.reasoning_deltas} "
+            f"tool_call_deltas={shape.tool_call_deltas} "
+            f"stop={_header_value(shape.stop)}"
+        )
+    # ``evidence_reply`` is the boundary that may carry the reply into evidence;
+    # ``reply`` is the history rendering and is the fallback for a client that
+    # never recorded the two separately.
+    reply = getattr(rejected, "evidence_reply", None)
+    if reply is None:
+        reply = getattr(rejected, "reply", None)
     if not reply:
-        return rejected.diagnostic
-    return f"{rejected.diagnostic}\n\n--- rejected reply ---\n{reply}"
+        return "\n".join(sections)
+    rendered = rejected_reply_evidence(reply, redactions)
+    sections.extend(["", "--- rejected reply ---", rendered])
+    return "\n".join(sections)
+
+
+def _header_value(value: str) -> str:
+    """A value safe to place inside a one-line artifact header.
+
+    The stop marker and the class key are TEXT, and the artifact's reader relies
+    on a fixed section order: a marker carrying a newline would otherwise open a
+    line that reads like another header, and a control character could hide the
+    rest of the section behind a terminal's interpretation of it. Escaped rather
+    than truncated -- the builder's 64-character bound does not neutralise a
+    short injection -- and ``unicode_escape`` leaves an ordinary ASCII marker
+    byte-identical to what the provider sent, so ``stop=stop`` still reads as
+    the marker itself.
+    """
+
+    return value.encode("unicode_escape").decode("ascii")
 
 
 def _diagnostic(error: BaseException, redactions: RedactionSet | None) -> str:

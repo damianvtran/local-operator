@@ -24,10 +24,12 @@ is documented on :meth:`_ContextBuilder.build`.
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 import re
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
 
@@ -44,14 +46,19 @@ from local_operator.evaluation.runner.model import (
     EpisodeTurn,
     ModelDecision,
     ModelUsage,
+    StreamShape,
+)
+from local_operator.evaluation.runner.public_reply import MAX_PUBLIC_OBSERVATIONS_CHARS
+from local_operator.evaluation.runner.public_reply import (
+    MAX_REJECTED_REPLY_CHARS as _MAX_REJECTED_REPLY_CHARS,
 )
 from local_operator.evaluation.runner.public_reply import (
-    MAX_PUBLIC_OBSERVATIONS_CHARS,
     PUBLIC_REPLY_TOOL_DESCRIPTION,
     REJECTED_PUBLIC_REPLY,
     REPLY_VERSION,
     decode_public_reply,
     is_public_reply,
+    is_quotable_key,
     looks_like_public_reply,
     public_reply_contract,
     public_reply_schema,
@@ -83,10 +90,10 @@ DEFAULT_KEEP_RECENT_FRAMES = 3
 DEFAULT_REBUILD_EVERY_FRAMES = 8
 
 #: Longest slice of a rejected reply replayed into the context as the model's
-#: own words before the correction. The reply has to be there -- the model
-#: must see WHAT it said to fix it -- but a runaway reply (a provider's
-#: max-token wall of prose) must not cost the whole window on the retry.
-MAX_REJECTED_REPLY_CHARS = 4_000
+#: own words before the correction. Declared in ``public_reply.py`` because the
+#: EVIDENCE rendering of the same reply is bounded by it while publishing, in a
+#: module that must not import this client.
+MAX_REJECTED_REPLY_CHARS = _MAX_REJECTED_REPLY_CHARS
 
 #: Longest run of tolerated trailing noise quoted into the observable warning
 #: when a decision parses as a leading JSON value followed by junk. The point
@@ -213,6 +220,625 @@ def _type_name(annotation: Any) -> str:
     if len(args) == 1:
         return _type_name(args[0])
     return "value"
+
+
+# ---------------------------------------------------------------------------
+# Refusal diagnosis: which class a refused reply belongs to, and what the model
+# is told about it.
+# ---------------------------------------------------------------------------
+#
+# Two outputs, one classification. The CLASS KEY is recorded in the rejection
+# artifact so a batch of bundles can be grouped without re-deriving the class
+# from prose; the HINT replaces the validator's own text in the message the
+# model receives, because a validator states the field it refused and the model
+# needs the shape it must send instead. The repo has already measured the
+# difference that makes: naming the defect recovered 9/10 where a bare rule
+# recovered 4/10 (``decode_public_reply``).
+#
+# Classification reads the DIAGNOSTIC STRING rather than the exception object,
+# and that is deliberate rather than a shortcut. The string is the one input
+# both paths share: at run time the client has the exception and the text it
+# renders, and offline the only thing a sealed bundle kept is that text -- the
+# reply itself was replaced by the placeholder or left out entirely in 273 of
+# the MiniMax campaign's 280 rejection artifacts (counted 2026-09-12). One
+# classifier, both paths, so the offline histogram measures the same function
+# the runner runs.
+#
+# It keys on two kinds of marker, in this order: the harness's OWN message
+# templates, which are ours to keep stable, and pydantic's error TYPE CODES
+# (``[type=extra_forbidden]``), which are a documented API. Never on validator
+# wording, which is pydantic's to change.
+
+#: Nothing matched. A distinct key rather than an exception: a refusal whose
+#: message changed shape must still be recordable and still produce a hint.
+REJECTION_CLASS_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class RejectionEvidence:
+    """What one refusal is called, what the model is told, and what is kept.
+
+    One value rather than three derived at three call sites, so the class key
+    in the bundle is by construction the class the hint was built for, and a
+    test can pin the pair.
+    """
+
+    class_key: str
+    hint: str
+    #: The reply as evidence may publish it: raw, for the publisher to scan and
+    #: bound (it holds the episode's redaction set; this module must not).
+    evidence_reply: str | None
+    stream_shape: StreamShape | None
+
+
+def classify_rejection(reason: str) -> str:
+    """Name the class of a refused reply from its diagnostic text.
+
+    Ordered most specific first, because several markers co-occur: a Pydantic
+    ``ValidationError`` always ends its rendering with a summary entry, so an
+    ``extra_forbidden`` on a real field is reported alongside a ``too_short``
+    on the emptied ``actions`` tuple. The first marker is the one the model
+    must act on.
+    """
+
+    if "outside model-visible frame" in reason:
+        return "out-of-frame-coordinate"
+    if "unknown frame_id" in reason:
+        return "unknown-frame-id"
+    if "unknown key:" in reason:
+        return "unknown-key"
+    if "type=extra_forbidden" in reason:
+        return "extra-action-key"
+    if "type=tuple_type" in reason:
+        # The wrapper shape: the model sent ``{"item": [...]}`` where the
+        # protocol takes the array itself.
+        return "keys-not-array"
+    if "type=union_tag_invalid" in reason:
+        return "unknown-action-kind"
+    if "is not valid JSON" in reason or "duplicate-free JSON object" in reason:
+        return "malformed-json"
+    if "unsupported model reply version" in reason:
+        return "unsupported-reply-version"
+    if (
+        "reserved envelope" in reason
+        or "model reply requires exactly" in reason
+        or "action_batch requires exactly" in reason
+        or "public_observations must be" in reason
+    ):
+        return "envelope-shape"
+    if "second action batch" in reason:
+        return "second-batch"
+    if "no tool call and no text" in reason:
+        return "empty-reply"
+    if "bind to a different observation_id" in reason or "does not bind to the current" in reason:
+        return "observation-binding"
+    if "non-empty actions array" in reason or "decision must be a JSON object" in reason:
+        return "batch-shape"
+    if (
+        "supports only ASCII" in reason
+        or "is limited to" in reason
+        or "not supported by this adapter" in reason
+    ):
+        # The adapter's own negotiated restriction, which ``ActionSurface``
+        # already phrases with the alternative it CAN carry.
+        return "adapter-capability"
+    if "type=" in reason or "validation error" in reason:
+        return "field-invalid"
+    return REJECTION_CLASS_UNKNOWN
+
+
+#: Markers whose message ALREADY states the defect and the accepted shape, and
+#: was measured doing it. The hint keeps them verbatim: the envelope diagnostic
+#: in ``decode_public_reply`` names the keys carried and omitted and recovered
+#: 9/10 on the model that produced this corpus, and the adapter, empty-reply and
+#: second-batch messages name the limit, the alternative and the rule. Rewriting
+#: one of these would throw away the only part of this that was ever measured.
+#:
+#: Every one of them is the harness's OWN sentence. A class whose diagnostic
+#: comes from a Pydantic rendering is never preserved: that rendering embeds
+#: ``input_value=`` and a docs URL, which must not reach the model.
+_PRESERVED_HINTS = frozenset(
+    {
+        "envelope-shape",
+        "second-batch",
+        "batch-shape",
+        "adapter-capability",
+        "empty-reply",
+    }
+)
+
+#: Key names a model reaches for that the validator refuses, mapped to the name
+#: it accepts. Only ever emitted when the target is in ``surface.named_keys``,
+#: so a removed key cannot leave a suggestion pointing at nothing. The first
+#: three are the synonyms the system prompt already names as wrong; the rest
+#: are the OS key names (``super``, ``win``, ``cmd``, ``option``) that mean a
+#: named key the prompt lists under a different word.
+_KEY_ALIASES = {
+    "return": "ENTER",
+    "control": "CTRL",
+    "escape": "ESC",
+    "closes": "ESC",
+    "del": "DELETE",
+    "super": "META",
+    "win": "META",
+    "windows": "META",
+    "cmd": "META",
+    "command": "META",
+    "option": "ALT",
+    "spacebar": "SPACE",
+    "page_up": "PAGEUP",
+    "page_down": "PAGEDOWN",
+    "caps": "CAPSLOCK",
+    "pgup": "PAGEUP",
+    "pgdn": "PAGEDOWN",
+}
+
+#: Extraction patterns over a diagnostic. The first finds a Pydantic LOCATION
+#: line (``actions.0.wait.frame_id``), which names a field and a literal kind and
+#: never a value; the rest pull the harness's own rule sentence and a refused
+#: name out of Pydantic's rendering without keeping the rendering.
+_ACTION_FIELD_PATH = re.compile(r"^actions(?:\.([A-Za-z0-9_-]+))*$", re.MULTILINE)
+_VALUE_ERROR_RULE = re.compile(r"Value error, (.+?) \[type=")
+_UNKNOWN_KEY_NAME = re.compile(r"unknown key: '(.*?)' \[type=")
+_QUOTED_TAG = re.compile(r"Input tag '(.*?)' found using 'kind'")
+_MAX_RULE_CHARS = 200
+
+
+def rejection_evidence(
+    reply_text: str,
+    reason: str,
+    observation: Observation,
+    surface: ActionSurface,
+    stream_shape: StreamShape | None,
+) -> RejectionEvidence:
+    """Classify one refused reply and derive both messages from it.
+
+    PURE: every input is data the attempt has already produced, and the only
+    effect is the returned value. Evidence recording therefore cannot change
+    which decisions are made -- pinned by
+    ``test_recording_the_rejection_does_not_change_the_decision_sequence``,
+    which runs the same scripted defective-then-corrected reply with this
+    called and with it replaced by a stub.
+    """
+
+    class_key = classify_rejection(reason)
+    return RejectionEvidence(
+        class_key=class_key,
+        hint=rejection_hint(class_key, reason=reason, observation=observation, surface=surface),
+        evidence_reply=reply_text or None,
+        stream_shape=stream_shape,
+    )
+
+
+def rejection_hint(
+    class_key: str,
+    *,
+    reason: str,
+    observation: Observation,
+    surface: ActionSurface = LEGACY_ACTION_SURFACE,
+) -> str:
+    """The model-facing correction for one refusal class.
+
+    Every branch states the accepted shape, literal, or bound -- never the
+    validator's rendering of the value it refused. That is the same rule
+    ``_diagnostic`` applies, for the same reason: a Pydantic ``str()`` embeds
+    ``input_value=<head>...<tail>`` and a docs URL, and the one boundary that
+    carries secret bytes would otherwise be quoted straight into the model's
+    next request. A test asserts it per class.
+    """
+
+    if class_key in _PRESERVED_HINTS:
+        return reason
+    if class_key == "malformed-json":
+        return (
+            "the reply was not one complete JSON object -- it may have been cut "
+            "off, wrapped in a code fence, or written in a native tool-call "
+            "syntax. Reply with exactly one JSON object and nothing else: "
+            f"{_example_json(surface, observation)}"
+        )
+    if class_key == "unsupported-reply-version":
+        return (
+            'the reply declared a "reply_version" this harness does not serve. '
+            f'The only accepted value is "{REPLY_VERSION}"'
+        )
+    if class_key == "extra-action-key":
+        return _extra_action_key_hint(reason, surface, observation)
+    if class_key == "unknown-action-kind":
+        return _unknown_action_kind_hint(reason, surface)
+    if class_key == "unknown-key":
+        return _unknown_key_hint(reason, surface)
+    if class_key == "keys-not-array":
+        return (
+            f'"{_keys_field_name(surface)}" takes {_keys_shape(surface)} written directly, '
+            f"e.g. {json.dumps(_keys_example(surface))} -- not an object wrapping the "
+            "names. Do not add a container of your own."
+        )
+    if class_key == "out-of-frame-coordinate":
+        # Appended rather than replaced: the message already names the
+        # coordinate the model chose, which is the half it needs to see to
+        # recognise its own mistake. What it lacked was the BOUND -- "outside
+        # the frame" does not say which pixels are inside it.
+        return f"{reason}. {_coordinate_bounds(observation)}"
+    if class_key == "unknown-frame-id":
+        return f"{reason}. {_frame_id_hint(observation)}"
+    if class_key == "observation-binding":
+        return (
+            "every action must carry the "
+            f'"observation_id" of the observation being answered: "{observation.observation_id}"'
+        )
+    if class_key == "field-invalid":
+        return _field_invalid_hint(reason, observation, surface)
+    # Anything unmatched: state the accepted envelope so the model has the shape
+    # even when the class is one this build has never seen.
+    return (
+        "the reply was refused before anything was executed. Reply with exactly "
+        f"one JSON object and nothing else: {_example_json(surface, observation)}"
+    )
+
+
+def _example_json(surface: ActionSurface, observation: Observation) -> str:
+    """One concrete accepted reply, built from the enforced envelope schema.
+
+    Read from ``public_reply_schema`` rather than hand-written, so the example
+    cannot advertise a key or a version the decoder would refuse -- the same
+    guarantee ``_action_schema_lines`` gives the system prompt.
+    """
+
+    schema = public_reply_schema(surface)
+    required = list(schema["required"])
+    # The prompt's own order first, then anything the schema requires that this
+    # build does not know: the example stays readable, and a fourth envelope key
+    # still cannot be omitted from it.
+    ordered = [
+        key for key in ("reply_version", "action_batch", "public_observations") if key in required
+    ]
+    ordered += [key for key in required if key not in ordered]
+    example: dict[str, Any] = {}
+    for key in ordered:
+        properties = schema["properties"][key]
+        if key == "reply_version":
+            example[key] = properties["const"]
+        elif key == "action_batch":
+            example[key] = {"actions": [_example_action(surface, observation)]}
+        else:
+            example[key] = ""
+    return json.dumps(example)
+
+
+def _example_action(surface: ActionSurface, observation: Observation) -> dict[str, Any]:
+    """One concrete action of the first kind this surface admits.
+
+    Values are placeholders EXCEPT the two the model most often gets wrong and
+    which are knowable here: the observation id and the frame id. Both are
+    taken from the observation in hand, so the example is executable shape, not
+    prose about it.
+    """
+
+    model = surface.models[0]
+    fields = model.model_fields
+    action: dict[str, Any] = {"kind": fields["kind"].default}
+    for name, field in fields.items():
+        if name == "kind":
+            continue
+        action[name] = _example_field_value(name, field, observation)
+    return action
+
+
+def _example_field_value(name: str, field: Any, observation: Observation) -> Any:
+    if name == "observation_id":
+        return observation.observation_id
+    if name == "frame_id":
+        frames = list(observation.frames)
+        return frames[0].frame_id if frames else "<frame_id>"
+    choices = get_args(field.annotation)
+    if choices and all(isinstance(choice, str) for choice in choices):
+        return choices[0]
+    rendered = _type_name(field.annotation)
+    if rendered == "int":
+        return 0
+    if rendered == "str":
+        return "<text>"
+    return "<value>"
+
+
+def _type_name_is_array(annotation: Any) -> bool:
+    return get_origin(annotation) in (tuple, list, set, frozenset)
+
+
+def _keys_shape(surface: ActionSurface) -> str:
+    """The accepted shape of the key-chord field, read from the field itself.
+
+    Drift-pinned the same way the system prompt is: mutating ``KeyAction``'s
+    ``keys`` annotation changes what this renders, so a protocol change cannot
+    leave the correction telling the model to send a shape the validator refuses
+    (``test_the_hint_is_derived_from_the_schema``). Falls back to the shape the
+    protocol documents today when a surface somehow carries no key action.
+    """
+
+    field = _action_field(surface, "key", "keys")
+    if field is None:
+        return "an array of key names"
+    return _field_shape(field, name="keys")
+
+
+def _keys_field_name(surface: ActionSurface) -> str:
+    for name in ("keys", "key"):
+        if _action_field(surface, "key", name) is not None:
+            return name
+    return "keys"
+
+
+def _keys_example(surface: ActionSurface) -> list[str]:
+    """Three key names the validator accepts, one of them a printable key.
+
+    Derived from the surface's vocabulary so the example cannot name a key the
+    enforcement set does not carry. The single printable character is the case
+    a model most often misses: ``"grave"`` is refused, ``"`"`` is not.
+    """
+
+    named = {key.upper() for key in surface.named_keys}
+    example = [key.lower() for key in ("CTRL", "ALT") if key in named]
+    return [*example, "t"]
+
+
+def _action_field(surface: ActionSurface, kind: str, name: str) -> Any | None:
+    for model in surface.models:
+        if model.model_fields["kind"].default != kind:
+            continue
+        return model.model_fields.get(name)
+    return None
+
+
+def _action_kind_of(model: Any) -> str:
+    return str(model.model_fields["kind"].default)
+
+
+def _field_shape(field: Any, *, name: str) -> str:
+    """The accepted shape of one action field, read from its own constraints.
+
+    Best-effort by design and bounded to what a model can act on: the literal
+    set, the array element kind, or the numeric/length bound. Anything else
+    degrades to the JSON type name rather than to a guess.
+    """
+
+    choices = get_args(field.annotation)
+    if choices and all(isinstance(choice, str) for choice in choices):
+        return "one of " + ", ".join(json.dumps(choice) for choice in choices)
+    if _type_name_is_array(field.annotation):
+        if name == "keys":
+            return "an array of key names"
+        return "an array"
+    if _type_name(field.annotation) == "int":
+        lower = _bound(field, "ge")
+        upper = _bound(field, "le")
+        if lower is not None and upper is not None:
+            return f"an integer from {lower} to {upper}"
+        return "an integer"
+    if _type_name(field.annotation) == "str":
+        lower = _bound(field, "min_length")
+        upper = _bound(field, "max_length")
+        if lower == 1 and upper is not None:
+            return f"a non-empty string of at most {upper} characters"
+        if lower is not None and upper is not None:
+            return f"a string of {lower} to {upper} characters"
+        return "a string"
+    return "a value"
+
+
+def _bound(field: Any, attribute: str) -> int | None:
+    for constraint in field.metadata:
+        value = getattr(constraint, attribute, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _field_invalid_hint(reason: str, observation: Observation, surface: ActionSurface) -> str:
+    """Name the field the validator refused and the shape it accepts.
+
+    The one class of hint built from a Pydantic LOCATION: the rendered path is
+    ``actions.<index>.<kind>.<field>``, which is a field name and a literal
+    kind, never the value -- the location is safe for the same reason
+    ``_diagnostic`` keeps it.
+
+    A protocol rule that belongs to the whole batch rather than to one field
+    (``scroll requires a non-zero delta``) is quoted from the ``Value error,``
+    line, bounded. Quoting the rule is what keeps this class from degrading into
+    "something was wrong somewhere": the rule is the harness's own sentence
+    about why, and it is the only part of Pydantic's rendering that survives
+    here. ``input_value=`` and the docs URL around it do not.
+    """
+
+    rule = _VALUE_ERROR_RULE.search(reason)
+    quoted_rule = rule.group(1)[:_MAX_RULE_CHARS] if rule is not None else ""
+    path = _first_field_path(reason)
+    if len(path) >= 3 and path[0] == "actions":
+        kind = path[2]
+        name = path[3] if len(path) > 3 else ""
+        field = _action_field(surface, kind, name) if name else None
+        if field is not None:
+            return (
+                f'"{name}" in a "{kind}" action was refused: it takes '
+                f"{_field_shape(field, name=name)}. "
+                f"The kind's full shape is {_action_line(surface, kind)}."
+            )
+        rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
+        return (
+            f'a "{kind}" action was refused.{rule_text} '
+            f"Its accepted shape is {_action_line(surface, kind)}."
+        )
+    if quoted_rule:
+        # A batch-level rule from one of the protocol's own model validators.
+        # Bounded, and quoted from the harness rather than from Pydantic's
+        # rendering, which is what would carry ``input_value=`` and the URL.
+        return f"the batch was refused by a protocol rule: {quoted_rule}"
+    return (
+        "the reply was refused before anything was executed. Accepted shape: "
+        f"{_example_json(surface, observation)}"
+    )
+
+
+def _extra_action_key_hint(reason: str, surface: ActionSurface, observation: Observation) -> str:
+    """Name the field that is not accepted, and where it IS accepted.
+
+    The useful half is not "extra inputs are not permitted" -- the model knows
+    something was refused -- but WHICH key, and which action kind the field it
+    sent actually belongs to. The common real case is a field borrowed from a
+    neighbouring kind (``frame_id`` on a ``wait``), so naming the kinds that
+    take it turns an opaque refusal into a one-line correction.
+    """
+
+    path = _first_field_path(reason)
+    if len(path) < 4 or path[0] != "actions":
+        return _example_json_hint(surface, observation, "an extra field in an action")
+    kind, name = path[2], path[3]
+    owners = sorted(
+        _action_kind_of(model)
+        for model in surface.models
+        if name in model.model_fields and _action_kind_of(model) != kind
+    )
+    parts = [f'"{name}" is not a field of a "{kind}" action']
+    if owners:
+        parts.append(
+            f"it belongs to the {', '.join(json.dumps(owner) for owner in owners)} "
+            f'action kind(s) -- check that "{kind}" is the kind you meant'
+        )
+    parts.append(f'a "{kind}" action takes exactly {_action_line(surface, kind)}')
+    return ". ".join(parts)
+
+
+def _action_line(surface: ActionSurface, kind: str) -> str:
+    """One action kind's accepted fields, from the models the prompt uses."""
+
+    for model in surface.models:
+        if _action_kind_of(model) == kind:
+            fields = [
+                f'"{name}": {_field_shape(field, name=name)}'
+                for name, field in model.model_fields.items()
+                if name != "kind"
+            ]
+            return "{" + ", ".join(fields) + "}"
+    return 'a JSON object whose "kind" is one of the accepted action kinds'
+
+
+def _unknown_action_kind_hint(reason: str, surface: ActionSurface) -> str:
+    kinds = sorted(_action_kind_of(model) for model in surface.models)
+    tag = _QUOTED_TAG.search(reason)
+    sent = tag.group(1) if tag is not None else ""
+    accepted = ", ".join(json.dumps(kind) for kind in kinds)
+    parts = [
+        f'"{sent}" is not an accepted action kind.' if sent else "The action kind was refused."
+    ]
+    nearest = _near_match(sent, kinds)
+    if nearest is not None:
+        parts.append(f'Did you mean "{nearest}"?')
+    parts.append(f"The accepted kinds are {accepted}.")
+    return " ".join(parts)
+
+
+def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
+    """Name the accepted key for the one the model sent.
+
+    The refused name is echoed ONLY when it renders to itself and fits the
+    whole-or-nothing bound (``is_quotable_key``), the same rule the envelope
+    diagnostic applies to unexpected keys: a model-supplied name is unbounded
+    text, and truncating it would leave a rendering whose length depends on its
+    own alphabet.
+    """
+
+    match = _UNKNOWN_KEY_NAME.search(reason)
+    sent = match.group(1) if match is not None else ""
+    named = {key.upper() for key in surface.named_keys}
+    parts = []
+    if sent and is_quotable_key(sent):
+        parts.append(f"{sent!r} is not an accepted key name")
+        nearest = _near_match(sent.upper(), sorted(named))
+        if nearest is not None:
+            parts.append(f"use {json.dumps(nearest.lower())} instead")
+    else:
+        parts.append("The reply used an unknown key name")
+    parts.append(
+        f"the key-chord field takes {_keys_shape(surface)} written directly, "
+        f"e.g. {json.dumps(_keys_example(surface))}; named keys are "
+        "case-insensitive, and a single printable character is accepted as itself"
+    )
+    return ". ".join(parts)
+
+
+def _coordinate_bounds(observation: Observation) -> str:
+    """The frame's own inclusive pixel bounds, from the observation's geometry.
+
+    Stated rather than clamped. An out-of-frame coordinate is honest model
+    error -- clamping would move the pointer to a pixel the model never chose,
+    which is the ``type``-to-``paste_text`` mistake with a worse consequence --
+    so the only thing this changes is what the model is told: the bounds of the
+    frame it is looking at, read from that frame rather than assumed.
+    """
+
+    frames = list(observation.frames)
+    if not frames:
+        return "the action's x and y must lie inside the frame it names"
+    geometry = frames[0].geometry.model_visible
+    return (
+        f'the accepted bounds are "x" 0..{geometry.width - 1} and '
+        f'"y" 0..{geometry.height - 1} for frame "{frames[0].frame_id}" '
+        f"({geometry.width}x{geometry.height}); do not rescale the screenshot or "
+        "assume another resolution"
+    )
+
+
+def _frame_id_hint(observation: Observation) -> str:
+    frames = list(observation.frames)
+    if not frames:
+        return "the current observation carries no frames, so no frame_id is accepted"
+    ids = ", ".join(json.dumps(frame.frame_id) for frame in frames)
+    return f"the only accepted frame ids on this observation are {ids}"
+
+
+def _example_json_hint(surface: ActionSurface, observation: Observation, refused: str) -> str:
+    return f"{refused} was refused. Accepted shape: {_example_json(surface, observation)}"
+
+
+def _first_field_path(reason: str) -> tuple[str, ...]:
+    """The first Pydantic location rendered in the diagnostic, split on dots."""
+
+    match = _ACTION_FIELD_PATH.search(reason)
+    return tuple(match.group(0).split(".")) if match is not None else ()
+
+
+def _near_match(sent: str, candidates: Sequence[str]) -> str | None:
+    """The closest accepted name, or nothing -- never a wrong suggestion.
+
+    A near-miss suggestion that is wrong is worse than none: told "did you mean
+    END" for ``return``, a model presses End, which is a real key that does
+    something else. So the common cases are decided outright -- by the alias map
+    for key synonyms, by containment for a name built on an accepted one
+    (``right_click`` against ``click``) -- and ``difflib`` only sees what is
+    left, at a cutoff high enough that it returns nothing rather than a distant
+    guess.
+
+    The containment rule requires four characters, which is what keeps
+    ``F1``..``F24`` out of it: ``F25`` must not be answered with "use f2".
+    """
+
+    alias = _KEY_ALIASES.get(sent.casefold())
+    if alias is not None and alias in candidates:
+        return alias
+    lowered = sent.casefold()
+    contained = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if len(candidate) >= 4
+            and (candidate.casefold() in lowered or lowered in candidate.casefold())
+        ),
+        key=len,
+        reverse=True,
+    )
+    if contained:
+        return contained[0]
+    close = difflib.get_close_matches(sent, candidates, n=1, cutoff=0.8)
+    return close[0] if close else None
 
 
 def _paste_instructions(surface: ActionSurface) -> str:
@@ -636,6 +1262,12 @@ _NORMAL_CONTENT_STOPS = frozenset({"stop", "length", "toolUse"})
 #: sent.
 _UNSPECIFIED_STOP = "unspecified"
 
+#: Longest provider terminal marker recorded in a stream shape. The marker is
+#: provider-owned text of no fixed vocabulary, so it is TRUNCATED rather than
+#: validated: a marker that failed a pattern would fail the record, and this
+#: record exists to describe a refusal, not to become one.
+_MAX_STOP_MARKER_CHARS = 64
+
 
 class ProviderStreamAbortedError(RuntimeError):
     """The stream ended abnormally without producing any usable content.
@@ -922,6 +1554,29 @@ class _ContextBuilder:
         self._messages = list(messages)
 
 
+@dataclass(frozen=True)
+class _StreamOutcome:
+    """Everything one provider attempt produced, including its shape.
+
+    A named record rather than a wider tuple: the shape adds three counters
+    that would sit beside ``tool_call_count`` (which counts CALLS, not delta
+    events) in a nine-element positional return, and two adjacent integers with
+    different meanings is exactly the kind of thing a positional unpack gets
+    wrong silently.
+    """
+
+    text: str
+    usage: ModelUsage
+    cost_micros: int
+    stop_reason: str
+    provider_request_id: str
+    context_tokens: int | None
+    stream_error: str | None
+    channel_reply: str | None
+    tool_call_count: int
+    shape: StreamShape
+
+
 class ProviderModelClient:
     """Drives a real provider through the session stream function.
 
@@ -1032,17 +1687,21 @@ class ProviderModelClient:
             tool_choice="auto" if self._model_spec.supports_tools else "none",
             prompt_cache_key=self._prompt_cache_key,
         )
-        (
-            text,
-            usage,
-            cost_micros,
-            stop_reason,
-            provider_request_id,
-            context_tokens,
-            stream_error,
-            channel_reply,
-            tool_call_count,
-        ) = await self._stream(request)
+        # Named rather than positional: the outcome carries a shape record
+        # beside nine fields, and a tuple unpack would put two same-typed
+        # integers (``tool_call_count`` and the delta counters) in reach of a
+        # reordering that no type checker can see.
+        outcome = await self._stream(request)
+        text = outcome.text
+        usage = outcome.usage
+        cost_micros = outcome.cost_micros
+        stop_reason = outcome.stop_reason
+        provider_request_id = outcome.provider_request_id
+        context_tokens = outcome.context_tokens
+        stream_error = outcome.stream_error
+        channel_reply = outcome.channel_reply
+        tool_call_count = outcome.tool_call_count
+        stream_shape = outcome.shape
         if channel_reply:
             # The model answered on the offered channel. Its arguments ARE the
             # envelope, so the raw JSON goes to the same decoder the prose path
@@ -1173,14 +1832,31 @@ class ProviderModelClient:
             # decides whether to re-call, so a re-call for the same observation
             # is corrective by construction. The billing provenance rides on
             # the exception so the runner can write this attempt's triple.
-            diagnostic = _rejection_prompt(str(error), observation)
+            #
+            # The reason the model is shown is a CLASS-SPECIFIC HINT, not the
+            # validator's own rendering. A Pydantic message names the field it
+            # refused and embeds ``input_value=`` plus a docs URL; what the
+            # model needs is the shape the field accepts, and the harness knows
+            # it (``rejection_hint``). Classification and the hint come from one
+            # call so the class recorded in the bundle is by construction the
+            # class the hint was written for.
+            evidence = rejection_evidence(
+                text, str(error), observation, action_surface, stream_shape
+            )
+            diagnostic = _rejection_prompt(evidence.hint, observation)
             # Invalid notes are not factual memory. For envelope failures do
-            # not quote their unvalidated (possibly secret) text on retries or
-            # in evidence. Classification cannot rely on successful decoding
-            # (a truncated reply fails) or literal keys (JSON Unicode escapes
-            # bypass the substring test), so the reserved-key scan is
-            # escape-aware and fails closed (F1, review round 1). Raw legacy
-            # rejection text is retained only where no reserved key appears.
+            # not quote their unvalidated (possibly secret) text on retries.
+            # Classification cannot rely on successful decoding (a truncated
+            # reply fails) or literal keys (JSON Unicode escapes bypass the
+            # substring test), so the reserved-key scan is escape-aware and
+            # fails closed (F1, review round 1). Raw legacy rejection text is
+            # retained only where no reserved key appears.
+            #
+            # This is the HISTORY boundary only. Evidence publishes the reply
+            # itself (``evidence_reply``), through its own escape-aware scan at
+            # the publishing site: withholding it from the bundle made 241 of
+            # the campaign's rejection artifacts unreadable, and a
+            # reader of a bundle is not the model being corrected.
             shown = text
             try:
                 rejected_value, _ = json.JSONDecoder().raw_decode(text.lstrip())
@@ -1194,6 +1870,12 @@ class ProviderModelClient:
                 # Truncated with the same bound the context replay uses: a
                 # runaway reply must not be able to inflate the bundle either.
                 reply=shown[:MAX_REJECTED_REPLY_CHARS],
+                class_key=evidence.class_key,
+                # Raw and UNBOUNDED here: the publisher scans the whole reply
+                # before applying the bound, because a reply cut first and
+                # scanned afterwards returns clean over a severed canary.
+                evidence_reply=evidence.evidence_reply,
+                stream_shape=evidence.stream_shape,
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
@@ -1302,12 +1984,10 @@ class ProviderModelClient:
             # The summary request offers no tools (``_summary_request`` sends
             # ``tool_choice="none"`` with an empty list), so the channel fields
             # are inert here — a summary is prose by definition.
-            text, usage, cost, _stop, _rid, _ctx, _err, _channel, _calls = await self._stream(
-                self._summary_request(prompt)
-            )
-            summary_usage = usage
-            summary_cost = cost
-            return text
+            summary = await self._stream(self._summary_request(prompt))
+            summary_usage = summary.usage
+            summary_cost = summary.cost_micros
+            return summary.text
 
         before = len(messages)
         result = await run_compaction_pass(
@@ -1584,9 +2264,7 @@ class ProviderModelClient:
             replayable=True,
         )
 
-    async def _stream(
-        self, request: Any
-    ) -> tuple[str, ModelUsage, int, str, str, int | None, str | None, str | None, int]:
+    async def _stream(self, request: Any) -> _StreamOutcome:
         text = ""
         usage = ModelUsage()
         cost_micros = 0
@@ -1596,6 +2274,15 @@ class ProviderModelClient:
         provider_request_id = "unknown"
         context_tokens: int | None = None
         stream_error: str | None = None
+        # Per-event counters, kept for the rejection artifact. They are what
+        # makes "the model generated nothing visible" distinguishable from
+        # "the client dropped what it generated": a refusal with a large
+        # reasoning count and no content is the model, all-zero counts are the
+        # wire. Counting EVENTS rather than characters, because the wire
+        # clients emit one delta per provider chunk.
+        content_deltas = 0
+        reasoning_deltas = 0
+        tool_call_deltas = 0
         # Reply-channel calls, accumulated per stream index because a provider
         # delivers a call's name and its arguments across many deltas. Assembly
         # is the harness loop's, so the two agree on what a provider's fragments
@@ -1603,8 +2290,15 @@ class ProviderModelClient:
         channel_calls: dict[int, dict[str, Any]] = {}
         async for event in self._stream_fn(request, None):
             if event.type == "text_delta":
+                content_deltas += 1
                 text += event.delta
+            elif event.type == "reasoning_delta":
+                # Counted, never read into ``text``: private reasoning is not a
+                # decision channel, and treating it as one would parse a
+                # model's thinking as its answer.
+                reasoning_deltas += 1
             elif event.type == "tool_call_delta":
+                tool_call_deltas += 1
                 state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
                 if event.name:
                     state["name"] += event.name
@@ -1645,20 +2339,31 @@ class ProviderModelClient:
         # instead); the empty string when it did and sent nothing usable, which
         # is a rejection the decoder must still report.
         channel_reply = envelope_from_tool_call(calls, name=REPLY_CHANNEL_TOOL_NAME)
-        return (
-            text,
-            usage,
-            cost_micros,
-            stop_reason,
-            provider_request_id,
-            context_tokens,
-            stream_error,
-            channel_reply,
+        return _StreamOutcome(
+            text=text,
+            usage=usage,
+            cost_micros=cost_micros,
+            stop_reason=stop_reason,
+            provider_request_id=provider_request_id,
+            context_tokens=context_tokens,
+            stream_error=stream_error,
+            channel_reply=channel_reply,
             # Every call the stream carried, including any the model made to a
             # name we never offered. Recorded in the evidence bundle rather
             # than acted on: a model reaching for a tool that does not exist is
             # a signal about the prompt, not something to salvage.
-            len(calls),
+            tool_call_count=len(calls),
+            shape=StreamShape(
+                content_deltas=content_deltas,
+                reasoning_deltas=reasoning_deltas,
+                tool_call_deltas=tool_call_deltas,
+                # The provider's RAW marker, never the normalized stop: a
+                # reader bucketing attempts needs ``length``/``toolUse``/whatever
+                # the wire said, and ``_UNSPECIFIED_STOP`` when it said nothing
+                # about how it ended. Truncated because the vocabulary is the
+                # provider's and this artifact must stay bounded.
+                stop=stop_reason[:_MAX_STOP_MARKER_CHARS],
+            ),
         )
 
 
