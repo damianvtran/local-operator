@@ -183,7 +183,9 @@ not already answered precisely — a bounded soft tier (prefix, word-order, edit
 distance <= 2 on words of 4+ characters). `rank` is the relevance tier
 (0 name, 1 id, 2 body, 3 soft) and `body_match` says the conversation is why the
 row surfaced, so a client can label a row it would otherwise show with no
-visible reason. A client that already holds the catalogue should merge these
+visible reason. `rank` is NOT MEANINGFUL when `q` is empty: an empty query is
+the store listing (every session, newest first) and nothing matched anything, so
+the tier is the constant 0 rather than "this matched on its name". A client that already holds the catalogue should merge these
 results into the rows it has rather than replacing the list, and must skip the
 whole call when `/v1/capabilities` does not advertise `features.session_search`
 — an older backend answers 404 there.

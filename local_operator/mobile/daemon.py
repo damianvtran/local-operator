@@ -2640,13 +2640,14 @@ def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     name, or a soft match) rather than its visible name, so the phone can say
     why it is on screen instead of showing a row with no visible reason.
 
-    No try/except around the call on purpose. A search that silently answers
-    "nothing matched" when the store could not be read is indistinguishable
-    from a correct empty result, and that is the failure this path exists to
-    avoid; ``build_index`` already degrades on its own (an absent or corrupt
-    cache costs a rebuild, never a raise), so the only exceptions reaching here
-    describe a store that genuinely could not be walked, which belongs in the
-    response as an error.
+    No try/except around the call, and the honest reason is not "only a broken
+    store raises": the index build degrades on its own (an absent or corrupt
+    cache costs a rebuild, never a raise), and a store whose ``sessions/``
+    directory cannot be read is reported as ZERO matches rather than as an
+    error, because ``resume._scan_sessions`` swallows that ``OSError`` so every
+    listing surface survives it (see ``search_store``). What is NOT caught here
+    is anything else — a bug in the search must not be laundered into a
+    confident "nothing matched".
     """
     from local_operator.paths import config_dir
     from local_operator.session.session_search import search_store

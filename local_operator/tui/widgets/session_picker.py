@@ -863,6 +863,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # tier and the body-match marker. Both are recomputed only on a
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
+            #
+            # This call is UNLOCKED and shares ``search_index``'s process-wide
+            # memo with the server's locked path (``session_search``). Safe only
+            # because the picker is a single thread and no process hosts it
+            # beside a shared-path caller — the TUI does not run the server
+            # in-process. An embedder that did both would need to take
+            # ``session_search._SHARED_LOCK`` around this line, because the memo
+            # is one entry that two threads can interleave.
             self._body_matches = search_digests(self._digests, self._query)
             # The soft tier is expensive on its first call for a given store —
             # it tokenises every digest and builds a vocabulary over them — so

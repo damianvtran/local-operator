@@ -47,6 +47,14 @@ class SessionSearchRow(BaseModel):
     can label it instead of showing a row with no visible reason for being in
     the results.
 
+    ``rank`` IS NOT MEANINGFUL WHEN ``query`` IS EMPTY. An empty query is the
+    store listing — every session, newest first — and nothing matched anything,
+    so the tier is the constant 0 rather than "this matched on its name". A
+    client that merges on ``rank`` must therefore treat an empty ``query`` as
+    "no ranking", which is also why the desktop renderer never sends one: its
+    search box is a filter, and an empty box is the unfiltered list it already
+    has.
+
     ``name``/``mtime``/``forked`` come along for the same reason the phone's
     payload carries them: a client that has never listed this session (a store
     larger than its own page, a row created since its last poll) can still
