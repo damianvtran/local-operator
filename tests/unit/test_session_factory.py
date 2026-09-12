@@ -25,9 +25,14 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
+    _latest_user_query,
     _transcript_dir_and_agent_id,
     attach_mcp_dispose,
     build_initial_blocks,
@@ -3853,3 +3858,39 @@ async def test_no_configured_effort_leaves_the_builders_seed(tmp_config_dir: Pat
     spec = plan.session_kwargs["model"]
     assert spec.reasoning_effort == "high"
     assert spec.reasoning_default_effort == "high"
+
+
+def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
+    """Reviewer m2: a harness notice must not become the selection query.
+
+    ``_latest_user_query`` reads the newest ``role="user"`` row, and a notice is
+    stored as one — so selection searched the skills index for "[model switch]
+    You are now running as …" and froze the block's ``task_id`` against it. Both
+    shapes are refused: the stamped render, and the legacy notice a compaction
+    block carried forward with no stamp at all.
+    """
+    notice = (
+        "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+        "Reason: provider failure"
+    )
+
+    def entry(entry_id: str, text: str, payload: dict[str, Any] | None = None) -> SimpleNamespace:
+        body: dict[str, Any] = {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+        if payload:
+            body["provider_payload"] = payload
+        return SimpleNamespace(id=entry_id, type="message", payload=body)
+
+    transcript = SimpleNamespace(
+        latest_entry=lambda _type: None,
+        latest_user_entry=lambda: entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        entries=lambda: [
+            entry("mine", "fix the login redirect loop"),
+            entry("stamped", notice, {RENDERED_INJECTION_KEY: True}),
+            entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        ],
+    )
+
+    assert _latest_user_query(transcript) == "fix the login redirect loop"

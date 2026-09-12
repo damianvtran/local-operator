@@ -13,11 +13,17 @@ because its ``if/elif`` chain ended with no ``else``.
 
 The decisions below are the ones both surfaces must make identically:
 whether a message is harness chrome that no surface may attribute to the
-user, what a timed-out gate says, what ink a refused compaction gets, and
-which assistant turns produce a notice instead of prose. Each is a pure
-function of a message, with **no host dependency** — no Textual, no wire
-type, no session import at module scope — so both hosts can call it and
-neither can own it.
+user, whether a row was minted by the harness from a ``CustomMessage`` at
+all (:func:`is_harness_injection`), what a timed-out gate says, what ink a
+refused compaction gets, and which assistant turns produce a notice instead
+of prose. Each is a pure function of a message, with **no host dependency**
+— no Textual, no wire type, no session import at module scope — so both
+hosts can call it and neither can own it.
+
+The injection predicate reads a raw payload MAPPING as readily as a message,
+because the subagents panel (``tui/widgets/subagent_view.py``) folds raw
+transcript entry payloads rather than ``AgentMessage``s. It is the same
+decision on a third surface, so it belongs here rather than in that fold.
 
 CONSTRAINT — this module must stay host-free. It sits below both renderers
 the same way ``compaction/marker.py`` sits below the hosts that must not
@@ -35,6 +41,7 @@ one renderer is a decision the other will not make.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
@@ -43,6 +50,74 @@ from typing import Any, Literal
 #: accepts every one of them, so a value produced here is always renderable
 #: on both sides.
 NoticeSeverity = Literal["info", "warning", "error"]
+
+#: Message heads the harness mints for its own notices, each with the producer
+#: that writes it, and the ONE enumeration a display surface uses to recognise a
+#: notice row (see :func:`is_harness_notice_row`).
+#:
+#: Why an enumeration is acceptable HERE, when the guard it feeds replaced one:
+#: these are the lines the harness itself writes, not a policy about content, and
+#: a missed head degrades to the pre-fix behaviour — a notice painted as the
+#: user's words, which the operator can see and report — rather than to losing
+#: anything of theirs. The stamp (:func:`is_harness_injection`) stays the primary
+#: test for everything minted since it existed; this list is what covers the rows
+#: written before it did, and the ones a compaction marker carried from that era.
+#:
+#: ``[`` + the elision notice is NOT here: that row has a fixed id
+#: (``PRESERVED_TURN_ELISION_ID``, ``compaction-elision``), which is provenance
+#: rather than wording, so the id prefix is checked instead.
+#:
+#: The DELIVERY ENVELOPES (``<parent-message>``, ``<subagent-message …>``,
+#: ``<peer-session-message …>``) are deliberately NOT here either, and the reason is
+#: what already covers a copy of one rather than a parser: a carried envelope copy
+#: is shed by PROVENANCE — ``cap_preserved_user_turns``' ``injection_ids``, resolved
+#: against the journal, where the stored turn's id names the entry whose
+#: ``custom_type`` is the delivery — so it never needs a wording rule. Measured
+#: fleet-wide (14 sessions): 229 of 233 carried envelope copies are shed that way on
+#: BOTH heads. The residue is NOT shed, and what a surface then shows depends on the
+#: surface: the phone fold and the subagents panel PARSE the envelope
+#: (``mobile.projection`` calls :func:`extract_parent_message`; the panel has its own
+#: call) and paint a parent receipt, while the TUI fold has NO envelope parser and
+#: paints the model-facing envelope as the operator's own words. That difference is
+#: pre-existing on ``main`` and is not changed here: the PR records the measurements
+#: and leaves the fix — a display product call for hub steers — to a follow-up. It is
+#: also a shape a person quotes verbatim when asking about it, which a wording rule
+#: would then eat
+#: (`test_a_human_quoting_the_envelope_keeps_their_own_words` pins that). A notice
+#: has no such provenance to fall back on: nothing about ``[model switch] …`` is
+#: addressable, which is why text is the only test for one.
+_HARNESS_NOTICE_HEADS: tuple[str, ...] = (
+    "[model switch] ",  # incidents.format_model_switch_message
+    "[session incident",  # incidents.Incident.render
+    "[session credential] ",  # incidents.format_credential_message
+    "[mcp recovery] ",  # incidents.format_mcp_recovery_message
+    "[session-state]\n",  # Session._system_state_message
+    # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather
+    # than the shared ``[system] `` prefix: that prefix is also minted by
+    # ``harness.loop.CONNECTIVITY_CONTINUATION_PROMPT``, so it does not select the
+    # gates. Both gate producers still match here, the connectivity prompt is hidden
+    # by :func:`is_harness_chrome` on every surface regardless, and the narrowing is
+    # therefore display-neutral — with one consequence recorded rather than hidden:
+    # a CARRIED copy of the connectivity prompt is no longer shed by text, so it
+    # returns to the model's context. No receipt changes visibly.
+    "[system] The question for ",
+    "[system] The approval request for ",
+    "<system-reminder>",  # Session._todo_reminder_text
+    "(alarm) Scheduled wake ",  # harness.wake.format_wake_delivery_text
+)
+
+
+def is_harness_notice_text(text: str) -> bool:
+    """Whether ``text`` is one of the notice shapes the harness itself mints.
+
+    The only evidence a row written before the ``harness_injected`` stamp
+    existed can offer about its own provenance: a 2026-09-08-era transcript
+    carries switch notices as plain ``role="user"`` rows with no
+    ``provider_payload`` at all, and they are still there — the audit phase of
+    the attached viewer replays them straight from the journal (a stored row is
+    not a copy, so there is no id to look up and no payload to read).
+    """
+    return text.lstrip().startswith(_HARNESS_NOTICE_HEADS)
 
 
 def harness_chrome_prompts() -> tuple[str, ...]:
@@ -85,6 +160,125 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
     """
     return text.strip() in harness_chrome_prompts()
+
+
+def is_harness_injection(row: Any) -> bool:
+    """Whether this row was minted BY the harness from a ``CustomMessage``.
+
+    :func:`~local_operator.session.session._default_convert_to_llm` renders a
+    harness aside — a model-switch notice, a session incident, a wake
+    delivery, a gate timeout — into a plain ``Message(role="user")`` and
+    stamps ``provider_payload["harness_injected"]`` on it, so the row is
+    structurally indistinguishable from an operator prompt once it exists.
+    The stamp is compaction's provenance signal, and it is also the only
+    signal a fold has: a row carrying it was never typed by a person, so no
+    human-facing surface may paint it as their words. The live path never
+    paints one either (the failover moment has its own receipt), which makes
+    dropping it live/replay parity rather than a second opinion — the same
+    doctrine :func:`is_harness_chrome` follows for the three continuation
+    prompts.
+
+    Accepts EITHER a message-like object or a raw payload mapping, because
+    the surfaces do not all read the same shape: the TUI and phone folds hold
+    ``AgentMessage``s, while the subagents panel folds raw transcript entry
+    payloads (``{"role": ..., "provider_payload": {...}}``). Making the
+    caller adapt is how the second copy of a decision gets written.
+
+    The marker constant is imported LAZILY, like :func:`harness_chrome_prompts`
+    imports its prompts: ``compaction.cutpoint`` pulls ``compaction.tokens``,
+    and this module sits on both folds' import path. Measured here, importing
+    this module costs 2.3 ms while importing it together with
+    ``compaction.cutpoint`` costs 308 ms — a module-scope import would pay
+    that on every TUI and mobile start for one string constant.
+    """
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    payload = _row_provider_payload(row)
+    if not payload:
+        # A replayed row can carry a malformed payload (an older writer, a
+        # hand-edited journal). Absent proof of injection is not proof of it.
+        return False
+    return bool(payload.get(RENDERED_INJECTION_KEY))
+
+
+def _row_provider_payload(row: Any) -> Mapping[str, Any]:
+    """The ``provider_payload`` of a message or of a raw transcript payload."""
+    payload = (
+        row.get("provider_payload")
+        if isinstance(row, Mapping)
+        else getattr(row, "provider_payload", None)
+    )
+    # A malformed payload (an older writer, a hand-edited journal) reads as
+    # empty: absent proof of provenance is not proof of it.
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _row_text(row: Any) -> str:
+    """The text of a message, or of a raw transcript payload's content blocks.
+
+    The payload arm is what the subagents panel holds; its ``content`` is the
+    same list of ``{"type": "text", "text": ...}`` blocks the message type
+    flattens into ``.text`` on the wire, so reading it here keeps the decision
+    in one place rather than asking each raw-payload caller to pre-flatten.
+    """
+    if isinstance(row, Mapping):
+        blocks = row.get("content") or ()
+        if not isinstance(blocks, Sequence):
+            return ""
+        return "".join(
+            str(block.get("text") or "") for block in blocks if isinstance(block, Mapping)
+        )
+    text = getattr(row, "text", "")
+    return text if isinstance(text, str) else ""
+
+
+def _row_id(row: Any) -> str:
+    value = row.get("id") if isinstance(row, Mapping) else getattr(row, "id", None)
+    return value if isinstance(value, str) else ""
+
+
+def is_harness_notice_row(row: Any) -> bool:
+    """Whether this row is harness-authored and must not paint as the user's words.
+
+    The decision every human-facing surface and every title/query/tail scan
+    makes, in one place, and it holds in BOTH phases a display can serve: the
+    context replay (where the row may be a stamped render or a copy a compaction
+    marker carried) and the audit replay (where it is the stored row itself).
+
+    Two shapes answer True, and they need different evidence:
+
+    * **the stamp** (:func:`is_harness_injection`) — the renderer minted the row
+      from a ``CustomMessage`` in this process. The primary test, and the only
+      provenance a live or freshly rendered row carries.
+    * **a NOTICE head** (:func:`is_harness_notice_text`) — what remains when the
+      row predates the stamp: the plain stored notices a pre-stamp build wrote
+      into the journal, which the audit phase serves verbatim, and the copies a
+      compaction marker re-seats from that era.
+
+    **The cost, stated exactly because it is a trade rather than a free win.** A
+    person who pastes a harness notice verbatim loses their display row: the text
+    is hidden on every human surface. It is NOT lost anywhere else — the row is
+    still in the journal, and still in the model's context; only the renderer drops
+    it, exactly as :func:`is_harness_chrome` does for the three loop/continuation
+    prompts, which a person can equally paste verbatim. Those two are the verified
+    retention surfaces, and they are named alone because a claim about anywhere
+    else would be one nobody measured. That precedent is the reason this is
+    acceptable at all: a display that must decide from text will occasionally
+    hide something a person wrote, and the alternative — leaving the harness's own
+    words behind the user gutter on a surface that has no other provenance to read
+    — is the defect being fixed. The elision notice is identified by ID rather
+    than wording: it has a fixed one (``compaction-elision``).
+
+    Accepts a message-like object or a raw payload mapping, for the reason
+    :func:`is_harness_injection` documents.
+    """
+    from local_operator.compaction.cutpoint import PRESERVED_TURN_ELISION_ID_PREFIX
+
+    if is_harness_injection(row):
+        return True
+    if _row_id(row).startswith(PRESERVED_TURN_ELISION_ID_PREFIX):
+        return True
+    return is_harness_notice_text(_row_text(row))
 
 
 def typed_line_of(text: str) -> str | None:

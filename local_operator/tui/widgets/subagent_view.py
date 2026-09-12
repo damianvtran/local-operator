@@ -72,6 +72,7 @@ from local_operator.harness.comms import (
     extract_parent_message,
 )
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -665,6 +666,18 @@ def fold_transcript_entries(
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
         if role == "user":
+            if is_harness_notice_row(payload):
+                # A row the harness wrote — the `harness_injected` stamp, or a
+                # notice a compaction block carried forward without one — is
+                # not the parent's words. A SUBAGENT fails over too
+                # (`journal_model_switch` names exactly that case) and the same
+                # compaction leak writes the notice into the child's
+                # transcript, where this fold would paint it as the parent
+                # speaking. The decision is the shared one from
+                # `harness/rows.py`, read here off the raw payload rather than
+                # a message, so the panel cannot answer it differently from the
+                # two main folds.
+                continue
             parent_message = extract_parent_message(text)
             if parent_message is not None:
                 # A persisted hub steer: model-facing XML around the parent's

@@ -43,6 +43,7 @@ from local_operator.harness.rows import (
     compaction_refused_notice,
     gate_timeout_notice,
     is_harness_chrome,
+    is_harness_notice_row,
     user_row_text,
     wake_receipt_headline,
 )
@@ -759,6 +760,17 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # carry a PARTIAL copy of it — suppressing the connectivity
                 # prompt while rendering the goal-loop and auto-continuation
                 # prompts as the user's own words.
+                continue
+            if is_harness_notice_row(message):
+                # A row the harness wrote — a stamped render of a
+                # ``CustomMessage`` (model-switch notice, incident, wake
+                # delivery) or a notice a compaction block carried forward from
+                # before the stamp existed — and the operator never typed it.
+                # The live fold has its own receipt for the moments these
+                # announce, so dropping the rendered copy is live/replay
+                # parity, and it also hides the rows an older build left in
+                # existing transcripts. One decision, in ``harness/rows.py``,
+                # for the same reason the chrome list lives there.
                 continue
             # A `$skill` invocation persists as its EXPANDED payload, because
             # that is what the model was sent. Rendering it verbatim showed the

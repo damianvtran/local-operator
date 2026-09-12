@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.transcript import (
     audit_slice,
@@ -716,8 +717,32 @@ def _capture_display_window(
         total_message_count=total,
         start=start,
         audit_available=audit_available,
-        theme_turn_count=sum(getattr(m, "role", "") in ("user", "assistant") for m in history),
+        # The retitle gate counts CONVERSATION turns, and a harness notice is
+        # not one: a carried-forward notice copy inflated this figure by eight
+        # on the session this fixes, and the gate reads the number, not the
+        # rows, so an inflated unit retitles on nothing the operator said.
+        theme_turn_count=sum(
+            getattr(m, "role", "") in ("user", "assistant") and not is_harness_notice_row(m)
+            for m in history
+        ),
+        # The opener names the conversation, and a title is read by a person.
+        # A row the harness wrote is not the user's opening prompt (see
+        # ``harness/rows.py``), so it must not title a thread "[model switch]
+        # You are now running as …" — nor the elision notice, whose text reads
+        # "[... harness-injected message(s) ... were also dropped; these were not
+        # authored by the user]" and was the title on the reported session. The
+        # rows an older build already wrote are why this checks provenance
+        # rather than trusting the role alone.
+        #
+        # ``total_message_count`` is deliberately NOT filtered: it is the unit
+        # the reader's paging is checked against, so it has to keep counting
+        # exactly the rows delivered.
         opener_text=next(
-            (m.text[:256] for m in history if isinstance(m, Message) and m.role == "user"), ""
+            (
+                m.text[:256]
+                for m in history
+                if isinstance(m, Message) and m.role == "user" and not is_harness_notice_row(m)
+            ),
+            "",
         ),
     )
