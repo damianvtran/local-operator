@@ -1145,3 +1145,102 @@ async def test_a_steer_whose_bind_left_no_client_is_reported_too(tmp_path, monke
     await next(iter(spawned))
 
     assert reports == [str(message.id)], "a bind that left no client was reported as delivered"
+
+
+class _FakeAttachClient:
+    """The minimum `attach_client` surface `_send_steer_when_ready` touches.
+
+    Only the third door is under test here, so `_ensure_bound` is a no-op and
+    this object IS the bind's result: `connected` is the snapshot the send
+    trusts, and `send_command` is the round trip that can raise after it.
+    """
+
+    def __init__(self, *, send_error: Exception | None = None) -> None:
+        self.connected = True
+        self.sent: list[Any] = []
+        self._send_error = send_error
+
+    async def send_command(self, command: Any, streaming: bool = False) -> None:
+        if self._send_error is not None:
+            raise self._send_error
+        self.sent.append(command)
+
+
+async def _steer_against(client: _FakeAttachClient, tmp_path, monkeypatch):
+    """A viewer whose bind succeeds and whose client is ``client``."""
+
+    async def no_bind(*, foreground: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(remote_module, "find_runtime_record", lambda *a: (None, None))
+    remote = AttachedSession(
+        config_dir=tmp_path,
+        session_id="s1",
+        takeover_factory=lambda: asyncio.sleep(0, result=None),
+    )
+    remote._ready_for_events = True
+    remote._runtime_ready.set()
+    monkeypatch.setattr(remote, "_ensure_bound", no_bind)
+    # `setattr`, not a direct assignment: this fake is deliberately not an
+    # `AttachClient`, and the type checker is right to say so.
+    monkeypatch.setattr(remote, "_client", client)
+    return remote
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_send_raises_is_reported_instead_of_dying_in_a_task(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 3, MINOR-3: the THIRD door, one line past the other two.
+
+    `client.connected` is read a line above the send and the send is a socket
+    round trip, so an owner that dies in the gap raises out of `_request_frame`
+    — and nothing awaits this task, so before this guard the shape QA round 2
+    (Q-1) filed came back one line lower: an unretrieved task exception in the
+    log while the row still promised `sends with that next message`. The window
+    could not be won by killing a live driver at three offsets (QA round 3 tried
+    and so did the reviewer), so it is FORCED here: what matters is that any
+    raise at that door is retrieved and reported rather than dropped.
+    """
+    reports: list[str] = []
+    client = _FakeAttachClient(
+        send_error=ConnectionError("owner socket unreachable: [Errno 61] Connect call failed")
+    )
+    remote = await _steer_against(client, tmp_path, monkeypatch)
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    assert len(spawned) == 1, f"expected one spawned steer task, got {spawned}"
+    # Awaiting is the assertion that the task ended QUIETLY: a re-raise here is
+    # the unretrieved-exception bug, and nothing in production awaits this task
+    # to notice it.
+    await next(iter(spawned))
+
+    assert reports == [str(message.id)], "a send that raised was treated as delivered"
+    assert client.sent == [], "the failed send was recorded as sent"
+
+
+@pytest.mark.asyncio
+async def test_a_steer_whose_send_succeeds_is_not_reported(tmp_path, monkeypatch) -> None:
+    """The mirror, so the guard cannot pass by reporting every send.
+
+    A delivered steer must leave the seam untouched: the app's hand-back lifts
+    the row and puts the text back in the composer, which would be a lie about a
+    message the owner already has.
+    """
+    reports: list[str] = []
+    client = _FakeAttachClient()
+    remote = await _steer_against(client, tmp_path, monkeypatch)
+    remote.set_steer_failure(reports.append)
+
+    message = Message(role="user", content=[TextContent(text="are you there?")])
+    before = asyncio.all_tasks()
+    remote.steer_message(message)
+    spawned = asyncio.all_tasks() - before
+    await next(iter(spawned))
+
+    assert reports == [], "a delivered steer was reported as undeliverable"
+    assert len(client.sent) == 1, client.sent

@@ -560,15 +560,33 @@ RECALL_AMBIGUOUS_NOTICE = "could not identify that steer — it is still queued"
 #: through `AttachedSession.set_steer_failure` → `_on_steer_undeliverable`,
 #: which lifts the steer's own rows and hands the text back the same way.
 #:
-#: The clause after the semicolon is the RECOVERY, and it was extended in QA
-#: round 2 (U6) after a measurement falsified the old one. "send it again to
-#: start a new one" is true only while nothing is claiming the session's
-#: runtime: in the live-but-silent shape — a record on disk still naming a live
-#: owner that never answers — the resend is REFUSED again, in ~0.4 s, for as
-#: long as the record's claim stands (measured: three presses, three refusals,
-#: the third served only at t+51 s once the planted heartbeat aged out). The
-#: `/resume` clause is the way out that works in that window, and it is the
-#: same lever `_no_session_notice` prints for its own unbound state.
+#: The clause after the semicolon is the RECOVERY, and it has now been through
+#: two rounds of measurement. QA round 2 (U6) extended it, because "send it
+#: again to start a new one" is true only while nothing is claiming the
+#: session's runtime: in the live-but-silent shape — a record on disk still
+#: naming a live owner that never answers — the resend is REFUSED again, in
+#: ~0.4 s, for as long as the record's claim stands (measured: three presses,
+#: three refusals, the third served only at t+51 s once the planted heartbeat
+#: aged out). That extension named `/resume` as the way out.
+#:
+#: ROUND 3 FALSIFIED THE EXTENSION, so it is DROPPED rather than re-worded.
+#: In the same shape, `/resume` reopens the session and immediately surfaces
+#: `owner socket unreachable: [Errno 61] Connect call failed ('127.0.0.1', 1)`
+#: — the lease refuses a live or unverifiable holder, and reopening does not
+#: clear that claim — while a `/resume` TYPED into the composer holding the
+#: returned text is consumed as a command and takes the message with it
+#: (review round 3, MINOR-4; UX round 3, U2 step C, which measured the text
+#: gone from the screen entirely). A lever that cannot work in the one shape
+#: that shows the row, and that can eat the message it was offered for, is
+#: worse than no lever. What is left is the one move that does work — the
+#: user's own next send, refused while the dead owner's claim stands and then
+#: starting a fresh runtime — and the row promises no timing for it.
+#:
+#: RETIREMENT is what makes that loop tolerable, and it is the row's other
+#: half: `_retire_unsent_runtime_notice` takes the row down when the message it
+#: describes is actually SERVED, so a refused press is followed by a served one
+#: that visibly ends the state, instead of the row standing over an empty
+#: composer for the life of the transcript (UX round 3, U1).
 #:
 #: Grammar, and it is the same fix as D3's: the user's own fact first, the cause
 #: second, the recovery last. The row above has already named the death ("turn
@@ -580,17 +598,18 @@ RECALL_AMBIGUOUS_NOTICE = "could not identify that steer — it is still queued"
 #: all.
 #:
 #: Geometry measured, not counted, on a mounted `NoticeBlock` across the sweep
-#: (this row is painted at 60/80/100/120 columns in the round's evidence). The
-#: `/resume` clause costs one row at 120 columns — 1 line becomes 2 — and
-#: nothing anywhere else: 3 lines at 60, 2 at 80, 2 at 100, which is exactly
-#: what the string it replaced occupied. Reordering to lead with the composer
-#: also ends the one-word widow D4 measured at 60 columns, where the old
-#: string's third line was the single word "one". Character count is not the
-#: instrument here (138 against 103), as `scripts/steer_receipt_candidates.py`
-#: says; the wrapped row count is.
+#: (this row is painted at 60/80/100/120 columns in each round's evidence, one
+#: `render_lines` of the real block per width). Dropping the `/resume` clause
+#: returns the row to 3/2/2/**1** lines from 3/2/2/2: the clause was the only
+#: thing that cost a row, and only at 120 columns, where there is room for the
+#: whole sentence on one line. At 60 columns the third line is `a new one` —
+#: the same row count the extended string had, and NOT the one-word widow D4
+#: measured before the reorder (that line was the single word `one`). Character
+#: count is not the instrument here (103 against 138), as
+#: `scripts/steer_receipt_candidates.py` says; the wrapped row count is.
 UNSENT_RUNTIME_NOTICE = (
     "your message is back in the composer — this session's runtime stopped; "
-    "send it again to start a new one, or /resume reopens this session"
+    "send it again to start a new one"
 )
 
 
@@ -4600,6 +4619,12 @@ class OperatorApp(App[None]):
         then suppress the one warning the user needs. Re-painting is the
         failure mode that costs a duplicate row; suppression is the one that
         hides the reason a send did not happen.
+
+        THE OTHER HALF IS :meth:`_retire_unsent_runtime_notice`, and it is what
+        keeps the row true rather than merely rare: a state row that is only
+        ever ADDED outlives the state it describes, so after the user followed
+        it and was served the screen still asserted the text was waiting in a
+        composer that was empty (UX round 3, U1).
         """
         held = self._unsent_runtime_notice
         if held is not None and held in self._transcript_view().blocks():
@@ -4614,6 +4639,49 @@ class OperatorApp(App[None]):
             source.notices.append((UNSENT_RUNTIME_NOTICE, "warning"))
             del source.notices[:-64]
 
+    def _retire_unsent_runtime_notice(self, source: SessionInteraction) -> None:
+        """Take the standing "back in the composer" row down once it is spent.
+
+        THE ROW IS A STATE, SO IT HAS TO END LIKE ONE. It asserts something
+        about RIGHT NOW — this text is in the composer and nothing could carry
+        it — and nothing removed it, so it stood for the life of the transcript:
+        after the user followed it, was refused while the dead owner's claim
+        held, and was finally served, the screen still told them their message
+        was waiting in an empty composer with the answered exchange directly
+        below it (UX round 3, U1, measured at t+40 and reproduced after a
+        different message was served).
+
+        THE TRIGGER IS THE SERVED MESSAGE, not the press. A refused send leaves
+        the state exactly as it was — text back in the composer, nothing able to
+        carry it — so retiring there and re-painting would reword the same fact
+        into a new block rather than end it (and that is the shape U6 measured
+        as "one row, not a tally of presses"). The announcement that consumes
+        the echo is the first moment the claim is false: the draft went out.
+
+        BY TEXT AS WELL AS BY IDENTITY, because this row has a second life: a
+        hand-back raised while its conversation was NOT on screen is stored in
+        `source.notices` and painted on adoption, so the copy the user is
+        looking at is a different block object than the one this class holds.
+        Removing only the held one would leave the identical sentence standing —
+        the defect this method exists to end. The string is private to this row,
+        so a text match cannot reach another notice.
+        """
+        held = self._unsent_runtime_notice
+        self._unsent_runtime_notice = None
+        if self._is_current(source):
+            view = self._transcript_view()
+            for block in list(view.blocks()):
+                if block is held or (
+                    isinstance(block, NoticeBlock) and block._text == UNSENT_RUNTIME_NOTICE
+                ):
+                    view.remove_block(block)
+            return
+        # A hidden conversation's row is the stored tuple, not a block: drop the
+        # entries (in place — `notices` is a view of the draft's list), and leave
+        # `_unsent_runtime_notice` alone: it names the row on the transcript in
+        # front of the user, which this call is not about.
+        source.notices[:] = [entry for entry in source.notices if entry[0] != UNSENT_RUNTIME_NOTICE]
+
     def _capture_editor_draft(self) -> SessionDraft:
         editor = self._editor()
         # Only the editor payload: copying the source's whole view state would
@@ -4626,12 +4694,31 @@ class OperatorApp(App[None]):
         )
 
     def _load_editor_draft(self, draft: SessionDraft) -> None:
+        """Put a restored draft back in the composer, caret included.
+
+        THE CARET RULE, and it is the one the recall hand-back already follows
+        (``_recall_queued_steers``: "the cursor lands at the END, not the start:
+        the resend gesture is 'edit, then Enter', and the end is where an edit
+        appends"). A draft that carries a caret of its own keeps it — that is
+        the user's place in text they parked themselves. A draft with NONE is a
+        restore: text handed back because a send could not reach a runtime,
+        which the user is meant to send again, so the caret belongs after it.
+
+        Textual's ``load_text`` parks the caret at the ORIGIN regardless
+        (``_set_document`` calls ``move_cursor((0, 0))``), which put the user's
+        next words IN FRONT of their own message — measured as one message
+        reading ``second message [bash:2]are you there?`` — and let a ``/resume``
+        typed there dispatch as a command that took the returned message with
+        it (UX round 3, U2, steps A-C).
+        """
         editor = self._editor()
         editor.load_text(draft.text)
         editor.adopt_attachments(draft.attachments)
         editor.set_shell_mode(draft.shell_mode)
         if draft.selection is not None:
             editor.selection = draft.selection
+        else:
+            editor.move_cursor(editor._end_of_buffer())
 
     def _restore_unsent_for(
         self,
@@ -4642,6 +4729,14 @@ class OperatorApp(App[None]):
         accepted: SessionDraft | None = None,
     ) -> None:
         restored = accepted or SessionDraft(text=text)
+        # No caret is set on `restored`: every draft this funnel builds is a
+        # RESTORE, and `_load_editor_draft` lands a caretless draft at the END of
+        # the text — the resend gesture's own landing (UX round 3, U2). The
+        # selection is deliberately not copied from anywhere: `accepted` is the
+        # submit-time snapshot (`SessionDraft(text=…, attachments=…)`, built
+        # without one) and a caret carried into a restore would be the position
+        # the user happened to be at when they pressed Enter, which is not where
+        # an edit appends.
         if accepted is None and images:
             from local_operator.tui.widgets.editor import Attachment, _marker_indices
 
@@ -6604,6 +6699,13 @@ class OperatorApp(App[None]):
                 editor.move_cursor(editor._end_of_buffer())
             elif source.draft.selection is not None:
                 editor.selection = source.draft.selection
+            else:
+                # The SAME restore rule as `_load_editor_draft`, for the hidden
+                # door of the same row: a hand-back raised while this
+                # conversation was off screen is stored without a caret of its
+                # own, and `load_text` above would otherwise park the caret in
+                # front of it (UX round 3, U2).
+                editor.move_cursor(editor._end_of_buffer())
             editor.restore_recall_state(
                 RecallState(
                     index=source.draft.history_index,
@@ -36900,6 +37002,11 @@ class OperatorApp(App[None]):
         those entries still comes from "every event for a painted echo finds an
         entry", not from any ordering guarantee."""
         if self._consume_user_echo(message.prompt, message_id=message.message_id):
+            # OUR OWN echo — the row is already painted. It is also the moment a
+            # standing "your message is back in the composer" row stops being
+            # true: the send that owns that composer draft has just been SERVED,
+            # so the draft is gone and the text with it (UX round 3, U1).
+            self._retire_unsent_runtime_notice(self._interaction)
             return  # our own echo — the row is already painted
         block = UserBlock(message.prompt, message.image_count)
         block.navigation_anchor_id = message.message_id

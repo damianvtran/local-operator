@@ -5951,17 +5951,7 @@ class AttachedSession:
             # `_resolve_recall` gives about the same seam: an unknown raise
             # would otherwise become the very unretrieved-exception bug this
             # block exists to remove.
-            if self._disposed:
-                return
-            logger.info(
-                "steer %s could not be delivered for %s: %s",
-                message.id,
-                self._session_id,
-                error,
-            )
-            resolver = self._steer_failure
-            if resolver is not None:
-                resolver(str(message.id))
+            self._report_steer_failure(message, str(error))
             return
         target = self._takeover_target
         if target is not None:
@@ -5973,10 +5963,7 @@ class AttachedSession:
             # bind returned but left nothing that can carry the message. The
             # row must stop promising for it too, or this is the silent drop
             # again with a different stack.
-            if not self._disposed:
-                resolver = self._steer_failure
-                if resolver is not None:
-                    resolver(str(message.id))
+            self._report_steer_failure(message, "the bind returned with no connected client")
             return
         command = ContinuationCommand(
             command_id=message.id,
@@ -5988,7 +5975,56 @@ class AttachedSession:
                 if isinstance(block, ImageContent)
             ],
         )
-        await client.send_command(command, streaming=True)
+        # THE THIRD DOOR, and the one the two checks above cannot close:
+        # `client.connected` is a SNAPSHOT taken one line earlier and the send
+        # is a socket round trip, so an owner that dies in between raises HERE
+        # (review round 3, MINOR-3 — read, not raced: three kill offsets from a
+        # live driver failed to land in the window, which is why the unit cells
+        # below force the raise instead). Left unguarded this is the shape QA
+        # round 2 (Q-1) filed, one line lower: nothing awaits this task, so the
+        # raise is an unretrieved task exception while the row still promises
+        # `sends with that next message`.
+        #
+        # ITS AMBIGUITY, stated rather than hidden: the raise can come FROM
+        # `_request_frame` before the frame is written ("not attached", an
+        # oversized request) or AFTER it (`OwnerAckTimeout`, a lost connection),
+        # and the second shape cannot prove the owner did not receive the
+        # message. Handing the text back is still the right gesture — the
+        # alternative is the silent drop this method exists to remove — and a
+        # user who resends a message the owner already had is the cheaper error.
+        try:
+            await client.send_command(command, streaming=True)
+        except Exception as error:  # noqa: BLE001 — reported, never re-raised into a task
+            self._report_steer_failure(message, str(error))
+            return
+
+    def _report_steer_failure(self, message: Message, detail: str) -> None:
+        """Report a steer nothing can carry, through the app's failure seam.
+
+        ONE ACTION FOR ALL THREE DOORS of ``_send_steer_when_ready`` — the bind
+        that raised, the bind that returned with no client, and the send itself
+        — because they leave the app in one state: a message that was echoed as
+        sent and is not going anywhere. The seam is what hands the text back
+        and lifts the rows that claimed otherwise.
+
+        Logged BEFORE the report, and the report is skipped when the resolver is
+        unarmed: the log line is then the only trace of the failure, which is
+        strictly better than the unretrieved exception every door here used to
+        produce. A DISPOSED facade reports nothing at all: the app that would
+        paint the warning is gone with it (`_send_steer_when_ready`'s one silent
+        return).
+        """
+        if self._disposed:
+            return
+        logger.info(
+            "steer %s could not be delivered for %s: %s",
+            message.id,
+            self._session_id,
+            detail,
+        )
+        resolver = self._steer_failure
+        if resolver is not None:
+            resolver(str(message.id))
 
     def queued_steering(self) -> list[Any]:
         return [

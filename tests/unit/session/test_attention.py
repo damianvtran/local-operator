@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -872,6 +874,35 @@ def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
     assert (kind, cause) == ("error", "runtime-killed")
     assert f"pid {dead_pid}" in reason
     assert "1.2.3@abcdef0" in reason
+
+
+def test_the_started_at_is_one_token_so_a_wrap_cannot_split_it() -> None:
+    """Design round 3, D7: the date and the time are ONE value, not two.
+
+    Measured on the real `NoticeBlock` at 60 columns (56 content cells): with a
+    PLAIN space the wrap landed between the date and the time —
+    `… started 2026-09-12` / `05:15:53)`, a 9-cell orphan line under a timestamp
+    the reader then has to reassemble. The non-breaking space carries the value
+    whole, and the row count is 4/3/2/2 at 60/80/100/120 either way.
+
+    The record is a stub because this is a RENDERING rule about one field: the
+    two classification tests above own which facts reach the reason, and the
+    sweep of real `NoticeBlock` renders is in the round-3 evidence.
+    """
+    from local_operator.session.attention import _record_detail
+
+    class _Record:
+        version = "0.54.15"
+        source_ref = ""
+        pid = 97342
+        started_at = time.mktime(time.strptime("2026-09-12 05:15:53", "%Y-%m-%d %H:%M:%S"))
+
+    detail = _record_detail(_Record())
+    assert "pid 97342" in detail, detail
+    assert "started 2026-09-12\u00a005:15:53" in detail, detail
+    # The exact boundary the wrap split on: no PLAIN space may separate a date
+    # from a time anywhere in the detail.
+    assert not re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", detail), detail
 
 
 def test_a_reaped_death_is_classified_from_the_record_the_scan_deleted(

@@ -339,7 +339,9 @@ def _record_detail(record: Any) -> str:
 
     Kept to the record's own facts (build, pid, started-at) rather than prose,
     because these are the fields a reader would otherwise have to reconstruct
-    from the log to answer "which runtime was this".
+    from the log to answer "which runtime was this". The started-at is ONE
+    token rather than two — see the note on its format below (design round 3,
+    D7).
     """
     build = str(getattr(record, "version", "") or "")
     ref = str(getattr(record, "source_ref", "") or "")
@@ -347,7 +349,16 @@ def _record_detail(record: Any) -> str:
     started = getattr(record, "started_at", None)
     when = ""
     if isinstance(started, (int, float)) and not isinstance(started, bool) and started:
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started))
+        # THE DATE AND THE TIME ARE ONE TOKEN, joined by a NON-BREAKING space,
+        # because the wrap is what made them read as two facts. Measured on the
+        # real `NoticeBlock` at 60 columns (56 content cells): with a plain
+        # space the boundary landed between them — `… started 2026-09-12` /
+        # `05:15:53)`, a 9-cell orphan line under a timestamp the reader has to
+        # reassemble. The non-breaking space carries the value whole on the last
+        # line at 60, and moves nothing anywhere else: 4/3/2/2 lines at
+        # 60/80/100/120 before and after, with the split removed (design round
+        # 3, D7 — the one-character fix it named).
+        when = time.strftime("%Y-%m-%d\u00a0%H:%M:%S", time.localtime(started))
     parts = [
         part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
     ]
