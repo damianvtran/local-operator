@@ -84,13 +84,24 @@ def test_a_runtime_takes_over_a_claim_held_by_a_zombie(tmp_path: Path) -> None:
     # HOME as well as the config dir: the cache root is derived from the home
     # directory independently, so a run isolated by config dir alone still
     # reads and writes the operator's real cache (see AGENTS.md).
-    env = {
-        **os.environ,
-        "HOME": str(tmp_path),
-        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path),
-        "LOP_MOBILE_CHILD_CWD": str(tmp_path),
-        "LOP_MOBILE_CHILD_RESUME": SESSION_ID,
-    }
+    #
+    # And SCRUB the two prefixes a lop parent exports, because a runtime child
+    # reads `LOP_*` directly (`session/runtime/process.py::amain`): a cell run
+    # from inside another session otherwise inherits its provider, model and
+    # deferral flags, and is silently not the cell it claims to be. QA round 1
+    # hit exactly that — an inherited `LOP_MOBILE_CHILD_PROVIDER` resolved a
+    # provider the fixture never chose, and an inherited deferral flag made a
+    # child idle-exit with no work at all, which would have "proved" nothing.
+    # Only the names this test means to set are put back.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("LOP_", "CMUX_"))}
+    env.update(
+        {
+            "HOME": str(tmp_path),
+            "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path),
+            "LOP_MOBILE_CHILD_CWD": str(tmp_path),
+            "LOP_MOBILE_CHILD_RESUME": SESSION_ID,
+        }
+    )
 
     with unreaped_child() as zombie_pid:
         claim = session_dir / ".execution-lease"
