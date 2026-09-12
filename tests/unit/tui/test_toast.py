@@ -224,6 +224,51 @@ def test_the_message_is_clamped_to_the_cells_it_was_given() -> None:
         assert cell_len(line) <= 30, line
 
 
+def _failure_row(name: str, error: str, cells: int) -> str:
+    """The failure row the real composer paints, without a live app."""
+    payload = format_mcp_startup(
+        McpStartupOutcome(configured=(name,), failures={name: error}), max_cells=cells
+    )
+    assert payload is not None
+    return payload[0].plain.split("\n")[1]
+
+
+def test_a_command_with_a_reason_sheds_the_reason_before_the_command() -> None:
+    """Design review round 3, D11, at the composer's own seam.
+
+    The clamp is character-based, so an auth line — which names the server in the
+    label AND inside its command — had its END cut when the budget ran out:
+    measured on the round-3 head, ``minerva-qa`` rendered ``… — refresh unc…`` at
+    100 columns and ``/mcp reauth mi…`` at 44, a command that errors if followed.
+    The budget now picks a RUNG: the whole row, then the command with the shed
+    reason marked, then the command alone, and only then the old clamp.
+    """
+    line = "/mcp reauth minerva-qa — refresh unconfirmed"
+    # 58 content cells: the command survives whole, the reason is GONE rather
+    # than clipped — the mark is the same cue the 44-column card already uses.
+    assert _failure_row("minerva-qa", line, 58) == "failed: minerva-qa — /mcp reauth minerva-qa…"
+    # 44 is where the mark itself stops fitting but the command still does; the
+    # bare command is what keeps the clamp from eating the name's last cell.
+    assert _failure_row("minerva-qa", line, 44).endswith("minerva-qa…")
+    assert _failure_row("minerva-qa", line, 43) == "failed: minerva-qa — /mcp reauth minerva-qa"
+
+
+def test_a_diagnostic_with_a_dash_is_still_clamped_exactly_as_before() -> None:
+    """The shed is keyed on a LEADING command, never on the dash.
+
+    The no-OAuth-endpoint challenge line is a diagnostic whose second clause is
+    half the statement rather than a droppable reason, so it is not a
+    command-with-reason and keeps the base's pixels byte for byte (design review
+    D10 is explicitly out of this change's scope).
+    """
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    text = "notion rejected our credentials (401) — set its API key or headers"
+    row = _failure_row("notion", text, 58)
+    assert row == truncate_cells(f"failed: notion — {text}", 58)
+    assert row == "failed: notion — notion rejected our credentials (401) —…"
+
+
 # -- width -------------------------------------------------------------------
 
 
