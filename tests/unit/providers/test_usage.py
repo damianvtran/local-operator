@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import warnings
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -1599,12 +1600,16 @@ def _qwencloud_console_client(
     requests: list[httpx.Request] | None = None,
     status: int = 200,
 ) -> httpx.AsyncClient:
-    """Route console-gateway posts, which are FORM-encoded, not JSON.
+    """Canned console-gateway responses, recording the full request objects.
 
-    Every other helper in this module reads ``json.loads(request.content)``.
-    The console gateway takes ``application/x-www-form-urlencoded`` with the
-    real request nested as a JSON string in the ``params`` field, so a
-    JSON-reading handler raises before it can assert anything.
+    The existing helpers cannot serve these tests. ``_client_for`` (:31)
+    discards the request entirely and ``_recording_client`` (:40) keeps only
+    ``str(request.url)``, but the console contract lives in the BODY and the
+    HEADERS -- the form encoding, the nested ``params`` JSON and the single
+    cookie -- so the whole ``httpx.Request`` has to survive. ``_qwencloud_client``
+    (:1567) does read the body, but as ``json.loads(request.content)``, and
+    this gateway takes ``application/x-www-form-urlencoded``, so it raises
+    before it can route anything. Decoding is ``_console_form``'s job.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1631,7 +1636,9 @@ def _console_form(request: httpx.Request) -> dict[str, Any]:
 
 
 #: Verbatim production body captured 2026-09-11 from a live personal Token
-#: Plan account. `per1WeekPercentage` is a FRACTION USED (0.2405 == 24.05%
+#: Plan account (requestIds redacted; every other field, including all 15
+#: digits of the fraction, is as captured). `per1WeekPercentage` is a
+#: FRACTION USED (0.2405 == 24.05%
 #: used, 75.95% remaining), not a 0-100 percentage, and `per1WeekResetTime`
 #: is epoch MILLISECONDS. Reading either the way the sibling fields elsewhere
 #: in this module read is the regression this body pins.
@@ -1662,9 +1669,30 @@ QWENCLOUD_CONSOLE_BODY = {
     "successResponse": True,
 }
 
+
+def _console_body_with_outer_success(value: Any, present: bool = True) -> dict[str, Any]:
+    """The captured body with ONLY the outer ``data.success`` flag altered.
+
+    Everything below it stays valid and populated, which is the whole point:
+    a body that also loses its ``DataV2`` is rejected by the isinstance guard
+    one line later, so it would pass this test no matter what the outer check
+    did. Only a fully-populated body can prove the outer check is what
+    rejected it.
+    """
+    body = json.loads(json.dumps(QWENCLOUD_CONSOLE_BODY))
+    if present:
+        body["data"]["success"] = value
+    else:
+        del body["data"]["success"]
+    return body
+
+
 #: The same endpoint with an expired or absent session cookie, captured the
 #: same day: HTTP **200** carrying a FAILURE. `code` is still "200" and
-#: `successResponse` is still true -- only `data.success` is false. A
+#: `successResponse` is still true -- only `data.success` is false. (The
+#: capture was truncated before `successResponse`, so that one field is
+#: asserted rather than captured; it is inert, since the parser rejects on
+#: `data.success` long before reading it.) A
 #: status-code check, or the sibling BSS helper's `payload["code"] != "200"`
 #: check, both read this as data and report a fabricated window.
 QWENCLOUD_CONSOLE_NOT_LOGGED_IN = {
@@ -1894,6 +1922,15 @@ async def test_qwencloud_console_sends_one_form_post_with_only_the_ticket() -> N
     # the management token is refused by this host outright.
     assert request.headers["cookie"] == "login_qwencloud_ticket=fake-console-ticket"
     assert "authorization" not in request.headers
+    # The gateway is a browser endpoint and checks these against its CORS
+    # rules; they are part of the request shape, not decoration.
+    assert request.headers["origin"] == "https://home.qwencloud.com"
+    assert request.headers["referer"] == (
+        "https://home.qwencloud.com/analytics/token-plan/individual"
+    )
+    # No synthesized user-agent: httpx's own default is what goes out, and
+    # faking a browser string here would be a claim the fetcher cannot back.
+    assert "chrome" not in request.headers.get("user-agent", "").lower()
 
 
 @pytest.mark.asyncio
@@ -1901,16 +1938,27 @@ async def test_qwencloud_console_does_not_persist_the_cookie_on_the_shared_clien
     """The client is owned by the CALLER and reused across every provider in
     one `/usage` refresh. A full-account console session cookie left in its
     jar would ride along on the next provider's request, so the ticket is
-    passed per-request and the jar must come back empty."""
-    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY)
-    async with client:
-        report = await fetch_usage(
-            client,
-            "alibaba-token-plan",
-            extra_creds={"ticket": "fake-console-ticket"},
-        )
-        assert report is not None
-        assert dict(client.cookies) == {}
+    passed per-request and the jar must come back empty.
+
+    Two ways of sending it are ruled out, and the empty jar only catches one.
+    `client.cookies.set(...)` populates the jar, so the assert below fails.
+    Per-request `cookies=` does NOT reach the jar under httpx 0.28 -- it
+    raises `DeprecationWarning` instead (and is dropped outright in 1.x), so
+    the jar assert alone would pass on it. CI runs bare `pytest` with no
+    `filterwarnings` configured, which is why the warning is promoted to an
+    error HERE rather than left to a `-W` flag someone has to remember.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY)
+        async with client:
+            report = await fetch_usage(
+                client,
+                "alibaba-token-plan",
+                extra_creds={"ticket": "fake-console-ticket"},
+            )
+            assert report is not None
+            assert dict(client.cookies) == {}
 
 
 @pytest.mark.asyncio
@@ -1941,7 +1989,8 @@ async def test_qwencloud_console_reaches_both_spellings_of_the_provider(provider
 @pytest.mark.asyncio
 async def test_qwencloud_console_fails_closed_on_a_two_hundred_carrying_not_logined() -> None:
     """An expired session cookie answers HTTP 200 with `code: "200"` and
-    `successResponse: true` -- only the inner `data.success` is false. Both
+    `successResponse: true` -- only `data.success`, the OUTER of the two
+    success flags (the source's `outer`, not the one inside `DataV2`). Both
     the status check every sibling fetcher makes and `_qwencloud_bss_call`'s
     `payload["code"] != "200"` check pass on this body, so a parser built to
     either pattern reports a fabricated window from a dead credential."""
@@ -2078,8 +2127,11 @@ async def test_qwencloud_console_wins_over_bss_when_both_could_answer() -> None:
         {"code": "200", "data": {"success": True}},
         {"code": "200", "data": {"success": True, "DataV2": {}}},
         {"code": "200", "data": {"success": True, "DataV2": {"data": {"success": False}}}},
-        # Truthy but not `True` at either envelope: a `== True` read or a
-        # bare truthiness check both let this through.
+        # Truthy but not `True`. Only the INNER case is actually pinned here:
+        # the outer one below has an empty inner `data`, so it returns None
+        # whatever the outer check does. The outer envelope is pinned on its
+        # own, with every deeper level populated, in
+        # `test_qwencloud_console_fails_closed_on_the_outer_envelope_alone`.
         {"code": "200", "data": {"success": 1, "DataV2": {"data": {"success": True, "data": {}}}}},
         {
             "code": "200",
@@ -2110,6 +2162,40 @@ async def test_qwencloud_console_fails_closed_on_a_partial_envelope(body) -> Non
     Any of them missing means the answer is not the one asked for, and a
     report built from a partial parse is worse than no report: it renders as
     a real number."""
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("false", _console_body_with_outer_success(False)),
+        ("absent", _console_body_with_outer_success(None, present=False)),
+        ("truthy-int", _console_body_with_outer_success(1)),
+        ("truthy-str", _console_body_with_outer_success("true")),
+    ],
+)
+async def test_qwencloud_console_fails_closed_on_the_outer_envelope_alone(label, body) -> None:
+    """The OUTER ``data.success`` must reject on its own, with every deeper
+    envelope intact and the number present.
+
+    This is the degraded answer the partial-envelope cases cannot reach: those
+    bodies also lack a populated ``DataV2``, so the isinstance guard one line
+    later rejects them whatever the outer check does -- they pass for an
+    unrelated reason. A gateway answering with a POPULATED ``DataV2`` and
+    ``data.success: false`` renders 24% from a failed call otherwise.
+
+    The truthy cases pin the ``is True`` identity specifically: a ``== True``
+    read admits ``1``, a bare truthiness read admits both ``1`` and
+    ``"true"``, and replacing the check with the sibling BSS helper's
+    ``payload["code"] != "200"`` admits all of them -- that last one being the
+    exact trap named in ``QWENCLOUD_CONSOLE_NOT_LOGGED_IN``'s own comment.
+    """
     client = _qwencloud_console_client(body)
     async with client:
         report = await fetch_usage(
@@ -2168,6 +2254,83 @@ async def test_qwencloud_console_clamps_the_fraction_into_a_percentage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("a JSON list", [1, 2, 3]),
+        ("a JSON string", "not-an-object"),
+        ("a JSON number", 42),
+        ("JSON null", None),
+    ],
+)
+async def test_qwencloud_console_survives_a_non_object_json_body(label, body) -> None:
+    """A body that parses as valid JSON but is not an object.
+
+    `payload.get(...)` is an AttributeError on every one of these, and
+    `_run_fetcher` has no try/except around this fetcher, so the exception
+    would escape `fetch_usage` and take the whole `/usage` table down with
+    it -- not just this provider's row.
+    """
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"<html>502 Bad Gateway</html>", b"{truncated", b""])
+async def test_qwencloud_console_survives_a_body_that_is_not_json(content) -> None:
+    """A proxy or captive portal answers HTTP 200 with HTML, and a connection
+    cut mid-response leaves truncated JSON. `response.json()` raises
+    `ValueError` on both; an empty body must not be parsed at all."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=content)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("DataV2 is a list", {"code": "200", "data": {"success": True, "DataV2": []}}),
+        (
+            "DataV2.data is a string",
+            {"code": "200", "data": {"success": True, "DataV2": {"data": "nope"}}},
+        ),
+        (
+            "the usage payload is a list",
+            {
+                "code": "200",
+                "data": {
+                    "success": True,
+                    "DataV2": {"data": {"success": True, "data": [{"per1WeekPercentage": 0.5}]}},
+                },
+            },
+        ),
+    ],
+)
+async def test_qwencloud_console_survives_wrong_types_at_every_nesting_level(label, body) -> None:
+    """Each nested level is reached with `.get` on whatever the level above
+    returned, so a non-dict anywhere is an AttributeError rather than a miss.
+    The isinstance guards are what make these a None instead of a crash."""
+    client = _qwencloud_console_client(body)
+    async with client:
+        report = await fetch_usage(
+            client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+        )
+    assert report is None
+
+
+@pytest.mark.asyncio
 async def test_extra_creds_does_not_change_any_other_provider() -> None:
     """The keyword is additive: a ticket in hand must not alter a route that
     has nothing to do with QwenCloud.
@@ -2180,7 +2343,12 @@ async def test_extra_creds_does_not_change_any_other_provider() -> None:
     session cookie was spent on an unrelated host.
     """
     requests: list[httpx.Request] = []
-    client = _qwencloud_console_client({"data": {"limit": 10, "usage": 4}}, requests)
+    # The captured console body, NOT a stub: ungated, the console parse has to
+    # SUCCEED for the corruption to happen, and a body that fails to parse
+    # falls through to the real fetcher and hides the defect. openrouter's own
+    # parser reads `data.limit`/`data.usage`, which this body lacks, so a
+    # report coming back at all already means the console route answered.
+    client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, requests)
     async with client:
         report = await fetch_usage(
             client,
@@ -2189,10 +2357,13 @@ async def test_extra_creds_does_not_change_any_other_provider() -> None:
             extra_creds={"ticket": "fake-console-ticket"},
         )
     assert report is not None
-    assert all("cs-data" not in str(request.url) for request in requests)
-    # The label is the other half of the defect: a report from the console
-    # route carries QwenCloud's provider id whatever was asked for.
+    # The LABEL is asserted first, and the order is deliberate. Ungated, the
+    # console route short-circuits before openrouter is contacted at all, so
+    # this provider's slot receives QwenCloud's 7-day window outright -- the
+    # data corruption, which is the worse half of the defect. Asserting the
+    # absent round trip first would fail there and this line would never run.
     assert report.provider == "openrouter"
+    assert all("cs-data" not in str(request.url) for request in requests)
 
 
 @pytest.mark.asyncio
@@ -2212,14 +2383,20 @@ async def test_qwencloud_console_never_raises() -> None:
             is None
         )
 
-    client = _qwencloud_console_client({"code": "200"}, status=502)
-    async with client:
-        assert (
-            await fetch_usage(
-                client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
-            )
-            is None
-        )
+    # A non-200 carrying a body that WOULD parse cleanly. A 502 whose body is
+    # already junk is rejected by the parse whatever the status check does, so
+    # only a valid body can prove the status is what rejected it -- and a
+    # gateway that returns stale cached data with an error status is exactly
+    # the case where the difference shows.
+    for status in (400, 403, 500, 502):
+        client = _qwencloud_console_client(QWENCLOUD_CONSOLE_BODY, status=status)
+        async with client:
+            assert (
+                await fetch_usage(
+                    client, "alibaba-token-plan", extra_creds={"ticket": "fake-console-ticket"}
+                )
+                is None
+            ), f"HTTP {status} carrying a valid body must still be refused"
 
 
 class TestZaiSignInReportsUsage:
