@@ -618,6 +618,10 @@ def _synthetic(pid: int, session_id: str, protocol: int = 5) -> registry.Session
         # session_id — the rebind race `find_runtime_record` reports as
         # `(None, pid)`. It is dialable, so no caller may call the process old.
         ([(_synthetic(91234, "sess-previous"), "live")], True),
+        # A WEDGED record is dialable as well (review round 3, MINOR-2): the pid
+        # is alive and `scan` keeps the record for the recovery the redial exists
+        # to outlast, so a caller must pace this owner rather than age it.
+        ([(_synthetic(91234, "sess-previous"), "wedged")], True),
         # A v1 record is not dialable at all, whatever it names.
         ([(_synthetic(91234, "sess-other", protocol=1), "live")], False),
         # Not live: the pid holds no record this build could talk to.

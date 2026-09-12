@@ -26,8 +26,11 @@ the real budget is asserted as a RELATIONSHIP in
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +44,8 @@ from local_operator.session.attached import (
     frontend_attach_refusal,
 )
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_navigation import UNREACHABLE_OWNER_MESSAGE
@@ -105,6 +109,19 @@ def _rendered_text(app: OperatorApp) -> str:
     return " ".join(" ".join(_rendered_notice_rows(app)).split())
 
 
+def _notice_blocks(app: OperatorApp) -> list[NoticeBlock]:
+    """The notice BLOCKS on screen, by identity, in visual order.
+
+    `_notices` compares authored strings, which cannot tell one identical block
+    from two. A claim that a run settled INTO an existing row rather than beside
+    it is a claim about identity, so it has to read the widgets.
+    """
+    blocks: list[NoticeBlock] = []
+    for view in app.query(TranscriptView):
+        blocks.extend(block for block in view.blocks() if isinstance(block, NoticeBlock))
+    return blocks
+
+
 def _rendered_notice_rows(app: OperatorApp) -> list[str]:
     """What the notices actually PAINT, one entry per rendered row.
 
@@ -148,11 +165,14 @@ def _gave_up(detail: str, *, session_id: str = "remote-1") -> str:
 def _stopped(*, session_id: str = "remote-1") -> str:
     """The sentence a redial that never reached a verdict leaves behind.
 
-    The cancellation exit — the sidebar switch — which is the exit the
-    composer copy teaches as the way to stop the wait.
+    The cancellation exit. It names NO cause, on purpose: the sidebar's switch
+    and Textual's own shutdown (`workers.cancel_all()` when the message loop
+    ends) take the same arm, so a sentence claiming a switch can be false for a
+    quit (review round 3, MINOR-1) — and the row is durable, so a false cause
+    can outlive the process that wrote it.
     """
     return (
-        f"resume of {session_id} stopped — the wait ended when you switched session.\n"
+        f"resume of {session_id} stopped — the wait ended without connecting.\n"
         f"Run /resume {session_id} again to retry."
     )
 
@@ -304,7 +324,7 @@ async def test_a_transient_connect_failure_is_retried_rather_than_reported(monke
         # claiming a reconnect that has already happened.
         assert not [n for n in notices if n.startswith("reconnecting to session")]
         # NOTHING AT ALL, which is the sharper form of the same claim: a row
-        # restated into "the wait ended when you switched session" also stops
+        # restated into "the wait ended without connecting" also stops
         # starting with "reconnecting", and it would be FALSE here — the attach
         # succeeded. That is what the settled flag at the break is for.
         assert notices == [], notices
@@ -937,14 +957,140 @@ async def test_a_redial_cancelled_by_a_sidebar_switch_settles_its_row(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_redial_cancelled_by_a_shutdown_names_no_cause(monkeypatch, tmp_path):
+    """MINOR-1 (round 3): Textual's shutdown takes the same arm as a switch.
+
+    `workers.cancel_all()` — which `_process_messages_loop`'s `finally` calls
+    when the message loop ends — cancels this worker on a quit exactly as the
+    sidebar's switch does, so the sentence that used to read "the wait ended when
+    you switched session" was false for every shutdown. The row is durable, so a
+    false cause could be read on the next launch beside a session the user never
+    left. What is true of both is that the resume never completed, and the row
+    now says that instead.
+
+    Driven on the real shutdown edge (`cancel_all`, the call Textual itself
+    makes) rather than by hand-raising a `CancelledError`, so the equivalence
+    the copy now rests on is executed. The how-to-retry half is asserted too: a
+    neutral cause must not cost the user their next step.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    parked = asyncio.Event()
+    dials: list[Any] = []
+
+    async def connect(*_args, **_kwargs):
+        dials.append(1)
+        if len(dials) == 1:
+            raise ConnectionError("attach refused")
+        parked.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with _running(app) as pilot:
+        app._run_session_transition(app._attach_or_refuse(tmp_path, "remote-1"))
+        for _ in range(200):
+            await pilot.pause()
+            if parked.is_set():
+                break
+        assert parked.is_set(), "the redial never reached its second dial"
+
+        app.workers.cancel_all()
+        for _ in range(200):
+            await pilot.pause()
+            if not app._session_transition_pending:
+                break
+
+        assert _notices(app) == [_stopped()]
+        # The cause is not asserted, because the code cannot establish one: no
+        # `switch`/`switched` anywhere on the rendered surface.
+        assert "switch" not in _rendered_text(app).lower()
+        assert "Run /resume remote-1 again to retry." in _rendered_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_second_abandonment_does_not_repeat_the_first_ones_sentence(monkeypatch, tmp_path):
+    """D1 (round 3): one settled sentence per conversation, because the words
+    carry no per-run information.
+
+    The cancellation sentence names only the session, so a SECOND abandoned
+    redial settled its fresh row into a byte-identical copy of the one already
+    in the view — measured on the round-3 head as `notice rows on screen: 2`,
+    regions `(12,14,75,3)` and `(12,18,75,3)`. Two adjacent identical blocks
+    say nothing the first one did not, so the run contributes no second copy
+    and the block that goes is its own live row.
+
+    NOT the verdict case: `test_a_second_resume_does_not_strand_the_first_ones_row`
+    keeps two identical VERDICTS (approved in rounds 1-2), and this narrowing
+    matches on the settle text only.
+    """
+    app = _app(monkeypatch, tmp_path)
+    record = _record(90909, "the remote")
+    parked: list[asyncio.Event] = []
+    dials: list[Any] = []
+
+    async def connect(*_args, **_kwargs):
+        dials.append(1)
+        # Odd dials fail, so every run narrates a row before its wait; even ones
+        # park where a switch finds the loop — the shape the `cancel2` rig drove.
+        if len(dials) % 2:
+            raise ConnectionError("attach refused")
+        event = asyncio.Event()
+        parked.append(event)
+        event.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+
+    async with _running(app) as pilot:
+        previous: NoticeBlock | None = None
+        for run in (1, 2):
+            app._run_session_transition(app._attach_or_refuse(tmp_path, "remote-1"))
+            for _ in range(200):
+                await pilot.pause()
+                if len(parked) == run:
+                    break
+            assert len(parked) == run, f"run {run} never reached its parked dial"
+            assert _notices(app)[-1].startswith("reconnecting to session remote-1")
+            app.workers.cancel_group(app, "session")
+            for _ in range(200):
+                await pilot.pause()
+                if not app._session_transition_pending:
+                    break
+            if run == 1:
+                # The row the first abandonment leaves behind. The second run
+                # must settle INTO this block, not append a copy beside it
+                # (design D1) — hence the identity check below.
+                previous = _notice_blocks(app)[0]
+
+        assert len(parked) == 2, "the second run never started, so D1 is untested"
+        assert previous is not None, "the first run's settled row was never captured"
+        rows = _rendered_notice_rows(app)
+        # ONE settled sentence for the conversation, and it is the FIRST run's
+        # own row, kept and restated rather than a second copy appended.
+        assert _notice_blocks(app) == [previous]
+        assert sum(1 for row in rows if "resume of remote-1 stopped" in row) == 1
+        assert _notices(app) == [_stopped()]
+        assert "still trying" not in _rendered_text(app)
+
+
+@pytest.mark.asyncio
 async def test_a_redial_cancelled_during_its_first_dial_invents_no_row(monkeypatch, tmp_path):
     """The settle restates the row the loop NARRATED; it never invents one.
 
     A `/resume` abandoned inside its very first silent envelope has nothing on
     screen yet, so there is nothing to correct — and the copy that would
-    otherwise be written ("the wait ended when you switched session") describes
-    a wait the user never saw. The invariant is about promises made, not about
-    exits taken.
+    otherwise be written ("the wait ended without connecting") describes a wait
+    the user never saw. The invariant is about promises made, not about exits
+    taken.
     """
     app = _app(monkeypatch, tmp_path)
     record = _record(90909, "the remote")
@@ -1105,6 +1251,63 @@ async def test_an_unreadable_registry_is_paced_rather_than_refused(monkeypatch, 
 
         assert clock.pauses == [5.0, 5.0, 2.0]
         assert not [n for n in _notices(app) if "older Local Operator process" in n]
+        assert _notices(app) == [_gave_up(UNREACHABLE_OWNER_MESSAGE)]
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_owner_is_paced_rather_than_told_it_is_an_older_process(
+    monkeypatch, tmp_path
+):
+    """review round 3 MINOR-2: `wedged` is not `absent`.
+
+    The registry has a third state — the pid is alive and the heartbeat is older
+    than `HEARTBEAT_TIMEOUT_S`, i.e. the owner is stuck — and it keeps that
+    record for exactly the reason the redial exists: a stuck owner may recover
+    on its own, which is the transient the budget outlasts. `dialable_record_exists`
+    asked only for `live`, so a wedged owner answered `False` and earned the
+    older-process sentence with the pacing skipped: a cause the code had not
+    established, printed for a current-version process that a redial could have
+    healed.
+
+    Driven through the REAL registry and the REAL `.session.pid` marker rather
+    than a stubbed classification of them, so the state under test is the one
+    `scan` actually produces — and the instrument is asserted first, because a
+    test that quietly drove the `live` branch would say nothing about this
+    finding.
+    """
+    app = _app(monkeypatch, tmp_path)
+    clock = _RedialClock()
+    clock.install(monkeypatch, wall_s=12.0)
+    monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", lambda _attempt: 5.0)
+
+    # A record for a REAL, live pid — this test process — aged past the
+    # heartbeat timeout, plus the claim marker naming it. Both are the files
+    # `find_runtime_record` reads in production.
+    record = replace(_record(os.getpid(), "the remote"), session_id="remote-1")
+    registry.publish(record, root=tmp_path)
+    published = registry.record_path(record.pid, root=tmp_path)
+    payload = json.loads(published.read_text())
+    payload["heartbeat_at"] = time.time() - (HEARTBEAT_TIMEOUT_S + 5.0)
+    published.write_text(json.dumps(payload))
+    marker = tmp_path / "sessions" / "remote-1"
+    marker.mkdir(parents=True, exist_ok=True)
+    (marker / ".session.pid").write_text(str(record.pid))
+
+    states = [state for found, state in registry.scan(tmp_path) if found.pid == record.pid]
+    assert states == ["wedged"], "the record is not wedged, so nothing below is about MINOR-2"
+
+    async def explode(*_args, **_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("a wedged owner's record is never handed to a dial")
+
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", explode)
+
+    async with _running(app):
+        await app._attach_or_refuse(tmp_path, "remote-1")
+
+        assert clock.pauses == [5.0, 5.0, 2.0], "the wedged owner's pacing was skipped"
+        assert not [
+            n for n in _notices(app) if "older Local Operator process" in n
+        ], "the older-process sentence was printed for a process the code never aged"
         assert _notices(app) == [_gave_up(UNREACHABLE_OWNER_MESSAGE)]
 
 

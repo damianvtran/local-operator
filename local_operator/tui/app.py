@@ -6931,6 +6931,16 @@ class OperatorApp(App[None]):
                 # re-arms automatically from here (`retry` stays False), so the
                 # only reader of a fresh count is the user's own next selection.
                 source.connect_attempts = 0
+                # THE LATCH IS A STATE END, SO THE COMPOSER'S ROW ENDS WITH IT
+                # (UX U1, round 3). This arm is the one that resolves the
+                # connect as a verdict for the user — the band reads "Reconnect
+                # failed · Select again to retry" — and a refusal row left
+                # saying "Reconnecting … it will keep trying" above it makes the
+                # app contradict itself at the exact moment the original defect
+                # is on screen. Called AFTER the two field writes above so the
+                # hint it restates from is the post-latch one.
+                if source is self._interaction:
+                    self._restate_composer_refusal()
         finally:
             if prepared is not None:
                 await self._release_sidebar_preparation(prepared)
@@ -11918,7 +11928,9 @@ class OperatorApp(App[None]):
         in place, so there is at most one such row.
 
         Called from the redial's every exit and from a sidebar connect that
-        COMPLETED — the two ways the state the row describes ends.
+        COMPLETED — two of the three ways the state the row describes ends; the
+        third is the sidebar's latch, which restates rather than retires (see
+        `_restate_composer_refusal`).
         """
         notice = self._composer_refusal_notice
         self._composer_refusal_notice = None
@@ -11930,6 +11942,59 @@ class OperatorApp(App[None]):
         parent = notice.parent
         if isinstance(parent, TranscriptView):
             parent.remove_block(notice)
+
+    def _restate_composer_refusal(self) -> None:
+        """Settle the refusal row into the state a sidebar LATCH published.
+
+        The latch is the third end of the state the row describes (UX U1,
+        round 3), beside the redial's exits and a completed connect. It is the
+        arm that resolves the connect as a verdict for the user — the band
+        reads "Reconnect failed · Select again to retry" and `connect_attempts`
+        goes back to zero — so a row still saying "Reconnecting … it will keep
+        trying for a few more seconds" above it made the app contradict itself
+        at the exact moment the original defect was on screen. The old bug
+        report is about that moment, which is why the contradiction matters
+        more than the row's grade.
+
+        Restated rather than retired, and through the row's own writer so the
+        two spellings cannot drift: the NEXT Enter already refreshes the row
+        into exactly this register (`Select this session again to retry.`), so
+        going through `composer_submission_refused` is what makes the surface
+        agree whether or not the user presses it. A latch with no row on screen
+        invents none — it is a state end, not a gesture, and only
+        `composer_submission_refused` speaks for gestures.
+        """
+        held = self._composer_refusal_notice
+        if held is None or not held.is_attached:
+            return
+        self.composer_submission_refused()
+
+    def _absorb_into_settled_notice(self, notice: NoticeBlock, text: str) -> bool:
+        """Settle into an identical settled sentence already in the same view.
+
+        Returns True when `notice`'s own view already holds `text`, having
+        retired `notice` in its favour. The redial's cancellation sentence names
+        only the session, so a second abandoned run settled its fresh row into a
+        byte-identical copy of the one already there: two adjacent identical
+        blocks in the current view (design D1, round 3). The sentence already on
+        screen says exactly what this run would have said, so the run
+        contributes no second copy — and the block that goes is this run's own
+        LIVE row, the only thing still promising a dial.
+
+        ONLY the cancellation arm calls it, because that is the sentence with no
+        per-run information: the fall-through for an unexpected raise reuses the
+        give-up sentence, and absorbing a repeat of that would collapse two
+        runs' verdicts into one (the one-row-per-run policy rounds 1-2 approved).
+        The match is therefore on one arm's text and never crosses registers.
+        """
+        parent = notice.parent
+        if not isinstance(parent, TranscriptView):
+            return False
+        for block in parent.blocks():
+            if block is not notice and isinstance(block, NoticeBlock) and block.text() == text:
+                parent.remove_block(notice)
+                return True
+        return False
 
     def composer_submission_blocked(
         self, text: str | None = None, *, shell: bool | None = None
@@ -12073,22 +12138,29 @@ class OperatorApp(App[None]):
         def stopped_text(unwound: BaseException | None) -> str:
             """The sentence for a redial that ended WITHOUT running to a verdict.
 
-            Reachable by cancellation — the sidebar switch, which is the exit the
-            composer copy recommends as the way to stop the wait — and by any
-            unexpected exception unwinding the loop. Only the row this loop
-            actually narrated is settled by it, so a `/resume` abandoned during
-            its first silent envelope (no row yet) gains no row here.
+            Reachable by cancellation and by any unexpected exception unwinding
+            the loop. Only the row this loop actually narrated is settled by it,
+            so a `/resume` abandoned during its first silent envelope (no row
+            yet) gains no row here.
 
-            The copy names the cause it can name rather than a diagnosis it
-            cannot: a `CancelledError` here IS the user switching away — the
-            sidebar cancels this worker group and nothing else does — and the way
-            back is a fresh `/resume`. Anything else gets the give-up sentence,
-            which is true of it: the wait is over and no dial is pending.
+            THE COPY NAMES NO CAUSE, because the cancellation arm has two and
+            the code cannot tell them apart (review round 3, MINOR-1): the
+            sidebar's switch cancels this worker group, and Textual cancels
+            EVERY worker when the message loop ends (`workers.cancel_all()` in
+            `_process_messages_loop`'s `finally`), so a quit or Ctrl+C mid-redial
+            lands on the same line. The row is durable, so a sentence claiming a
+            switch could be read on the next launch beside a session the user
+            never left. What is true of both is that the resume never completed —
+            said here as a fact rather than as a cause — and the way back is a
+            fresh `/resume`. (Design D2's `switched session` also read as a
+            dropped article, which a cause-neutral sentence does not have to
+            carry.) Anything else gets the give-up sentence, which is true of it:
+            the wait is over and no dial is pending.
             """
             if isinstance(unwound, asyncio.CancelledError):
                 return (
-                    f"resume of {concrete} stopped — the wait ended when you switched "
-                    f"session.\nRun /resume {concrete} again to retry."
+                    f"resume of {concrete} stopped — the wait ended without "
+                    f"connecting.\nRun /resume {concrete} again to retry."
                 )
             return gave_up_text(unwound if isinstance(unwound, Exception) else ConnectionError())
 
@@ -12167,6 +12239,15 @@ class OperatorApp(App[None]):
                 # anything else — a dialable record, or a registry that could
                 # not be read — is paced, and the timeout's own honest sentence
                 # is the outcome.
+                #
+                # A WEDGED OWNER IS PACED FOR THE SAME REASON (review round 3,
+                # MINOR-2). The registry's third state — pid alive, heartbeat
+                # older than `HEARTBEAT_TIMEOUT_S`, i.e. the owner is stuck — is
+                # a current-version process that may recover, and `scan` keeps
+                # its record for exactly that hope, so `dialable_record_exists`
+                # answers `True` for it. Asking only for `live` printed this
+                # sentence for a merely stuck owner and skipped the very wait
+                # that could have healed it.
                 #
                 # A MOVED OWNER PID IS PACED, NOT REFUSED. `find_runtime_record`
                 # derives its own owner from the same `.session.pid` marker the
@@ -12259,12 +12340,36 @@ class OperatorApp(App[None]):
             # `CancelledError` without reaching any verdict: without this, the
             # row the user left behind still promises a dial that is over, in
             # the session they return to, one more stranded row per abandoned
-            # run (design D1 / review m4 / QA Q2). Restating rather than
-            # removing keeps the one-row-per-run guarantee, and `settled` keeps
-            # this out of the two exits that already resolved the row. An
-            # unwind that delivered no dial at all has no row and gains none.
+            # run (design D1 / review m4 / QA Q2). Textual's own shutdown
+            # cancels every worker the same way (`workers.cancel_all()`), which
+            # is why the sentence below names no cause — see `stopped_text`.
+            # Restating rather than removing keeps the one-row-per-run
+            # guarantee, and `settled` keeps this out of the two exits that
+            # already resolved the row. An unwind that delivered no dial at all
+            # has no row and gains none.
             if not settled and retry_notice is not None and retry_notice.is_attached:
-                retry_notice.restate(stopped_text(sys.exc_info()[1]), "warning")
+                unwound = sys.exc_info()[1]
+                settled_text = stopped_text(unwound)
+                # ONE SETTLED SENTENCE PER CONVERSATION (design D1, round 3):
+                # the cancellation sentence carries no per-run information, so a
+                # SECOND abandoned redial settled its fresh row into a
+                # byte-identical copy of the one already there — two identical
+                # blocks adjacent in the current view. When the view already
+                # holds that exact sentence, it IS this run's outcome, and the
+                # block that goes is this run's own live row.
+                #
+                # Scoped to the CANCELLATION arm on purpose. The fall-through
+                # for an unexpected raise reuses the give-up sentence, and
+                # absorbing a repeat of THAT would collapse two runs' verdicts
+                # into one — the one-row-per-run policy rounds 1-2 approved and
+                # this round was told not to reopen (`_absorb_into_settled_notice`
+                # is the mechanism, called only here).
+                is_cancellation = isinstance(unwound, asyncio.CancelledError)
+                absorbed = is_cancellation and self._absorb_into_settled_notice(
+                    retry_notice, settled_text
+                )
+                if not absorbed:
+                    retry_notice.restate(settled_text, "warning")
                 retry_notice = None
             # The composer's refusal row describes the same state, so it ends
             # with the operation on every exit too.

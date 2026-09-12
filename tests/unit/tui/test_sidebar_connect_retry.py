@@ -41,6 +41,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from rich.text import Text
 
 from local_operator.session.attached import COLD_FALLBACK_S, AttachedSession
 from local_operator.tui import app as app_module
@@ -239,6 +240,26 @@ def _instant_backoff(monkeypatch, *, attempts: int | None = None) -> None:
     monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_BACKOFF_CEILING_S", 0.0)
     if attempts is not None:
         monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", attempts)
+
+
+def _notice_rows(app: OperatorApp) -> list[str]:
+    """What the notices on screen actually PAINT, one entry per row.
+
+    `NoticeBlock.text()` is the authored string; `_build()` is what the surface
+    shows. The claim these tests make is about the surface — a row that still
+    promises a dial is a rendered sentence, and a restate that changed nothing
+    on screen would pass a check on the authored list and fail the user.
+    """
+    rows: list[str] = []
+    for view in app.query(TranscriptView):
+        for block in view.blocks():
+            if not isinstance(block, NoticeBlock):
+                continue
+            # `_build` is typed as any renderable; these blocks build `Text`,
+            # and `plain` is the string the surface shows.
+            built = block._build()
+            rows.extend((built if isinstance(built, Text) else Text(str(built))).plain.split("\n"))
+    return rows
 
 
 @pytest.mark.asyncio
@@ -1250,3 +1271,66 @@ async def test_a_refused_enter_stops_speaking_once_the_connect_lands(monkeypatch
         views = list(app.query(TranscriptView))
         rows = [b for b in views[0].blocks() if isinstance(b, NoticeBlock)]
         assert [b.text() for b in rows if b.text().startswith("Send unavailable")] == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_enter_does_not_survive_the_latch(monkeypatch):
+    """UX U1's third exit: the LATCH is a state end too (round 3).
+
+    The row ends on the redial's exits and on a COMPLETED connect, but a
+    sidebar connect that LATCHES left it speaking in the present tense under the
+    band's own verdict — measured on the round-3 head at 14.23s:
+
+        LATCHED: status='Saved · Reconnect failed · Select again to retry'
+        notices at the latch: ['Send unavailable until connected. Reconnecting —
+                              it will keep trying for a few more seconds.']
+
+    The band had retracted the retry while the transcript still promised one,
+    in exactly the state the original bug report was about. Restated into the
+    register the user's next Enter already produced, so the two surfaces agree
+    whether or not they press it — and asserted on the PAINTED rows, because
+    the defect is what the user reads.
+    """
+    session = RecoveringRemote("gone")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        # NOT the collapsed backoff here: the Enter has to land in the mid-retry
+        # register ("Reconnecting — it will keep trying …"), which only exists
+        # while a round is PARKED. With a zeroed backoff the whole chain latches
+        # inside one `pilot.pause()` and the row is written in the
+        # pre-first-dial register instead — which would make this test pass on
+        # the very defect it exists to catch.
+        monkeypatch.setattr(app_module, "SIDEBAR_CONNECT_ATTEMPTS", 3)
+        monkeypatch.setattr(app_module, "sidebar_connect_backoff_s", lambda _attempt: 0.2)
+
+        app._start_sidebar_connection(source)
+        assert source.display_only is True
+        # Pump until the first attempt has failed, so the Enter lands in the
+        # register the user actually sees mid-retry (the `connect_attempts`
+        # hint) rather than in the pre-first-dial state.
+        for _ in range(400):
+            await pilot.pause()
+            if source.connect_attempts >= 1:
+                break
+        assert source.connect_attempts >= 1, "the connect never attempted a dial"
+        app.composer_submission_refused()
+        assert app._composer_refusal_notice is not None, "the refusal said nothing"
+        # The state the row describes, while it is still true.
+        assert any("will keep trying" in row for row in _notice_rows(app))
+
+        await _drain_retries(app, source)
+
+        assert source.connect_attempts == 0, "the connect did not latch"
+        assert app._status is not None
+        status = app._status.render_text(120).plain
+        assert "Reconnect failed" in status
+        assert "Select again to retry" in status
+
+        rows = _notice_rows(app)
+        assert "will keep trying" not in " ".join(
+            rows
+        ), "the refusal row outlived the latch and kept promising a dial"
+        assert any("Select this session again to retry." in row for row in rows)
+        # One row, not two: the restate replaces rather than stacks.
+        assert sum(1 for row in rows if "Send unavailable" in row) == 1
