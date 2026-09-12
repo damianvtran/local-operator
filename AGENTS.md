@@ -2036,10 +2036,39 @@ expired ticket also returns HTTP **200**, carrying
 `data.errorCode == "BailianGateway.Login.NotLogined"`. The fix is one line:
 capture a fresh cookie and re-run `set`.
 
+**The ticket AUGMENTS a Token Plan credential — it does not replace one.**
+This is the precondition that actually gates the feature, and it is invisible
+unless you know to look. `/usage` only fetches a provider `can_report_usage`
+accepts, which requires `is_usable` — and the ticket deliberately cannot
+satisfy that, because a row that did would be the exact blast radius the
+separate namespace exists to prevent. So with a valid ticket and NO
+`alibaba-token-plan` credential row, `/usage` renders nothing at all: no
+window, no error, no block.
+
+The way you get there is ordinary: `lop logout alibaba-token-plan` removes the
+credential row while leaving the ticket in place. `lop qwencloud-ticket status`
+warns when no such row exists, and that warning is the only signal — do not
+change `is_usable`, `has_any_credential` or `can_report_usage` to "fix" it.
+
 **Cache lag.** The stored ticket is deliberately not part of the usage cache
 fingerprint — hashing a full-account session cookie into a cache key is the
-worse trade — so replacing an expired ticket can take up to the 5-minute TTL to
-show. Press `r` in the panel to force it.
+worse trade. The consequence is that a ticket swap changes NOTHING the cache
+key observes (measured: byte-identical keys across two different tickets), so
+`set` and `rm` call `_invalidate_cached_usage` explicitly, exactly as `lop
+login` and `lop logout` do for the credentials they change. Without that call a
+latched `usage unavailable` row was served for up to ~12.5 minutes
+(`USAGE_UNAVAILABLE_RETRY_MS` 10 min, ±25% jitter) after the user had already
+pasted a working cookie. Press `r` in the panel to force a refresh regardless.
+
+**The value is validated at the door.** `set` rejects a ticket containing an
+embedded newline, any other control character, or a non-latin-1 character, and
+bounds the length at 4096 (the live cookie is 172 chars). This is not
+fastidiousness: the value's only use is interpolation into a `cookie:` header,
+httpx rejects such values LOCALLY, and the console fetcher swallows that as
+`httpx.HTTPError` — so the panel showed "no windows reported" with nothing
+linking it back to the paste. Copying the cookie out of devtools is the
+documented workflow and the cookie expires roughly weekly, so a multi-line
+paste is a recurring certainty rather than a corner case.
 
 **The update hazard.** `lop /update` or `uv tool upgrade` reinstalls from PyPI
 and silently reverts a locally built console fetcher while leaving the row in
