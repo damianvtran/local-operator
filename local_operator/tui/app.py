@@ -9149,11 +9149,28 @@ class OperatorApp(App[None]):
         self._projection_live_call_ids = live_projection_call_ids(session)
         try:
             # Inside the guard, with the projection it serves. `_transcript_view()`
-            # raises `NoMatches` once `#transcript` is gone — the shutdown reachable
-            # with a session-adoption worker in flight (`:18416`) — and the `finally`
-            # below resets the projection bookkeeping, so a read placed ahead of the
-            # `try` would skip those resets for a projection that never ran (review
-            # round 2, N4).
+            # raises `NoMatches` once `#transcript` is gone — the case `_shutdown`'s
+            # own docstring records (`_adopt_session` → `_render_resumed_history` →
+            # `_transcript_view()`, the crash the pre-prune worker cancel closed) —
+            # and the `finally` below resets the projection bookkeeping, so a read
+            # placed ahead of the `try` skipped those resets for a projection that
+            # never ran.
+            #
+            # The read is DEFENSIVE, not a live path. QA round 3 drove the teardown
+            # 8 times per tree and never entered it: 0 projection entries during
+            # teardown, with the painter workers cancelled before Textual prunes
+            # the tree. What is observable is the leak on the previous head,
+            # reached through the same raise: there `_projection_message_id` and
+            # `_projection_skipped_live` survived it, and the NEXT appended block
+            # inherited the stale anchor; on this head all three fields reset and
+            # the next block gets none.
+            #
+            # Named by FUNCTION, not by line, and the other citations in this
+            # comment were re-resolved against this tree on the way past: adding
+            # 29 comment lines above shifted the case this sentence is about, which
+            # is how the previous citation came to point at
+            # `_stop_multiplexer_broadcast` instead. A line number in a comment
+            # survives only until the next edit above it.
             fold_width = self._transcript_view().scrollable_content_region.width
             projected = project_settled_rows(self, history, bound=bound, fold_width=fold_width)
             # The visible transcript, so the app's own registry is the right

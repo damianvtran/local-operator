@@ -857,13 +857,22 @@ def project_settled_rows(
         # `OlderHistoryNotice box=96 authored at 80`).
         #
         # The pane where that is VISIBLE is a narrow one, not the 96-cell pane
-        # the `box=` readout above happens to carry (design round 2, D6): the
-        # sentence is 36 cells and fits on one row at every pane above ~44, so
-        # at 100x30 and 60x20 this notice paints identically before and after.
-        # Measured at 40x20 (pane 36): the fallback build is one row ending
-        # `…scroll up`, and this one wraps to a second, hanging-indented row —
-        # `…scroll` / `up to load`. Below the fallback the width is the
-        # difference between the whole sentence and a truncated one.
+        # the `box=` readout above happens to carry (design round 2, D6). The
+        # sentence is 40 cells and the body budget is `width - 6` (`body_budget`:
+        # the 2-cell spine indent plus the 4-cell glyph column), so the row stops
+        # wrapping at pane 46 — one row from 46 up, two rows at 44 and below.
+        # Measured by building the notice at fold widths 36..54 and reading each
+        # row's cell length: pane 44 → `[39, 8]` cells, pane 46 → `[44]`. An
+        # earlier cut of this comment carried the 40x20 PANE (36) as though it
+        # were the sentence's length — the sentence is 40, and a figure no
+        # reader can re-derive is worse than no figure.
+        #
+        # At 100x30 and 60x20 this notice therefore paints identically before
+        # and after, and the observable case is 40x20 (pane 36): the fallback
+        # build is one row ending `…scroll up`, and this one wraps to a second,
+        # hanging-indented row — `…scroll` / `up to load`. Below the wrap
+        # threshold the width is the difference between the whole sentence and
+        # a truncated one.
         notice = OlderHistoryNotice(RESUME_OLDER_NOTICE, fold_width=fold_width)
         self._resume_head_notice = notice
         self._append_block(notice)
