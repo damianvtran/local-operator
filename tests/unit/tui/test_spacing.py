@@ -201,12 +201,6 @@ async def test_a_ledger_of_tool_rows_is_one_row_each_under_the_real_sheet(
     was asked for; the row offsets say what the user sees, and they are what
     catches a `.tool-card` margin sneaking in on top of `.gap-above` and
     doubling it.
-
-    ONE ROW is about the card's INK, and the two numbers below are what keep
-    that honest now that the sheet pads a row below every summary. The content
-    box stays 1 — that is the no-reflow contract, and it is what would break if
-    a card resolved to two rows of TEXT — while the border box is 2 and the
-    pitch is 3: summary, the card's own pad, one row of ground.
     """
     cases: list[tuple[str, dict[str, object]]] = [
         ("bash", {"command": "pytest tests/unit -q"}),
@@ -230,30 +224,19 @@ async def test_a_ledger_of_tool_rows_is_one_row_each_under_the_real_sheet(
         await pilot.pause()
         await pilot.pause()
 
-        # Content box: still exactly one row of text per action, which is the
-        # regression above (a card that resolved to two rows of INK).
         assert [card.size.height for card in cards] == [1, 1, 1, 1]
-        # Border box: the summary plus the sheet's one pad row below it.
-        assert [card.region.height for card in cards] == [2, 2, 2, 2]
         # First meets the top edge; every following action takes its own row
-        # of ground on top of its own pad.
+        # of air. Two cells of pitch for a one-row card IS one blank row.
         assert not cards[0].has_class(GAP_CLASS)
         assert all(card.has_class(GAP_CLASS) for card in cards[1:])
         offsets = [card.region.y for card in cards]
-        assert [b - a for a, b in zip(offsets, offsets[1:])] == [3, 3, 3], offsets
+        assert [b - a for a, b in zip(offsets, offsets[1:])] == [2, 2, 2], offsets
 
 
 @pytest.mark.asyncio
 async def test_a_real_mouse_click_expands_and_collapses_under_the_real_sheet() -> None:
     """The pinned collapsed height must not defeat the expansion, and the one
-    row of ground below survives a card growing and coming back.
-
-    ``size`` is the CONTENT box throughout, so it excludes the pad row the
-    sheet adds below every summary; the pitch below it is measured on regions,
-    which include it. Both are asserted because the pairing is what a
-    height/padding mismatch breaks — a pad row uncounted by the height clips
-    the last line of revealed output, which is the line the card was opened
-    for."""
+    blank row below survives a card growing to four rows and back."""
     app = StyledTranscriptApp()
     async with app.run_test(size=(100, 24)) as pilot:
         view = app.query_one(TranscriptView)
@@ -265,23 +248,21 @@ async def test_a_real_mouse_click_expands_and_collapses_under_the_real_sheet() -
         below.mark_done("/tmp")
         await pilot.pause()
         assert card.size.height == 1
-        assert below.region.y - card.region.y == 3
+        assert below.region.y - card.region.y == 2
 
         await pilot.click(card)
         await pilot.pause()
         assert card.expanded is True
         assert card.size.height == 5  # summary + the call + three output rows
-        # Still exactly one row of ground: the expansion added rows to the
-        # card, not to the space under it. The pad row rides along with the
-        # content under `height: auto` rather than being clipped by it.
-        assert card.region.height == card.size.height + 1
-        assert below.region.y - card.region.y == 7
+        # Still exactly one blank row: the expansion added rows to the card,
+        # not to the space under it.
+        assert below.region.y - card.region.y == 6
 
         await pilot.click(card)
         await pilot.pause()
         assert card.expanded is False
         assert card.size.height == 1
-        assert below.region.y - card.region.y == 3
+        assert below.region.y - card.region.y == 2
 
 
 @pytest.mark.asyncio
