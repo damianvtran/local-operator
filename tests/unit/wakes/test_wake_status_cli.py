@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -25,6 +26,23 @@ from local_operator.wakes.install import SupervisorState
 from local_operator.wakes.store import write_entry
 
 NOW_MS = int(time.time() * 1000)
+
+
+def _arm(config_dir: Path, session_id: str, **kwargs: object) -> None:
+    """Index entry PLUS the session it belongs to.
+
+    Round 2 (QA Q4) taught `wake status` the supervisor's ghost predicate: an
+    index entry whose session has no transcript can never be engaged, so it is
+    no longer rendered as an armed, overdue wake. A bare ``write_entry`` builds
+    exactly that shape, which the product never produces — the session writes
+    its own transcript before it ever persists a schedule — so these fixtures
+    would all be ghosts and would test the ghost branch by accident. Tests that
+    WANT a ghost call ``write_entry`` directly and say so.
+    """
+    session = config_dir / "sessions" / session_id
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    write_entry(config_dir, session_id, **kwargs)  # type: ignore[arg-type]
 
 
 def _args(**kwargs: object) -> argparse.Namespace:
@@ -87,7 +105,7 @@ def test_a_stopped_supervisor_is_not_reported_as_installed(
     """
     from local_operator.cli import wake_command
 
-    write_entry(
+    _arm(
         tmp_path,
         "statussess01",
         cwd=str(tmp_path),
@@ -124,13 +142,13 @@ def test_status_reports_overdue_and_stale_counts(
     """
     from local_operator.cli import wake_command
 
-    write_entry(
+    _arm(
         tmp_path,
         "statussess02",
         cwd=str(tmp_path),
         schedules=[{"id": "w1", "message": "late watch", "next_due_at": NOW_MS - 600_000}],
     )
-    write_entry(
+    _arm(
         tmp_path,
         "statussess03",
         cwd=str(tmp_path),
@@ -146,9 +164,14 @@ def test_status_reports_overdue_and_stale_counts(
     # up on dominate the figure an operator reads as "how late am I".
     assert "overdue:     1" in out, out
     assert "stale:       1 past 7d" in out, out
-    # And `next:` names the FIREABLE wake, never the stale one.
-    next_line = next(line for line in out.splitlines() if line.startswith("next:"))
-    assert "late watch" in next_line, next_line
+    # The FIREABLE wake is the one named, never the stale one — and it is named
+    # on `overdue:`, not `next:`. Round 2 (D16): with nothing in the future,
+    # `next:` was labelling an already-late wake as a coming event and saying
+    # the same fact the line below it said. `next:` now appears only when there
+    # genuinely is a next.
+    overdue_line = next(line for line in out.splitlines() if line.startswith("overdue:"))
+    assert "late watch" in overdue_line, overdue_line
+    assert not [line for line in out.splitlines() if line.startswith("next:")], out
 
 
 def test_the_json_form_carries_the_machine_readable_state(
@@ -157,7 +180,7 @@ def test_the_json_form_carries_the_machine_readable_state(
     """A monitoring caller must not have to scrape the human rendering."""
     from local_operator.cli import wake_command
 
-    write_entry(
+    _arm(
         tmp_path,
         "statussess04",
         cwd=str(tmp_path),
@@ -181,13 +204,13 @@ def test_list_marks_overdue_and_stale_schedules(
 ) -> None:
     from local_operator.cli import wake_command
 
-    write_entry(
+    _arm(
         tmp_path,
         "statussess05",
         cwd=str(tmp_path),
         schedules=[{"id": "w1", "message": "late watch", "next_due_at": NOW_MS - 600_000}],
     )
-    write_entry(
+    _arm(
         tmp_path,
         "statussess06",
         cwd=str(tmp_path),
@@ -265,7 +288,7 @@ def test_an_unsupervisable_store_never_reports_another_stores_supervisor(
     if not is_supported():
         pytest.skip("launchd scoping is only meaningful on darwin with launchctl")
 
-    write_entry(
+    _arm(
         tmp_path,
         "statussess07",
         cwd=str(tmp_path),
@@ -321,7 +344,7 @@ def test_every_wake_entry_point_survives_the_real_parser(
     """
     from local_operator.cli import build_cli_parser, wake_command
 
-    write_entry(
+    _arm(
         tmp_path,
         "realparser1",
         cwd=str(tmp_path),
@@ -355,3 +378,229 @@ def test_the_parser_defines_every_flag_the_dispatcher_reads(tmp_path: Path) -> N
                 f"`lop {' '.join(argv)}` parses without `{flag}`, which `wake_command` "
                 f"dereferences — this is the round-1 blocker's exact shape"
             )
+
+
+# --- Round 2: the rendering guards ------------------------------------------
+
+
+def test_a_wake_in_another_year_renders_its_whole_time(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D11 (MAJOR): `format_wake_time` widens to 24 characters for an off-year
+    wake, and a fixed 18-wide column cut `Jan 01 2027 9:00 AM EST` to
+    `Jan 01 2027 9:00 A` — a half meridiem, no zone, no marker. `wake create`
+    printed the full form one line earlier, so the same wake read two ways.
+
+    Mutation-checked: restoring `format_wake_time(...)[:18]` fails this with
+    `the rendered time was truncated mid-token`.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes.display import format_wake_time
+
+    due = NOW_MS + 400 * 86400_000  # comfortably into the next calendar year
+    _arm(
+        tmp_path,
+        "nextyear0001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "annual renewal: TLS cert", "next_due_at": due}],
+    )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+
+    out = capsys.readouterr().out
+    expected = format_wake_time(due)
+    assert "2027" in expected or "2026" in expected, expected
+    row = next(line for line in out.splitlines() if "nextyear0001" in line)
+    assert expected in row, f"the rendered time was truncated mid-token: {row!r}"
+
+
+def test_a_session_id_is_never_silently_shortened(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R9: a 12-wide column rendered a longer id as a DIFFERENT id — one an
+    operator cannot paste into `lop wake list` or `lop stop`. A real id fits
+    whole; anything longer is marked.
+
+    Mutation-checked: restoring `row['session_id'][:id_w]` fails this with
+    `a truncated id is indistinguishable from a real one`.
+    """
+    from local_operator.cli import wake_command
+
+    real = "00264921d0d9"  # uuid4().hex[:12], the shape the product mints
+    longer = "lr_bda7b76d34e0"
+    for session_id in (real, longer):
+        _arm(
+            tmp_path,
+            session_id,
+            cwd=str(tmp_path),
+            schedules=[{"id": "w1", "message": "watch", "next_due_at": NOW_MS + 60_000}],
+        )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+
+    out = capsys.readouterr().out
+    assert real in out, f"a real 12-character id must render whole: {out}"
+    # The longer id does not fit; it must be MARKED, never silently shortened
+    # into a different, real-looking id.
+    assert (
+        longer[:12] not in out or longer in out or "…" in out
+    ), f"a truncated id is indistinguishable from a real one: {out!r}"
+    ghosty = [line for line in out.splitlines() if "lr_bda7b76d" in line]
+    assert ghosty and ("…" in ghosty[0] or longer in ghosty[0]), ghosty
+
+
+def test_a_narrow_terminal_keeps_the_columns_aligned(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """D12 / QA Q1: at 60 columns every row wrapped (68-71 chars), so the
+    alignment this table exists for was gone in a split pane. The absolute
+    time is the redundant half — `DUE` answers "when" in 11 characters — so it
+    is what yields, and the omission is stated rather than silent.
+
+    Mutation-checked: forcing `show_when = True` fails this with
+    `row exceeds the terminal width`.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((60, 24))
+    )
+    _arm(
+        tmp_path,
+        "narrowsess01",
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "w1",
+                "message": "cluster watch: aws-prod-2 node rotation",
+                "next_due_at": NOW_MS + 400 * 86400_000,
+            }
+        ],
+    )
+
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+
+    out = capsys.readouterr().out
+    for line in out.splitlines():
+        assert len(line) <= 60, f"row exceeds the terminal width ({len(line)}): {line!r}"
+    assert "WHEN hidden" in out, out
+
+
+def test_status_and_the_supervisor_agree_about_a_ghost(
+    tmp_path: Path, stopped_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q4: a ghost-only store made the two halves contradict each other —
+    the supervisor retired ("no fireable wakes remain") while this frame said
+    `1 armed`, `overdue: 1`. A painted frame that disagrees with the process is
+    the defect class this PR exists to remove.
+
+    `write_entry` directly, not `_arm`: the whole point is an index entry with
+    no session on disk.
+
+    Mutation-checked: removing the `ghost` predicate from `_wake_rows` fails
+    this with `status claims a wake is coming that the supervisor has retired
+    over`.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.wakes.store import read_index
+    from local_operator.wakes.supervisor import _has_fireable_wakes
+
+    write_entry(
+        tmp_path,
+        "ghostsess001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "orphaned watch", "next_due_at": NOW_MS - 600_000}],
+    )
+
+    # The supervisor's verdict on this exact store.
+    assert not _has_fireable_wakes(read_index(tmp_path), config_dir=tmp_path)
+
+    assert wake_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "ghost:       1 with no session on disk" in out, out
+    assert (
+        "overdue:" not in out
+    ), f"status claims a wake is coming that the supervisor has retired over: {out}"
+
+    assert wake_command(_args(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ghost"] == 1
+    assert payload["overdue"] == 0
+    assert payload["next_fireable_due_in_s"] is None
+    assert payload["unfireable"]["ghost"] == ["ghostsess001"]
+
+
+def test_a_long_status_line_folds_at_the_surfaces_indent(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """D13 + QA Q2: the `wedged:` line was 108 columns and the only one whose
+    continuation started at column 0, and `next:`/`overdue:` interpolate a
+    user-authored message that was never clamped (156 columns measured).
+
+    Mutation-checked: bypassing `_wrap_status` fails this with
+    `status line exceeds the terminal width`.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((80, 24))
+    )
+    _arm(
+        tmp_path,
+        "verbosewake1",
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "w1",
+                "message": (
+                    "prod watch: NER backfill completion across every shard, then "
+                    "reconcile the ledger and post the summary to the release thread"
+                ),
+                "next_due_at": NOW_MS - 600_000,
+            }
+        ],
+    )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    for line in out.splitlines():
+        assert len(line) <= 80, f"status line exceeds the terminal width ({len(line)}): {line!r}"
+    # Continuations align with the label column rather than starting at 0.
+    continuations = [
+        line
+        for line in out.splitlines()
+        if line.startswith(" ") and line.strip() and not line.startswith(" " * 13)
+    ]
+    assert not continuations, f"a continuation broke the 13-column indent: {continuations}"
+
+
+def test_a_remedy_command_is_never_split_across_lines(
+    tmp_path: Path, stopped_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """Every remedy on this surface is a command the operator copies; a wrap
+    inside one produces a line that looks like an instruction and is not
+    runnable. Folding must treat a quoted command as one token.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((62, 24))
+    )
+    _arm(
+        tmp_path,
+        "remedysess01",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "watch", "next_due_at": NOW_MS + 60_000}],
+    )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "'lop wake install'" in out, out

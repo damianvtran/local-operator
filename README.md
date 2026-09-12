@@ -273,9 +273,10 @@ Work keeps moving after you walk away.
   and reports how many occurrences it skipped, rather than replaying six
   hourly checks at once. `lop wake status` reports whether the supervisor is
   actually *running* (not merely installed), the soonest wake that will fire,
-  and how many are overdue, dormant, or too stale for the supervisor to keep
-  retrying; `lop wake list` shows every schedule with that state per row. When
-  the supervisor has stopped or gone missing, `lop wake install` puts it back.
+  and how many are overdue, dormant, too stale for the supervisor to keep
+  retrying, or blocked by a wedged runtime holding the session lease; `lop
+  wake list` shows every schedule with that state per row. When the supervisor
+  has stopped or gone missing, `lop wake install` puts it back.
   Human-readable wake times use the machine's
   local timezone, labelled explicitly, with a 12-hour AM/PM clock by default.
   Other dates include the month/day (and year when different). Choose **Wake

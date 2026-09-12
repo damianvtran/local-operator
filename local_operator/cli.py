@@ -2913,14 +2913,24 @@ def _wake_rows() -> "list[dict[str, Any]]":
 
     from local_operator.paths import config_dir
     from local_operator.wakes.store import read_index
-    from local_operator.wakes.supervisor import STALE_AFTER_S
+    from local_operator.wakes.supervisor import STALE_AFTER_S, _session_exists
 
+    root = config_dir()
     now_ms = int(_time.time() * 1000)
     rows: list[dict[str, Any]] = []
-    for session_id, entry in read_index(config_dir()).items():
+    for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
             continue
         dormant = bool(entry.get("stopped_at"))
+        # GHOST, asked with the supervisor's own predicate (round 2, Q4). The
+        # supervisor refuses an entry whose session has no transcript and
+        # retires on a ghost-only store, while this listing had no ghost
+        # notion at all — so the rendered frame said "1 armed, 10m overdue"
+        # about a wake the process had already gone home over. A painted frame
+        # that contradicts the process is the defect class this PR exists to
+        # remove, so the two surfaces share the predicate rather than deriving
+        # it twice.
+        ghost = not dormant and not _session_exists(root, session_id)
         for raw in entry.get("schedules") or ():
             if not isinstance(raw, dict):
                 continue
@@ -2966,6 +2976,7 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     "overdue": due < now_ms,
                     "overdue_s": max((now_ms - due) / 1000.0, 0.0),
                     "stale": (now_ms - due) / 1000.0 > STALE_AFTER_S,
+                    "ghost": ghost,
                     # Written by the session (the one writer of schedule
                     # state), absent on an entry that has not fired since the
                     # fields were added rather than defaulted to a lie.
@@ -3023,19 +3034,42 @@ def wake_command(args: argparse.Namespace) -> int:
         # Splitting the two time facts into their own columns is what makes the
         # padding mean something.
         term_width = shutil.get_terminal_size((80, 24)).columns
-        # Widths sized from the real renderings rather than guessed: the
-        # absolute time is "Sep 02 6:10 PM EDT" at its longest (18), the
-        # relative cell "10m overdue" (11), and a session id is 12. Anything
-        # wider is room taken from the message for no gain.
-        when_w, rel_w, id_w = 18, 11, 12
-        # The message takes what is left, never more, so a row cannot wrap.
-        # The floor keeps it readable on a narrow terminal at the cost of
-        # overflowing there — a deliberate trade, since truncating to nothing
-        # would be worse than one wrapped line.
-        message_w = max(24, term_width - (when_w + rel_w + id_w + 3) - 1)
-        print(f"{'WHEN':<{when_w}} {'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
+        # A RENDERED TIME IS NEVER TRUNCATED (round 2, D11). `format_wake_time`
+        # chooses its own form — a clock alone for today, a date for another
+        # day, a year as well for another year — so its width is 11 to 24
+        # characters depending on the wake, and a fixed 18 cut `Jan 01 2027
+        # 9:00 AM EST` to `Jan 01 2027 9:00 A`: a half meridiem, no zone, and
+        # no marker to say anything was dropped. A time that is wrong is worse
+        # than a time that is absent, and unlike a message (which the reader
+        # can recognise from its start) there is no recovering a mangled clock.
+        #
+        # So the column is sized from THE ROWS BEING RENDERED, and the
+        # renderer's output is printed whole or not at all.
+        when_cells = {row["next_due_at"]: format_wake_time(row["next_due_at"]) for row in rows}
+        when_w = max(len(cell) for cell in when_cells.values())
+        rel_w = 11  # "10m overdue"
+        # SLACK for the id (round 2, R9). Ids are `uuid4().hex[:12]`, and a
+        # 12-wide column truncated a 12-character id to exactly itself with no
+        # room to show that anything was cut — while the 15-character `lr_` ids
+        # that appear in real stores rendered as a DIFFERENT id an operator
+        # cannot paste back. 13 gives a real id slack, and `_elide_id` marks
+        # anything longer instead of silently shortening it.
+        id_w = 13
+        fixed = rel_w + id_w + 2
+        message_floor = 24
+        # WHEN IS THE COLUMN THAT YIELDS on a narrow terminal (round 2, D12 /
+        # QA Q1), because the relative `DUE` cell answers "when does this fire"
+        # in 11 characters and the absolute time is the redundant half. Dropping
+        # it keeps the table aligned at 60 columns instead of wrapping every
+        # row, which is the trade D12 argued for — shed the absolute time
+        # rather than the alignment.
+        show_when = term_width >= when_w + fixed + 1 + message_floor
+        head = fixed + (when_w + 1 if show_when else 0)
+        message_w = max(message_floor, term_width - head - 1)
+        header = f"{'WHEN':<{when_w}} " if show_when else ""
+        print(f"{header}{'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
-            when = format_wake_time(row["next_due_at"])[:when_w]
+            when = when_cells[row["next_due_at"]]
             # DORMANT WINS, and the overdue/stale marks are suppressed under it
             # (round 1, Q2/R6). A dormant wake is one nothing is SUPPOSED to
             # fire, so "(OVERDUE)" — which means "should have fired and did
@@ -3050,6 +3084,11 @@ def wake_command(args: argparse.Namespace) -> int:
             # restated on every row what the reader needs told once.
             if row["dormant"]:
                 state = "dormant"
+            elif row["ghost"]:
+                # Ghost before stale: with no session on disk, nothing can fire
+                # this at all, which is a stronger statement than "the
+                # supervisor stopped retrying" (round 2, Q4).
+                state = "ghost"
             elif row["stale"]:
                 state = "stale"
             else:
@@ -3093,19 +3132,43 @@ def wake_command(args: argparse.Namespace) -> int:
             if len(message) > room:
                 message = message[: max(room - 1, 1)] + "…"
             detail = f"{message}{tail}"
+            when_cell = f"{when:<{when_w}} " if show_when else ""
             print(
-                f"{when:<{when_w}} {state:>{rel_w}} "
-                f"{row['session_id'][:id_w]:<{id_w}} {detail:<{message_w}}".rstrip()
+                f"{when_cell}{state:>{rel_w}} "
+                f"{_elide_id(row['session_id'], id_w):<{id_w}} {detail}".rstrip()
             )
+
         # ONE legend under the table rather than the same sentence on every
         # row, and only for the states actually present: what "stale" and
         # "dormant" COST is the thing a reader needs told, but telling it per
         # row is what made a single wake occupy 155 columns.
-        if any(row["stale"] and not row["dormant"] for row in rows):
-            print("\nstale    the supervisor no longer fires these; they are delivered")
-            print("         when their session is next opened")
+        # The legend folds to the terminal like the rows do (round 2, D12):
+        # a legend that wraps is the same ragged frame the table just stopped
+        # producing. 9 = the width of the state word plus its gap.
+        def _legend(word: str, text: str) -> None:
+            import textwrap
+
+            print()
+            for line in textwrap.wrap(
+                f"{word:<9}{text}", width=term_width, subsequent_indent=" " * 9
+            ):
+                print(line)
+
+        if any(row["stale"] and not row["dormant"] and not row["ghost"] for row in rows):
+            _legend(
+                "stale",
+                "the supervisor no longer fires these; they are delivered when "
+                "their session is next opened",
+            )
         if any(row["dormant"] for row in rows):
-            print("\ndormant  the session was stopped; reopening it re-arms its wakes")
+            _legend("dormant", "the session was stopped; reopening it re-arms its wakes")
+        if any(row["ghost"] for row in rows):
+            _legend("ghost", "no session with this id exists on disk; nothing can fire these")
+        if not show_when:
+            # The omission is STATED, not silent: the absolute time was dropped
+            # to keep the table aligned on a narrow terminal (round 2, D12), and
+            # the reader is told where it went rather than left to notice.
+            print("\n(WHEN hidden — terminal too narrow)")
         return 0
 
     # status
@@ -3162,8 +3225,13 @@ def wake_command(args: argparse.Namespace) -> int:
     # in three minutes was absent from the screen entirely.
     armed = [row for row in rows if not row["dormant"]]
     dormant = [row for row in rows if row["dormant"]]
-    fireable = [row for row in armed if not row["stale"]]
-    stale = [row for row in armed if row["stale"]]
+    # GHOST sits beside stale as a reason the supervisor will not fire a row
+    # (round 2, Q4): an index entry whose session has no transcript can never
+    # be engaged, and the supervisor retires on a ghost-only store. Excluded
+    # from `fireable` for exactly the same reason stale is.
+    ghost = [row for row in armed if row["ghost"]]
+    stale = [row for row in armed if row["stale"] and not row["ghost"]]
+    fireable = [row for row in armed if not row["stale"] and not row["ghost"]]
     overdue = [row for row in fireable if row["overdue"]]
     upcoming = fireable  # already sorted soonest-first by `_wake_rows`
 
@@ -3171,6 +3239,9 @@ def wake_command(args: argparse.Namespace) -> int:
     # reads the registry, and a session with three schedules is still one
     # process. Only sessions with something armed are worth asking about — a
     # dormant session's runtime being wedged is not why its wake is not firing.
+    # Each call is a `registry.scan`, which walks the run directory AND reaps
+    # records for dead processes (round 2, R10) — cheap and idempotent at this
+    # scale (measured 19 sessions / 28 ms), but not a free read.
     from local_operator.wakes.supervisor import wedged_runtime
 
     wedged: list[tuple[str, int, float]] = []
@@ -3204,9 +3275,14 @@ def wake_command(args: argparse.Namespace) -> int:
         "scheduled": len(rows),
         "armed": len(armed),
         "dormant": len(dormant),
-        # The soonest FIREABLE wake, which is the only honest answer to "when
-        # will something happen"; `next_due_in_s` used to name the stale row.
-        "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        # NAMED FOR WHAT THEY MEAN (round 2, D18). `next_due_in_s` silently
+        # changed meaning in round 1 — it began excluding stale rows, which is
+        # what D2 asked for, under a name that still reads "the soonest due
+        # wake" — and a consumer wanting the raw value had nowhere to get it.
+        # Both are published: the fireable one under an explicit name, the raw
+        # one under the original name so an existing consumer keeps parsing.
+        "next_due_in_s": rows[0]["due_in_s"] if rows else None,
+        "next_fireable_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
         "supervisor": {
             # False whenever the answer would be about another store, so a
             # monitoring caller cannot read this block as a verdict on THIS
@@ -3220,8 +3296,21 @@ def wake_command(args: argparse.Namespace) -> int:
             "uptime_s": uptime_s,
             "detail": state.detail if state else "",
         },
+        # `overdue` counts FIREABLE rows only, which is what makes it
+        # reconcilable: `scheduled` = fireable + dormant + stale + ghost, and
+        # `overdue` is a subset of the fireable ones. Round 2 (D18) noted a
+        # consumer had no way to tell which rows were inside it; the
+        # `unfireable` block below is that breakdown.
         "overdue": len(overdue),
         "stale": len(stale),
+        "ghost": len(ghost),
+        # Why each non-firing row will not fire, so the counts above can be
+        # reconciled without re-deriving the classification.
+        "unfireable": {
+            "dormant": [row["session_id"] for row in dormant],
+            "stale": [row["session_id"] for row in stale],
+            "ghost": [row["session_id"] for row in ghost],
+        },
         "max_overdue_s": max((row["overdue_s"] for row in overdue), default=0.0),
         # The wedged case: a runtime whose process is alive but whose
         # heartbeat has gone stale holds the transcript lease without serving,
@@ -3243,8 +3332,8 @@ def wake_command(args: argparse.Namespace) -> int:
         # store. Observed during validation, where an isolated run printed the
         # operator's real LaunchAgent pid.
         print("supervisor:  cannot be verified for this store")
-        print(f"             ({state.detail})")
-        print("             (wakes here fire only while a session is open)")
+        print(_wrap_status(f"({state.detail})"))
+        print(_wrap_status("(wakes here fire only while a session is open)"))
     elif running:
         detail = f"running (pid {state.pid})" if state and state.pid else "running"
         # Suppressed under a minute: `up 0s` on a just-started supervisor is
@@ -3267,16 +3356,23 @@ def wake_command(args: argparse.Namespace) -> int:
     # `run 'lop wake install'` twice in a four-line block.
     if is_supported() and verifiable and not running:
         if rows:
-            print("             (nothing will fire these while their sessions are")
-            print("              closed — run 'lop wake install')")
+            print(
+                _wrap_status(
+                    "(nothing will fire these while their sessions are closed — "
+                    "run 'lop wake install')"
+                )
+            )
         else:
-            print("             (run 'lop wake install')")
+            print(_wrap_status("(run 'lop wake install')"))
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole
         # point of this line.
-        print("             (no installer for this platform — wakes fire only while a")
-        print("              session is open)")
+        print(
+            _wrap_status(
+                "(no installer for this platform — wakes fire only while a session is open)"
+            )
+        )
 
     # DORMANCY IS NAMED (round 1, D3). `scheduled: 1 (0 armed)` with no word of
     # explanation was a dead end for the operator asking "why has nothing
@@ -3286,37 +3382,122 @@ def wake_command(args: argparse.Namespace) -> int:
         counts += f", {len(dormant)} dormant"
     print(f"scheduled:   {len(rows)} ({counts})")
     if dormant and not armed:
-        print("             (dormant — their sessions were stopped; reopening one re-arms it)")
+        print(_wrap_status("(dormant — their sessions were stopped; reopening one re-arms it)"))
 
-    # ONE LINE PER DISTINCT STATE (round 1, D5). A single stale wake used to
-    # occupy four lines that restated the same fact, and `next:` promised a
-    # future event while naming something nine days past.
-    if upcoming:
+    # ONE LINE PER DISTINCT STATE (round 1, D5; sharpened in round 2, D16).
+    # `next:` is only printed when there IS a next — a fireable wake in the
+    # future. An overdue fireable wake is reported by the `overdue:` line
+    # below, because labelling something already late as "next" promises a
+    # future event, and saying it twice was the overlap D16 named.
+    if upcoming and not upcoming[0]["overdue"]:
         soonest = upcoming[0]
-        when = _format_due(soonest["due_in_s"])
-        print(f"next:        {when}  {soonest['message']}")
-    elif armed:
-        # Armed but nothing fireable: every armed wake is stale.
-        print("next:        none — nothing here will fire until its session is opened")
+        print(_wrap_status(f"{_format_due(soonest['due_in_s'])}  {soonest['message']}", "next:"))
     if overdue:
         # Counted over FIREABLE rows only, so "worst" is a wake that is
-        # actually coming rather than one the supervisor has given up on.
+        # actually coming rather than one the supervisor has given up on. The
+        # soonest overdue row is named, since with nothing in the future this
+        # is the line that answers "what is the supervisor working on".
         worst = max(row["overdue_s"] for row in overdue)
-        print(f"overdue:     {len(overdue)} (worst {_format_duration(worst)})")
+        summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        print(_wrap_status(summary, "overdue:"))
     if stale:
         print(
-            f"stale:       {len(stale)} past {int(stale_after_days)}d — delivered when "
-            "their sessions are next opened"
+            _wrap_status(
+                f"{len(stale)} past {int(stale_after_days)}d — delivered when their "
+                "sessions are next opened",
+                "stale:",
+            )
+        )
+    if ghost:
+        # The supervisor refuses these and retires on a ghost-only store
+        # (round 2, Q4). Saying so here is what stops this frame contradicting
+        # the process; the remedy is the session, not the wake subsystem.
+        print(
+            _wrap_status(
+                f"{len(ghost)} with no session on disk — nothing can fire these; "
+                "the entry is removed when that session id is next written",
+                "ghost:",
+            )
         )
     for session_id, pid, age in wedged:
-        # Named on its own line because the remedy is different from every
-        # other state here: nothing the wake subsystem does will help, and the
-        # operator has to decide whether that process is recoverable.
+        # Named on its own line because the remedy is a DIFFERENT command from
+        # every other non-running state (round 2, D14): the surface points at
+        # `lop wake install` elsewhere, and here no wake-subsystem action can
+        # help at all, so it names the two commands that can.
         print(
-            f"wedged:      {session_id} (pid {pid}) has not heartbeat for "
-            f"{_format_duration(age)}; it holds the lease, so its wake cannot fire"
+            _wrap_status(
+                f"{session_id} (pid {pid}) has not sent a heartbeat in "
+                f"{_format_duration(age)}; it holds the session lease, so its wake "
+                f"cannot fire. It will not recover on its own — 'lop sessions' shows "
+                f"it, 'lop stop --pid {pid}' ends it",
+                "wedged:",
+            )
         )
     return 0
+
+
+def _elide_id(session_id: str, width: int) -> str:
+    """A session id that fits, and that SAYS SO when it does not.
+
+    Round 2 (R9): `session_id[:12]` in a 12-wide column rendered a
+    15-character id as a different, shorter id — one an operator cannot paste
+    back into `lop wake list` or `lop stop`, with nothing marking it as cut.
+    Truncating an identifier is not like truncating a message: the reader can
+    recognise a message from its opening words and cannot reconstruct an id.
+    Ids are `uuid4().hex[:12]` so the column fits every id the product mints;
+    anything longer is marked rather than silently shortened.
+    """
+    if len(session_id) <= width:
+        return session_id
+    return session_id[: max(width - 1, 1)] + "…"
+
+
+#: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
+#: Every continuation line on that surface already indents to it, so a new
+#: line that wraps at column 0 reads as a different block (round 2, D13).
+_STATUS_LABEL_W = 13
+
+
+def _wrap_status(text: str, label: str = "") -> str:
+    """One `wake status` line, folded at the surface's own hanging indent.
+
+    Two round-2 findings meet here. D13: the `wedged:` line was 108 columns and
+    the only one whose continuation started at column 0, so the single line an
+    operator must act on was the one rendered as a ragged paragraph. Q2: the
+    `next:`/`overdue:` lines interpolate a user-authored wake message and were
+    never clamped — a 129-character message produced a 156-column line at every
+    terminal width, which is the last unclamped string on either screen.
+
+    Wrapping rather than truncating, because unlike the `wake list` table (one
+    row per wake, where a clamp keeps the columns) these lines are prose and
+    the whole sentence is the payload.
+    """
+    import re
+    import shutil
+    import textwrap
+
+    width = max(shutil.get_terminal_size((80, 24)).columns, _STATUS_LABEL_W + 24)
+    indent = " " * _STATUS_LABEL_W
+    first = f"{label:<{_STATUS_LABEL_W}}{text}" if label else f"{indent}{text}"
+
+    # A QUOTED COMMAND IS ONE TOKEN. Every remedy on this surface is a command
+    # the operator copies — `'lop wake install'`, `'lop stop --pid 4242'` — and
+    # a wrap inside one produces a line that looks like an instruction and is
+    # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
+    # single quotes are hidden from it and restored afterwards.
+    nbsp = "\x00"
+    protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
+    return "\n".join(
+        textwrap.wrap(
+            protected,
+            width=width,
+            subsequent_indent=indent,
+            # A wake message can carry a path or a URL; breaking one makes it
+            # unusable, and an over-long line is the lesser harm.
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    ).replace(nbsp, " ")
 
 
 def _json_dumps(value: Any) -> str:

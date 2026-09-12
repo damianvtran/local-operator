@@ -9,6 +9,10 @@ also deliver would double-fire every wake it touched.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import logging
 import os
 import subprocess
 import sys
@@ -1027,3 +1031,309 @@ def test_the_wedged_probe_reads_the_registry_classification(
         lambda _root=None: [(record, "live")],
     )
     assert wedged_runtime(tmp_path, "sessionwedg3") is None
+
+
+# --- Round 2: per-schedule staleness, and the guards the round added ---------
+#
+# Round 2's reviewer observed that 3 of round 1's 4 new guards survived being
+# reverted while the whole suite stayed green — the delta's own guards were its
+# least-tested code, which is how R7 and R8 passed a green CI. Every test below
+# is written to FAIL on a specific reverted line, and each was mutation-checked
+# by actually reverting that line.
+
+
+def _mixed_entry(now_ms: int) -> dict[str, object]:
+    """One entry: a >7-day stale one-shot beside a live recurring watch.
+
+    The R7 shape. `next_due_at(entry)` answers with the EARLIEST schedule, so
+    an entry-level staleness test classifies this whole entry as stale — and
+    once that predicate drove retirement, the live 20-minute watch stopped
+    firing for good with no trace.
+    """
+    return {
+        "schema": 1,
+        "session_id": "mixedentry01",
+        "cwd": "/tmp",
+        "updated_at": now_ms,
+        "schedules": [
+            {"id": "w1", "message": "ancient one-shot", "next_due_at": now_ms - 9 * 86400_000},
+            {
+                "id": "w2",
+                "message": "20-minute watch",
+                "next_due_at": now_ms - 5_000,
+                "every_ms": 1_200_000,
+            },
+        ],
+    }
+
+
+def test_a_stale_schedule_does_not_speak_for_its_live_siblings(tmp_path: Path) -> None:
+    """R7 (BLOCKER): mixed entry ⇒ still fireable, and the LIVE wake is the one due.
+
+    Mutation-checked: restoring the entry-level test (`_is_stale` answering on
+    `next_due_at(entry)`) fails this with
+    `the supervisor retired on an entry holding a live 20-minute watch`.
+    """
+    from local_operator.wakes.supervisor import (
+        _due_sessions,
+        _fireable_due_ms,
+        _has_fireable_wakes,
+        _is_stale,
+    )
+
+    now_ms = int(time.time() * 1000)
+    entry = _mixed_entry(now_ms)
+    index = {"mixedentry01": entry}
+    (tmp_path / "sessions" / "mixedentry01").mkdir(parents=True)
+    (tmp_path / "sessions" / "mixedentry01" / "transcript.jsonl").write_text("{}\n")
+
+    assert not _is_stale(entry, now_ms), "an entry with a live schedule is not stale"
+    assert _has_fireable_wakes(
+        index, config_dir=tmp_path, now_ms=now_ms
+    ), "the supervisor retired on an entry holding a live 20-minute watch"
+    # And the wake it engages is the live one, not the week-old one-shot: the
+    # occurrence key is built from this figure, so engaging on the stale row
+    # would also mis-key the in-flight dedupe.
+    assert _fireable_due_ms(entry, now_ms) == now_ms - 5_000
+    assert [due for _, _, due in _due_sessions(index, now_ms)] == [now_ms - 5_000]
+
+
+def test_an_entry_whose_every_schedule_is_stale_is_still_stale(tmp_path: Path) -> None:
+    """The other half of R7: `all(...)` must not become "never stale"."""
+    from local_operator.wakes.supervisor import _has_fireable_wakes, _is_stale
+
+    now_ms = int(time.time() * 1000)
+    entry = {
+        "schema": 1,
+        "session_id": "allstale0001",
+        "cwd": "/tmp",
+        "schedules": [
+            {"id": "w1", "message": "old", "next_due_at": now_ms - 9 * 86400_000},
+            {"id": "w2", "message": "older", "next_due_at": now_ms - 30 * 86400_000},
+        ],
+    }
+    (tmp_path / "sessions" / "allstale0001").mkdir(parents=True)
+    (tmp_path / "sessions" / "allstale0001" / "transcript.jsonl").write_text("{}\n")
+
+    assert _is_stale(entry, now_ms)
+    assert not _has_fireable_wakes({"allstale0001": entry}, config_dir=tmp_path, now_ms=now_ms)
+
+
+@pytest.mark.asyncio
+async def test_serve_keeps_running_for_a_live_watch_beside_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R7 end to end: `serve()` must not retire, and must engage the live wake.
+
+    The reviewer's probe asserted on the process, not the predicate, because
+    the two disagreed: the contract-level test passed while `serve()` exited 0
+    in 0.2 s. This runs the real loop.
+    """
+    from local_operator.wakes import supervisor as mod
+
+    (tmp_path / "wakes").mkdir()
+    (tmp_path / "sessions" / "mixedentry01").mkdir(parents=True)
+    (tmp_path / "sessions" / "mixedentry01" / "transcript.jsonl").write_text("{}\n")
+    now_ms = int(time.time() * 1000)
+    (tmp_path / "wakes" / "mixedentry01.json").write_text(json.dumps(_mixed_entry(now_ms)))
+
+    engaged: list[str] = []
+
+    async def _fake_engage(session_id: str, *_args: object, **_kwargs: object) -> object:
+        engaged.append(session_id)
+        return object()
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _fake_engage)
+    monkeypatch.setattr(mod, "SLICE_S", 0.05)
+
+    task = asyncio.create_task(mod.serve(tmp_path))
+    await asyncio.sleep(0.6)
+    still_running = not task.done()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert still_running, "serve() retired on an entry that holds a live recurring watch"
+    # The fake engage does not advance the schedule (the real session owns that
+    # write), so the same occurrence stays due and is re-engaged each slice —
+    # what matters is that it fired AT ALL, which it did not before this fix.
+    assert engaged, "the live watch never fired"
+    assert set(engaged) == {"mixedentry01"}, engaged
+    assert "the supervisor is retiring" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_retirement_line_says_which_state_it_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D15/R7: a stale-only store retires BEFORE the sweep, so the retirement
+    line is the only line the operator gets — it must carry the reason.
+
+    Mutation-checked: dropping `_retirement_reason` from the log call fails
+    this with `the retirement line does not say why`.
+    """
+    from local_operator.wakes import supervisor as mod
+
+    (tmp_path / "wakes").mkdir()
+    (tmp_path / "sessions" / "staleonly001").mkdir(parents=True)
+    (tmp_path / "sessions" / "staleonly001" / "transcript.jsonl").write_text("{}\n")
+    now_ms = int(time.time() * 1000)
+    (tmp_path / "wakes" / "staleonly001.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "session_id": "staleonly001",
+                "cwd": "/tmp",
+                "schedules": [
+                    {"id": "w1", "message": "forgotten", "next_due_at": now_ms - 9 * 86400_000}
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(mod, "SLICE_S", 0.05)
+
+    with caplog.at_level(logging.INFO):
+        rc = await mod.serve(tmp_path)
+
+    assert rc == 0
+    assert "the supervisor is retiring" in caplog.text
+    assert (
+        "past the 7d staleness bound" in caplog.text
+    ), f"the retirement line does not say why: {caplog.text}"
+    assert "delivered when their sessions are next opened" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_runtimeerror_from_engage_is_throttled_and_the_wake_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R8 (MAJOR): `engage_runtime` documents RuntimeError for "every candidate
+    died"; unhandled, it escaped a detached task as a 13-line asyncio traceback
+    per slice — 8,640/day into an unrotated log, bypassing the throttle.
+
+    Mutation-checked: removing `RuntimeError` from the `except` fails this with
+    `a RuntimeError escaped the engage as an unretrieved task exception`.
+    """
+    from local_operator.wakes import supervisor as mod
+
+    (tmp_path / "wakes").mkdir()
+    (tmp_path / "sessions" / "alwaysfail01").mkdir(parents=True)
+    (tmp_path / "sessions" / "alwaysfail01" / "transcript.jsonl").write_text("{}\n")
+    now_ms = int(time.time() * 1000)
+    (tmp_path / "wakes" / "alwaysfail01.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "session_id": "alwaysfail01",
+                "cwd": "/tmp",
+                "schedules": [
+                    {
+                        "id": "w1",
+                        "message": "doomed",
+                        "next_due_at": now_ms - 5_000,
+                        "every_ms": 1_200_000,
+                    }
+                ],
+            }
+        )
+    )
+
+    attempts = 0
+
+    async def _always_raises(*_args: object, **_kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("every candidate died: no credential")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _always_raises)
+    monkeypatch.setattr(mod, "SLICE_S", 0.05)
+
+    loop_exceptions: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda _loop, context: loop_exceptions.append(context)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        task = asyncio.create_task(mod.serve(tmp_path))
+        await asyncio.sleep(1.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await asyncio.sleep(0)
+
+    assert (
+        not loop_exceptions
+    ), f"a RuntimeError escaped the engage as an unretrieved task exception: {loop_exceptions}"
+    # Retried, not lost: the schedule is untouched, so later passes try again.
+    assert attempts > 1, f"the wake was not retried after the failure (attempts={attempts})"
+    # THROTTLED: many attempts, few lines. The burst bound is _SKIP_BURST.
+    lines = [rec for rec in caplog.records if "could not start a runtime" in rec.message]
+    assert (
+        len(lines) <= mod._SKIP_LOG_BURST
+    ), f"{attempts} failures produced {len(lines)} log lines; the throttle was bypassed"
+    assert lines and lines[0].message.startswith("failed:"), lines[0].message if lines else "none"
+
+
+@pytest.mark.asyncio
+async def test_an_unanticipated_raise_from_an_engage_does_not_flood_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R8's belt: `_engage_one` is a detached task, so ANY unhandled raise lands
+    in the same hole. A type nobody anticipated must still degrade to one
+    throttled line, not a traceback per slice.
+
+    Mutation-checked: removing the `except Exception` belt from `_run` fails
+    this with `an unanticipated raise escaped the detached task`.
+    """
+    from local_operator.wakes import supervisor as mod
+
+    (tmp_path / "wakes").mkdir()
+    (tmp_path / "sessions" / "weirdfail001").mkdir(parents=True)
+    (tmp_path / "sessions" / "weirdfail001" / "transcript.jsonl").write_text("{}\n")
+    now_ms = int(time.time() * 1000)
+    (tmp_path / "wakes" / "weirdfail001.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "session_id": "weirdfail001",
+                "cwd": "/tmp",
+                "schedules": [
+                    {
+                        "id": "w1",
+                        "message": "doomed",
+                        "next_due_at": now_ms - 5_000,
+                        "every_ms": 1_200_000,
+                    }
+                ],
+            }
+        )
+    )
+
+    async def _raises_unexpectedly(*_args: object, **_kwargs: object) -> object:
+        raise ValueError("nobody planned for this")
+
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch.engage_runtime", _raises_unexpectedly
+    )
+    monkeypatch.setattr(mod, "SLICE_S", 0.05)
+
+    loop_exceptions: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(
+        lambda _loop, context: loop_exceptions.append(context)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        task = asyncio.create_task(mod.serve(tmp_path))
+        await asyncio.sleep(1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await asyncio.sleep(0)
+
+    assert (
+        not loop_exceptions
+    ), f"an unanticipated raise escaped the detached task: {loop_exceptions}"
+    errors = [rec for rec in caplog.records if rec.message.startswith("error:")]
+    assert errors, "the belt swallowed the failure without a word"
+    assert len(errors) <= mod._SKIP_LOG_BURST, f"{len(errors)} lines; the throttle was bypassed"
+    assert "ValueError" in errors[0].message
