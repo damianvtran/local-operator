@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import subprocess
+import sys
 import tempfile
 import time
 from contextlib import suppress
@@ -374,3 +376,243 @@ def test_the_candidates_keep_paths_whose_directories_are_already_gone(
         "broker would never be reaped"
     )
     assert not gone.exists(), "the test's premise: the directories are gone by teardown"
+
+
+def _run_nested_pytest(
+    tmp_path: Path, body: str, *, extra_argv: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """Run one test file under a REAL nested pytest that loads this repo's conftest.
+
+    The end-to-end tests below cannot be expressed in-process: what they pin is
+    pytest's own FINALISATION ORDER — ``tmp_path`` is torn down before an autouse
+    fixture declared in ``tests/conftest.py``, because that fixture is set up
+    first and finalisers run in reverse — and a test cannot observe its own
+    teardown. A nested run can: the inner test records what it started, the outer
+    one reads the record after the inner session has finished tearing down.
+
+    ``pytest_plugins = ["tests.conftest"]`` rather than a copy of the fixture:
+    the subject is the SHIPPED conftest, so anything that reproduces it here
+    would pass while the real one leaked — which is precisely the failure issue
+    #958 describes. ``-n0`` keeps the inner session single-process so the pid the
+    inner test writes is the broker's parent-visible one, and ``-p
+    no:cacheprovider`` keeps the inner run from writing a cache into the repo.
+
+    **``tmp_path_retention_policy = "failed"`` is load-bearing, not inherited.**
+    A nested run given its own ``-c`` ini does NOT pick up the root
+    ``pyproject.toml``, and that setting is the entire precondition for the bug:
+    under it, `tmp_path`'s own finaliser REMOVES the directory when the test
+    passed, before an autouse fixture declared in ``tests/conftest.py`` is
+    finalised — so a teardown-time walk finds nothing. Verified both ways here:
+    with the default policy the directory still exists at teardown and a
+    teardown-only sweep would have worked, which would have made this test pass
+    against the very code it is meant to catch.
+    """
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "conftest.py").write_text('pytest_plugins = ["tests.conftest"]\n')
+    (inner / "test_inner.py").write_text(body)
+    # Mirrors the root `pyproject.toml`'s `[tool.pytest.ini_options]` for the two
+    # settings this reproduction depends on. `-c` below points the inner run at
+    # it, which also stops it inheriting the root `addopts` (`-n auto`).
+    (inner / "pytest.ini").write_text(
+        "[pytest]\ntmp_path_retention_policy = failed\ntmp_path_retention_count = 3\n"
+    )
+    repo_root = Path(__file__).resolve().parents[3]
+    environment = dict(os.environ)
+    # The inner interpreter must import BOTH `local_operator` and `tests.conftest`
+    # from this worktree — see AGENTS.md on a subprocess resolving the root
+    # checkout's copy when it is launched with the wrong path.
+    environment["PYTHONPATH"] = str(repo_root)
+    environment["LO958_RECORD"] = str(tmp_path / "record.txt")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(inner / "test_inner.py"),
+            "-q",
+            "-n0",
+            "-p",
+            "no:cacheprovider",
+            "-c",
+            str(inner / "pytest.ini"),
+            f"--basetemp={tmp_path / 'inner-basetemp'}",
+            *extra_argv,
+        ],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+#: The inner test for the end-to-end case: start a real broker under the config
+#: dir the test itself uses, and record its pid for the outer test to check.
+_INNER_STARTS_A_BROKER = '''
+import os
+from pathlib import Path
+
+from local_operator.secrets import client
+
+
+def test_starts_a_broker(tmp_path, monkeypatch):
+    """Stands in for every test that touches the store: it leaves a broker up."""
+    base = tmp_path / "config"
+    base.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(base))
+    assert client.ensure_broker(base), "the broker never came up"
+    pid = (client.broker_status(base) or {}).get("pid")
+    assert isinstance(pid, int), "no pid to hand to the outer test"
+    Path(os.environ["LO958_RECORD"]).write_text(f"{pid}\\n{base}")
+'''
+
+
+def test_a_broker_a_test_started_is_dead_once_that_test_has_torn_down(tmp_path: Path) -> None:
+    """The end-to-end regression guard for issue #958, at the level that broke.
+
+    Every other test in this file drives `_stop_brokers_in` or the candidate list
+    DIRECTLY, which is why the leak survived them all: the helper was correct and
+    the sweep still reaped nothing, because the candidate list it was given at
+    teardown had already collapsed to the default-config-dir entry. The bug lived
+    in the ORDERING, so only a test that submits to the real ordering can catch a
+    regression of it.
+
+    Fails against the pre-#985 conftest (candidate discovery at teardown only)
+    and passes with the call-phase reap; that A/B is in the PR for #958.
+
+    Asserted through `_wait_gone` rather than a bare `pid_alive` for the reason
+    that helper documents, and it matters MORE here: the sweep waits for the
+    daemon to stop ANSWERING, which happens as it closes its listener — a step
+    before it exits — so the broker is reliably still a process for a moment
+    after the inner pytest returns (measured on this machine: alive at t+0s,
+    gone by t+0.25s). A bare probe would flap on that scheduling. The bounded
+    wait still separates the two outcomes the test is about, because a LEAKED
+    broker does not exit at all: it idles for 30 minutes.
+    """
+    result = _run_nested_pytest(tmp_path, _INNER_STARTS_A_BROKER)
+    assert result.returncode == 0, f"the inner run failed:\n{result.stdout}\n{result.stderr}"
+
+    record = (tmp_path / "record.txt").read_text().splitlines()
+    pid, base = int(record[0]), Path(record[1])
+    try:
+        assert _wait_gone(pid), (
+            f"broker {pid} for {base} outlived the test that started it — the sweep "
+            "saw no candidate naming this test's config dir (issue #958)"
+        )
+    finally:
+        _kill_pid(pid)
+
+
+#: The inner test for the session-end net: a MODULE-SCOPED fixture starts a
+#: broker in its teardown, under a directory from ``tmp_path_factory``. That
+#: directory is in no test's ``tmp_path``, so no per-test record can name it and
+#: the module finaliser runs after the last test's function-scoped sweep — the
+#: one shape neither per-test mechanism can reach. Verified to leak without the
+#: net: the broker was still alive a second after the inner run returned.
+_INNER_STARTS_A_BROKER_AT_TEARDOWN = """
+import os
+from pathlib import Path
+
+import pytest
+
+from local_operator.secrets import client
+
+
+@pytest.fixture(scope="module")
+def module_scoped_store(tmp_path_factory):
+    base = tmp_path_factory.mktemp("modcfg")
+    yield base
+    # Module teardown: after the last test's function-scoped autouse sweep, in a
+    # directory that was never any test's tmp_path. Only the session-end net
+    # sees this one.
+    assert client.ensure_broker(base)
+    pid = (client.broker_status(base) or {}).get("pid")
+    Path(os.environ["LO958_RECORD"]).write_text(f"{pid}\\n{base}")
+
+
+def test_touches_the_store(module_scoped_store, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(module_scoped_store))
+"""
+
+
+def test_the_session_end_net_reaps_a_broker_started_after_the_per_test_reap(
+    tmp_path: Path,
+) -> None:
+    """The case neither per-test mechanism can see, and the count the net reports.
+
+    A module-scoped fixture's directory comes from ``tmp_path_factory`` and so
+    belongs to no test's ``tmp_path``: no per-test record can name it, and its
+    finaliser runs after the last function-scoped sweep. That is a structural
+    gap rather than a bug in the per-test reap, and it is what
+    `pytest_sessionfinish` covers.
+
+    Issue #958 asked for the net to REPORT what it reclaimed, so a leak past the
+    per-test reap stays visible instead of being silently absorbed; the reported
+    count is asserted for that reason rather than as decoration.
+    """
+    result = _run_nested_pytest(tmp_path, _INNER_STARTS_A_BROKER_AT_TEARDOWN)
+    assert result.returncode == 0, f"the inner run failed:\n{result.stdout}\n{result.stderr}"
+
+    record = (tmp_path / "record.txt").read_text().splitlines()
+    pid, base = int(record[0]), Path(record[1])
+    try:
+        assert _wait_gone(pid), (
+            f"broker {pid} for {base} survived the session it was started in — the "
+            "session-end net did not reach it"
+        )
+        assert "[broker-sweep] session-end net reclaimed 1 live broker" in result.stderr, (
+            "the net reaped the broker but reported nothing, so a suite leaking "
+            f"past the per-test reap would look clean:\n{result.stderr}"
+        )
+    finally:
+        _kill_pid(pid)
+
+
+def test_a_spawned_broker_names_itself_in_the_process_listing(config_root: Path) -> None:
+    """Issue #958's open question: the branded child in a teardown listing.
+
+    Every pre-#954 CI teardown listed a bare ``Local Operator`` child and nothing
+    said what it was. It was this: `_spawn_broker` launches ``[sys.executable,
+    "-m", ...]``, and in any process that has been through
+    `procname.reexec_branded` — every real ``lop`` launch — ``sys.executable`` IS
+    the branded hardlink, so the broker inherited the product name alone.
+
+    Asserted on ``argv``, deliberately, because that is the axis a teardown dump
+    reads and the only one that survives: Linux ``comm`` truncates at 15 bytes,
+    so ``Local Operator`` and every labelled form are indistinguishable there.
+    The argv is read back from the REAL spawned process rather than from
+    `_broker_argv0`, so a label that never reaches the child fails this.
+
+    The branded-``sys.executable`` precondition is macOS-only (a branded image is
+    only planted there — `procname.branded_link_path` returns None elsewhere), so
+    this test pins the part that holds EVERYWHERE: the label reaches the child's
+    argv whatever the image is. The branded-parent capture is in the PR for #958.
+    """
+    pid = _start(config_root)
+    try:
+        listing = subprocess.run(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+        assert "[secret broker]" in listing, (
+            f"a spawned broker is unidentifiable in `ps`: {listing!r} — this is the "
+            "unexplained branded child of issue #958"
+        )
+        # The digest ties the row to the socket directory on disk, which is what
+        # makes the label actionable rather than merely decorative; and it is a
+        # digest and not the path because argv is world-readable.
+        digest = _runtime_fallback_dir(secrets_dir(config_root)).name.rsplit("-", 1)[-1]
+        assert f"store={digest}" in listing, (
+            f"the label does not name this broker's store: {listing!r}; expected the "
+            f"digest {digest} that also names its runtime directory"
+        )
+        assert "local_operator.secrets.brokerd" in listing, (
+            "the module must stay in argv: it is how the issue's reopen condition "
+            f"('argv is not -m local_operator.secrets.brokerd') is checked: {listing!r}"
+        )
+    finally:
+        _kill(config_root)
+        _kill_pid(pid)

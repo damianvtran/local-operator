@@ -277,6 +277,17 @@ def _spawn_broker(base: Path | None) -> None:
     broker being detached is correct (it must outlive its starter), while a
     CLIENT being detached is exactly the attacker shape spike 9 denies. They
     are different processes with different requirements.
+
+    **The child names itself in ``ps``, and that is a bug fix rather than
+    decoration (issue #958).** ``sys.executable`` is the branded hardlink in any
+    process that has been through :func:`procname.reexec_branded` — every real
+    ``lop`` launch — so this spawn used to produce a process whose whole identity
+    in a process listing was the product name, with nothing to say it was a
+    broker or which store it held. That is precisely the unexplained ``Local
+    Operator`` child every pre-#954 CI teardown listed, and on Linux ``comm``
+    truncates at 15 bytes, so no two branded children could be told apart there
+    either. Relabelling ``argv[0]`` fixes it on the one axis that is NOT
+    truncated (``ps -o args``), which is the axis those teardown dumps read.
     """
     environment = os.environ.copy()
     if base is not None:
@@ -285,7 +296,13 @@ def _spawn_broker(base: Path | None) -> None:
         environment[CONFIG_DIR_ENV] = str(base)
     with open(os.devnull, "rb") as devnull_in, open(os.devnull, "wb") as devnull_out:
         subprocess.Popen(
-            [sys.executable, "-m", "local_operator.secrets.brokerd"],
+            # ``argv[0]`` is the label and ``executable=`` is the real image:
+            # the two independent name axes documented in
+            # :mod:`local_operator.procname`. Passing ``executable=`` explicitly
+            # is what lets argv[0] stop being a path at all, which is also why
+            # this works on Linux, where there is no branded image to plant.
+            [_broker_argv0(base), "-m", "local_operator.secrets.brokerd"],
+            executable=sys.executable,
             stdin=devnull_in,
             stdout=devnull_out,
             stderr=devnull_out,
@@ -293,6 +310,33 @@ def _spawn_broker(base: Path | None) -> None:
             env=environment,
             close_fds=True,
         )
+
+
+def _broker_argv0(base: Path | None) -> str:
+    """The ``argv[0]`` label for a broker serving ``base``, or the interpreter path.
+
+    Degrades to ``sys.executable`` — today's exact behaviour — on any failure,
+    because a daemon must never fail to start over its own decoration. That is
+    the same contract every other spawn site in this project holds
+    (``proc.spawn_detached``, ``tools/eval.py``).
+
+    The store digest comes from the SAME derivation
+    :func:`local_operator.secrets.protocol._runtime_fallback_dir` uses for the
+    socket directory name, so the row in ``ps`` and the directory under
+    ``TMPDIR`` carry the same identifier and an operator can match one to the
+    other. It is a digest and not the path itself because argv is world-readable
+    and a config dir can name a user or a project.
+    """
+    try:
+        import hashlib
+
+        from local_operator import procname
+        from local_operator.secrets.keys import secrets_dir
+
+        digest = hashlib.sha256(str(secrets_dir(base)).encode("utf-8")).hexdigest()[:12]
+        return procname.branded_argv0(procname.LABEL_BROKER, digest=digest)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a failure
+        return sys.executable
 
 
 def fetch_master_key(base: Path | None = None) -> bytes:
