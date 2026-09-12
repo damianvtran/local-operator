@@ -20,9 +20,9 @@
 # syntax against GitHub's own CODEOWNERS validator
 # (`gh api repos/damianvtran/local-operator/codeowners/errors`, which
 # validates the default branch; the pre-change baseline on `main` returned an
-# empty error list). Both owners added 2026-09-10 -- `olafagbemi` and
-# `sherman-tsui` -- were confirmed as write collaborators the same day, so
-# every handle on the `*` line below is already effective.
+# empty error list). As of 2026-09-11 every handle on the `*` line below has
+# been confirmed a write collaborator that way, so the line is effective in
+# full -- five names, all live.
 #
 # 2026-09-10 ADDITIONS -- `olafagbemi` and `sherman-tsui` were added as
 # owners on 2026-09-10 by explicit operator decision, and each was invited
@@ -32,18 +32,21 @@
 # `gh api repos/damianvtran/local-operator/collaborators/<handle>/permission`
 # returns `write` for each, so both handles on the `*` line are effective.
 #
-# `SanaKetabchi` was on the same 2026-09-10 operator request and was invited
-# with `write` permission (invitation 332543898), but that invitation was
-# still PENDING as of 2026-09-10 21:50 UTC, so she was REMOVED from this
-# file the same day by operator decision: per the documented rule above a
-# pending handle is silently ignored by GitHub -- the exact failure mode
-# this file exists to prevent. She is NOT an owner. The invitation is left
-# open (do not cancel it; GitHub invitations expire seven days after
-# creation, 2026-09-17 for this one), and a later PR will add her if and
-# when she accepts. Her handle must not sit on the owners line "for later"
-# -- that is the silent-ignore failure described above. Re-check state with
-# `gh api repos/damianvtran/local-operator/collaborators` and
-# `gh api repos/damianvtran/local-operator/invitations`.
+# 2026-09-11 RESOLUTION -- `SanaKetabchi` was on the same 2026-09-10 operator
+# request and was invited with `write` permission (invitation 332543898,
+# issued 2026-09-10 15:54 UTC), but that invitation was still PENDING as of
+# 2026-09-10 21:50 UTC, so she was held off the owners line then by operator
+# decision: per the documented rule above a pending handle is silently
+# ignored by GitHub -- the exact failure mode this file exists to prevent.
+# That deferral was recorded in PR #911, which shipped the two accepted
+# owners over the same 2026-09-10 request and stated a later PR would add her
+# if and when she accepted. She has now ACCEPTED: invitation 332543898 is
+# consumed (`gh api repos/damianvtran/local-operator/invitations` returns an
+# empty list) and
+# `gh api
+# repos/damianvtran/local-operator/collaborators/SanaKetabchi/permission`
+# returns `write`, so as of 2026-09-11 her handle on the `*` line below is
+# effective. This PR is that promised follow-up, and it closes the deferral.
 #
 # Handle verification for the 2026-09-10 candidates, in the same
 # evidence-first spirit: all three are listed together in
@@ -62,4 +65,4 @@
 # non-owners because no such decision covers them.
 
 # Default owners for everything in the repository.
-* @damianvtran @bbqben @olafagbemi @sherman-tsui
+* @damianvtran @bbqben @olafagbemi @sherman-tsui @SanaKetabchi
