@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -30,6 +31,7 @@ from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
@@ -281,6 +283,28 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # a PATCH route or hand-written YAML stores). Non-default in every case:
     # the section's contract is that defaults resolve to NO ``provider``
     # object at all.
+    # The one key in this section that is NOT a wire preference: it gates the
+    # harness-side cache affinity pin, so it is probed through the gate that
+    # actually reads it rather than through the `provider` resolver (which
+    # deliberately ignores it — see test_openrouter_defaults_mean_no_opinion).
+    # Probed False because the default is True: the probe must observe a
+    # CHANGE reaching the live session.
+    "providers.openrouter.provider_affinity": (
+        False,
+        # Built against the session's LIVE routing mapping, which is the thing
+        # a cross-process write has to reach; the gate itself is pure over that
+        # mapping, so this observes the same decision `__call__` would make.
+        lambda s, w: SessionStreamFn(MagicMock(), s.routing_settings, "probe")._affinity_enabled(
+            ChatRequest(
+                model=ModelSpec(
+                    provider="openrouter",
+                    model_id="deepseek/deepseek-v4.1-flash",
+                    supports_prompt_cache=True,
+                ),
+                messages=[Message.user("hi")],
+            )
+        ),
+    ),
     "providers.openrouter.sort": (
         "price",
         lambda s, w: (_openrouter_provider_preferences(s.routing_settings) or {}).get("sort"),

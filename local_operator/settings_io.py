@@ -740,6 +740,28 @@ SETTINGS: tuple[Setting, ...] = (
     # then price/perf. Labels carry no "OpenRouter " prefix — the section
     # header already says it, and the prefix pushed the distinguishing words
     # past the 29-cell label budget (design round 1, D5).
+    # Leads the section despite the reading order below, because it is the one
+    # row that is ON by default and every row after it OVERRIDES it: a user who
+    # sets `sort`, `order`, `only` or `ignore` has expressed a host preference,
+    # and the harness then stops pinning entirely (`SessionStreamFn._affinity_
+    # enabled`). Reading it first is what makes that relationship visible.
+    #
+    # Also the one row here that is NOT a wire key. The four `provider` object
+    # keys below are resolved by `_openrouter_provider_preferences` and sent to
+    # OpenRouter; this one is a HARNESS switch, deliberately not read by that
+    # resolver — see the note on the parity test in tests/unit/test_settings_io.
+    Setting(
+        key="providers.openrouter.provider_affinity",
+        path=("providers", "openrouter", "provider_affinity"),
+        section="openrouter",
+        label="cache affinity",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Reuses the host that served the previous turn so the prompt cache "
+            "stays warm. Off = OpenRouter's price-weighted load balancing."
+        ),
+    ),
     Setting(
         key="providers.openrouter.sort",
         path=("providers", "openrouter", "sort"),
