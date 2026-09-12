@@ -15,6 +15,8 @@ says so instead of implying a guard that does not exist.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -1128,6 +1130,11 @@ async def test_an_old_send_deadline_cannot_sever_its_replacement(
     assert ErrorCode.EXTENSION_DISCONNECTED.value in body
     assert ErrorCode.EXTENSION_UNRESPONSIVE.value not in body
     assert "notdelivered" in body.replace('"', ""), body
+    # ...and it carries `phase`, so the reader is not told to open a browser
+    # that is already open (design D3-3). Without the discriminator the client
+    # renders the code's own copy: "no browser is attached. Ask the user to
+    # open their browser".
+    assert '"phase":"replaced"' in body, body
 
 
 @pytest.mark.asyncio
@@ -1378,3 +1385,343 @@ async def test_a_superseded_socket_that_never_closes_does_not_park_the_accept(
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+# --- Audit round 2 re-audit: A1, the handshake's shared-state install -------
+#
+# The auditor drove three overlapping hellos at the real `extension()` and
+# showed that a superseded handshake could still WRITE. Their verdict was that
+# the replacement path retained the stale-handler defect with an authorization
+# consequence (`rpc not_paired -> ok`), and that a revoke could clear a
+# replacement that arrived while its close was in flight. Both rows below fail
+# on `bb039c18e`.
+
+
+class _GatedClosePeer(_FakePeer):
+    """A peer whose ``close()`` parks until the test releases it.
+
+    A1's repro needs the superseded socket's close held OPEN while a third
+    handshake arrives — that await is the window the daemon has to survive.
+    Distinct from ``_StallingClosePeer``, which models a close that never
+    finishes at all (A2's bound), rather than one that resumes into a race.
+    """
+
+    def __init__(self, extension_id: str = EXTENSION_ID) -> None:
+        super().__init__(extension_id)
+        self.close_entered = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def close(self, code: int | None = None, reason: str | None = None) -> None:
+        self.closed.append(code)
+        self.close_entered.set()
+        await self.release_close.wait()
+
+
+class _AnsweringPeer(_FakePeer):
+    """A scripted peer that ANSWERS every command frame it is sent.
+
+    The authorization half of the A1 row is that an invalid-token peer could be
+    DRIVEN, so the test has to show the drive either landing (pre-fix) or never
+    leaving the daemon (post-fix). A peer that stayed mute could not tell those
+    apart — it would look identical to a daemon that refused.
+    """
+
+    def __init__(self, extension_id: str = EXTENSION_ID) -> None:
+        super().__init__(extension_id)
+        self.commands: list[dict[str, Any]] = []
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        await super().send_json(payload)
+        if "method" in payload:
+            self.commands.append(payload)
+            self.push({"id": payload["id"], "ok": True, "result": {"driven": True}})
+
+
+def _saved_pairing(root: Path, token: str) -> None:
+    """Write the REAL pairing record the handshake validates against.
+
+    The auditor's script stubbed ``_read_json``; this writes the file the daemon
+    actually reads, through the same writer ``_try_pair`` uses, inside the
+    test's own root. Token validation, the origin check and ``reset_pairing``
+    therefore all run for real.
+    """
+    daemon_module._private_write(
+        daemon_module._pairing_path(root),
+        {
+            "extension_id": EXTENSION_ID,
+            "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+            "paired_at": time.time(),
+        },
+    )
+
+
+async def _reply(service: BridgeService, request_id: str) -> dict[str, Any]:
+    """The decoded body of one `tabs` RPC through the real HTTP gate."""
+    response = await _rpc(service, {"id": request_id, "method": "tabs", "params": {}})
+    return json.loads(bytes(response.body).decode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_handshake_cannot_authorize_its_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1 (blocker): the install must not straddle an await, and the ack must be fenced.
+
+    The auditor's sequence against the pinned head, through the production
+    `extension()`, token check and `rpc()`: W1's close is held, W2 (valid token)
+    installs itself and parks on that close, W3 arrives with the permitted
+    extension id and an INVALID token, and when W1's close is released the
+    superseded W2 writes its own verdict — `paired: True` — onto W3's link. W3
+    then drives RPCs through the real pairing gate:
+
+        before: not_paired      after: ok -> {"accepted_by_unpaired_peer": true}
+
+    That is authorization of a rejected token, not a stale frame. The guard is
+    ordering: every shared-state write (identity, pairing, liveness, latch)
+    completes before the first yield after `attach`, so a handshake that no
+    longer owns the link has nothing left to write, and the ack it would have
+    sent is fenced by identity too.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 5.0)
+    _saved_pairing(tmp_path, "good-token")
+    service = BridgeService(root=tmp_path)
+
+    first = _GatedClosePeer()
+    first.push(_hello(token="good-token"))
+    first_task = asyncio.create_task(service.extension(first))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.websocket is first)
+    assert service.link.paired, "precondition: the first peer holds the saved, valid token"
+
+    # W2: a VALID token. It becomes the link, then parks closing W1 — the
+    # window the auditor exploited. (`attach` precedes that close on every
+    # head, which is why only the INSTALL ORDER is the fix, not the arrival.)
+    second = _FakePeer()
+    second.push(_hello(token="good-token"))
+    second_task = asyncio.create_task(service.extension(second))  # type: ignore[arg-type]
+    await asyncio.wait_for(first.close_entered.wait(), timeout=2.0)
+    assert service.link.websocket is second, "W2 is the authoritative link"
+    assert second.sent == [], "precondition: W2 is still inside its handshake"
+
+    # W3: same permitted extension id, INVALID token. It supersedes W2 while W2
+    # is still parked, and gets its own honest `paired: false` ack.
+    third = _AnsweringPeer()
+    third.push(_hello(token="bad-token"))
+    third_task = asyncio.create_task(service.extension(third))  # type: ignore[arg-type]
+    assert await _settles(
+        lambda: any(frame.get("event") == "hello_ack" for frame in third.sent)
+    ), "the newest peer's handshake answer never went out"
+    assert service.link.websocket is third
+    assert service.link.paired is False, "the invalid token did not pair"
+
+    before = await _reply(service, "before")
+    assert before["error"]["code"] == ErrorCode.NOT_PAIRED.value, before
+
+    # Release W1's close: the superseded W2 resumes INSIDE its handshake. One
+    # buffered frame lets a superseded receive loop exit on either head, so the
+    # discriminator below is the pairing verdict rather than a parked task.
+    first.release_close.set()
+    second.push({"event": "pong"})
+    await asyncio.wait_for(second_task, timeout=2.0)
+
+    after = await _reply(service, "after")
+    assert (
+        after.get("error", {}).get("code") == ErrorCode.NOT_PAIRED.value
+    ), "a superseded handshake authorized the newest, invalid-token peer: " + json.dumps(after)
+    assert service.link.websocket is third
+    assert service.link.paired is False, "the stale handshake rewrote pairing"
+    assert second.sent == [], "a handshake that lost authority still spoke on its wire"
+    assert third.commands == [], "an unpaired peer was driven with a command"
+
+    for task in (third_task, first_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_revoke_does_not_clear_a_replacement_that_arrived_mid_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A1's revoke half: a scoped revoke must not tear down a later handshake.
+
+    `revoke()` captures the socket, awaits its bounded close, and then cleared
+    the link UNCONDITIONALLY. Installing a replacement during that await
+    therefore had its socket nulled and its state forgotten by a revoke that had
+    already closed the connection it was aimed at — the auditor's
+    `replacementStillAuthoritative: false`.
+
+    The control that makes this a fix and not a hole: preserving the connection
+    is NOT authorization. The replacement computed its own `paired` from the
+    pairing file `reset_pairing` had already removed, so it is refused by the
+    same `not_paired` gate as any other unpaired peer.
+    """
+
+    monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 5.0)
+    _saved_pairing(tmp_path, "good-token")
+    service = BridgeService(root=tmp_path)
+
+    revoked = _GatedClosePeer()
+    revoked.push(_hello(token="good-token"))
+    revoked_task = asyncio.create_task(service.extension(revoked))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.paired)
+    generation = service.link.generation
+
+    revoke_task = asyncio.create_task(service.revoke())
+    await asyncio.wait_for(revoked.close_entered.wait(), timeout=2.0)
+
+    # The replacement dials while the revoked socket's close is still parked.
+    replacement = _AnsweringPeer()
+    replacement.push(_hello(token="good-token"))
+    replacement_task = asyncio.create_task(service.extension(replacement))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.websocket is replacement)
+
+    revoked.release_close.set()
+    await asyncio.wait_for(revoke_task, timeout=2.0)
+
+    assert service.link.websocket is replacement, "the revoke cleared the link it did not close"
+    assert service.link.generation == generation + 1, "the replacement's link state was forgotten"
+    assert service.link.paired is False, "a revoked token paired the replacement"
+    assert 4003 in revoked.closed, "the revoked socket was not closed as unpaired"
+
+    after = await _reply(service, "after")
+    assert after["error"]["code"] == ErrorCode.NOT_PAIRED.value, after
+    assert replacement.commands == [], "a revoked pairing drove the replacement"
+
+    for task in (replacement_task, revoked_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_lost_answer_on_a_replaced_wire_names_the_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D3-3, the response half: "replaced" is not "no browser is attached".
+
+    The reachable interleaving is a command registered in the gap between
+    `forget_link_state()` and `attach()` during a handshake: the replacement
+    does not fail that future (it was not in the map when the superseded link's
+    state was dropped), so this command's answer never arrives on either wire.
+    By the time its budget expires the promotion rule finds, on a mute
+    replacement, nothing of ours left to sever — and the honest answer is that
+    the extension replaced its connection.
+
+    That answer carries `extension_disconnected`, whose copy tells the reader no
+    browser is attached and to ask the user to open one. `phase: replaced` is
+    what makes the client render the truthful copy instead (design D3-3), which
+    is why this row asserts BOTH the phase and that the absent-browser sentence
+    is not what the model would read.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.05)
+    service = BridgeService(root=tmp_path)
+    old = _connected(service, silent_for=2.0)
+    service.link.paired = True
+    old_wire = (service.link.websocket, service.link.generation)
+
+    # The REAL `link.send`: the frame must genuinely land on the superseded wire
+    # (that is what makes this command "delivered, never answered"), and nothing
+    # ever pushes a response frame back — `_RecordingSocket` only records.
+    task = asyncio.get_running_loop().create_task(
+        service._dispatch_serialized(
+            Request(id="r-lost", method="read", params={"tab": "bridge:9:n"})
+        )
+    )
+    await asyncio.sleep(0)
+    for _ in range(100):
+        if old.sent:
+            break
+        await asyncio.sleep(0.002)
+    assert old.sent == [
+        {"id": "r-lost", "method": "read", "params": {"tab": "bridge:9:n"}}
+    ], "precondition: the command was delivered on the superseded wire"
+    assert service.link.pending.get("r-lost") is not None, "precondition: nothing failed its future"
+
+    # The replacement: attached WITHOUT the superseded link's state being
+    # dropped, which is what leaves this command's future pending across it.
+    replacement = _RecordingSocket()
+    service.link.attach(replacement)  # type: ignore[arg-type]
+    service.link.paired = True
+    service.link.last_frame_at = time.monotonic()
+
+    response = await asyncio.wait_for(task, timeout=5.0)
+    body = bytes(response.body).decode().replace(" ", "")
+
+    assert service.link.websocket is replacement, "the replacement was severed"
+    assert (service.link.websocket, service.link.generation) != old_wire
+    assert ErrorCode.EXTENSION_DISCONNECTED.value in body, body
+    assert '"phase":"replaced"' in body, body
+    assert "hassincereplaced" in body, body
+    # The rendered copy, not just the code: this is what the model reads.
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+
+    rendered = format_error(
+        BridgeError(
+            ErrorCode.EXTENSION_DISCONNECTED,
+            "read was delivered on a connection the extension has since replaced",
+            {"phase": "replaced"},
+        ),
+        action="read",
+    )
+    assert "no browser is attached" not in rendered
+    assert "open their browser" not in rendered
+    assert "retry the action" in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_sibling_teardown_is_not_reported_as_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-4 (major): the fence refused for TWO reasons and only one was true.
+
+    Two sessions timing out on ONE frozen worker is the multi-session case this
+    PR exists for. The first timeout severs the link (`disconnect()` nulls the
+    socket and leaves the generation alone); the second then asks the fence about
+    the wire it captured, is refused, and used to take the "a replacement
+    answered" arm — telling the reader no browser is attached and to ask the user
+    to open one, for a browser that is open and wedged, with nothing having been
+    replaced. At `a733b08a4` both commands answered `extension_unresponsive`.
+
+    The assertion is deliberately race-tolerant about WHICH command severs the
+    link (the two probes overlap): what must hold is that NEITHER answer claims a
+    replacement, because no replacement happened on this wire.
+    """
+
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "read", 0.05)
+    monkeypatch.setitem(daemon_module.COMMAND_TIMEOUTS, "snapshot", 0.05)
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 1.0)
+    # Long enough that both commands are inside the probe at the same time, which
+    # is the interleaving that puts one of them on the wrong arm.
+    monkeypatch.setattr(daemon_module, "PING_PROBE_TIMEOUT_S", 0.15)
+    service = BridgeService(root=tmp_path)
+    socket = _connected(service, silent_for=2.0)
+    service.link.paired = True
+    generation = service.link.generation
+
+    bodies = await asyncio.gather(
+        *(
+            service._dispatch_serialized(
+                Request(id=f"r-{index}", method=method, params={"tab": f"bridge:{index}:n"})
+            )
+            for index, method in ((1, "read"), (2, "snapshot"))
+        )
+    )
+    decoded = [bytes(body.body).decode().replace(" ", "") for body in bodies]
+
+    for body in decoded:
+        assert ErrorCode.EXTENSION_DISCONNECTED.value not in body, (
+            "a command on a torn-down wire was told the extension replaced its connection: " + body
+        )
+        assert ErrorCode.EXTENSION_UNRESPONSIVE.value in body, body
+        assert '"link_silent_s"' in body, body
+
+    assert socket.closed == [4000], "the wedge is severed exactly once"
+    assert service.link.websocket is None, "the link stays down until the peer re-dials"
+    assert (
+        service.link.generation == generation
+    ), "no replacement attached, which is the fact both answers had to respect"
+    assert service.link.dropped_unproven(), "the latched reason is what the answer reports"

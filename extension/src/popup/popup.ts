@@ -172,39 +172,82 @@ let pairingShown = false;
 // because renders are serialised — see daemonHealth().
 const HEALTH_TIMEOUT_MS = 3000;
 
-// The last known pairing outcome, mirrored into localStorage so the FIRST
-// PAINT can size itself.
+// The pinned #pending height this browser last settled on, mirrored into
+// localStorage so the FIRST PAINT can size itself.
 //
 // #pending is the only section shipping visible, so it paints on every open,
 // before render()'s awaits resolve. Its pinned height therefore decides how far
-// the card travels when the real state arrives. Pinned to the pairing form the
-// first-run user settles with no motion but the already-paired user — who opens
-// this popup for the rest of the product's life — falls ~121px. chrome.storage
+// the card travels when the real state arrives — pinned to the pairing form the
+// first-run user settles with no motion but the already-paired user, who opens
+// this popup for the rest of the product's life, falls ~121px. chrome.storage
 // is async and so cannot inform a synchronous first paint; localStorage on an
-// extension page is synchronous, so the bit is mirrored there purely as a
-// LAYOUT HINT.
+// extension page is synchronous, so the pinned height is mirrored there purely
+// as a LAYOUT HINT.
+//
+// It records the PIN rather than a boolean derived from /health (design D3-1).
+// A boolean could only ever name two of the three measured states, so a browser
+// in the third — the wedged-but-paired worker this PR exists for — opened at
+// whichever of the two the boolean happened to collapse to and then grew the
+// difference: measured 86px → 378.8px, a 167.8px reflow in the state whose copy
+// sends the user to "Check again". The pin is written by show(), i.e. for the
+// card that was actually rendered, so a repeated open reproduces the height
+// already on screen.
 //
 // It is a hint and nothing else: it never gates behaviour, and render() paints
-// whatever /health actually reports. A stale or absent bit costs one resize,
+// whatever /health actually reports. A stale or absent pin costs one resize,
 // which is exactly the behaviour without it — so there is nothing to fail
-// closed about, and no security surface (it records that a pairing happened,
-// never a credential).
-const PAIRED_HINT_KEY = "lop:paired-hint";
+// closed about, and no security surface (it records a card height, never a
+// credential).
+const PIN_HINT_KEY = "lop:pin-hint";
+// The previous revision stored a BOOLEAN under its own key. It is read once, as
+// a fallback, so an already-paired browser's first open after the rename does
+// not pay a resize for it: "1" meant the connected card. Nothing writes the old
+// key again, and a stale "0" is indistinguishable from absent — both mean "no
+// hint", which falls back to the tall pin.
+const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 
-function readPairedHint(): boolean {
+// The pin that belongs to each state, measured at 300x600 against the card this
+// popup renders. The pin is `#pending`'s min-height and the card's own chrome
+// (padding, the driven-URL trough, the actions row) is the constant between
+// them, so a pin is the state's total card height minus that chrome:
+//
+//   connected card      211.2px  ->  86px
+//   pairing form        344.0px  -> 219px
+//   unresponsive card   378.8px  -> 254px
+//
+// A state with no entry keeps the last hint. That is deliberate: only these
+// three were measured in a real render, and a pin for the rest would be a pixel
+// guess no frame backs — while an unmeasured state costs exactly the one
+// resize a browser with no hint at all gets. Re-measure all three together when
+// any of them moves: a stale pin IS the resize this whole block exists to
+// prevent (popup.css carries the same numbers).
+const PIN_CONNECTED = "86px";
+const PIN_PAIRING = "219px";
+const PIN_UNRESPONSIVE = "254px";
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+const PIN_BY_STATE: Partial<Record<State, string>> = {
+  connected: PIN_CONNECTED,
+  pairing: PIN_PAIRING,
+  unresponsive: PIN_UNRESPONSIVE,
+};
+
+/** The pinned height this browser last settled on, or null for "no hint". */
+function readPinHint(): string | null {
   try {
-    return localStorage.getItem(PAIRED_HINT_KEY) === "1";
+    const stored = localStorage.getItem(PIN_HINT_KEY);
+    if (stored !== null && PINS.includes(stored)) return stored;
+    return localStorage.getItem(LEGACY_PAIRED_HINT_KEY) === "1" ? PIN_CONNECTED : null;
   } catch {
-    // Storage can be unavailable (disabled, quota, partitioned context). The
-    // unpaired pin is the safe default: it is the state a user who cannot be
-    // identified is most likely to be in on their first open.
-    return false;
+    // Storage can be unavailable (disabled, quota, partitioned context). No
+    // hint is the safe answer: it is the behaviour this popup had before the
+    // hint existed, and it is what a browser we cannot identify must get.
+    return null;
   }
 }
 
-function writePairedHint(paired: boolean): void {
+function writePinHint(pin: string): void {
   try {
-    localStorage.setItem(PAIRED_HINT_KEY, paired ? "1" : "0");
+    localStorage.setItem(PIN_HINT_KEY, pin);
   } catch {
     // A hint that cannot be stored simply is not used next time.
   }
@@ -212,20 +255,25 @@ function writePairedHint(paired: boolean): void {
 
 /** Size the pre-render placeholder to the state it is most likely to become,
  * so the first paint settles without moving the popup window. Called inline at
- * module scope, before the first paint, and again whenever the hint changes. */
+ * module scope — before the first paint — and again from show(), which is where
+ * the hint is learned. */
 function applyPendingPin(): void {
   const pending = document.getElementById("pending");
   if (!pending) return;
-  // Measured at 300x600 against THIS card: 86px lands the card on connected's
-  // height (207px), 219px on the pairing form's (340px). Re-measure both if the
-  // pairing form or the error slot changes height — a stale pin is a resize.
-  pending.style.minHeight = readPairedHint() ? "86px" : "219px";
+  pending.style.minHeight = readPinHint() ?? PIN_PAIRING;
 }
 applyPendingPin();
 
 function show(state: State): void {
   for (const section of sections) section?.classList.toggle("hidden", section.id !== state);
   document.getElementById("card")?.style.setProperty("--tone", TONE[state]);
+  // Record the pin for the card being painted, so the NEXT open starts at the
+  // height this one settles on (design D3-1). Here rather than at the call
+  // sites because show() is the single point that decides which card is on
+  // screen — every render path funnels through it, and one of them picking the
+  // wrong pin is exactly the defect this replaced.
+  const pin = PIN_BY_STATE[state];
+  if (pin) writePinHint(pin);
   if (state === "pairing") {
     const input = document.getElementById("pair-code") as HTMLInputElement | null;
     // Focus only a form the user has NOT been looking at. `pairingShown` is
@@ -456,14 +504,14 @@ async function renderOnce(): Promise<void> {
     show("incompatible");
     return;
   }
-  // /health is the authority on whether this browser is paired, so it is what
-  // the first-paint layout hint is mirrored from — in BOTH directions, so an
-  // unpair shrinks the next first paint back to the form's height. The ONE
-  // state that inverts this is a wedged-but-paired link: it renders the honest
-  // card below, NOT the pairing form, so pinning the form's height for it would
-  // open on a resize. (`extension_unresponsive` is exactly "the daemon says a
-  // pairing exists and the worker is not answering".)
-  writePairedHint(health.paired || health.extension_unresponsive === true);
+  // /health is the authority on whether this browser is paired, and the two
+  // cards below are what decide which pin show() records for the next open.
+  // Nothing is mirrored from /health here: the previous revision derived a
+  // BOOLEAN from `paired || extension_unresponsive` and the wedge state — which
+  // renders the honest card below, not the pairing form — is precisely the one
+  // the boolean could not express, so every reopen of it started at the
+  // connected card's height and grew 167.8px into this card (design D3-1,
+  // measured 86px → 378.8px). show() records the pin per card instead.
   // The worker is wedgeable in a way the socket does not show: attached, paired,
   // and answering nothing. Say so instead of painting the green "Connected."
   // card over a browser the agent cannot drive — that card is exactly what the

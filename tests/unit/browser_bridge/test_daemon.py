@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -635,3 +636,198 @@ async def test_owner_keys_are_evicted_so_the_lock_map_cannot_grow(tmp_path: Path
             )
         )
     assert service._tab_locks == {}, f"proof keys retained: {sorted(service._tab_locks)}"
+
+
+# --- Audit round-2 re-audit: A4, the admission/response lifetime ------------
+#
+# The auditor's round-2 re-audit kept A4 at MAJOR: registering the pending
+# future BEFORE the admission lock (which the extension's early answer requires)
+# meant a caller cancelled while QUEUED never reached the only cleanup there
+# was. Their controlled run on the pinned head:
+#
+#     {"case": "cancel admission-only waiter before send",
+#      "pendingLeaked": ["cancelled-queued"], "framesSent": 0}
+#
+# Both rows below fail on `bb039c18e`.
+
+
+class _FakeWire:
+    """A scripted socket leg: records writes, and can park one mid-send.
+
+    ``release`` set means a write does not complete until the test says so,
+    which parks a caller INSIDE admission — holding or queued on its key —
+    without a wall-clock sleep. Every wait in these rows is on a frame count or
+    an event, per AGENTS.md, "Wait on the event, never on the clock".
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.entered = asyncio.Event()
+        self.release: asyncio.Event | None = None
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+        self.entered.set()
+        if self.release is not None:
+            await self.release.wait()
+
+    async def close(self, code: int | None = None) -> None:
+        return None
+
+
+def _owner_request(request_id: str, proof: str) -> Any:
+    """An owner-scoped, no-tab command: the admission-only key shape."""
+    from local_operator.browser_bridge.protocol import Request
+
+    return Request(
+        id=request_id,
+        method="owner_recover",
+        params={"owner_proof": proof, "requester": "session:s1", "owner_generation": "g1"},
+    )
+
+
+async def _write_frames(wire: _FakeWire, count: int) -> None:
+    """Return once ``wire`` has recorded ``count`` writes (event, not a clock)."""
+    for _ in range(200):
+        if len(wire.sent) >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"only {len(wire.sent)} of {count} writes were attempted")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_queued_admission_leaves_no_pending_future(tmp_path: Path) -> None:
+    """A4 (major): the cleanup must span registration → lock → send → response.
+
+    The auditor cancelled a waiter queued behind an admission-only lock, after
+    that waiter had already registered its future, and found the future still
+    registered with no frame sent and no answer possible. The leak is not merely
+    untidy: the request id stays occupied until link teardown, so repeated
+    client disconnects grow retained state on a long-lived healthy link.
+
+    The positive controls this row also pins: a cancelled queued caller sends NO
+    late frame, and the key it was queued on survives for the caller that still
+    holds it — eviction is the holder's exit, not the cancelled caller's.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+
+    service = BridgeService(root=tmp_path)
+    wire = _FakeWire()
+    service.link.websocket = wire  # type: ignore[assignment]
+    service.link.last_frame_at = time.monotonic()
+
+    holder = _owner_request("r-holder", "h" * 32)
+    key = service.lock_key_for(holder)
+    wire.release = asyncio.Event()  # the holder parks inside admission
+    holder_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(holder))
+    await _write_frames(wire, 1)
+
+    queued = _owner_request("cancelled-queued", "h" * 32)
+    queued_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(queued))
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if queued.id in service.link.pending:
+            break
+    assert (
+        queued.id in service.link.pending
+    ), "precondition: the future is registered before the lock is granted"
+    assert len(wire.sent) == 1, "precondition: the queued caller has written nothing"
+
+    queued_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await queued_task
+
+    assert (
+        queued.id not in service.link.pending
+    ), "cancelling a queued request left a future registered for a frame that was never sent"
+    assert len(wire.sent) == 1, "a cancelled queued request sent a late frame"
+    assert service._key_callers.get(key) == 1, "the cancelled caller's hold on the key leaked"
+    assert key in service._tab_locks, "the key was evicted while its holder was still using it"
+
+    # The holder leaves cancelled too: THAT exit is what evicts the key.
+    holder_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await holder_task
+    assert service._key_callers == {}, "the caller counter leaked"
+    assert key not in service._tab_locks, "the key outlived every caller"
+
+
+@pytest.mark.asyncio
+async def test_a_key_another_caller_is_queued_on_is_not_evicted(tmp_path: Path) -> None:
+    """A4: eviction must not drop a lock a queued caller is about to take.
+
+    `asyncio.Lock.locked()` goes False the instant `release()` hands the lock to
+    the first waiter, so an eviction decided on `locked()` alone removed a lock
+    another request was already waiting on. That waiter then ran under a Lock
+    object the map no longer held, while the next request for the key minted a
+    SECOND one and interleaved with it — mutual exclusion lost for one owner's
+    commands. The structural assertion is that the map still holds the lock
+    object the queued caller is admitted under.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+
+    service = BridgeService(root=tmp_path)
+    wire = _FakeWire()
+    service.link.websocket = wire  # type: ignore[assignment]
+    service.link.last_frame_at = time.monotonic()
+
+    holder = _owner_request("r-holder", "k" * 32)
+    key = service.lock_key_for(holder)
+    held_lock = service._tab_locks.setdefault(key, asyncio.Lock())
+    wire.release = asyncio.Event()
+    holder_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(holder))
+    await _write_frames(wire, 1)
+
+    queued = _owner_request("r-queued", "k" * 32)
+    queued_task = asyncio.get_running_loop().create_task(service._dispatch_serialized(queued))
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if queued.id in service.link.pending:
+            break
+    assert queued.id in service.link.pending, "precondition: the queued caller registered"
+
+    # Let the holder's write complete. It then releases the lock, the queued
+    # caller takes it and writes its own frame — which is what proves the
+    # hand-off ran before the assertion below.
+    wire.release.set()
+    await _write_frames(wire, 2)
+
+    assert (
+        service._tab_locks.get(key) is held_lock
+    ), "eviction dropped the lock a queued caller was admitted under"
+
+    for task in (holder_task, queued_task):
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_tab_command_leaves_no_pending_future(tmp_path: Path) -> None:
+    """A4, the sibling arm: the same leak existed on the lock-held path.
+
+    `_dispatch_locked` registers its future before `_admit` and relied on
+    `_complete`'s `finally` alone, so a caller cancelled mid-send left an
+    unanswerable future behind exactly as the admission-only arm did. Same
+    defect class, same guard — this row keeps the two arms from drifting apart.
+    """
+    from local_operator.browser_bridge.daemon import BridgeService
+    from local_operator.browser_bridge.protocol import Request
+
+    service = BridgeService(root=tmp_path)
+    wire = _FakeWire()
+    wire.release = asyncio.Event()
+    service.link.websocket = wire  # type: ignore[assignment]
+
+    request = Request(id="r-tab-cancel", method="read", params={"tab": "bridge:1:n"})
+    task = asyncio.get_running_loop().create_task(service._dispatch_serialized(request))
+    await _write_frames(wire, 1)
+    assert request.id in service.link.pending
+
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+    assert (
+        request.id not in service.link.pending
+    ), "a cancelled tab command left its future registered"

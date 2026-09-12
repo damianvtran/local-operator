@@ -26,6 +26,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * than one that fails when an id is renamed. */
 const IDS = [
   "connected", "paired", "pairing", "disconnected", "incompatible", "origin", "origin-ack",
+  // The wedge card and its retry: popup.ts paints the section and wires the
+  // button, and the D3-1 pin row asserts on the section's visibility, so a
+  // missing stub node would make that assertion vacuous.
+  "unresponsive", "retry-unresponsive",
   "pending", "origin-host", "origin-again", "origin-scope", "origin-scope-detail",
   "origin-position", "origin-waiting", "origin-allow", "origin-deny", "origin-previous",
   "origin-next", "origin-ack-title", "origin-ack-sub", "origin-ack-check", "card", "retry",
@@ -243,7 +247,7 @@ async function loadPopup() {
 /** A reachable daemon whose /health answer and LATENCY are both controllable.
  * Latency is what puts two renders in flight at once, which is the whole of
  * the ordering defect. */
-function installFetchStub(paired, delayMs = () => 0) {
+function installFetchStub(paired, delayMs = () => 0, extra = {}) {
   globalThis.fetch = async () => {
     const wait = delayMs();
     // The answer is snapshotted when the request STARTS, exactly as a real
@@ -260,6 +264,7 @@ function installFetchStub(paired, delayMs = () => 0) {
         extension_connected: true,
         protocol_version: 1,
         pending_origin: undefined,
+        ...extra,
       }),
     };
   };
@@ -458,16 +463,19 @@ test("the error sits above the button that produced it (D2)", async () => {
   );
 });
 
-test("the first paint is pinned to the state this browser will actually reach (D1)", async () => {
+test("the first paint is pinned to the state this browser will actually reach (D1/D3-1)", async () => {
   // #pending paints on EVERY open, before render()'s awaits resolve, so its
-  // pinned height decides how far the card travels. One pin cannot serve both
-  // populations: the pairing form is 360.5px and the connected card 239.9px.
+  // pinned height decides how far the card travels. THREE pins now, not a
+  // boolean: the unresponsive card was unreachable from a paired/unpaired
+  // choice, so the wedge state opened 167.8px short of the card it settled on
+  // (design D3-1, measured in Chrome). The pin recorded is the one for the card
+  // show() last rendered.
   const nodes = installDomStub();
   const { areas } = installChromeStub();
 
   // An already-paired browser. The hint is synchronous (localStorage), because
   // chrome.storage cannot inform a first paint.
-  globalThis.localStorage.setItem("lop:paired-hint", "1");
+  globalThis.localStorage.setItem("lop:pin-hint", "86px");
   installFetchStub(() => true);
   let bundle = await loadPopup();
   try {
@@ -491,7 +499,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
   // A browser that has never paired.
   const fresh = installDomStub();
   const second = installChromeStub();
-  globalThis.localStorage.removeItem("lop:paired-hint");
+  globalThis.localStorage.removeItem("lop:pin-hint");
   installFetchStub(() => false);
   bundle = await loadPopup();
   try {
@@ -556,24 +564,46 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   // duplicated because nothing can be shared with code that runs this early,
   // and a silent divergence is a resize for one of the two populations.
   const popup = await readFile(join(HERE, "..", "src", "popup", "popup.ts"), "utf8");
-  const owned = /readPairedHint\(\) \? "(\d+)px" : "(\d+)px"/.exec(popup);
-  assert.ok(owned, "popup.ts must still own the measured pins");
-  const early = /paired \? PAIRED_PIN : UNPAIRED_PIN/.test(source) && {
-    paired: /PAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
-    unpaired: /UNPAIRED_PIN = "(\d+)px"/.exec(source)?.[1],
-  };
-  assert.ok(early, "first-paint.js must choose between a paired and an unpaired pin");
-  assert.equal(early.paired, owned[1], "the paired pin must match popup.ts");
-  assert.equal(early.unpaired, owned[2], "the unpaired pin must match popup.ts");
+  const owned = Object.fromEntries(
+    [...popup.matchAll(/const PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
+  );
+  assert.deepEqual(
+    Object.keys(owned).sort(),
+    ["CONNECTED", "PAIRING", "UNRESPONSIVE"],
+    "popup.ts must own the three measured pins (design D3-1) — a state with no pin of its own reopens at the wrong height",
+  );
+  const early = Object.fromEntries(
+    [...source.matchAll(/var PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
+  );
+  for (const [name, px] of Object.entries(owned)) {
+    assert.equal(
+      early[name],
+      px,
+      `first-paint.js must carry popup.ts's PIN_${name} (${px}px); a divergence is a resize for whoever holds that hint`,
+    );
+  }
+  // And the script must actually CONSULT the stored pin rather than pick one of
+  // the three by a rule of its own: that is what D3-1 was.
+  assert.match(
+    source,
+    /PINS\.indexOf\(stored\)/,
+    "first-paint.js must accept only a recorded pin, so a stale value falls back rather than pinning something unmeasured",
+  );
 
-  const key = /PAIRED_HINT_KEY = "([^"]+)"/.exec(popup)?.[1];
+  const key = /PIN_HINT_KEY = "([^"]+)"/.exec(popup)?.[1];
+  assert.ok(key, "popup.ts must own the hint's storage key");
   assert.ok(source.includes(`"${key}"`), `first-paint.js must read the same key (${key}) popup.ts writes`);
+  // The boolean key the previous revision wrote: read once so the rename does
+  // not cost an existing paired browser a resize. Both files, or the pre-paint
+  // and the module disagree for exactly one open.
+  assert.match(popup, /LEGACY_PAIRED_HINT_KEY = "lop:paired-hint"/, "popup.ts must keep the legacy-key fallback");
+  assert.match(source, /LEGACY_KEY = "lop:paired-hint"/, "first-paint.js must keep the legacy-key fallback");
 
-  // And the CSS fallback must be the unpaired pin: it is what a browser whose
+  // And the CSS fallback must be the pairing pin: it is what a browser whose
   // hint cannot be read at all gets.
   const css = await readFile(join(HERE, "..", "src", "popup", "popup.css"), "utf8");
   const fallback = /#pending\s*\{[^}]*min-height:\s*(\d+)px/.exec(css);
-  assert.equal(fallback?.[1], owned[2], "the CSS fallback must be the unpaired pin");
+  assert.equal(fallback?.[1], owned.PAIRING, "the CSS fallback must be the pairing pin");
 
   // The store package is an explicit allowlist; an unlisted file ships a popup
   // whose <head> references a 404 and whose pin is never applied.
@@ -584,29 +614,55 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   );
 });
 
-test("the paired hint follows /health in both directions (D1)", async () => {
-  // The hint is a layout guess and must never drift from reality: an unpair has
-  // to shrink the next first paint back, or the returning user gets the resize
-  // the pin exists to remove.
+test("the pin follows the card that was rendered, in both directions (D1/D3-1)", async () => {
+  // The hint is a layout guess and must never drift from what the popup paints:
+  // an unpair has to shrink the next first paint back, and the wedge state —
+  // which is neither paired nor unpaired — has to reopen at ITS OWN height, or
+  // the reopen lands 167.8px short (design D3-1).
   const nodes = installDomStub();
   const { areas } = installChromeStub();
+  globalThis.localStorage.removeItem("lop:pin-hint");
   globalThis.localStorage.removeItem("lop:paired-hint");
-  let paired = true;
-  installFetchStub(() => paired);
+  let health = { paired: true, extension_unresponsive: false };
+  installFetchStub(() => health.paired, () => 0, { extension_unresponsive: false });
   const bundle = await loadPopup();
   try {
     areas.local.set("port", 4099);
     await bundle.import();
     await tick(30);
-    assert.equal(globalThis.localStorage.getItem("lop:paired-hint"), "1", "pairing must record the hint");
+    assert.equal(
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "86px",
+      "the connected card must record its own pin",
+    );
 
-    paired = false;
+    // An unpair: the next open must be pinned to the form, not to a card this
+    // browser will not reach.
+    health = { paired: false, extension_unresponsive: false };
+    globalThis.fetch = async () => ({ ok: true, json: async () => health });
     await chrome.storage.session.set({ connState: "pairing" });
     await tick(30);
     assert.equal(
-      globalThis.localStorage.getItem("lop:paired-hint"),
-      "0",
-      "an unpair must clear the hint, or the next first paint is pinned to the wrong state",
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "219px",
+      "an unpair must record the form's pin, or the next first paint is the wrong height",
+    );
+
+    // The wedge: neither paired nor unpaired. THIS is the case a boolean hint
+    // could not express, and the one the recovery copy sends the user back into
+    // ("Check again").
+    health = { paired: false, extension_unresponsive: true };
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(30);
+    assert.equal(
+      nodes.get("unresponsive").classList.contains("hidden"),
+      false,
+      "precondition: the wedge state really does render the unresponsive card",
+    );
+    assert.equal(
+      globalThis.localStorage.getItem("lop:pin-hint"),
+      "254px",
+      "the wedge card must record ITS OWN pin, or every reopen grows into it (D3-1)",
     );
   } finally {
     await bundle.close();

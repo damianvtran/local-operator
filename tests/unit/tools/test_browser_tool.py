@@ -966,6 +966,12 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
     """Absence is not an error state: the tool is not advertised at all, and a
     host that forces it on gets one clear message per action, never a raise."""
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    # Hermetic: the demotion guard classifies the bridge from the DISCOVERY FILE,
+    # so without this the developer's own daemon decides which copy this test
+    # sees — and whether it sees the guard at all (a fresh bridge would hand the
+    # tool a real backend and there would be no "not available" text at all).
+    # Pin "no daemon" explicitly.
+    monkeypatch.setattr(builtin, "_bridge_liveness", lambda: (None, None))
     assert builtin.build_browser_tool(_ctx()) is None
     forced = builtin.AgentTool(
         name="browser",
@@ -1356,3 +1362,65 @@ def test_run_cmux_kills_the_child_when_the_turn_is_cancelled(monkeypatch) -> Non
     asyncio.run(scenario())
     assert proc.killed, "the cmux child was left running"
     assert proc.waited, "an unreaped child is a zombie until the operator exits"
+
+
+def test_a_running_bridge_with_no_browser_is_not_reported_as_unconfigured(monkeypatch) -> None:
+    """Design D3-2: a drop is not an unconfigured host.
+
+    After the daemon severs a silent link, `extension_connected` is false, so
+    `state_store.liveness()` answers ABSENT and the demotion guard fires — and it
+    used to tell the reader to run `lop browser install` to "set up the bridge",
+    on a machine where the bridge is installed, paired and running. The same
+    session's later `recover` got the good copy, so the incident's own window was
+    the one place the answer was wrong (design D1/D2-1's class, on a third site).
+
+    Two shapes, both keyed on facts the file already carries: the daemon
+    latched a silent link (the wedge), or the browser simply is not attached
+    right now. Neither names an install, and both carry a typed `error_code` so
+    the agent can branch to the remedy instead of substring-matching prose.
+    """
+    from local_operator.browser_bridge import state as state_store
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+
+    def classify(*, extension_unresponsive: bool):
+        # `pid` is THIS process, so the classification is about a live daemon;
+        # the guard reads the state object directly, so no socket is opened.
+        current = state_store.BridgeState(
+            pid=os.getpid(),
+            port=4099,
+            session_key="s" * 32,
+            proto=1,
+            extension_connected=False,
+            paired=False,
+            extension_id="a" * 32,
+            browser_name="Chrome/153",
+            extension_unresponsive=extension_unresponsive,
+        )
+        return lambda: (state_store.Liveness.ABSENT, current)
+
+    forced = builtin.AgentTool(
+        name="browser",
+        label="Browser",
+        description="d",
+        parameters={},
+        approval_tier="write",
+        concurrency="shared",
+        execute=builtin.execute_browser,
+    )
+
+    # 1. The wedge: the daemon dropped a link for silence and says so.
+    monkeypatch.setattr(builtin, "_bridge_liveness", classify(extension_unresponsive=True))
+    wedged = _run(forced, "t1", {"action": "tabs"}, _ctx())
+    assert wedged.is_error
+    assert "lop browser install" not in wedged.text
+    assert "stopped answering" in wedged.text, wedged.text
+    assert (wedged.details or {}).get("error_code") == "extension_unresponsive"
+
+    # 2. No browser attached, no latch: still not an unconfigured host.
+    monkeypatch.setattr(builtin, "_bridge_liveness", classify(extension_unresponsive=False))
+    idle = _run(forced, "t2", {"action": "tabs"}, _ctx())
+    assert idle.is_error
+    assert "lop browser install" not in idle.text
+    assert "remembers this browser" in idle.text, idle.text
+    assert (idle.details or {}).get("error_code") == "extension_disconnected"

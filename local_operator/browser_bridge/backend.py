@@ -73,6 +73,22 @@ ERROR_MESSAGES = {
 }
 
 
+#: The one `extension_disconnected` shape that is NOT "no browser is attached":
+#: the daemon's wire fence detected that the extension REPLACED its connection
+#: while a command was in flight (see `daemon.py`'s `_admit`/`_complete` send and
+#: response fences). The browser is open and the worker has already re-dialled,
+#: so "ask the user to open their browser" names an action that does not apply
+#: and `lop browser install` is not even in scope — it resolves itself in about a
+#: second (design D3-3). Selected by the `phase` the daemon carries, because the
+#: code alone cannot tell this apart from a genuinely absent browser.
+REPLACED_PHASE = "replaced"
+REPLACED_PHASE_MESSAGE = (
+    "the browser extension replaced its connection while this command was in flight, so the "
+    "command was never answered. The browser is open and reconnected — retry the action; no "
+    "user action is needed."
+)
+
+
 class BridgeError(RuntimeError):
     def __init__(self, code: ErrorCode, message: str, data: dict[str, Any] | None = None) -> None:
         super().__init__(message)
@@ -185,6 +201,11 @@ def _origin(value: str) -> str:
 
 def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> str:
     """Map every wire error to one actionable model-facing diagnostic."""
+    # Checked BEFORE the table: this code's own copy is the "no browser is
+    # attached" one, and it is exactly wrong for a replaced wire — the browser is
+    # open, mid-reconnect, and the command may simply be retried (design D3-3).
+    if error.code == ErrorCode.EXTENSION_DISCONNECTED and error.data.get("phase") == REPLACED_PHASE:
+        return REPLACED_PHASE_MESSAGE
     if error.code in ERROR_MESSAGES:
         return ERROR_MESSAGES[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
