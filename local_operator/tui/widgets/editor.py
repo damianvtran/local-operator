@@ -2040,6 +2040,8 @@ class Editor(TextArea):
         # derive-from-registry reason as the tuples above; read during the
         # inline run to decide reassemble-to-front vs splice-and-run.
         self._prompt_commands: tuple[str, ...] = ()
+        self._prompt_command_names: frozenset[str] = frozenset()
+        self._name_prompt_commands: frozenset[str] = frozenset()
         # The team/agent NAMES the open argument list is offering, pushed by the
         # app in ``on_argument_query_opened`` (see :meth:`set_name_choices`).
         # A frozenset so the render pass tests membership in O(1): the render
@@ -2559,6 +2561,28 @@ class Editor(TextArea):
         # included) so the set cannot drift from the flag it reads.
         self._prompt_commands = tuple(
             name for command in commands if command.consumes_prompt for name in command.names
+        )
+        # The same flag as a lower-cased SET, for the `$` parsers: inside one of
+        # these commands the argument is free text destined for the model, which
+        # is exactly where reaching for a skill makes sense, so the command's
+        # claim on its line is partially lifted there. Kept separate from the
+        # tuple above rather than repointing its readers, because that one
+        # answers a different question (which command to reassemble) and its
+        # callers depend on the ordering.
+        self._prompt_command_names = frozenset(
+            name.lower()
+            for command in commands
+            if command.consumes_prompt
+            for name in command.names
+        )
+        # Those of the above that also offer a NAME list, so the `$` floor knows
+        # a name slot has to be passed first. Derived from the registry, not
+        # spelled out, so it cannot drift from `NAME_ARGUMENT_COMMANDS`.
+        self._name_prompt_commands = frozenset(
+            name.lower()
+            for command in commands
+            if command.consumes_prompt and command.arguments is not ArgumentMode.NONE
+            for name in command.names
         )
         # Lower-cased vocabulary (primaries AND aliases), shared by the
         # highlighter's "is this a real command?" oracle and the inline
@@ -7182,11 +7206,19 @@ class Editor(TextArea):
         """Which list the caret is currently inside, or ``None``.
 
         ``"argument"`` while :func:`slash_argument` matches, ``"command"``
-        while :func:`slash_context` matches, ``None`` otherwise. The three
-        answers are mutually exclusive by construction (the space that
-        opens an argument closes the command word). Used by
+        while :func:`slash_context` matches, ``None`` otherwise. Used by
         :meth:`_sync_picker_if_phase_changed` so a caret move that stays
         inside one phase does not re-open an Esc-dismissed list.
+
+        The three answers are still mutually exclusive, but the claim alone no
+        longer delivers that. A prompt command's claim is now PARTIAL: a ``$``
+        inside ``/team delivery …`` does open a skill token. What keeps the
+        phases disjoint is ``_skill_argument_floor``, which refuses the NAME
+        SLOT — while ``/team del`` is being typed there is no skill token at
+        all, so the roster list answers alone and cannot be hijacked. Past the
+        name the argument is free text, where the roster list has nothing to
+        say. The order below therefore still decides only who is ASKED first,
+        never who wins.
         """
         cursor = self._caret_offset()
         # Checked FIRST and short-circuiting, but the reason is no longer "a `$`
@@ -7197,7 +7229,16 @@ class Editor(TextArea):
         # `slash_argument` resolve their own nested slashes with. The two answers
         # are therefore disjoint by construction, and this order only decides who
         # is asked first — not who wins.
-        if skill_token(self.text, cursor, self._command_names) is not None:
+        if (
+            skill_token(
+                self.text,
+                cursor,
+                self._command_names,
+                self._prompt_command_names,
+                self._name_prompt_commands,
+            )
+            is not None
+        ):
             return "skill"
         if (
             slash_argument(self.text, self._argument_commands, cursor, self._command_names)
@@ -7308,7 +7349,16 @@ class Editor(TextArea):
         # engaged command's argument is claimed by that command and never
         # answers here. The rows themselves are pushed by the app
         # (SkillQueryOpened), exactly as an argument list's are.
-        if skill_token(self.text, cursor, self._command_names) is not None:
+        if (
+            skill_token(
+                self.text,
+                cursor,
+                self._command_names,
+                self._prompt_command_names,
+                self._name_prompt_commands,
+            )
+            is not None
+        ):
             if not self._skill_choices_requested:
                 self._skill_choices_requested = True
                 self.post_message(SkillQueryOpened())
@@ -7788,6 +7838,8 @@ class Editor(TextArea):
             name,
             self._argument_commands,
             self._command_names,
+            self._prompt_command_names,
+            self._name_prompt_commands,
         )
 
     def _completion_mode(self) -> CompletionMode | None:

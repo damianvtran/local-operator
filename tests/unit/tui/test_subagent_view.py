@@ -5189,3 +5189,80 @@ async def test_a_follower_renders_the_delegated_brief_once_not_twice(tmp_path, m
         page = " ".join(view.rendered_rows())
         assert "SYSTEM PREAMBLE" not in page
         assert page.count(concise) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_prepend_settle_does_not_wedge_the_history_gate(tmp_path) -> None:
+    """``_history_loading`` must not outlive an insert whose settle was dropped.
+
+    ``TranscriptView.insert_blocks`` keeps its ``on_settled`` promise even when
+    the pump refuses the callback it would normally schedule — in which case
+    the callback runs INLINE, before ``insert_blocks`` returns. The prepend
+    path used to raise ``_history_loading`` immediately AFTER that call, so on
+    the inline path the raise landed on top of ``_finish_history_mount``'s
+    clear and the flag stayed True forever.
+
+    That is unrecoverable, unlike the parent transcript's gate: the flag gates
+    both ``_maybe_load_history`` and ``_note_history_gesture``, so no gesture
+    re-opens it. The footer sits on "loading earlier…" with no read in flight
+    and ``action_home`` does nothing, however many times it is pressed
+    (review round 1, MAJOR-1).
+
+    The flag is now raised BEFORE the insert, which is order-preserving for
+    every other reader — it is already True on entry and continuously True
+    across the mount either way, so ``_history_state_text`` can still never
+    observe it down mid-mount.
+    """
+    transcript = Transcript(tmp_path / "child")
+    # Several PAGES deep (`HISTORY_PAGE_ROWS`), so history genuinely remains
+    # after the prepend under test. A child that fits in one page drains on
+    # the first read and the recovery assertion below could not distinguish a
+    # working gate from an exhausted one.
+    for index in range(HISTORY_PAGE_ROWS * 4):
+        await transcript.append_message(Message.assistant(f"durable {index}"))
+    job = _job_with(TRAJECTORY, status="completed")
+    session = FakeSession()
+    session.jobs = _fake_jobs(job)
+    session._subagent_comms = type(
+        "Comms", (), {"session_dir_of": lambda self, _job_id: transcript.directory}
+    )()
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(90, 28)) as pilot:
+        view = await _open(pilot, app, job)
+        await _wait_history(pilot, view)
+
+        body = view._body
+        real = body.call_after_refresh
+        refused = {"hit": False}
+
+        def refuse(callback, *args, **kwargs):
+            # Exactly the settle `insert_blocks` schedules, once — the same
+            # False Textual returns for a pump that is closing.
+            if not refused["hit"] and getattr(callback, "__name__", "") == "settle_then_restore":
+                refused["hit"] = True
+                return False
+            return real(callback, *args, **kwargs)
+
+        body.call_after_refresh = refuse  # type: ignore[assignment]
+        view.action_home()
+        await _wait_history(pilot, view)
+        for _ in range(40):
+            await pilot.pause()
+        body.call_after_refresh = real  # type: ignore[assignment]
+
+        assert refused["hit"], "the prepend's settle was never refused; hazard not armed"
+        # THE INVARIANT: the gate is down, so a further read is possible.
+        assert view._history_loading is False
+        assert "loading earlier" not in view._history_state_text()
+
+        # And the documented gesture still answers, which is what the reader
+        # experiences: pre-fix six presses moved nothing at all.
+        before = len(view._history_ids)
+        for _ in range(3):
+            view.action_home()
+            await _wait_history(pilot, view)
+            for _ in range(10):
+                await pilot.pause()
+        assert (
+            len(view._history_ids) > before
+        ), "no history loaded after a dropped prepend settle: the gate is wedged"

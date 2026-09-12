@@ -1119,15 +1119,77 @@ class _PagingLease:
     will never complete — a wedged owner socket that no disconnect event
     reaches — so the next such request retires it rather than standing down
     against a gate that nothing will ever release. A holder that HAS mounted
-    is merely settling, and keeps its gate (F1): a dropped ``insert_blocks``
-    settle is a TranscriptView defect outside this path, and breaking that
-    lease would re-consume a cursor whose rows are already painted. A fetch
-    that has not yet returned is indistinguishable from a wedge, so the
-    request is also the reader's way out of a hung wait.
+    is merely settling, and keeps its gate (F1): breaking that lease would
+    re-consume a cursor whose rows are already painted. A fetch that has not
+    yet returned is indistinguishable from a wedge, so the request is also
+    the reader's way out of a hung wait.
+
+    ``mounted_view`` is what makes "merely settling" a CHECKABLE claim rather
+    than an assumption. A settling lease is released by the callback
+    ``insert_blocks`` scheduled on that view; if the view's message pump is
+    gone, that callback can never run and the lease is unsettleable — the
+    live-lock this field exists to make recoverable.
+
+    NOT DEFENCE-IN-DEPTH FOR AN UNREACHABLE STATE — a first-party path
+    reaches it. ``insert_blocks`` honours its ``on_settled`` contract when
+    the post is REFUSED, which closes the route where the pump is already
+    closing at post time. It cannot close the other one: a post that
+    SUCCEEDS is forwarded to the screen's callback list and invoked on a
+    later refresh, so a teardown that lands between the post and that flush
+    drops the callback silently and strands the lease in exactly the same
+    state (review round 1, MAJOR-3). That race is accepted rather than
+    guarded, because the honest guard would be a second implementation of
+    the release racing the first. What makes it acceptable is this field:
+    ``can_settle()`` answers False there, so one further explicit ask
+    retires the lease and the reader is out — inconvenienced by one click,
+    never wedged. So this escape is the PRIMARY mechanism for that race, and
+    anyone tempted to delete it as dead code should read this paragraph
+    first. Reading the VIEW's liveness rather than a timeout is what keeps
+    the answer deterministic.
     """
 
     source_token: str
     mounted: bool = False
+    mounted_view: Any | None = None
+
+    def can_settle(self) -> bool:
+        """Whether the callback that would release this lease can still run.
+
+        An unmounted lease is a fetch in flight: its release comes from the
+        fetch's own completion, not from a view, so it is never declared
+        unsettleable here (``_break_abandoned_paging_lease`` owns that case).
+        A mounted lease is answered by the view it painted into: a widget
+        whose pump is closed will never deliver another callback, so a gate
+        waiting on one is waiting forever.
+
+        THE TERM IS THE PUMP'S OWN, and deliberately NOT ``is_mounted``.
+        ``Widget._is_mounted`` is set in the pump's ``_pre_process``, which
+        runs a tick AFTER ``mount()`` — so a freshly mounted, fully live view
+        reports ``is_mounted=False`` while ``post_message`` still returns
+        True. Reading it here answered "unsettleable" for a view that would
+        in fact deliver the callback, which errs in the F1-VIOLATING
+        direction: an explicit ask landing in that window would retire a
+        lease whose settle was still coming and let a second fetch re-consume
+        the cursor (review round 1, MAJOR-2). The id dedupe covers duplicate
+        rows, not a duplicate request.
+
+        ``_closing``/``_closed`` are the exact flags ``post_message`` itself
+        tests, so this predicate and the refusal it reasons about read the
+        same state. ``parent is None`` covers a view detached without its
+        pump having closed yet. Both are private to Textual (pinned
+        ``textual>=8.0.0``, verified against 8.2.8); the ``getattr`` defaults
+        mean a rename degrades to "assume live", which is the FAIL-SAFE
+        direction — it restores the pre-fix stand-down rather than inventing
+        an F1 violation (review round 1, NIT-1).
+        """
+        if not self.mounted:
+            return True
+        view = self.mounted_view
+        if view is None:
+            return True
+        if getattr(view, "_closing", False) or getattr(view, "_closed", False):
+            return False
+        return getattr(view, "parent", object()) is not None
 
 
 def _resume_tail_start(history: list[Any], bound: int) -> int:
@@ -4728,6 +4790,56 @@ class OperatorApp(App[None]):
         self._exit_hint = None
         self._superseded_steer_controllers.clear()
 
+    async def _preview_cwd(self, directory: Path, session_id: str) -> str:
+        """Where the conversation about to be PREVIEWED was working, or ``""``.
+
+        The previewed ``session_id`` is a DIFFERENT conversation from the one
+        this terminal is attached to, so the value has to come from that
+        conversation's own record — never from ``self._session``. Handing over
+        the current session's directory made the preview band advertise one
+        conversation's project as another's, and it did not stay a label: the
+        connect leg binds a runtime in that directory.
+
+        Two honest sources, in the order of how much each knows: the live
+        runtime's discovery record (it is running, so its recorded ``cwd`` is
+        current), then the wake index, which keeps a ``cwd`` for a session no
+        process has open. This is the ladder ``tui/resume_click.py``'s
+        ``_session_cwd`` already uses, deliberately minus its ``~`` fallback:
+        a notification may put a user in a plausible default, but the band's
+        ``cwd`` rung renders as the conversation's own identity field, where a
+        guess cannot be told apart from a recorded fact.
+
+        ``""`` is the last resort, and it is deliberately the SAME value the
+        dead probe returned: the previewed session is then bound with no
+        recorded directory at all, so the runtime bound for it falls back to
+        the process default (``~`` — ``session/runtime/process.py``'s
+        child-cwd default) and the band renders that real bound directory,
+        exactly as the pre-PR tree did. There is no "unknown" rung to render,
+        which is why this is stated as "the same as before" rather than as an
+        absent value. What it must never be is THIS terminal's directory: that
+        reads as an answer about a conversation which was never in it.
+
+        ``find_runtime_record`` (not ``registry.scan``) is the reader for the
+        live half: it resolves the OWNER of this exact id, so a stale or
+        unrelated record cannot supply a third session's directory.
+        """
+        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.wakes import store as wake_store
+
+        try:
+            record, _owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
+            if record is not None and record.cwd:
+                return str(record.cwd)
+        except Exception:  # noqa: BLE001 — an unreadable registry is an ordinary "unknown"
+            logger.debug("could not read the previewed session's record", exc_info=True)
+        try:
+            entry = await asyncio.to_thread(wake_store.read_entry, directory, session_id) or {}
+        except Exception:  # noqa: BLE001 — same: absent is the answer, not an error
+            logger.debug("could not read the previewed session's wake entry", exc_info=True)
+            return ""
+        cwd = entry.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else ""
+
     async def _lease_sidebar_source(
         self, session_id: str, *, speculative: bool
     ) -> SessionInteraction:
@@ -4750,7 +4862,7 @@ class OperatorApp(App[None]):
             remote = await AttachedSession.saved_preview(
                 session_id,
                 config_dir=directory,
-                cwd=str(getattr(self._session, "cwd", "")),
+                cwd=await self._preview_cwd(directory, session_id),
                 takeover_factory=no_takeover,
             )
         else:
@@ -8750,7 +8862,22 @@ class OperatorApp(App[None]):
             if self._resume_fill_active:
                 self._fill_resume_until_scrollable(target=target)
 
-        view.call_after_refresh(start)
+        if not view.call_after_refresh(start):
+            # SAME UNKEPT PROMISE as the insert seam, one screen away: the
+            # flag above is raised BEFORE the post, and `call_after_refresh`
+            # returns False on a closing pump rather than raising. A refused
+            # post therefore stranded `_resume_fill_active = True` with no
+            # fill in flight, which is exactly the R6 skip inverted —
+            # `_reconcile_head_notice` is told a better frame is on its way
+            # and keeps stale copy forever (review round 1, MAJOR-4).
+            #
+            # Cleared rather than run inline: `start` exists to measure
+            # geometry AFTER a refresh, and a pump that will not deliver it
+            # will not paint either, so there is no frame to fill. Standing
+            # the fill down and restating the row from the geometry that
+            # actually exists is the honest answer.
+            self._resume_fill_active = False
+            self._reconcile_head_notice()
 
     def _fill_resume_until_scrollable(
         self, _attempt: int = 0, *, target: float | None = None
@@ -8827,8 +8954,30 @@ class OperatorApp(App[None]):
             if lease is None:
                 # A prior transaction for this source is still outstanding —
                 # including one started before a switch away and back. Filling
-                # resumes from that transaction's own settle callback rather
-                # than sending a second request against the same cursor (F1).
+                # must not send a second request against the same cursor (F1).
+                #
+                # DEFENSIVE, AND CURRENTLY UNREACHABLE. `_resume_paging` is
+                # `token in self._paging_leases`, which is the exact condition
+                # `_acquire_paging_lease` refuses on, and the guard at the top
+                # of this method has already returned on it. There is no
+                # `await` and no lease mutation in between, so today this
+                # cannot be None (review round 1, MINOR-1). It is kept rather
+                # than deleted because the guard and the acquire are separated
+                # by ~80 lines and a future yield between them would make the
+                # window real — a total state machine should not depend on
+                # that distance.
+                #
+                # If it is ever reached, it stands the fill down and restates
+                # the row rather than returning silently: leaving
+                # `_resume_fill_active` set would tell `_reconcile_head_notice`
+                # a better frame is on its way (the R6 skip) and the copy would
+                # go stale. Deliberately NOT claiming the holder's settle
+                # re-enters the fill — an earlier version of this comment did,
+                # and it was wrong: `settled()` guards on `_resume_fill_active`,
+                # which this branch has just cleared, so the demand ends here
+                # and the reader's next gesture re-arms it.
+                self._resume_fill_active = False
+                self._reconcile_head_notice()
                 return
             self.run_worker(
                 self._fetch_older_display_page(source, lease, on_settled=settled),
@@ -8919,8 +9068,12 @@ class OperatorApp(App[None]):
             # geometry (UX U1) and "click to load" looks idle while a load is
             # already underway (UX U3 / D2). Loading copy until a page mounts
             # is the honest state; a second click or ctrl+home may still
-            # retire the lease. A holder that HAS mounted is merely settling
-            # and falls through so R6's skip still applies.
+            # retire the lease. A holder that HAS mounted falls through so
+            # R6's skip still applies — either it is settling (its release is
+            # on its way) or its view is gone, in which case the ordinary
+            # "scroll up"/"click to load" copy is once again TRUE: an explicit
+            # ask retires an unsettleable lease (`_PagingLease.can_settle`)
+            # and proceeds to a real fetch rather than standing down.
             self._restate_head_notice(
                 notice,
                 RESUME_AUDIT_LOADING_NOTICE if audit else RESUME_LOADING_NOTICE,
@@ -9597,8 +9750,14 @@ class OperatorApp(App[None]):
         from this side of the gate, so the ask is also the way out of a hung
         wait. A holder that HAS mounted is merely settling, and keeping that
         gate is F1: retiring it would let a second fetch re-consume the same
-        cursor. A dropped ``insert_blocks`` settle is a TranscriptView defect
-        outside this path and is deliberately not retired here.
+        cursor. That deference is conditional on the settle being ABLE to
+        arrive — a lease mounted into a view whose pump is gone is retired
+        here, because nothing will ever release it (see
+        ``_PagingLease.can_settle``). This docstring used to say such a
+        settle was "a TranscriptView defect outside this path"; it is now
+        handled at that seam AND recoverable here, and the stale sentence is
+        removed rather than left to justify reverting the fix (review round
+        1, MINOR-2).
 
         The replacement inherits ``_older_page_retries`` for this source: the
         budget is against a moving window, not a particular transaction, so a
@@ -9615,8 +9774,28 @@ class OperatorApp(App[None]):
         the gesture should now proceed to a fresh fetch.
         """
         lease = self._paging_leases.get(source.token)
-        if lease is None or lease.mounted:
+        if lease is None:
             return False
+        if lease.mounted and lease.can_settle():
+            # Merely settling, and its release can still arrive. Standing down
+            # is correct here and retiring would re-consume a cursor whose
+            # rows are already painted (F1).
+            return False
+        # Either nothing was ever mounted (the wedged-fetch case above), or a
+        # page WAS mounted into a view whose pump is gone, so the callback
+        # that releases this lease can never run. The second is the live-lock
+        # AC1 forbids: without this the gate stayed shut for the life of the
+        # app, `_resume_paging` stood every gesture down, and the head notice
+        # went on advertising a control that could not answer. The lease is
+        # keyed by SOURCE TOKEN, which outlives any one view, so a reader
+        # returning to that conversation inherited the dead gate too.
+        #
+        # Safe for the same reason the unmounted case is: the retired lease
+        # loses ownership, so a late completion releases nothing and publishes
+        # nothing. It is not a lost page either — the rows this lease mounted
+        # are already in `_resume_mounted_ids`, and the id dedupe in
+        # `_mount_older_resume_page` drops any that a re-issue delivers twice.
+        #
         # Cancel the wedged fetch's worker so its coroutine unwinds through
         # its own `finally` (which now releases nothing, having lost the gate)
         # rather than lingering against the retired lease.
@@ -9663,14 +9842,37 @@ class OperatorApp(App[None]):
             if self._sidebar_navigation.generation == generation:
                 self._check_resume_page()
 
+        def post_check() -> bool:
+            """Queue ``run_check``, reporting whether the pump accepted it."""
+            return view.call_after_refresh(run_check)
+
+        def defer_check() -> None:
+            # The inner hop can be refused on its own, once the outer one has
+            # already been delivered, so it carries the same clear.
+            if not post_check():
+                self._resume_check_pending = False
+
         if upward is not None:
             # Keyboard scroll helpers enqueue their actual motion after the
             # refresh too. Our input hook runs first to release tail-follow;
             # checking in that same callback batch would retire the demand
             # before Home/PageUp had even installed its animation target.
-            view.call_after_refresh(lambda: view.call_after_refresh(run_check))
+            queued = view.call_after_refresh(defer_check)
         else:
-            view.call_after_refresh(run_check)
+            queued = post_check()
+        if not queued:
+            # THE WORST OF THE THREE, because it needs no lease at all.
+            # `_resume_check_pending` is raised before the post and cleared
+            # only inside `run_check`; a refused post latched it True, and the
+            # guard above then returned early on EVERY subsequent scroll — the
+            # wheel dead permanently while the notice click still worked,
+            # which is the operator's reported symptom reached without any
+            # paging lease being involved (review round 1, MAJOR-4; QA Q1).
+            #
+            # A demand that cannot be scheduled is not retained: the reader's
+            # next gesture re-arms it, which is the same contract a delivered
+            # `run_check` honours when it finds the view superseded.
+            self._resume_check_pending = False
 
     def _check_resume_page(self, *, force: bool = False) -> None:
         """Spend one demand only after motion settles in the prefetch zone.
@@ -9834,11 +10036,24 @@ class OperatorApp(App[None]):
             # are still answering must see a working transaction, not a
             # wedge. Mutated on this object so identity (F1) is unchanged.
             lease.mounted = True
+            # WHICH view owes this lease its release, so "still settling" can
+            # be checked rather than assumed. `insert_blocks` schedules the
+            # releasing callback on this widget; a later ask asserting the
+            # lease is merely settling is only entitled to stand down while
+            # that widget can still deliver it (`_PagingLease.can_settle`).
+            lease.mounted_view = transcript
             transcript.insert_blocks(index, blocks, on_settled=release_gate)
         else:
             # Hidden-only pages still yield; otherwise initial fill projects
             # several raw pages synchronously without letting input run.
-            transcript.call_after_refresh(release_gate)
+            #
+            # The SAME unkept promise as the insert path: `call_after_refresh`
+            # refuses on a closing pump and returns False rather than raising,
+            # so a hidden-only page mounted against a view that is going away
+            # left this source's lease held forever. Yield when the pump can
+            # still yield; release inline when it cannot.
+            if not transcript.call_after_refresh(release_gate):
+                release_gate()
 
     def _collect_resume_page_blocks(self, page: list[Any]) -> list[Any]:
         """Build the blocks for one deferred page WITHOUT mounting them.
@@ -11366,26 +11581,6 @@ class OperatorApp(App[None]):
             logger.debug("could not decide whether the runtime is local", exc_info=True)
             return True
 
-    def _session_is_busy(self) -> bool:
-        """Whether the session is mid-turn, however that turn was started.
-
-        Deliberately asks the SESSION rather than this viewer's own state: the
-        turn may have been submitted by another terminal, or by the phone, and
-        the answer is still "yes, work is happening".
-        """
-        session = self._session
-        if session is None:
-            return False
-        for probe in ("is_busy", "busy"):
-            value = getattr(session, probe, None)
-            try:
-                resolved = value() if callable(value) else value
-            except Exception:  # noqa: BLE001 — a probe must never break a command
-                continue
-            if isinstance(resolved, bool):
-                return resolved
-        return False
-
     def _overlay_live_state(self, rows: list[Any]) -> list[Any]:
         from local_operator.paths import config_dir
         from local_operator.tui.session_catalog import decorate_rows
@@ -12453,12 +12648,27 @@ class OperatorApp(App[None]):
         markers are resolved from the CHIP text, before the splice, because
         ``resolve_markers`` orders images by where the citation sits and a
         payload spliced in ahead of one would move it.
+
+        A ``$skill`` LEADING the argument expands here, through the same
+        ``_expand_invocation`` the bare-prompt path uses. The argument is its
+        OWN string, whose offset 0 is exactly where the user's ``$`` sits, so
+        the anchored parser needs no change to serve ``/team backend $research
+        fix the login bug`` — and the money/shell guards it gets from anchoring
+        (``$100``, a non-leading ``$research``) keep holding here unaltered.
+        Calling that method rather than re-resolving a body locally is what
+        keeps ONE answer to "what does an invocation expand to": the paste
+        splice into the request alone, the empty-body warning and the
+        never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
-        expanded = expand_pastes(request, attachments or {})
+        sent = self._expand_invocation(request, attachments)
+        # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
+        # argument as its row (the body belongs in the payload, never the
+        # ledger), everything else shows the paste-expanded text.
+        row = request if sent is not None else expand_pastes(request, attachments or {})
         # `typed=` keeps the naming split: the chip line names the thread, the
         # payload is what the model is sent.
-        self._submit_prompt(expanded, images, attachments, typed=request)
+        self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
     def _cmd_team(
         self,
@@ -27973,24 +28183,33 @@ class OperatorApp(App[None]):
             if self._loop_running:
                 self._loop_cancelled = True
                 notice("loop will stop after the current turn")
-            elif self._session_is_busy():
+            else:
+                # Say only what THIS terminal knows, and nothing more.
+                #
                 # A loop DRIVES the session from the terminal that started it:
                 # each iteration is an ordinary turn submitted over the socket,
                 # which is what keeps it bounded, interruptible and visible in
                 # the transcript. So a second viewer of the same session has no
-                # loop to cancel even though it can see the turns arriving, and
-                # "no loop is running" would be a flat contradiction of what is
-                # on its screen.
+                # loop of its own to cancel even while it watches turns arrive,
+                # and it CANNOT tell a loop's turn from a plain prompt's —
+                # `_loop_running` is app-local state the owner never publishes.
                 #
-                # Say where the control actually is, and name the tool that
-                # works from here: `/stop` ends the runtime from any viewer.
-                notice(
-                    "no loop is running in THIS terminal — a loop is cancelled "
-                    "where it was started, or use /stop to end the session",
-                    "warning",
-                )
-            else:
-                notice("no loop is running")
+                # Two predecessors of this line were each wrong in a different
+                # direction, which is why the branch is one flat sentence now:
+                # a bare "no loop is running" reads as a flat contradiction of
+                # a viewer's own screen, while "a loop is cancelled where it
+                # was started, or use /stop to end the session" (guarded by the
+                # `_session_is_busy` probe) asserted a loop elsewhere and
+                # offered a SESSION-ENDING action as the remedy for a no-op —
+                # and fired in the owner's own terminal during an ordinary turn,
+                # where no loop exists at all. The scoped sentence is true in
+                # every one of those states: this terminal is not running a
+                # loop, and this terminal cannot answer for another one.
+                #
+                # The tint is the plain notice, not `warning`: the request is
+                # legitimate, the answer is an explanation, and nothing here
+                # says the user did anything wrong.
+                notice("no loop is running in THIS terminal")
             return
         if session is None:
             # A rejected command changed nothing, so the conversation has not
@@ -33097,9 +33316,16 @@ class OperatorApp(App[None]):
         The loop drives provider turns through the session, which lives here;
         a follower-local loop would either drive nothing (its own facade has
         no loop worker worth running — each iteration's prompt must cross the
-        socket anyway) or double-drive the session. Every stop/validation
-        branch mirrors ``_cmd_loop`` so the two UIs answer identically; only
-        the transport of the receipt differs.
+        socket anyway) or double-drive the session. The stop and validation
+        branches mirror ``_cmd_loop`` in SUBSTANCE but not word for word: this
+        handler runs on the AUTHORITATIVE host
+        (``OperatorApp.run_slash_authoritative``), so its ``_loop_running`` IS
+        the loop's own terminal-local state — nothing about it crosses a
+        process boundary, so the receipt may name what the loop is doing. The
+        local path cannot: there the flag belongs to whichever terminal asked
+        (see ``_cmd_loop``'s stop branch). Only the transport of the receipt
+        differs for the branches that DO agree — the launch and validation
+        notices.
         """
         session = self._session
         if arg.lower() in ("stop", "cancel", "abort"):

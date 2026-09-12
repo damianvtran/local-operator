@@ -90,10 +90,11 @@ from local_operator.harness.types import AskOption, AskQuestion
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import (
     DEFAULT_DESC_CAP,
-    MAX_QUESTION_ROWS,
+    MIN_QUESTION_ROWS,
     MIN_TRANSCRIPT_ROWS,
     OTHER_LABEL,
     PROMPT_HEIGHT_SHARE,
+    QUESTION_LIST_RESERVE,
     RECOMMENDED_TAG,
     REVEAL_MAX_ROWS,
     SCROLLBAR_THUMB,
@@ -237,6 +238,29 @@ def _long_description_question(recommended: int | None = 0) -> AskQuestion:
     )
 
 
+def _is_badge_line(text: str) -> bool:
+    """Is this drawn line the recommendation BADGE's own line?
+
+    The badge owns a line between a row's label and its prose
+    (`ask_picker._build_line_list`), so "every line past a row's first is
+    description" — the rule the four structural helpers below share — would
+    count it as a phantom prose line. That is not a cosmetic miscount: the
+    BLOCKER-1 reveal guards assert on those helpers to prove prose is still on
+    screen, and `_repro_question` defaults to `recommended=0`, so a phantom line
+    lets them pass while the prose is actually gone.
+
+    The test is the tag AND nothing else on the line, not `RECOMMENDED_TAG in
+    text`: a bare containment check would also swallow a genuine PROSE line that
+    happens to quote the words. At the budget-1 band the tag rides the LABEL
+    instead, which these helpers already skip as a row's first line, so this
+    never has to consider that frame.
+
+    Scrollbar glyphs are stripped first — a windowed frame appends one to every
+    body line, and the badge's line is no exception.
+    """
+    return _strip_scrollbar_cell(text).strip() == RECOMMENDED_TAG
+
+
 def _description_lines_of(card: AskPickerScreen, lines: list[str]) -> list[str]:
     """The DESCRIPTION lines among ``lines``, read from the card's own map.
 
@@ -245,14 +269,15 @@ def _description_lines_of(card: AskPickerScreen, lines: list[str]) -> list[str]:
     already multi-line tolerant — so this keeps working when one row's
     description occupies several lines, which is the whole point of the change.
     A row's FIRST line is its label; every further line belonging to the same
-    row is description.
+    row is description — EXCEPT the recommendation badge's own line, which is
+    neither (:func:`_is_badge_line`).
     """
     seen: set[int] = set()
     out: list[str] = []
     for index, line in zip(card._line_rows, lines):
         if index is None:
             continue
-        if index in seen:
+        if index in seen and not _is_badge_line(line):
             out.append(line)
         seen.add(index)
     return out
@@ -1253,7 +1278,7 @@ async def test_the_card_never_draws_more_lines_than_its_budget() -> None:
                     card = await app.open_picker()
                     await pilot.pause()
                     layout = card._layout()
-                    budget = card._body_rows(len(card._question_lines(layout.width)))
+                    budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
                     lines = card.render_lines_for_test()
                     assert len(lines) <= budget, (width, height, len(lines), budget, lines)
                     # And no line overflows the card's column either. The
@@ -1632,21 +1657,50 @@ async def test_the_footer_offers_the_reveal_only_where_it_does_something() -> No
     becomes a lock.
 
     Under `DEFAULT_DESC_CAP` the default view never draws a paragraph in full,
-    so 190x50 flips to ``True`` and joins 150x40. The row kept without change is
-    100x20, where the key is still correctly withheld for the OTHER reason the
-    original docstring named: the budget is 6 and step 7a has nothing left to
-    buy a reveal line with, so the revealed plan equals the default one. That is
-    a genuine "the key would do nothing", and it is the case this test still
-    exists to pin.
+    so 190x50 flips to ``True`` and joins 150x40.
+
+    RE-DERIVED for the two-target reveal: the dead-key row moved from 100x20 to
+    240x50. `ctrl+e` now lifts the QUESTION's adaptive bound as well as the
+    selected row's cap, and 100x20's stated premise — "the budget is 6 and step
+    7a has nothing left to buy a reveal line with, so the revealed plan equals
+    the default one" — is no longer true there: the question is cut at 100x20
+    and `^e` gains it 2 lines. Keeping that row would pin a LIVE key as dead,
+    which is exactly the lock this docstring's own paragraph warns about, one
+    target further along.
+
+    This row's job is to pin that the footer never names a DEAD key, so it needs
+    a size where the key is dead — and under a two-target reveal that means dead
+    for BOTH. At 240x50 the question wraps to 3 and is drawn in full (nothing to
+    lift) and the row's description wraps to `DEFAULT_DESC_CAP` (nothing to
+    uncover). Both are asserted below rather than trusted from the size, so the
+    leg fails loudly if either target revives instead of quietly measuring a
+    frame that no longer holds.
 
     Both cases are asserted on the COMPOSITED footer as well as on the
     predicate. The hint being derivable is not the claim; what the user is told
     is.
     """
-    for size, offered in (((190, 50), True), ((100, 20), False), ((150, 40), True)):
+    for size, offered in (((190, 50), True), ((240, 50), False), ((150, 40), True)):
         app, card = await _real_app_card(size, [_long_description_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
+
+            if not offered:
+                # The premise of a dead-key row, asserted: NEITHER target has
+                # anything to show. Trusting the size is how this row came to
+                # pin a live key as dead in the first place.
+                default = card._layout(reveal=False)
+                revealed = card._layout(reveal=True)
+                selected = card.state.selected
+                assert len(revealed.question) == len(default.question), (
+                    size,
+                    "the question target is live; this is not a dead-key size",
+                    len(default.question),
+                    len(revealed.question),
+                )
+                assert card._visible_row_lines(revealed, selected) == card._visible_row_lines(
+                    default, selected
+                ), (size, "the row target is live; this is not a dead-key size")
 
             assert card._offers_reveal() is offered, (size, card._reveal_hint())
             painted = _painted_footer(app)
@@ -2021,17 +2075,20 @@ def _desc_lines_by_row(card: AskPickerScreen) -> dict[int, int]:
     """How many DESCRIPTION lines each visible row drew: its drawn lines minus 1.
 
     A row's first drawn line is its label; every further line mapped to the same
-    row is a description line. Read from `_line_rows` so it stays correct when a
-    row occupies several lines — which is the whole point of the change. A row
-    clipped to only its label (the top/bottom partial-row case) reports 0.
+    row is a description line — EXCEPT the recommendation badge's own line,
+    which is neither and is not counted (:func:`_is_badge_line`). Read from
+    `_line_rows` so it stays correct when a row occupies several lines — which
+    is the whole point of the change. A row clipped to only its label (the
+    top/bottom partial-row case) reports 0.
     """
     counts: dict[int, int] = {}
     first_seen: set[int] = set()
-    for index in _body_line_rows(card):
+    for index, line in zip(_body_line_rows(card), card.render_lines_for_test()):
         if index is None:
             continue
         if index in first_seen:
-            counts[index] = counts.get(index, 0) + 1
+            if not _is_badge_line(line):
+                counts[index] = counts.get(index, 0) + 1
         else:
             first_seen.add(index)
             counts.setdefault(index, 0)
@@ -2261,9 +2318,14 @@ def _prose_by_row(card: AskPickerScreen) -> dict[int, list[str]]:
     Built from `_line_rows` for the same reason :func:`_description_lines_of`
     is: it is the map the hit-test uses, it is rebuilt on every paint, and it is
     already multi-line tolerant. A row's FIRST mapped line is its label; every
-    further line belonging to that row is description. Rows with no description
-    drawn are ABSENT from the result rather than present-and-empty, so
-    `set(before) - set(after)` names the rows that lost their prose outright.
+    further line belonging to that row is description — EXCEPT the
+    recommendation badge's own line, which is neither
+    (:func:`_is_badge_line`). Counting the badge as prose is precisely the
+    failure this helper exists to catch, one level down: the guards below would
+    report a row as still carrying its prose when all it carries is the tag.
+    Rows with no description drawn are ABSENT from the result rather than
+    present-and-empty, so `set(before) - set(after)` names the rows that lost
+    their prose outright.
     """
     lines = [line.rstrip() for line in card.render_lines_for_test()]
     seen: set[int] = set()
@@ -2271,7 +2333,7 @@ def _prose_by_row(card: AskPickerScreen) -> dict[int, list[str]]:
     for index, line in zip(card._line_rows, lines):
         if index is None:
             continue
-        if index in seen:
+        if index in seen and not _is_badge_line(line):
             out.setdefault(index, []).append(line.strip())
         seen.add(index)
     return out
@@ -2681,7 +2743,13 @@ async def test_the_badge_no_longer_shortens_the_option_it_promotes() -> None:
         assert cell_len(promoted) == cell_len(sibling), (promoted, sibling)
         assert RECOMMENDED_TAG not in promoted
         # It moved to the row's own second line, where the prose had room.
-        assert lines[lines.index(promoted) + 1].strip().startswith(RECOMMENDED_TAG)
+        badge_line = lines[lines.index(promoted) + 1]
+        assert badge_line.strip().startswith(RECOMMENDED_TAG)
+        # And that line is the badge's ALONE. It used to head the first prose
+        # line behind a ` · ` separator, which is what made it the row's second
+        # claim on one line and let a tight budget drop it.
+        assert badge_line.strip() == RECOMMENDED_TAG, badge_line
+        assert "·" not in badge_line, badge_line
 
 
 @pytest.mark.asyncio
@@ -3796,6 +3864,65 @@ def _fingerprint(card: AskPickerScreen) -> list[str]:
     return [line.rstrip() for line in card.render_lines_for_test()]
 
 
+def _anchored_fingerprint(card: AskPickerScreen) -> dict[tuple[str, int], str]:
+    """The card's drawn text keyed by WHAT each line is, not WHERE it landed.
+
+    `_fingerprint` compares frames position by position, which cannot tell a
+    one-line viewport SCROLL from a redistribution: a scroll rewrites every
+    position while saying nothing new, and the D3 guard below is about the card
+    rewriting itself under the cursor, not about it scrolling.
+
+    So body lines are keyed by their ABSOLUTE line in the card's line list
+    (`_offset` plus their position within the drawn viewport), which a scroll
+    leaves unchanged and a redistribution rewrites. Chrome lines (`None` in
+    `_line_rows`) do NOT scroll — the header, question, spacer, position row and
+    footer hold their frame positions while only the body moves — so they stay
+    keyed by frame position. Keying the whole frame by a single shift measures
+    WORSE than not shifting at all (11 of 13 against 6 of 13 at 130x30), because
+    it misaligns every chrome line.
+
+    Keys present on only one side are lines that scrolled INTO or out of the
+    viewport — arrivals, not rewrites — and :func:`_churn` does not count them.
+
+    The scrollbar cell is EXCLUDED from body lines, which is this keying's own
+    logic followed one column further. The thumb is chrome the paint overlays on
+    the body's last cell, not text the card wrote, and a thumb that moves is the
+    scrollbar correctly reporting a new viewport position — the same mechanical
+    consequence of a scroll that the offset-anchoring already discounts. Counting
+    it would re-admit through the last column exactly what the keying removes
+    from every other one.
+
+    That the thumb moved is a real claim, and it is asserted separately rather
+    than dropped (:func:`_thumb_moved_consistently`) — two claims, two
+    assertions, rather than one conflated count.
+
+    Order matters. `render_lines_for_test()` is called FIRST because it
+    repaints, and `_line_rows` / `_offset` are its output; read before the
+    repaint they describe the previous frame.
+    """
+    lines = [line.rstrip() for line in card.render_lines_for_test()]
+    rows = list(card._line_rows)
+    offset = card._offset
+    keyed: dict[tuple[str, int], str] = {}
+    body_position = 0
+    for position, text in enumerate(lines):
+        row = rows[position] if position < len(rows) else None
+        if row is None:
+            keyed[("chrome", position)] = text
+        else:
+            keyed[("body", offset + body_position)] = _strip_scrollbar_cell(text).rstrip()
+            body_position += 1
+    return keyed
+
+
+def _churn(
+    before: dict[tuple[str, int], str], after: dict[tuple[str, int], str]
+) -> tuple[int, int]:
+    """``(lines that changed, lines compared)`` over the keys both frames share."""
+    shared = before.keys() & after.keys()
+    return sum(1 for key in shared if before[key] != after[key]), len(shared)
+
+
 def _thumb_column(card: AskPickerScreen) -> list[str]:
     """The rightmost cell of every DRAWN BODY (viewport) line, top to bottom.
 
@@ -3851,10 +3978,17 @@ def _selected_row_lines(card: AskPickerScreen) -> list[str]:
     description lines ARE its own lines in the one line list (§6) — there is no
     separate block — so this is how a test reads "the revealed text" now that
     :func:`_reveal_block_lines` (the old block locator) always returns empty.
+
+    The recommendation badge's own line is excluded (:func:`_is_badge_line`):
+    callers read this as the row's label plus its PROSE, and the tag is neither
+    — a `…`-mark test over these lines would otherwise be answered by a line
+    that never carries one.
     """
     selected = card.state.selected
     return [
-        line for row, line in zip(card._line_rows, card.render_lines_for_test()) if row == selected
+        line
+        for row, line in zip(card._line_rows, card.render_lines_for_test())
+        if row == selected and not _is_badge_line(line)
     ]
 
 
@@ -3870,6 +4004,48 @@ def _thumb_span(card: AskPickerScreen) -> tuple[int | None, int]:
     top = next((i for i, cell in enumerate(column) if cell == _THUMB_GLYPH), None)
     length = sum(1 for cell in column if cell == _THUMB_GLYPH)
     return top, length
+
+
+def _thumb_moved_consistently(
+    before: tuple[int | None, int],
+    after: tuple[int | None, int],
+    offset_before: int,
+    offset_after: int,
+) -> bool:
+    """Did the thumb track the viewport, rather than jump or resize?
+
+    :func:`_anchored_fingerprint` excludes the scrollbar cell from the text it
+    compares, because the thumb is chrome the paint overlays rather than text the
+    card wrote. Excluding it is only honest if the thumb is claimed somewhere,
+    and this is that claim — stated POSITIVELY, and a real one:
+
+    - the thumb does not change LENGTH under a cursor press. Its length is a
+      function of how much of the list fits the viewport, which a cursor move
+      does not change; a thumb that grew or shrank means the list or the budget
+      moved, which is the redistribution the churn guard is about;
+    - and its top moves in the SAME DIRECTION as the offset — down when the
+      viewport scrolls down, not at all when the viewport does not move. A thumb
+      that walked up while the card scrolled down is reporting the wrong
+      position, which is worse than not drawing one.
+
+    A card with no thumb on either side (it does not window) passes trivially:
+    there is nothing to report and nothing to get wrong.
+    """
+    top_before, len_before = before
+    top_after, len_after = after
+    if top_before is None and top_after is None:
+        return True
+    if top_before is None or top_after is None:
+        # The bar appeared or vanished under a cursor press: the list's overflow
+        # decision moved, which is not something a move should do.
+        return False
+    if len_before != len_after:
+        return False
+    if offset_after > offset_before:
+        return top_after >= top_before
+    if offset_after < offset_before:
+        return top_after <= top_before
+    return top_after == top_before
 
 
 @pytest.mark.asyncio
@@ -4150,17 +4326,23 @@ async def test_the_reveal_never_shows_less_than_the_default_view() -> None:
 
 @pytest.mark.asyncio
 async def test_a_long_question_is_bounded_and_marks_its_cut() -> None:
-    """D7's fix, pinned at its source: the QUESTION is bounded to
-    ``MAX_QUESTION_ROWS`` so it cannot starve the option list, and the cut is
-    marked with the card's usual ``…`` idiom (``cb5d8e2b``; OMP's
-    ``MAX_HEADER_ROWS``).
+    """D7's fix, pinned at its source: the QUESTION is bounded so it cannot
+    starve the option list, and the cut is marked with the card's usual ``…``
+    idiom (``cb5d8e2b``; OMP's ``MAX_HEADER_ROWS``).
 
     Our port had declared the question "never truncated", which is what let a
     592-character question wrap to 7 lines and leave a 2-line option viewport
-    (D7). The fix caps it. This asserts the property directly on the real app: a
-    question far longer than four lines' worth wraps to EXACTLY
-    ``MAX_QUESTION_ROWS`` lines, the last ending ``…``, at several widths (the
-    wrap count is width-dependent, so the cap must hold across them).
+    (D7). The fix bounds it.
+
+    RE-EXPRESSED against the ADAPTIVE bound. The bound was the blind constant
+    ``MAX_QUESTION_ROWS = 4``, which could not know how much room the terminal
+    had and so cut a question that the card had the rows to draw. It is now
+    ``max(MIN_QUESTION_ROWS, _body_rows(1) - QUESTION_LIST_RESERVE)``: what the
+    options need is reserved, and the question may have what is left. The
+    property asserted here is unchanged in kind — a question far longer than the
+    body can hold is bounded, and its cut is marked — but the bound is now
+    COMPUTED FROM THE CARD rather than hardcoded, because a number written into
+    the test would re-introduce exactly the blindness that was removed.
 
     Proven able to go red by
     :func:`test_an_unbounded_question_can_starve_the_options` (monkeypatch).
@@ -4178,18 +4360,28 @@ async def test_a_long_question_is_bounded_and_marks_its_cut() -> None:
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
             width = card._layout().width
-            lines = card._question_lines(width)
-            # Bounded to the cap — never the 16-line wall an unbounded question
-            # would draw at these widths.
-            assert len(lines) == MAX_QUESTION_ROWS, (size, len(lines), lines)
+            lines = card._question_lines(width, reveal=False)
+            # The bound, derived from the card exactly as the widget derives
+            # it — a search for the tallest question that still leaves the
+            # options their reserve, never a number written in here.
+            bound = card._question_bound(width, len(_wrap(long_question.question, width)))
+            # Bounded — never the 16-line wall an unbounded question would draw
+            # at these widths.
+            assert len(lines) == bound, (size, len(lines), bound, lines)
             # And the cut is MARKED, so the reader can tell the question
             # continues — the same discipline every other abbreviation follows.
             assert lines[-1].rstrip().endswith("…"), (size, lines[-1])
             # The drawn plan carries the same bounded question (not just the
             # helper): the renderer reads ``layout.question``.
-            assert len(card._layout().question) <= MAX_QUESTION_ROWS, (
+            assert len(card._layout().question) <= bound, (
                 size,
                 card._layout().question,
+            )
+            # The reserve is doing its job: the option list still has the lines
+            # it was promised, which is the whole point of bounding the question.
+            assert card._layout().body_line_budget >= QUESTION_LIST_RESERVE, (
+                size,
+                card._layout().body_line_budget,
             )
 
 
@@ -4197,19 +4389,23 @@ async def test_a_long_question_is_bounded_and_marks_its_cut() -> None:
 async def test_an_unbounded_question_can_starve_the_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The red half of the question-cap guard: lift the bound and the question
-    grows past ``MAX_QUESTION_ROWS`` again, which is the D7 starvation the cap
-    prevents.
+    """The red half of the question-bound guard: lift the bound and the question
+    takes the option list's rows — the D7 starvation the bound prevents.
 
-    Patched as the module constant (the coder owns the widget file; the editable
-    install maps ``local_operator`` to the shared tree, so monkeypatch is the
-    reliable isolation). With the cap raised, a long question wraps to its full
-    height — the uncapped state that starved the option list — proving the
-    guard above is load-bearing rather than a restatement of current behaviour.
+    RE-EXPRESSED against ``QUESTION_LIST_RESERVE``, and STRENGTHENED. The old
+    form patched ``MAX_QUESTION_ROWS`` to 99 and asserted only that the question
+    grew past 4, which is a statement about a line count. D7 was never about the
+    line count — it was about what the long question DID to the options: it left
+    them a 1-2 line viewport in which a cut description was unreachable by any
+    gesture. So this asserts the starvation itself.
+
+    Lifting the reserve to a large negative value removes the floor the options
+    stand on, which is the honest way to express "unbounded" now that the bound
+    is derived rather than fixed. Patched as the module constant (the coder owns
+    the widget file; the editable install maps ``local_operator`` to the shared
+    tree, so monkeypatch is the reliable isolation).
     """
     import local_operator.tui.widgets.ask_picker as ask_picker_module
-
-    monkeypatch.setattr(ask_picker_module, "MAX_QUESTION_ROWS", 99)
 
     long_question = AskQuestion(
         id="long_q",
@@ -4223,10 +4419,289 @@ async def test_an_unbounded_question_can_starve_the_options(
     app, card = await _real_app_card(size, [long_question])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
-        lines = card._question_lines(card._layout().width)
-        # Uncapped: the question is far taller than the bound, so it would take
-        # the rows the option list needs — the D7 starvation.
-        assert len(lines) > MAX_QUESTION_ROWS, (len(lines), "the cap should have been lifted")
+        bounded = len(card._layout().question)
+        bounded_budget = card._layout().body_line_budget
+
+        # Now lift the bound by removing the options' reserve.
+        monkeypatch.setattr(ask_picker_module, "QUESTION_LIST_RESERVE", -999)
+        card._invalidate_description_wraps()
+        card.refresh()
+        await pilot.pause()
+
+        lines = card._question_lines(card._layout().width, reveal=False)
+        starved = card._layout()
+        # Unbounded: the question wraps to its full height, far past what the
+        # bound allowed.
+        assert len(lines) > bounded, (len(lines), bounded, "the bound should have been lifted")
+        # And THIS is D7 — the question has eaten the option list's budget. The
+        # original guard only ever asserted the line count; the starvation is
+        # what the reserve exists to prevent.
+        assert starved.body_line_budget < bounded_budget, (
+            starved.body_line_budget,
+            bounded_budget,
+            "the unbounded question did not cost the option list anything",
+        )
+        assert starved.body_line_budget < QUESTION_LIST_RESERVE, (
+            starved.body_line_budget,
+            "the option list should be starved below the reserve",
+        )
+
+
+#: A question that wraps to 5 lines at 96 cells and 6 at 76 — one more than the
+#: retired ``MAX_QUESTION_ROWS = 4`` allowed, at sizes where the card has a spare
+#: body row. The fixture for the bound being ADAPTIVE rather than constant: under
+#: the constant these frames cut the question while the room to draw it was
+#: sitting unused, and no gesture reached the cut text.
+_ADAPTIVE_QUESTION_TEXT = (
+    "Which rollout should the stale-row migration take, given that the audit log still holds"
+    " every row that was written since the analytics recorder first shipped to production,"
+    " that the follow-up merge request has not yet been assigned to any reviewer, that the"
+    " cleanup window closes on Friday afternoon, and that nobody has confirmed which engineer"
+    " carries the pager for the week after this lands?"
+)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """The card's own wrap, for tests that compare against the FULL question."""
+    from local_operator.tui.widgets.transcript import wrap_cells
+
+    return wrap_cells(text, width)
+
+
+def _adaptive_question() -> AskQuestion:
+    """The 5-line question, with ordinary short-description options beside it."""
+    return AskQuestion(
+        id="rollout",
+        question=_ADAPTIVE_QUESTION_TEXT,
+        options=[
+            AskOption(label="Backfill from the audit log", description="slower, keeps history"),
+            AskOption(label="Drop the rows", description="nothing reads the column any more"),
+            AskOption(label="Dual-write for a week", description="two writers, one week"),
+        ],
+        recommended=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_question_is_complete_where_the_constant_used_to_cut_it() -> None:
+    """The point of the adaptive bound: draw the question the card has room for.
+
+    ``MAX_QUESTION_ROWS = 4`` could not see the terminal. At 100x46, 100x40 and
+    80x40 this question wraps to 5 lines (6 at 80 columns) and the card has a
+    SPARE body row, yet the constant cut the last line and marked it ``…`` — an
+    abbreviation made to protect an option list that was under no pressure, and
+    the cut text was reachable by no gesture at all.
+
+    Asserted as completeness rather than as a line count: the drawn question
+    equals the full wrap, and nothing is marked.
+    """
+    question = _adaptive_question()
+    for size in ((100, 46), (100, 40), (80, 40)):
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            full = _wrap(_ADAPTIVE_QUESTION_TEXT, layout.width)
+            # The precondition: the retired constant WOULD have cut this.
+            assert len(full) > 4, (size, len(full))
+            # The bound has room to spare, so the question is drawn whole.
+            assert list(layout.question) == full, (size, layout.question, full)
+            assert not layout.question[-1].rstrip().endswith("…"), (size, layout.question[-1])
+            # And the options still have their reserve — completeness was not
+            # bought out of the option list.
+            assert layout.body_line_budget >= QUESTION_LIST_RESERVE, (
+                size,
+                layout.body_line_budget,
+            )
+
+
+@pytest.mark.asyncio
+async def test_the_adaptive_bound_is_stable_across_repaints() -> None:
+    """The bound reads ``_body_rows(1)``, never the live budget.
+
+    A bound taken from the true budget is circular — ``_body_rows`` takes the
+    question's height as its argument — and iterating ``q -> budget -> q`` makes
+    a long question OSCILLATE (measured 13<->23 at 100x50) rather than settle.
+    ``_body_rows(1)`` is stable by construction and equals the settled answer
+    wherever one exists.
+
+    This is the guard that catches the swap, and it exists because NOTHING ELSE
+    WOULD: ``_body_rows`` does not call ``_question_lines``, so the live budget
+    introduces no call cycle and raises no ``RecursionError``. It would simply
+    flicker across repaints, which a passing suite would never notice.
+    """
+    for question in (_adaptive_question(), _long_description_question()):
+        for size in ((100, 50), (100, 40), (190, 50), (80, 40)):
+            app, card = await _real_app_card(size, [question])
+            async with app.run_test(size=size) as pilot:
+                await _show(app, pilot, card)
+                first = list(card._layout().question)
+                # Lay out again with NOTHING changed. A budget-derived bound
+                # that fed itself would answer differently the second time.
+                second = list(card._layout().question)
+                third = list(card._layout().question)
+                assert first == second == third, (size, first, second, third)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_lifts_the_question_bound() -> None:
+    """Where the bound cuts the question, ``^e`` reaches the cut text.
+
+    The bound alone would have left the user exactly where they started: a
+    question cut with no gesture to expand it. The reveal's second disjunct is
+    what closes that, and it ships in the same commit for that reason.
+
+    ``^e`` is asserted on the PAINTED FOOTER as well as through
+    ``_reveal_hint``, because the footer is what makes the gesture real — a key
+    the card does not advertise is one the user has no way to discover.
+    """
+    question = _adaptive_question()
+    for size in ((100, 22), (100, 20), (80, 24)):
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            full = _wrap(_ADAPTIVE_QUESTION_TEXT, layout.width)
+            # The regime: the question IS cut here.
+            assert len(layout.question) < len(full), (size, layout.question)
+
+            assert card._reveal_hint() == ("^e", "more"), (size, card._reveal_hint())
+            assert "^e more" in _painted_footer(app), (size, _painted_footer(app))
+            before = len(layout.question)
+
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+            after = len(card._layout().question)
+            assert after > before, (size, before, after)
+            # D5: the way back is still on screen. A toggle the card stops
+            # naming once it is on is a one-way door.
+            assert card._reveal_hint() == ("^e", "less"), (size, card._reveal_hint())
+            assert "^e less" in _painted_footer(app), (size, _painted_footer(app))
+
+            # And off returns the earlier frame.
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: not card.state.revealed)
+            assert len(card._layout().question) == before, (size, before)
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_lifts_the_bound_and_does_not_promise_the_whole_question() -> None:
+    """The honest degradation: ``^e`` lifts the BOUND, it does not promise the text.
+
+    Past the point where the body cannot hold the question, ``_allocate`` step 5
+    clips it and marks the cut — the card's existing discipline. This is the
+    boundary where the design deliberately does NOT add an escape hatch it
+    cannot honour, and the safety property still holds there.
+    """
+    question = AskQuestion(
+        id="very_long",
+        question=" ".join(f"word{index}" for index in range(300)),
+        options=[
+            AskOption(label="A", description="first consequence"),
+            AskOption(label="B", description="second consequence"),
+        ],
+    )
+    size = (100, 30)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        if card._reveal_hint() == ("^e", "more"):
+            await pilot.press("ctrl+e")
+            await _until(pilot, lambda: card.state.revealed)
+
+        layout = card._layout()
+        full = _wrap(question.question, layout.width)
+        # Even revealed, the body cannot hold it...
+        assert len(layout.question) < len(full), (len(layout.question), len(full))
+        # ...and the card SAYS so rather than stopping mid-clause.
+        assert layout.question[-1].rstrip().endswith("…"), layout.question[-1]
+        # The safety property is intact at the boundary: the footer is drawn,
+        # the question has a line, and an option row survives.
+        assert layout.show_footer, "the exit must survive"
+        assert len(layout.question) >= MIN_QUESTION_ROWS, layout.question
+        assert layout.body_line_budget >= 1, layout.body_line_budget
+
+
+@pytest.mark.asyncio
+async def test_the_safety_property_holds_across_the_tight_regime() -> None:
+    """The card's safety property, as a property, in BOTH reveal states.
+
+    Wherever the card draws anything at all: the footer is shown, at least one
+    question line is drawn, and at least one option row is drawn. The question
+    outranks the options and the footer is bought first — that ordering is what
+    the adaptive bound must not disturb, and it is asserted here in both reveal
+    states because the bound now depends on which state is being drawn.
+
+    100x14 is the measured exception and it is the CORRECT answer, not a gap:
+    the budget is 0, so no option row is bought and the card draws the question
+    and the way out. A card that laid out rows the region cannot paint would let
+    the compositor choose what to lose, which is how the footer went missing.
+
+    The budget is asserted at every size so the sweep cannot drift into
+    measuring nothing.
+    """
+    question = _adaptive_question()
+    # RE-MEASURED under the corrected bound. The reserve is met where it can be
+    # bought (100x26) and the card falls to MIN_QUESTION_ROWS below that, which
+    # is where these numbers come from — they are the bound working, not drift.
+    expected = {
+        (100, 26): 4,
+        (100, 24): 3,
+        (100, 22): 2,
+        (100, 20): 1,
+        (100, 16): 1,
+        (100, 14): 0,
+    }
+    for size, budget in expected.items():
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            for _ in range(2):
+                layout = card._layout()
+                if not card.state.revealed:
+                    assert layout.body_line_budget == budget, (size, layout.body_line_budget)
+                # The exit is always on screen.
+                assert layout.show_footer, (size, card.state.revealed)
+                # The question always says what is being asked.
+                assert len(layout.question) >= MIN_QUESTION_ROWS, (size, layout.question)
+                drawn = len({row for row in card._line_rows if row is not None})
+                if layout.body_line_budget > 0:
+                    # And an answer is on offer.
+                    assert drawn >= 1, (size, card.state.revealed, "no option row drawn")
+                else:
+                    # 100x14: budget 0, and 0 options is the measured, correct
+                    # answer — the card says what it is asking and how to leave.
+                    assert drawn == 0, (size, drawn)
+                if not card._reveal_hint():
+                    break
+                await pilot.press("ctrl+e")
+                await _until(pilot, lambda: card.state.revealed)
+
+
+@pytest.mark.asyncio
+async def test_the_question_expand_is_never_offered_unadvertised() -> None:
+    """R5: wherever ``_reveal_is_useful()`` is True, ``^e`` is on the PAINTED footer.
+
+    The question disjunct lives in ``_reveal_is_useful`` and nowhere else, and
+    this is the guard that catches it leaking into a second place.
+    ``_offers_reveal`` asks the footer whether ``^e`` is actually on screen
+    before letting the key fire, and ``action_toggle_reveal`` refuses a gesture
+    the card does not advertise — but that protection only holds while there is
+    ONE predicate to guard. A question-expand offered here and shed from the
+    footer by ``_shed_to_fit`` at a narrow width would be an unadvertised key.
+    """
+    for question in (_adaptive_question(), _long_description_question()):
+        for size in ((100, 40), (100, 30), (100, 24), (100, 22), (100, 20), (80, 24), (60, 30)):
+            app, card = await _real_app_card(size, [question])
+            async with app.run_test(size=size) as pilot:
+                await _show(app, pilot, card)
+                if not card._reveal_is_useful():
+                    continue
+                assert "^e" in _painted_footer(app), (
+                    size,
+                    "the reveal is useful but ^e is not advertised",
+                    _painted_footer(app),
+                )
 
 
 @pytest.mark.asyncio
@@ -4240,8 +4715,11 @@ async def test_a_cut_description_is_reachable_by_the_reveal_where_the_body_can_h
     option 1's description was cut and ``^e`` was REFUSED. The architect ruled a
     FIX in the header, not the reveal (our port had declared the question "never
     truncated" where OMP caps its header at ``MAX_HEADER_ROWS``): ``cb5d8e2b``
-    added ``MAX_QUESTION_ROWS`` (4) and bounds ``_question_lines`` to it, marking
-    the cut. Canary 100x30 body budget went 2 -> 5 and ``^e`` is now offered.
+    added a question bound and bounds ``_question_lines`` to it, marking the
+    cut. Canary 100x30 body budget went 2 -> 5 and ``^e`` is now offered. That
+    bound is now ADAPTIVE (``QUESTION_LIST_RESERVE``) rather than the constant
+    four it shipped as, which changes how many lines the question may take but
+    not that it is bounded or that its cut is marked.
 
     This pins the LIVE claim at the sizes where the fix genuinely delivers: where
     the body can hold the whole revealed row (``body_line_budget >= wrap + 1``),
@@ -4325,11 +4803,36 @@ async def test_a_revealed_row_taller_than_the_viewport_marks_its_cut() -> None:
     cap but not the body), the regime the D7 fix exposed.
 
     Proven able to go red by :func:`test_a_silent_viewport_clip_is_caught`.
+
+    The 120-column leg was RE-DERIVED to 110 when the recommendation badge took
+    a line of its own. The badge used to reserve its cells in the recommended
+    row's first description line, so that row's prose wrapped in a column
+    fourteen cells narrower than every other row's; with the reservation gone it
+    wraps at the full width like its siblings, and at 120 columns the selected
+    row's wrap drops from 5 lines to 4 — enough to fit the viewport, so the leg
+    stopped reaching the clip regime it was chosen to exercise.
+
+    RE-DERIVED AGAIN for the adaptive question bound, and 100x30 was DROPPED for
+    a substantive reason rather than a convenient one. Under the bound, turning
+    the reveal on at 100x30 expands the QUESTION from 5 lines to 7, which
+    collapses ``body_line_budget`` from 4 to 2 and takes the selected row's
+    visible lines from 4 down to 2. The reveal makes the row SHORTER there, so
+    the marker the grant stamps lands off-viewport and the frame shows a single
+    unmarked line. That is the honest trade the design accepts — at a tight size
+    lifting the question costs option lines — not a silent clip this guard is
+    about, and the regime predicate (``budget >= wrap + 1``) no longer selects
+    the sizes the test was written for. Measured in-regime and genuinely marking
+    after the change: 100x32, 100x36, 110x30, 110x34, 110x36 and 120x30.
+
+    Nothing about the CLAIM moved — "incomplete implies marked" is asserted
+    unchanged — and the sweep is still asserted non-vacuous below for exactly
+    that reason: a size list that quietly stops entering the regime turns this
+    guard into a test that passes by doing nothing.
     """
     full = " ".join(_LONG_DESCRIPTIONS[0].split())
     exercised = 0
 
-    for size in ((100, 30), (100, 32), (100, 34), (120, 30), (120, 32), (120, 34)):
+    for size in ((100, 32), (100, 36), (110, 30), (110, 34), (110, 36), (120, 30)):
         app, card = await _real_app_card(size, [_long_description_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
@@ -4439,10 +4942,20 @@ async def test_a_clipped_selected_row_keeps_its_label_intact_in_the_default_view
     - the label text keeps the selection accent hue, not ``muted`` (it was not
       repainted as unselected prose).
 
+    RE-DERIVED 100x22 -> 100x21 for the adaptive question bound, and this
+    MATTERS: the guard was passing vacuously. The blocker can only corrupt a
+    LABEL when the selected row's last visible line IS its label, i.e.
+    ``_visible_row_lines(layout, selected) == 1``. Under the bound 100x22 now
+    leaves a 2-line body, so the marker lands on a DESCRIPTION line, the label
+    is never touched, and the red half below could not go red — a green guard
+    whose red half cannot fire is not a guard. At 100x21 the body is 1 line
+    again and the regime is restored. The regime is now ASSERTED rather than
+    assumed, so a future bound change that moves it fails loudly here.
+
     Proven able to go red by
     :func:`test_an_unconditional_clip_marker_corrupts_the_label`.
     """
-    size = (100, 22)
+    size = (100, 21)
     app, card = await _real_app_card(size, [_long_description_question()])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
@@ -4459,6 +4972,14 @@ async def test_a_clipped_selected_row_keeps_its_label_intact_in_the_default_view
             size,
             "expected a tight body",
             layout.body_line_budget,
+        )
+        # The regime the blocker lives in, pinned rather than assumed: the
+        # selected row's last visible line IS its label, which is the only
+        # state in which an unconditional `_mark_clipped` can corrupt one.
+        assert card._visible_row_lines(layout, selected) == 1, (
+            size,
+            "the selected row must draw only its label for this guard to bite",
+            card._visible_row_lines(layout, selected),
         )
 
         label = _selected_label_line(card)
@@ -4497,7 +5018,7 @@ async def test_an_unconditional_clip_marker_corrupts_the_label() -> None:
     The fix is one term — ``and on_description`` — in ``_card_text``'s decision to
     stamp the clip marker. This reintroduces the blocker by source-transforming
     ``_card_text`` to drop that term (the pre-``af77527d`` behaviour) and rebinding
-    it on the class, then rendering the same 100x22 default frame the green guard
+    it on the class, then rendering the same 100x21 default frame the green guard
     pins. The label then loses its cursor, its number, its hue, and gains a false
     ``…`` — every corruption the green guard forbids. Asserted so the green guard
     is a real guard and not a restatement of current behaviour.
@@ -4521,10 +5042,18 @@ async def test_an_unconditional_clip_marker_corrupts_the_label() -> None:
     exec(buggy_source, namespace)  # noqa: S102 - controlled source, test-only
     buggy_card_text = namespace["_card_text"]
 
-    size = (100, 22)
+    size = (100, 21)
     app, card = await _real_app_card(size, [_long_description_question()])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
+        # The regime this red half needs: the selected row's last visible line
+        # IS its label. At 100x22 the adaptive bound leaves a 2-line body, the
+        # marker lands on a description line, and the corruption below is
+        # unreachable — which is why both halves moved to 100x21.
+        assert card._visible_row_lines(card._layout(), card.state.selected) == 1, (
+            size,
+            "the selected row must draw only its label for this red half to bite",
+        )
         original = AskPickerScreen._card_text
         AskPickerScreen._card_text = buggy_card_text  # type: ignore[assignment]
         try:
@@ -4560,6 +5089,15 @@ async def test_a_tui_unreachable_description_still_reaches_the_phone() -> None:
     description is genuinely UNREACHABLE in the TUI at that size, by physics, not
     by a bug.
 
+    RE-DERIVED for the two-target reveal, and STRENGTHENED. `ctrl+e` now lifts
+    the QUESTION's adaptive bound as well as the selected row's cap, so
+    `_reveal_hint() is None` stopped being a statement about this row: at 100x26
+    the hint is offered because the key shows five more lines of the QUESTION,
+    while the row's cap-lift still reaches nothing. The claim was always about
+    the ROW, so it is now asserted against the row target directly, and the
+    tail's unreachability is MEASURED in both reveal states (reach 176/434
+    default, 1/434 revealed) rather than inferred from a hint being absent.
+
     That tail is acceptable ONLY because it has an escape hatch, and this pins
     that the escape hatch is real rather than assumed: the mobile relay ships the
     option's description UNTRUNCATED to the phone. The wire cap is
@@ -4587,9 +5125,41 @@ async def test_a_tui_unreachable_description_still_reaches_the_phone() -> None:
         assert len(card._reveal_wrap(selected, plan.width)) > plan.description_rows.get(
             selected, 0
         ), (size, "the description should be cut at this tight size")
-        assert card._reveal_hint() is None, (size, "^e should be refused; the body is too short")
+        # The ROW target is refused — the claim this test was always making,
+        # now stated against the target it is about. `ctrl+e` lifts two things
+        # (the question's bound and the selected row's cap), and at this size
+        # the row's cap-lift reaches no further: a 2-line viewport can show
+        # nothing more of the row's own prose.
+        revealed = card._layout(reveal=True)
+        assert card._visible_row_lines(revealed, selected) <= card._visible_row_lines(
+            plan, selected
+        ), (size, "the row cap-lift should reach no further at this size")
+        # The QUESTION target IS live here, and that is asserted rather than
+        # denied: `^e` is offered at this size because it shows more of the
+        # QUESTION. Reading the old `_reveal_hint() is None` as "the reveal does
+        # nothing" conflated the two targets.
+        assert len(revealed.question) > len(plan.question), (
+            size,
+            "the question target should be live at this size",
+        )
+        # The tail is unreachable in the TUI in BOTH reveal states, measured
+        # directly rather than inferred from a hint being absent. That is what
+        # makes the phone hatch load-bearing: no gesture in the terminal reaches
+        # this text.
         reached = _prefix_reach(card.render_lines_for_test(), full)
         assert reached < len(full), (size, reached, "expected the TUI to withhold text here")
+        card.state.revealed = True
+        card._repaint()
+        await pilot.pause()
+        reached_revealed = _prefix_reach(card.render_lines_for_test(), full)
+        assert reached_revealed < len(full), (
+            size,
+            reached_revealed,
+            "expected the TUI to withhold text in the revealed state too",
+        )
+        card.state.revealed = False
+        card._repaint()
+        await pilot.pause()
 
     # (2) The escape hatch: the phone gets the WHOLE description, untruncated.
     # Driven through the real mobile handle's projection, the JSON the phone
@@ -4771,7 +5341,7 @@ async def test_an_uncapped_view_windows_instead_of_building_a_wall(
         # But the wall is not rebuilt: the card windows the overflow instead of
         # drawing past its budget.
         assert layout.show_position, ("the uncapped view must window, not wall", grants)
-        budget = card._body_rows(len(card._question_lines(layout.width)))
+        budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
         assert len(card.render_lines_for_test()) <= budget, (
             "the uncapped view drew past its body budget — the wall is back",
             len(card.render_lines_for_test()),
@@ -4812,20 +5382,69 @@ async def test_one_arrow_press_barely_changes_the_card() -> None:
     The old height claim is NOT dropped: it is asserted here too, because a
     card could hold its content still by changing height instead, and the two
     together are what "the card does not move" means.
+
+    Churn is now measured VIEWPORT-ANCHORED (:func:`_anchored_fingerprint`) and
+    the numbers above still read true. A position-by-position comparison cannot
+    tell a one-line SCROLL from a redistribution — a scroll rewrites every
+    position while the card says nothing new — and the recommendation badge's
+    own line made that reachable here: at 130x30 the recommended row spans four
+    lines of a six-line body, so moving the cursor to the next row scrolls by
+    one to keep its whole span visible, which is `_scroll_offset_for_cursor`
+    doing its documented job. Body lines are therefore keyed by their absolute
+    line in the line list and chrome by frame position.
+
+    And the D3 property is now asserted DIRECTLY as well, on
+    `description_rows`. That is not belt-and-braces for its own sake: against a
+    synthetic redistribution (the rejected design — the selected row's cap
+    lifted to 6 unconditionally) the anchored churn measurement catches 190x50
+    (12 of 18) and 150x40 (9 of 20) but MISSES 130x30, scoring 3 of 9 against
+    this bound of 4. At a six-line viewport a rewrite large enough to change the
+    whole card pushes most of the rewritten content out of the shared key set,
+    so only the survivors are compared. The grants assertion closes that hole,
+    and it is the more honest statement of what D3 is: the allocation moved.
+
+    The bound stays at 4 for the reason it always was — worst legitimate churn
+    under the anchored measurement is 3, at 130x30.
     """
     for size in ((190, 50), (150, 40), (130, 30)):
         app, card = await _real_app_card(size, [_repro_question()])
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
 
-            before = _fingerprint(card)
+            grants_before = card._layout().description_rows
+            height_before = len(_fingerprint(card))
+            before = _anchored_fingerprint(card)
+            thumb_before = _thumb_span(card)
+            offset_before = card._offset
             await pilot.press("down")
             await _until(pilot, lambda: card.selected_index == 1)
-            after = _fingerprint(card)
+            grants_after = card._layout().description_rows
+            height_after = len(_fingerprint(card))
+            after = _anchored_fingerprint(card)
+            thumb_after = _thumb_span(card)
+            offset_after = card._offset
 
-            assert len(after) == len(before), (size, len(before), len(after))
-            changed = sum(1 for old, new in zip(before, after) if old != new)
-            assert changed <= 4, (size, changed, len(before))
+            # The height proxy, kept.
+            assert height_after == height_before, (size, height_before, height_after)
+            # D3 stated DIRECTLY: the allocation does not move under the cursor.
+            # This is the assertion that actually pins the defect — churn-on-ink
+            # alone lets a real redistribution through at a 6-line viewport,
+            # where most of the rewritten content is pushed out of the shared
+            # key set and only the survivors are compared (measured: a synthetic
+            # cap-lift redistribution scores 3 of 9 at 130x30, under the bound,
+            # while its grants visibly move).
+            assert grants_after == grants_before, (size, grants_before, grants_after)
+            # And the ink the user sees stays put, viewport-anchored. The belt to
+            # the grants check's braces: it catches a rewrite that holds the
+            # grants constant, which the grants check alone would miss.
+            changed, compared = _churn(before, after)
+            assert changed <= 4, (size, changed, compared)
+            # The scrollbar cell is excluded from the churn above, so the thumb
+            # is claimed here instead of going unasserted: same length, and its
+            # top tracks the offset rather than jumping.
+            assert _thumb_moved_consistently(
+                thumb_before, thumb_after, offset_before, offset_after
+            ), (size, thumb_before, thumb_after, offset_before, offset_after)
 
 
 @pytest.mark.asyncio
@@ -4835,29 +5454,56 @@ async def test_an_uncapped_card_churns_under_the_cursor(
     """The red half of the churn guard, and the demonstration that the height
     test alone could never have caught D3.
 
-    With the cap lifted, 150x40 reproduces the measured 9-of-20 rewrite. The
-    height assertion is made FIRST and passes — that is the point: the card
-    holds its height exactly as the shipped design intended while nearly half
-    its body rewrites, so a suite carrying only the height test stays green
-    through the defect. The churn assertion is the one that fails.
-    """
-    import local_operator.tui.widgets.ask_picker as ask_picker_module
+    With the selected row's cap lifted, 150x40 reproduces the measured
+    9-of-20 rewrite. The height assertion is made FIRST and passes — that is the
+    point: the card holds its height exactly as the shipped design intended while
+    nearly half its body rewrites, so a suite carrying only the height test stays
+    green through the defect. The churn assertion is the one that fails.
 
-    monkeypatch.setattr(ask_picker_module, "DEFAULT_DESC_CAP", 99)
+    RE-DERIVED to redistribute rather than to scroll. This patched
+    `DEFAULT_DESC_CAP = 99`, which uncaps EVERY row and produces a five-line
+    scroll with the grants identical before and after — so the test had stopped
+    demonstrating the defect its own docstring describes, and its detection rode
+    on the scrollbar glyph moving rather than on the card rewriting itself.
+
+    The defect reproduced here is the rejected design exactly: the SELECTED row's
+    cap lifted to 6 while every other row pays for it, at constant offset. That
+    is what "the selected row's grant grew from 3 lines to 6 and every other
+    row's shrank" means, and it measures the 9 of 20 this docstring has always
+    claimed — now with the grants visibly moving.
+    """
+    original_cap_for_row = AskPickerScreen._cap_for_row
+
+    def redistributing_cap(
+        self: AskPickerScreen, index: int, revealed: bool, selected: int, cap: int
+    ) -> int:
+        """The rejected design: the SELECTED row's cap lifted to 6, always."""
+        if index == selected:
+            return max(cap, 6)
+        return original_cap_for_row(self, index, revealed, selected, cap)
+
+    monkeypatch.setattr(AskPickerScreen, "_cap_for_row", redistributing_cap)
     app, card = await _real_app_card((150, 40), [_repro_question()])
     async with app.run_test(size=(150, 40)) as pilot:
         await _show(app, pilot, card)
 
-        before = _fingerprint(card)
+        height_before = len(_fingerprint(card))
+        before = _anchored_fingerprint(card)
         await pilot.press("down")
         await _until(pilot, lambda: card.selected_index == 1)
-        after = _fingerprint(card)
+        height_after = len(_fingerprint(card))
+        after = _anchored_fingerprint(card)
 
         # The proxy holds...
-        assert len(after) == len(before), (len(before), len(after))
-        # ...and the real property does not.
-        changed = sum(1 for old, new in zip(before, after) if old != new)
-        assert changed > 4, (changed, len(before))
+        assert height_after == height_before, (height_before, height_after)
+        # ...and the real property does not. Measured viewport-anchored, so this
+        # fires on genuine rewriting rather than on a scroll having moved every
+        # line down by one.
+        #
+        # No grants assertion here, deliberately: this half's job is to FAIL, and
+        # a second failing assertion beside it would obscure which property fired.
+        changed, compared = _churn(before, after)
+        assert changed > 4, (changed, compared)
 
 
 @pytest.mark.asyncio
@@ -4893,20 +5539,22 @@ async def test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it() -> No
         card = await app.open_picker()
         await pilot.pause()
 
-        line = next(
-            candidate
-            for candidate in card._card_text().split("\n")
-            if RECOMMENDED_TAG in candidate.plain
+        drawn = card._card_text().split("\n")
+        at = next(
+            index for index, candidate in enumerate(drawn) if RECOMMENDED_TAG in candidate.plain
         )
+        line = drawn[at]
         start = line.plain.index(RECOMMENDED_TAG)
-        end = start + len(RECOMMENDED_TAG)
 
         badge = _style_at(line, start)
-        # The prose after the tag: the text the badge has to win against. Taken
-        # from the far side of the ` · ` separator so it is genuinely the
-        # description and not the separator's own ink.
-        prose_at = line.plain.index("·", end) + 2
-        prose = _style_at(line, prose_at)
+        # The prose the badge has to win against: the row's first description
+        # line, which is the badge's SUCCESSOR now that the tag owns a line of
+        # its own. It used to be taken from the far side of this line's own
+        # ` · ` separator, and an own-line badge has no separator and no prose
+        # to point at — the locator moved for that reason and for no other.
+        # Every assertion below is unchanged.
+        prose_line = drawn[at + 1]
+        prose = _style_at(prose_line, len(prose_line.plain) - len(prose_line.plain.lstrip()))
 
         badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
         prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
@@ -4929,6 +5577,9 @@ async def test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it() -> No
         # buy its emphasis by dimming the consequence text, which on the
         # approval gate authorises a tool call (design §2.3).
         assert prose_colour == theme_mod.semantic_color("muted"), prose_colour
+        # The badge really is alone on its line — the premise the locator above
+        # now rests on, asserted rather than assumed.
+        assert line.plain.strip() == RECOMMENDED_TAG, line.plain
 
 
 @pytest.mark.asyncio
@@ -4996,21 +5647,290 @@ async def test_a_badge_drawn_like_the_prose_is_caught(
     async with app.run_test(size=(100, 30)) as pilot:
         card = await app.open_picker()
         await pilot.pause()
-        line = next(
-            candidate
-            for candidate in card._card_text().split("\n")
-            if RECOMMENDED_TAG in candidate.plain
+        drawn = card._card_text().split("\n")
+        at = next(
+            index for index, candidate in enumerate(drawn) if RECOMMENDED_TAG in candidate.plain
         )
+        line = drawn[at]
         start = line.plain.index(RECOMMENDED_TAG)
 
         badge = _style_at(line, start)
-        prose = _style_at(line, line.plain.index("·", start + len(RECOMMENDED_TAG)) + 2)
+        # The badge's successor line — the row's prose. See the locator note in
+        # the green half above: only where the prose is read moved, and only
+        # because the badge no longer shares a line with it.
+        prose_line = drawn[at + 1]
+        prose = _style_at(prose_line, len(prose_line.plain) - len(prose_line.plain.lstrip()))
         badge_colour = badge.color.triplet.hex if badge.color and badge.color.triplet else None
         prose_colour = prose.color.triplet.hex if prose.color and prose.color.triplet else None
 
         # Indistinguishable, which is what the guard above must reject.
         assert badge_colour == prose_colour, (badge_colour, prose_colour)
         assert bool(badge.bold) == bool(prose.bold), (badge.bold, prose.bold)
+
+
+def _edge_question() -> AskQuestion:
+    """A recommended row whose description wraps to TWO lines at width 100.
+
+    Sized so the row's span is ``label + badge + 2 prose`` and the viewport can
+    cut it between the badge and the prose — the frame
+    :func:`test_a_badge_line_at_the_viewport_edge_is_not_marked_as_a_clipped_description`
+    needs, and the reason the description is this long.
+    """
+    return AskQuestion(
+        id="rollout",
+        question="Which rollout should the stale-row migration take?",
+        options=[
+            AskOption(label="Drop the rows", description="nothing reads the column any more"),
+            AskOption(
+                label="Backfill from the audit log",
+                description=(
+                    "nothing reads that column any more, and the follow-up merge request has"
+                    " not been assigned to anyone yet, so the cleanup would wait"
+                ),
+            ),
+            AskOption(label="Dual-write for a week", description="two writers for a week"),
+        ],
+        recommended=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_badge_line_at_the_viewport_edge_is_not_marked_as_a_clipped_description() -> None:
+    """The badge's own line must never reach `_mark_clipped`.
+
+    `_mark_clipped` documents "assumes ``row`` is a DESCRIPTION line": it slices
+    off `_description_indent()` cells and repaints the remainder at `muted` with
+    a `…` appended. Run on the badge line it strips the `▸` glyph and turns
+    `RECOMMENDED` into muted prose ending in an ellipsis — a badge rendered as a
+    sentence fragment, on the one row the model is pointing at.
+
+    It is reachable because the guard that gates it used to be POSITIONAL —
+    "the last visible line sits past the row's label" — which was a sound proxy
+    for "is prose" only while a row's lines were `label, desc*`. The own-line
+    badge makes `label, badge, desc*` reachable and the proxy false, so the
+    guard now reads the line's KIND. Nothing else about the frame changed, which
+    is why a green suite would not notice: the corruption is one line of one
+    frame at one viewport edge.
+
+    The size is DERIVED here rather than pinned from a measurement taken before
+    the badge had a line, and the preconditions are asserted so the test cannot
+    quietly stop testing anything.
+    """
+    question = _edge_question()
+    size = (100, 22)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        row = card.question.recommended
+        assert row is not None
+
+        # Precondition 1: the plan gives the row exactly its label and its
+        # badge, with prose below the edge.
+        assert layout.body_line_budget == 2, layout.body_line_budget
+        assert layout.row_draws_badge_line(row), "the row was not granted a badge line"
+
+        lines = [line.rstrip() for line in card.render_lines_for_test()]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        assert len(drawn) == 2, (drawn, lines)
+        badge_line = lines[drawn[-1]]
+
+        # Precondition 2: the last visible line of the viewport IS the badge
+        # line, and the clip guard is live behind it (the row continues below).
+        assert _is_badge_line(badge_line), badge_line
+        assert len(card._description_lines(row, layout.content_width)) >= 2, "prose must continue"
+
+        # The badge, verbatim and unmangled.
+        assert RECOMMENDED_TAG in badge_line, badge_line
+        assert badge_line.startswith(" ") and "▸" in badge_line, badge_line
+        assert not _strip_scrollbar_cell(badge_line).rstrip().endswith("…"), badge_line
+
+        styled = next(
+            line for line in card._card_text().split("\n") if RECOMMENDED_TAG in line.plain
+        )
+        ink = _style_at(styled, styled.plain.index(RECOMMENDED_TAG))
+        assert ink.bold, styled.plain
+        colour = ink.color.triplet.hex if ink.color and ink.color.triplet else None
+        assert colour != theme_mod.semantic_color("muted"), colour
+
+
+@pytest.mark.asyncio
+async def test_a_badge_line_marked_as_a_clipped_description_is_caught() -> None:
+    """The red half of the guard above: under the POSITIONAL test the badge line
+    is routed into `_mark_clipped`, and it comes back destroyed.
+
+    Two claims, because the guard is worth only as much as both:
+
+    1. the OLD predicate — "the last visible line sits past the row's label
+       line" — is TRUE for this frame's badge line, so the pre-fix code would
+       have marked it. Recomputed here from the same `_line_rows` map the widget
+       builds, rather than asserted from memory;
+    2. and `_mark_clipped` run on that line destroys the badge.
+
+    What "destroyed" means is measured, not assumed. The `▸` glyph SURVIVES —
+    `_description_indent()` is 5 and the tag starts at column 5, so the slice
+    that strips the indent stops exactly short of it. The damage is the other
+    three: the weight is dropped (bold → none), the ink is repainted from `fg`
+    to `muted`, and a `…` is appended. That is the badge rendered as an
+    abandoned sentence of description prose — the same indistinguishable-from-
+    prose state `test_the_recommended_badge_is_drawn_unlike_the_prose_beside_it`
+    exists to reject, arrived at from the paint side instead of the style side.
+    """
+    question = _edge_question()
+    size = (100, 22)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        row = card.question.recommended
+        assert row is not None
+        assert layout.body_line_budget == 2, layout.body_line_budget
+
+        lines = [line.rstrip() for line in card.render_lines_for_test()]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        badge_at = drawn[-1]
+        assert _is_badge_line(lines[badge_at]), lines[badge_at]
+
+        # Claim 1: the positional predicate fires on the badge line. `label_pos`
+        # is the row's first drawn line; the badge sits past it, which is all
+        # the old guard ever asked.
+        label_pos = drawn[0]
+        assert badge_at > label_pos, (badge_at, label_pos)
+
+        # Claim 2: what that routing does to the line.
+        original = next(
+            line for line in card._card_text().split("\n") if RECOMMENDED_TAG in line.plain
+        )
+        before = _style_at(original, original.plain.index(RECOMMENDED_TAG))
+        assert before.bold, "precondition: the badge is bold before marking"
+
+        mangled = card._mark_clipped(original, layout.content_width, row)
+        assert mangled.plain.rstrip().endswith("…"), mangled.plain
+        after = _style_at(mangled, len(mangled.plain) - len(mangled.plain.lstrip()))
+        assert not after.bold, mangled.plain
+        colour = after.color.triplet.hex if after.color and after.color.triplet else None
+        assert colour == theme_mod.semantic_color("muted"), colour
+        assert colour != theme_mod.semantic_color("fg"), colour
+
+
+@pytest.mark.asyncio
+async def test_the_badge_line_is_not_counted_as_a_rows_prose() -> None:
+    """The badge's line is not description, and the structural helpers know it.
+
+    `_prose_by_row` and its three siblings map "every line past a row's first"
+    to description. Under the own-line badge that rule hands the recommended row
+    a phantom prose line — and `_repro_question` defaults to `recommended=0`, so
+    the phantom lands squarely in the BLOCKER-1 reveal guards, which would then
+    report a row as still carrying prose when all it carries is the tag.
+    """
+    question = _edge_question()
+    size = (100, 30)
+    app, card = await _real_app_card(size, [question])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        row = card.question.recommended
+        assert row is not None
+        layout = card._layout()
+        assert layout.row_draws_badge_line(row), "the fixture must draw a badge line"
+
+        prose = _prose_by_row(card)[row]
+        drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+        # label + badge + prose: the badge is drawn, and it is not in the prose.
+        assert len(drawn) > len(prose) + 1, (drawn, prose)
+        assert all(RECOMMENDED_TAG not in line for line in prose), prose
+        assert prose, "the row's prose must still be reported"
+        assert prose[0].startswith("nothing reads that column"), prose
+
+
+@pytest.mark.asyncio
+async def test_the_recommended_badge_survives_the_band_where_it_used_to_vanish() -> None:
+    """100x22 and below is where the badge was measured GONE.
+
+    It was drawn at the head of the row's first DESCRIPTION line, so it was the
+    row's second claim on a line and the first thing a tight budget dropped —
+    on exactly the frames where the badge is the only thing marking the promoted
+    row, since a short card also sheds the prose that would otherwise explain
+    it. Charged its own line ahead of the prose it survives every budget that
+    grants the row two lines; at a budget of one it rides the LABEL
+    (`_row_text`), which is the honest degradation and not an absence.
+
+    The measured budget is asserted at each size, not noted in a comment, so
+    the test fails loudly rather than silently measuring a different frame.
+    """
+    question = _edge_question()
+    expected_budget = {(100, 30): 6, (100, 24): 3, (100, 22): 2, (100, 20): 1}
+    for size, budget in expected_budget.items():
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            row = card.question.recommended
+            assert row is not None
+            assert layout.body_line_budget == budget, (size, layout.body_line_budget)
+
+            frame = "\n".join(_fingerprint(card))
+            assert RECOMMENDED_TAG in frame, (size, frame)
+
+            lines = [line.rstrip() for line in card.render_lines_for_test()]
+            drawn = [index for index, mapped in enumerate(card._line_rows) if mapped == row]
+            assert drawn, (size, "the recommended row drew nothing")
+            if len(drawn) >= 2:
+                # Two lines or more: the tag is ALONE on the second one.
+                assert layout.row_draws_badge_line(row), size
+                assert _is_badge_line(lines[drawn[1]]), (size, lines[drawn[1]])
+            else:
+                # One line: the tag rides the label, and the row is selected.
+                assert not layout.row_draws_badge_line(row), size
+                assert RECOMMENDED_TAG in lines[drawn[0]], (size, lines[drawn[0]])
+                assert card.state.selected == row, size
+
+
+@pytest.mark.asyncio
+async def test_the_badge_is_never_drawn_without_the_label_it_points_at() -> None:
+    """D1: a badge whose row's LABEL has scrolled off the top is not drawn.
+
+    The badge names a row by sitting under that row's label. Scrolled to just
+    below the label, the frame drew `▸ RECOMMENDED` with no name, no number and
+    no cursor beneath it — and directly above a DIFFERENT option's label, so the
+    natural reading is that the option BELOW is the recommended one. A badge
+    pointing at the wrong row is worse than the missing badge this whole change
+    exists to fix.
+
+    Reachable only under the own-line badge, and that is why it ships with it:
+    before, the tag shared line 0 with the row's description, and a scrolled-off
+    row showing prose reads as an obvious continuation of something above — which
+    is exactly what it is. A badge does not.
+
+    The band is body 6 / recommended row 4 — common laptop-split and tmux-pane
+    sizes — measured at 130x30, 120x30, 110x30, 100x30 and 80x30, on every
+    recommended index. The invariant asserted here is TOTAL rather than pinned to
+    that band: wherever a badge line is drawn, its row's label is drawn above it.
+    """
+    sizes = ((130, 30), (120, 30), (110, 30), (100, 30), (80, 30), (190, 50), (150, 40))
+    for size in sizes:
+        for recommended in (0, 1, 2):
+            app, card = await _real_app_card(size, [_repro_question(recommended=recommended)])
+            async with app.run_test(size=size) as pilot:
+                await _show(app, pilot, card)
+                for press in range(3):
+                    lines = [line.rstrip() for line in card.render_lines_for_test()]
+                    rows = list(card._line_rows)
+                    for position, (row, line) in enumerate(zip(rows, lines)):
+                        if row is None or not _is_badge_line(line):
+                            continue
+                        drawn = [at for at, mapped in enumerate(rows) if mapped == row]
+                        # The row's label is its FIRST drawn line. A badge line
+                        # that is itself the row's first drawn line means the
+                        # label is above the window: the orphan.
+                        assert min(drawn) < position, (
+                            size,
+                            recommended,
+                            press,
+                            "a badge was drawn without the label it points at",
+                            lines,
+                        )
+                    await pilot.press("down")
+                    await pilot.pause()
 
 
 @pytest.mark.asyncio
@@ -5101,7 +6021,7 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
                 layout.body_line_budget,
             )
             assert not layout.show_position, (size, "the approval gate is windowing")
-            # The question cap (MAX_QUESTION_ROWS, cb5d8e2b) is a NO-OP on the
+            # The question bound (QUESTION_LIST_RESERVE, cb5d8e2b) is a NO-OP on the
             # gate: its question ("Allow bash? …") is one line, well under the
             # bound, so the cap neither truncates it nor marks it — which is why
             # the golden above is byte-identical. Asserted so a future change that
@@ -5186,6 +6106,23 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
     at which the real dock still affords the full 2-line rhythm, and the
     label-only 100x30 frame is pinned SEPARATELY and honestly below, because it
     is a real frame the user can reach and nothing else in this file covered it.
+
+    RE-DERIVED for the badge's OWN LINE, and the frame grew by exactly one line.
+    The badge used to head the row's first description line behind a ` · `
+    separator; it is now charged its own line ahead of the prose, so
+
+        ``❯ 1. Backfill from the audit log``
+        ``     ▸ RECOMMENDED · slower, keeps history``
+
+    became three lines with the tag alone on the middle one. INTENDED, and the
+    point of the change: sharing line 0 made the badge the row's second claim on
+    a line the viewport may not grant, so it vanished at 100x22 and below —
+    exactly the frames where it is the only mark on the promoted row.
+
+    One line, and no other row moved: the line list went 10 → 11 at both pinned
+    sizes and `show_position` stayed False at both, so the badge's line did not
+    push this surface into windowing. The two assertions below say so, and if
+    either flips that is a stop-and-escalate rather than a golden to update.
     """
     question = AskQuestion(
         id="rollout",
@@ -5206,7 +6143,8 @@ async def test_the_cap_leaves_the_short_description_card_byte_identical() -> Non
         "Which rollout should the stale-row migration take?",
         "",
         "❯ 1. Backfill from the audit log",
-        f"     {RECOMMENDED_TAG} · slower, keeps history",
+        f"     {RECOMMENDED_TAG}",
+        "     slower, keeps history",
         "  2. Drop the rows",
         "     nothing reads the column any more",
         "  3. Dual-write for a week",
@@ -6095,7 +7033,7 @@ async def test_the_card_never_draws_more_lines_than_its_body_budget_in_lines(
                         await pilot.press("ctrl+e")
                         await pilot.pause()
                     layout = card._layout()
-                    budget = card._body_rows(len(card._question_lines(layout.width)))
+                    budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
                     lines = card.render_lines_for_test()
                     # (a) the body never lays out more than it was given.
                     assert len(lines) <= budget, (
@@ -6171,7 +7109,7 @@ async def test_a_body_that_overdraws_its_budget_clips_the_footer_and_is_caught(
         await pilot.pause()
 
         layout = card._layout()
-        budget = card._body_rows(len(card._question_lines(layout.width)))
+        budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
         lines = card.render_lines_for_test()
         # The green guard's assertion, INVERTED: the overdraw is real and the
         # budget check would have caught it.
