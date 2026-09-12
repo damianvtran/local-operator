@@ -23,6 +23,11 @@ Three sessions, each one shaped to isolate one surface:
   position can be measured on arrival rather than inferred (U3).
 * ``failures`` — a fan-out with failed agents, for the collapsed header's
   failure count (U5).
+* ``failures-pending`` — the same fan-out WITH a request pending, so the
+  failure count and the held-shut panel state appear at once. The compounding
+  case: `forceClosed` dims the header, and a dim above the count's level takes
+  the count with it (design D4). No other fixture puts both on screen, which is
+  why the dim's cost to that glyph went unmeasured until round 2.
 
 No runtime scanner and no registrant sockets (``dial_registrants=False``), so
 this never touches the operator's live daemon or their sessions. HOME and
@@ -335,6 +340,38 @@ def _failures_projection() -> SessionProjection:
     return projection
 
 
+def _failures_pending_projection() -> SessionProjection:
+    """Failed agents AND a pending request in one column (D4).
+
+    The state where a failed fan-out matters most is the one that dimmed it:
+    the panels are held shut precisely while the user is being asked for a
+    decision, so the `· 3 failed` count is dimmed at the moment it is most
+    worth reading. Needs both halves at once — `failures` has no pending
+    request and `stacked` has no failures — so neither could show it.
+    """
+    projection = _failures_projection()
+    projection.session_id = "failures-pending"
+    projection.pid = 900009
+    projection.conversation_name = "Failing fan-out, decision waiting"
+    projection.todos = [
+        TodoPhase(
+            name="Remediation",
+            items=[
+                TodoItem(text=f"Land finding {i:02d} and re-measure it", status="pending")
+                for i in range(1, 13)
+            ],
+        )
+    ]
+    projection.pending = PendingRequest(
+        request_id="req-failures-pending",
+        kind="approval",
+        title="bash",
+        detail=APPROVAL_DETAIL,
+    )
+    projection.pending_count = 1
+    return projection
+
+
 def _stale_projection() -> SessionProjection:
     """An ask whose answers the daemon refuses as moved-on (U3).
 
@@ -372,6 +409,7 @@ async def main() -> None:
         _stacked_projection("stacked", approval=False),
         _stacked_projection("stacked-approval", approval=True),
         _failures_projection(),
+        _failures_pending_projection(),
         _stale_projection(),
     ):
         record = SessionRecord(

@@ -357,7 +357,28 @@ export function PendingCard({
 					</div>
 				</div>
 			) : optionCount === 0 ? (
-				<div className="mt-2 flex shrink-0 flex-col gap-1 pr-1.5">
+				/* Same footer rhythm as the approval above (design D5), which is
+				   the variant that had one: `gap-2` between a grounding non-control
+				   row and the controls, and the card's own `p-2.5` as the only
+				   thing below them. Measured before this, the two cards' footers
+				   sat on different ground — the approval's controls opened 60px
+				   below the scroller with the `remember` row between, while the
+				   secret's input sat 8px under text that scrolls beneath it with
+				   nothing between, and its reassurance line hanging BELOW the
+				   controls made the card bottom-heavy at 32.4px against the
+				   approval's 11px.
+
+				   The reassurance line is what grounds this footer, so it moves
+				   ABOVE the input rather than a hairline being added beside it: a
+				   second divider idiom next to the approval's row is the
+				   competing-patterns bug, and a warning about a credential is one
+				   a user should read BEFORE pasting it, not after. */
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
+					{pending.secret ? (
+						<p className="text-meta text-ink-dim">
+							secret — sent directly, not shown in the transcript
+						</p>
+					) : null}
 					<div className="flex gap-2">
 						<input
 							/* No per-field remount key needed: the whole card is keyed
@@ -386,11 +407,6 @@ export function PendingCard({
 							{busy ? "…" : "send"}
 						</button>
 					</div>
-					{pending.secret ? (
-						<p className="text-meta text-ink-dim">
-							secret — sent directly, not shown in the transcript
-						</p>
-					) : null}
 				</div>
 			) : null}
 

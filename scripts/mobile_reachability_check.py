@@ -68,15 +68,44 @@ KEYBOARD_HEIGHTS = (260, 300, 336)
 
 MEASURE_JS = """
 (() => {
+  // The column is what CLIPS, so it is what visibility is measured against.
+  // `window.innerHeight` is not that box while a keyboard is open: the column
+  // is pinned to `innerHeight - kb` and is `overflow: hidden`, so a control
+  // below the COLUMN's foot is invisible to the user while still sitting above
+  // the window's. Measuring against the window scored `send` 44/44px visible on
+  // a build with the `dvh` cap fully reintroduced, where 0-31px were actually on
+  // screen — the exact assertion U1/C1 asked for, green on the defect it names
+  // (review R1 / UX U7). Falls back to the window when no column is pinned,
+  // which is the keyboard-closed case and genuinely is the clipping box then.
+  const clipBox = () => {
+    const col = document.querySelector('[class*="h-dvh"]');
+    if (!col) return { top: 0, bottom: window.innerHeight };
+    const cr = col.getBoundingClientRect();
+    return {
+      top: Math.max(cr.top, 0),
+      bottom: Math.min(cr.bottom, window.innerHeight),
+    };
+  };
   const vis = (el) => {
     if (!el) return null;
     const r = el.getBoundingClientRect();
-    const top = Math.max(r.top, 0);
-    const bottom = Math.min(r.bottom, window.innerHeight);
+    const clip = clipBox();
+    const top = Math.max(r.top, clip.top);
+    const bottom = Math.min(r.bottom, clip.bottom);
+    const visible = Math.max(0, Math.round(bottom - top));
+    // Geometry says a pixel is painted there; hit-testing says a FINGER lands
+    // on the control. They disagree exactly when something overlays it, which
+    // geometry alone cannot see, so the reachability checks require both.
+    const cx = Math.round(r.left + r.width / 2);
+    const cy = Math.round(r.top + r.height / 2);
+    const hit =
+      cy >= clip.top && cy <= clip.bottom ? document.elementFromPoint(cx, cy) : null;
     return {
       h: Math.round(r.height),
-      visible: Math.max(0, Math.round(bottom - top)),
-      fully: r.top >= 0 && r.bottom <= window.innerHeight && r.height > 0,
+      visible,
+      fully: r.top >= clip.top && r.bottom <= clip.bottom && r.height > 0,
+      hit: !!hit && !!el && (hit === el || el.contains(hit)),
+      hitText: hit ? (hit.textContent || '').trim().slice(0, 28) : null,
     };
   };
   const byText = (re) =>
@@ -165,6 +194,29 @@ PIN_COLUMN_JS = """
 """
 
 
+def reach_detail(got: dict[str, Any] | None) -> str:
+    """Render a control's reachability so a FAIL says which half failed.
+
+    Visible-pixels and hit-testing answer different questions — "is it painted
+    inside the box that clips" and "does a finger landing on its centre reach
+    it" — and a control can pass one while failing the other, so the detail line
+    has to carry both or a failure reads as a mystery.
+    """
+    if not got:
+        return "control absent"
+    detail = f"{got['visible']}/{TAP_FLOOR}px visible (height {got['h']}px)," f" hit={got['hit']}"
+    if not got["hit"]:
+        detail += f" — centre lands on {got['hitText']!r}"
+    return detail
+
+
+def column_detail(pin: dict[str, Any] | None) -> str:
+    """The pinned-column context a keyboard-open failure has to be read against."""
+    if not pin:
+        return ""
+    return f"; column {pin['pinned']}, dvh {pin['dvhUnchanged']}"
+
+
 def login(page: Page, base: str) -> None:
     page.goto(f"{base}/login")
     page.js(
@@ -203,22 +255,38 @@ def main() -> None:
             print(f"\n=== {vp} ===")
 
             # R2: the approval's primary action, ON ARRIVAL, no gesture.
+            #
+            # Run twice: keyboard-closed, then with the column PINNED. The
+            # on-arrival form is the strongest assertion in this file (a full
+            # 44px before the user does anything), and it used to run only in the
+            # easiest state, so the tightest check and the hardest scenario never
+            # met (review R2). A keyboard is open on arrival whenever the user is
+            # already typing when the request lands, which is the ordinary case
+            # for an approval raised mid-composition.
             page.goto(f"{base}/#/s/approval")
-            m = measure(page)
-            for label in ("approve", "deny"):
-                got = m[label]
+            for kb in (None, *KEYBOARD_HEIGHTS):
+                if kb is None:
+                    state, pin = "", None
+                else:
+                    pin = json.loads(page.js(PIN_COLUMN_JS % kb))
+                    state = f" kb={kb}"
+                m = measure(page)
+                for label in ("approve", "deny"):
+                    got = m[label]
+                    check(
+                        f"R2 {vp}{state} {label} visible on arrival",
+                        bool(got) and got["visible"] >= TAP_FLOOR and got["hit"],
+                        reach_detail(got) + column_detail(pin),
+                    )
                 check(
-                    f"R2 {vp} {label} visible on arrival",
-                    bool(got) and got["visible"] >= TAP_FLOOR,
-                    f"{got and got['visible']}/{TAP_FLOOR}px visible"
-                    f" (height {got and got['h']}px)",
+                    f"R2 {vp}{state} card within column",
+                    bool(m["card"]) and m["card"]["withinColumn"],
+                    f"card {m['card'] and (m['card']['top'], m['card']['bottom'])}"
+                    f" column clientH={m['column'] and m['column']['clientH']}",
                 )
-            check(
-                f"R2 {vp} card within column",
-                bool(m["card"]) and m["card"]["withinColumn"],
-                f"card {m['card'] and (m['card']['top'], m['card']['bottom'])}"
-                f" column clientH={m['column'] and m['column']['clientH']}",
-            )
+            # Unpin, so the R1 block below starts from the same state it always
+            # did rather than inheriting this block's last keyboard.
+            page.goto(f"{base}/#/s/approval")
 
             # R1: the keyboard divergence, driven the way the app drives it.
             for kb in KEYBOARD_HEIGHTS:
@@ -239,8 +307,8 @@ def main() -> None:
                     if got:
                         check(
                             f"R1 {vp} kb={kb} {label} reachable",
-                            got["visible"] >= TAP_FLOOR,
-                            f"{got['visible']}/{TAP_FLOOR}px visible",
+                            got["visible"] >= TAP_FLOOR and got["hit"],
+                            reach_detail(got),
                         )
 
             # R1 for the variant it actually bites: free-text/secret, where the
@@ -253,10 +321,8 @@ def main() -> None:
                 got = m2["send"]
                 check(
                     f"R1 {vp} kb={kb} send reachable (secret variant)",
-                    bool(got) and got["visible"] >= TAP_FLOOR,
-                    f"{got and got['visible']}/{TAP_FLOOR}px visible;"
-                    f" column {pin['pinned']}, dvh {pin['dvhUnchanged']},"
-                    f" cap {pin['capResolved']}",
+                    bool(got) and got["visible"] >= TAP_FLOOR and got["hit"],
+                    reach_detail(got) + column_detail(pin) + f", cap {pin['capResolved']}",
                 )
 
             # R3: the last of ten options, by gesture only.

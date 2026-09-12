@@ -531,4 +531,53 @@ describe("column budget while a request is pending", () => {
 		render(<SessionScreen sessionId="s1" />);
 		expect(screen.queryByText(/failed/)).toBeNull();
 	});
+
+	it("keeps the failure count out of the held-shut dim, and says why it is held", () => {
+		// D4: `forceClosed` used to dim the whole header button, and opacity
+		// composites the subtree — so the dim reached the failure count U5 had
+		// just added, measured at 3.30:1 from the painted frame against 7.08:1
+		// undimmed. The state that dims it is the state where a failed fan-out
+		// matters most: the user is being asked for a decision. U8: dimmed and
+		// inert is also how this product says "busy", so the held header states
+		// the rule rather than leaving a dead tap to read as a fault.
+		const withFailures = [
+			...roster().slice(0, 19),
+			row("surface-audit-19", "failed"),
+			row("surface-audit-20", "failed"),
+			row("surface-audit-21", "failed"),
+		];
+		slot = {
+			projection: projection({
+				subagents: withFailures,
+				pending: askPending(10),
+				pending_count: 1,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		const rosterHeader = screen.getByRole("button", { name: /subagents/ });
+		expect(rosterHeader.getAttribute("aria-expanded")).toBe("false");
+
+		// The count is legible: neither it nor any ancestor up to the header
+		// carries the dim. Walking the chain is the assertion that matters —
+		// checking the span alone passes even when the dim sits above it, which
+		// is exactly how this shipped.
+		const failed = screen.getByText(/3 failed/);
+		expect(failed.className).toContain("text-danger");
+		for (let el: HTMLElement | null = failed; el; el = el.parentElement) {
+			expect(el.className).not.toContain("opacity-60");
+			if (el === rosterHeader) break;
+		}
+
+		// The label beside it still dims, or the held state stops reading as
+		// inert at all and the tap looks live.
+		expect(
+			rosterHeader.querySelector(".opacity-60"),
+		).toBeTruthy();
+
+		// And the header says why nothing happens when it is tapped.
+		expect(screen.getAllByText(/answer first/).length).toBeGreaterThan(0);
+		expect(rosterHeader.getAttribute("title")).toMatch(/answer it to reopen/);
+	});
 });

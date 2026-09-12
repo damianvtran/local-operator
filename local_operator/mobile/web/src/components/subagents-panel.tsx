@@ -28,7 +28,7 @@ import { PANEL_FRACTION, columnCap } from "../lib/column";
 import { formatElapsed } from "../lib/format";
 import { navigate } from "../router";
 import type { SubagentRow } from "../types";
-import { Disclosure } from "./ui/disclosure";
+import { Disclosure, HELD_DIM } from "./ui/disclosure";
 
 export const AGENT_GLYPH: Record<SubagentRow["status"], string> = {
 	running: "⟳",
@@ -143,9 +143,19 @@ export function AgentRoster({
 			)}
 			header={
 				<span className="text-body-sm text-ink-muted">
-				{label}{" "}
-					<span className="font-mono text-mono-sm text-ink-dim">
-						{running}/{direct.length} running
+					{/* The held-shut dim is applied per PART, and the failure count
+					    is deliberately a SIBLING of the dimmed span rather than a
+					    child of it: opacity composites the whole subtree, so a dim
+					    any higher takes the count with it — 7.08:1 down to 3.30:1,
+					    measured from the painted frame (design D4). The label and
+					    running count may fade, because a pending card already
+					    implies the roster is held; a failed fan-out may not, and it
+					    matters most while a decision is waiting. */}
+					<span className={cn(forceCollapsed && HELD_DIM)}>
+						{label}{" "}
+						<span className="font-mono text-mono-sm text-ink-dim">
+							{running}/{direct.length} running
+						</span>
 					</span>
 					{failed > 0 ? (
 						<span className="font-mono text-mono-sm text-danger">

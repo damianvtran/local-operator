@@ -18,7 +18,7 @@
 import { cn } from "../lib/cn";
 import { PANEL_FRACTION, columnCap } from "../lib/column";
 import type { TodoItem, TodoPhase } from "../types";
-import { Disclosure } from "./ui/disclosure";
+import { Disclosure, HELD_DIM } from "./ui/disclosure";
 
 const GLYPH: Record<TodoItem["status"], string> = {
 	pending: "☐",
@@ -103,7 +103,16 @@ export function TodosPanel({
 				embedded ? "pt-1" : "px-4",
 			)}
 			header={
-				<span className="text-body-sm text-ink-muted">
+				/* Dimmed here rather than on the Disclosure's button — see HELD_DIM.
+				   This panel has nothing that must stay at full contrast while held,
+				   but it takes the dim the same way the roster does so the two held
+				   headers read as one state rather than two treatments. */
+				<span
+					className={cn(
+						"text-body-sm text-ink-muted",
+						forceCollapsed && HELD_DIM,
+					)}
+				>
 					tasks{" "}
 					<span className="font-mono text-mono-sm text-ink-dim">
 						{done}/{items.length}
