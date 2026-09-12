@@ -87,6 +87,16 @@ class ModelDecision(ProtocolModel):
     #: which counts how the model answered: a bundle showing a call against a
     #: request that offered nothing is a state the wire cannot produce.
     offered_tool_count: SafeCount = 0
+    #: How many DECLARED provider reasoning-boundary markers were stripped from
+    #: the head of this attempt's reply before it was judged. Recorded on the
+    #: ACCEPTED path as well as the rejected one, and that is the whole point:
+    #: the strip exists to turn a refused reply into an accepted one, so a
+    #: counter that only appeared on refusals could never show the tolerance
+    #: working -- and could never show it going quiet, which is what a provider
+    #: changing its chat template looks like from here. See
+    #: ``ModelSpec.reasoning_boundary_markers`` for the declaration and
+    #: ``strip_reasoning_boundary_markers`` for what removal is licensed to do.
+    stripped_reply_markers: SafeCount = 0
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
     compaction: CompactionRecord | None = None
@@ -186,6 +196,7 @@ class DecisionRejected(Exception):
         class_key: str | None = None,
         evidence_reply: str | None = None,
         stream_shape: StreamShape | None = None,
+        stripped_reply_markers: int = 0,
     ) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
@@ -224,6 +235,12 @@ class DecisionRejected(Exception):
         # reply can be told apart from a discarded one.
         self.class_key = class_key
         self.stream_shape = stream_shape
+        # The reply-assembly tally, for the same reason the class key is here:
+        # a refusal whose reply LOST a provider boundary token explains itself
+        # differently from one that arrived already broken, and only the count
+        # can tell the two apart after the fact -- the recorded reply is the
+        # version the harness judged, i.e. with the marker already gone.
+        self.stripped_reply_markers = stripped_reply_markers
         # The served route matters even for a rejected reply: a fallback that
         # answered badly still moved the run off its pinned route.
         self.route = route

@@ -296,7 +296,19 @@ def classify_rejection(reason: str) -> str:
     if "type=union_tag_invalid" in reason:
         return "unknown-action-kind"
     if "is not valid JSON" in reason or "duplicate-free JSON object" in reason:
-        return "malformed-json"
+        # Two causes under one JSON-parse failure, and they are DIFFERENT
+        # failures that used to share one key and one hint (see
+        # ``_LEADING_DELIMITER_RULE``). The offset is the discriminator: a
+        # decode that cannot start is a reply whose FIRST byte is not a JSON
+        # value -- a preamble, a code fence, or a provider reasoning boundary
+        # token -- while a decode that starts and then breaks is a reply whose
+        # object was cut off or double-escaped. Keyed on the parser's own
+        # reported position and not on the reply text, because this classifier
+        # must run over sealed artifacts too, 271 of whose 311 reply sections
+        # carry the placeholder instead of the reply.
+        if _LEADING_DELIMITER_RULE.search(reason):
+            return "leading-delimiter"
+        return "incomplete-json"
     if "unsupported model reply version" in reason:
         return "unsupported-reply-version"
     if (
@@ -377,6 +389,17 @@ _KEY_ALIASES = {
 #: line (``actions.0.wait.frame_id``), which names a field and a literal kind and
 #: never a value; the rest pull the harness's own rule sentence and a refused
 #: name out of Pydantic's rendering without keeping the rendering.
+#:
+#: ``_LEADING_DELIMITER_RULE`` matches a decode that could not START, which is
+#: how the old ``malformed-json`` class splits in two. It reads the position the
+#: JSON parser itself reported -- ``Expecting value: line 1 column 1 (char 0)``
+#: -- rather than the reply text, because the reply text is exactly what is
+#: missing from 271 of the sealed corpus's 311 rejection artifacts, and a class
+#: that could only be derived on the runs that happened to keep the reply would
+#: measure a different population than the run it is bucketing. Kept tolerant of
+#: the parser's own rendering around the offsets: everything outside the two
+#: offsets is CPython's wording, and only the offsets are this file's business.
+_LEADING_DELIMITER_RULE = re.compile(r"line 1 column 1 \(char 0\)")
 _ACTION_FIELD_PATH = re.compile(r"^actions(?:\.([A-Za-z0-9_-]+))*$", re.MULTILINE)
 _VALUE_ERROR_RULE = re.compile(r"Value error, (.+?) \[type=")
 _UNKNOWN_KEY_NAME = re.compile(r"unknown key: '(.*?)' \[type=")
@@ -429,12 +452,40 @@ def rejection_hint(
 
     if class_key in _PRESERVED_HINTS:
         return reason
-    if class_key == "malformed-json":
+    if class_key == "leading-delimiter":
+        # The half of the old ``malformed-json`` class whose reply could not be
+        # READ AT ALL: the first byte is not the start of a JSON value, so the
+        # decoder had nothing to start from. The named causes are the shapes
+        # that put something else in front of the object -- a preamble, a code
+        # fence, a native tool-call syntax wrapper -- because those three are
+        # what the old hint named and none of them is absorbed. The fourth,
+        # a provider reasoning delimiter, IS absorbed before this point when the
+        # model declares one (``strip_reasoning_boundary_markers``), and naming
+        # a defect the harness has already absorbed would spend the model's one
+        # correction on a rule it is not breaking. The accepted-shape example is
+        # what actually corrects all four.
         return (
-            "the reply was not one complete JSON object -- it may have been cut "
-            "off, wrapped in a code fence, or written in a native tool-call "
-            "syntax. Reply with exactly one JSON object and nothing else: "
+            "the reply did not begin with the JSON object -- its first character "
+            "was not '{', so no decision could be read from it. A preamble, a "
+            "code fence or a native tool-call syntax wrapper before the object "
+            "is not skipped. Reply with exactly one JSON object, beginning with "
+            "'{', and nothing else: "
             f"{_example_json(surface, observation)}"
+        )
+    if class_key == "incomplete-json":
+        # The other half: the decode STARTED, so the first byte was fine and
+        # the object broke afterwards. Both causes are named. The second one is
+        # the case the normaliser does NOT absorb -- the delimiter was removed
+        # and what remained was still incomplete -- and it must be stated,
+        # because the model's own view of its reply is the version it wrote,
+        # delimiter included; a hint that named only truncation would leave it
+        # looking for a mistake it cannot see in what it sent.
+        return (
+            "the reply was not one complete JSON object: the object itself was "
+            "incomplete (cut off, double-escaped, or followed by text outside "
+            "it), or a leading provider reasoning delimiter was removed and what "
+            "remained was still not a complete object. Reply with exactly one "
+            f"JSON object and nothing else: {_example_json(surface, observation)}"
         )
     if class_key == "unsupported-reply-version":
         return (
@@ -1141,6 +1192,77 @@ def _batch_observation_ids(value: Any) -> set[str]:
     }
 
 
+#: How many boundary markers one reply may have stripped before the tolerance
+#: gives up. Not a policy knob: the strip is licensed to remove a TEMPLATE
+#: artifact, and a template emits one boundary token, so a reply that is nothing
+#: but repeated tokens is either an adversarial payload or a provider loop.
+#: Past this many the remainder is judged as the bytes it is -- refused, and
+#: re-prompted, which is the safe direction -- rather than normalised an
+#: unbounded number of times against a string the harness does not control. The
+#: loop terminates on its own (every pass removes at least one byte); this is the
+#: bound on how much of an untrusted reply the tolerance will rewrite.
+_MAX_BOUNDARY_MARKER_STRIPS = 8
+
+
+def strip_reasoning_boundary_markers(
+    text: str, markers: Sequence[str]
+) -> tuple[str, tuple[str, ...]]:
+    """Remove DECLARED reasoning-boundary markers from the head of a reply.
+
+    The reply-assembly tolerance for the one reply shape that is not the model's
+    own text: a provider template emits the closing half of its reasoning
+    boundary token at the joint between the reasoning channel and the content
+    channel, so the assembled reply starts with ``</mm:think>`` welded to a
+    byte-perfect action batch. The strict decoder refuses a reply that does not
+    START with a JSON value -- by design, because hunting forward for the first
+    ``{`` can silently execute a batch the model never sent -- so the whole
+    billed turn was discarded as ``malformed-json``. The token is DECLARED per
+    model (``ModelSpec.reasoning_boundary_markers``), never recognised here.
+
+    Returns the text to judge and the markers actually removed, in order. Two
+    properties the caller depends on:
+
+    * **The licence is the HEAD only, and the match is exact.** A declared
+      marker is removed only while it sits at the very start of the reply (after
+      leading whitespace, which the decoder lstrips anyway, so the whitespace is
+      not part of the decision either way). A token inside a string value, or
+      behind a character of prose, is not touched and the reply is judged on its
+      original bytes. No ``find``, no substring surgery, and no balanced-object
+      extraction from prose -- the last is the salvage operation this module's
+      strictness exists to refuse.
+    * **An undeclared marker is not a marker.** ``markers`` empty -- every
+      model the table does not list -- returns the input unchanged and nothing
+      removed, so this is a declaration-driven tolerance and not a global
+      licence to rewrite replies.
+
+    Whitespace-only and empty entries are ignored rather than stripped: they
+    would remove bytes without encoding any provider fact, and an entry that is
+    a prefix of everything is indistinguishable from mangling.
+
+    Public rather than module-private on purpose, unlike the decoder helpers
+    beside ``parse_decision``: this is the function an offline reader runs over
+    SEALED replies to reproduce the change's acceptance numbers on a corpus it
+    cannot re-pay for, and a report tool should not have to import a private
+    name to do that.
+    """
+
+    wanted = tuple(marker for marker in markers if marker.strip())
+    if not text or not wanted:
+        return text, ()
+    removed: list[str] = []
+    remaining = text
+    while len(removed) < _MAX_BOUNDARY_MARKER_STRIPS:
+        head = remaining.lstrip()
+        for marker in wanted:
+            if head.startswith(marker):
+                removed.append(marker)
+                remaining = head[len(marker) :]
+                break
+        else:
+            break
+    return remaining, tuple(removed)
+
+
 def parse_decision(
     payload: str,
     observation: Observation,
@@ -1575,6 +1697,14 @@ class _StreamOutcome:
     channel_reply: str | None
     tool_call_count: int
     shape: StreamShape
+    #: How many DECLARED reasoning-boundary markers were removed from the head
+    #: of the assembled reply before anything judged it
+    #: (``strip_reasoning_boundary_markers``). Carried beside the shape rather
+    #: than inside it because it is not a property of the provider's event
+    #: stream: a strip is something the harness did to the reply afterwards.
+    #: Zero on every ordinary attempt, including every reply from a spec that
+    #: declares no markers -- which is what makes a run of zeros a measurement.
+    stripped_reply_markers: int = 0
 
 
 class ProviderModelClient:
@@ -1702,6 +1832,7 @@ class ProviderModelClient:
         channel_reply = outcome.channel_reply
         tool_call_count = outcome.tool_call_count
         stream_shape = outcome.shape
+        stripped_reply_markers = outcome.stripped_reply_markers
         if channel_reply:
             # The model answered on the offered channel. Its arguments ARE the
             # envelope, so the raw JSON goes to the same decoder the prose path
@@ -1803,7 +1934,7 @@ class ProviderModelClient:
                     'single JSON object with a non-empty "actions" array, and '
                     "nothing else."
                 )
-            return parse_decision(
+            decision = parse_decision(
                 text.strip(),
                 observation,
                 route=self._route,
@@ -1826,6 +1957,16 @@ class ProviderModelClient:
                 # describe a request the wire never carried.
                 offered_tool_count=len(request.tools or ()),
             )
+            if stripped_reply_markers:
+                # Attached here rather than passed in: the strip is provenance
+                # about how the reply was ASSEMBLED, not a fact about its shape,
+                # so ``parse_decision`` keeps its one question (is this one
+                # valid batch for this observation?) and stays free of the
+                # provider vocabulary the declaration lives in.
+                decision = decision.model_copy(
+                    update={"stripped_reply_markers": stripped_reply_markers}
+                )
+            return decision
         except DecisionParseError as error:
             # The call happened and was billed; only the reply is unusable.
             # Fold the rejection into the history NOW, before the runner
@@ -1871,6 +2012,10 @@ class ProviderModelClient:
                 # runaway reply must not be able to inflate the bundle either.
                 reply=shown[:MAX_REJECTED_REPLY_CHARS],
                 class_key=evidence.class_key,
+                # The reply the harness judged has the provider's boundary token
+                # already gone, so this count is the only record in the artifact
+                # that the reply arrived with one -- see ``_rejection_detail``.
+                stripped_reply_markers=stripped_reply_markers,
                 # Raw and UNBOUNDED here: the publisher scans the whole reply
                 # before applying the bound, because a reply cut first and
                 # scanned afterwards returns clean over a severed canary.
@@ -2328,6 +2473,43 @@ class ProviderModelClient:
                 stream_error = event.error
         from local_operator.harness.types import ToolCall
 
+        # THE REPLY-ASSEMBLY BOUNDARY, and the only place a reply is rewritten.
+        # Two reasons it is HERE rather than in the decoder:
+        #
+        # * The decoder is provider-agnostic by contract. It decides what a reply
+        #   MEANS, and it must refuse a reply it cannot read from the first byte
+        #   (``_decode_leading_json``). A provider template token is a fact about
+        #   the ROUTE, so it is absorbed on the way in, next to the channel
+        #   assembly that produced the bytes -- the same boundary that already
+        #   prefers a channel reply over prose.
+        # * ``request.model`` is in hand here and the runner has nothing to do
+        #   with it: the declaration rides on the spec, so the strip is
+        #   declaration-driven and the runner stays free of model knowledge.
+        #   ``parse_decision`` and ``_decode_leading_json`` never see a marker
+        #   table, and a spec that declares none is untouched byte for byte.
+        text, stripped_markers = strip_reasoning_boundary_markers(
+            text, request.model.reasoning_boundary_markers
+        )
+        if stripped_markers:
+            # A tolerance nobody can see is indistinguishable from the harness
+            # quietly mangling a reply. This is the same rule the trailing-text
+            # tolerance states in ``_decode_leading_json``, and it matters MORE
+            # here: the strip REMOVES bytes the model sent, so the one thing a
+            # reader must be able to reconstruct is that it happened, which
+            # marker, and how much was taken. The count also rides on the
+            # attempt (``_StreamOutcome.stripped_reply_markers``) into the
+            # bundle, so an ACCEPTED reply records it too -- a run where the
+            # count has gone to zero is a provider that changed its template,
+            # and that is only visible if zero is written down somewhere.
+            logger.warning(
+                "stripped %d provider reasoning boundary marker(s) %r from the head "
+                "of the reply (%d byte(s) removed) for model %r; the marker is "
+                "declared by the model spec, not recognised from the reply's text",
+                len(stripped_markers),
+                stripped_markers,
+                sum(len(marker) for marker in stripped_markers),
+                request.model.model_id,
+            )
         calls = [
             ToolCall(
                 name=state["name"],
@@ -2364,6 +2546,7 @@ class ProviderModelClient:
                 # provider's and this artifact must stay bounded.
                 stop=stop_reason[:_MAX_STOP_MARKER_CHARS],
             ),
+            stripped_reply_markers=len(stripped_markers),
         )
 
 
