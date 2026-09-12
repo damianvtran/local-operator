@@ -299,9 +299,12 @@ env HOME=/tmp/iso-run LOCAL_OPERATOR_CONFIG_DIR=/tmp/iso-run/.local-operator ...
 the child product rather than only by a terminal.** `CMUX_*` is the one already
 known here (a headless TUI that inherits `CMUX_WORKSPACE_ID` renames the
 operator's real cmux workspaces). `LOP_*` is the other, and it is quieter:
+
 `session/runtime/process.py` reads `LOP_MOBILE_CHILD_PROVIDER`, `_MODEL`, `_CWD`
-and `_RESUME`, plus `LOP_RUNTIME_DEFER_MATERIALISE` and `_ADOPT_SESSION`, to
-decide what a child runtime is and what it works on. A cell run from inside
+and `_RESUME` to decide what a child runtime is, and sets
+`LOP_RUNTIME_ADOPT_SESSION` for it; `session_factory` then reads that flag and
+`LOP_RUNTIME_DEFER_MATERIALISE` to decide whether the session is adopted as-is or
+materialised first. A cell run from inside
 another session therefore inherits *that* session's provider and model (so it
 silently runs on a provider the fixture never chose) and, with a deferral flag
 inherited, a child can idle-exit with no work at all — a plausible-looking cell
