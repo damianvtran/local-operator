@@ -47,6 +47,7 @@ def test_provider_argument_is_closed_to_supported_catalogue() -> None:
     assert set(provider["anyOf"][0]["enum"]) == {
         "duckduckgo",
         "tavily",
+        "deepseek",
         "perplexity",
         "brave",
         "exa",

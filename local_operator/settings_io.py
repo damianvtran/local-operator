@@ -1889,6 +1889,7 @@ SETTINGS: tuple[Setting, ...] = (
         members=(
             "duckduckgo",
             "tavily",
+            "deepseek",
             "perplexity",
             "brave",
             "exa",
