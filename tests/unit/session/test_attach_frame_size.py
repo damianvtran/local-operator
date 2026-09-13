@@ -5505,7 +5505,11 @@ def _bulk_frame(*, others_chars: int, row_chars: int, rows: int = 2, todos_chars
         "job_trajectory_replacements": [],
     }
     if todos_chars:
-        payload["job_todo_updates"] = {"job0": [{"text": "t" * todos_chars}]}
+        # Spread across jobs, because the producer caps todo payload at 128 KiB
+        # per changed job — a single 680 KB entry is not a shape it can emit.
+        payload["job_todo_updates"] = {
+            f"job{index}": [{"text": "t" * todos_chars}] for index in range(6)
+        }
     return payload
 
 
@@ -5535,7 +5539,7 @@ def test_todos_count_against_the_room_the_appends_may_spend() -> None:
     which is the failure this whole area exists to stop."""
     rows = 24
     without = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows)
-    with_todos = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows, todos_chars=680_000)
+    with_todos = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows, todos_chars=110_000)
 
     kept_without = filter_update_trajectories(
         without, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
@@ -5547,3 +5551,37 @@ def test_todos_count_against_the_room_the_appends_may_spend() -> None:
 
     assert len(kept_with) < len(kept_without)
     assert _line_bytes({"op": "frontend_update", "data": filtered_with}) < _MAX_LINE_BYTES
+
+
+def test_a_deep_roster_charges_for_its_own_keys_and_markers() -> None:
+    """The appends object's keys and the marker list ride the same JSON as the rows.
+
+    QA measured the onset on a real deep-roster delta: 200 jobs with 24 KB rows each
+    shipped 1,050,111 B — 1,535 B over the line — because those keys (2,799 B) and
+    markers (2,398 B) were unbudgeted, and the wire pass then repaired the frame by
+    EMPTYING the kept rows' payloads (840,000 → 0 characters of transcript), which is
+    the silent cut this module exists to prevent. Both are charged before any row
+    spends room now, so the frame fits with the rows intact.
+    """
+    jobs, rows_per_job, row_chars = 200, 4, 24_000
+    appends = {
+        f"job-{index:04d}": [
+            _payload_event(row, payload_chars=row_chars) for row in range(rows_per_job)
+        ]
+        for index in range(jobs)
+    }
+    payload = {
+        "epoch": "e1",
+        "sequence": 9,
+        "changes": {"jobs": [{"id": job_id} for job_id in appends]},
+        "job_trajectory_appends": appends,
+        "job_trajectory_replacements": [],
+    }
+    filtered = filter_update_trajectories(
+        payload, appends.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    shipped = _line_bytes({"op": "frontend_update", "data": filtered})
+    assert shipped < _MAX_LINE_BYTES, shipped
+    kept = sum(len(rows) for rows in filtered["job_trajectory_appends"].values())
+    assert kept > 0, "the bound emptied every job's rows to fit a frame the keys cost"
+    assert len(filtered["job_trajectory_replacements"]) == jobs

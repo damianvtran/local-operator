@@ -2475,12 +2475,14 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
 _TRAJECTORY_APPEND_KEYS = frozenset({"job_trajectory_appends", "job_trajectory_replacements"})
 
 #: Room reserved for the frame's own envelope — the ``{"op": "frontend_update",
-#: "data": …}`` wrapper and its separators — when the ceiling is derived from the
-#: socket's line limit. Measured at 37 B for that wrapper, so this is slack rather
-#: than an estimate: the row costs that spend the room are themselves measured with
-#: ``json.dumps`` at its default separators, which runs ~3.5% above the compact wire
-#: form, so the room is already conservative before this is subtracted. Kept small
-#: on purpose — a needlessly large reservation drops rows that would have fitted.
+#: "data": …}`` wrapper — and for the rounding in the measurement itself, when the
+#: ceiling is derived from the socket's line limit. The wrapper plus the excluded
+#: field names measure 111 B (review measured the identity `others + Σ row costs +
+#: 111 = exact wire bytes` on this path, where the relay writes default JSON
+#: separators, so the row costs are exact rather than an over-estimate); the rest is
+#: deliberate slack for the per-job keys and marker ids the trim itself adds, which
+#: the bound charges explicitly before it spends anything. Kept small on purpose: a
+#: needlessly large reservation drops rows that would have fitted.
 TRAJECTORY_FRAME_ENVELOPE_BYTES = 4_096
 
 
@@ -2535,6 +2537,16 @@ def _bound_trajectory_appends_in_place(
     if not job_ids:
         return False
     room = budget_bytes if ceiling_bytes is None else max(0, ceiling_bytes)
+    # The rows are not the only thing this object costs. Every job that keeps rows
+    # contributes its own KEY to the appends object, and every job the trim marks
+    # contributes an id to the marker list, and both ride the same JSON. QA measured
+    # the difference on a 200-job roster: 2,799 B of keys plus 2,398 B of markers,
+    # which was enough to push the frame 1,535 B past the line — where the wire
+    # pass then repaired it by EMPTYING the row payloads it had just kept, i.e. the
+    # silent cut this module exists to prevent. Charged up front, worst case (a key
+    # per job with rows, a marker id for each of them), so the room the rows spend
+    # is the room that is genuinely left.
+    room = max(0, room - sum(len(str(job_id)) + 16 for job_id in job_ids))
     costs = {job_id: [_live_row_cost(row) for row in appends[job_id]] for job_id in job_ids}
     counts = {job_id: 0 for job_id in job_ids}
     budget_left = min(budget_bytes, room)
