@@ -202,7 +202,7 @@ class _ParkedInSection(HerdrReporter):
 
     A seam rather than ``sys.setswitchinterval``, because a widened-but-still-
     probabilistic window is what made the original guard unable to fail
-    (review round 1, MINOR-1).
+    (review round 2, MINOR-1).
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1244,7 +1244,7 @@ def test_the_heartbeat_does_not_break_mint_order_under_contention() -> None:
     ascending. Measured, that is a bet on the scheduler rather than a test:
     restoring the pre-fix split in production left it green 11 runs in 12, and
     the sibling control printed 0/12, 1/12 and 2/12 inversions across runs
-    (review round 1, MINOR-1). So the guarantee is pinned structurally here
+    (review round 2, MINOR-1). So the guarantee is pinned structurally here
     instead.
 
     A transition is parked INSIDE the mint-and-enqueue section — the lock is
