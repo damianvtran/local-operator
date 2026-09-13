@@ -176,19 +176,32 @@ _MAX_LINE_BYTES = 1 << 20
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
     """Encoded bytes this frame occupies on the wire, with the delimiter counted.
 
-    ONE definition, deliberately: the same arithmetic decides what a producer
-    may emit, what the relay guard must degrade, and what compaction may merge.
-    Two spellings of it is how a producer's "sendable" drifts from a reader's
-    "readable", which is the failure this whole family of guards exists to
-    prevent.
+    ONE definition, deliberately: the same arithmetic decides what the ceiling
+    may emit, what the relay guard must degrade, and what compaction may merge
+    — on THIS module's send path. Two spellings of it is how a producer's
+    "sendable" drifts from a reader's "readable", the failure this whole family
+    of guards exists to prevent.
+
+    It is NOT yet the only spelling in the tree, and saying it was would be a
+    claim this file cannot keep. ``session/frontend_state.py`` derives the same
+    number inline twice — its result-envelope reserve, and ``oversized_frame_report``'s
+    ``+1`` — against the very limit this module hands it as an argument, and it
+    cannot import this name because ``runtime.server`` imports THAT module, so the
+    import would close a cycle (its own comment at ``MODEL_CATALOGUE_FLOOR_ROWS``
+    pins the value for exactly that reason). Nothing is broken today: the
+    arithmetic is identical. Unifying those two onto one rule — by hosting it
+    where both can import it — is a follow-up, not something this docstring can
+    assert into being.
 
     Counting the newline is CONSERVATIVE, not a requirement of the readers. The
-    boundary was probed against asyncio's ``readline(limit=L)``: a payload of
-    exactly ``L`` bytes plus its ``\\n`` is RETURNED, and only a payload longer
-    than ``L`` raises ``ValueError("Separator is found, but chunk is longer than
-    limit")``. Keeping the delimiter in the count buys one byte of margin on a
-    boundary where being wrong costs the whole connection, which is worth more
-    than the byte; it is not a claim about where the limit sits.
+    boundary was probed against an asyncio ``StreamReader`` created with a buffer
+    limit of ``L`` — the limit is a property of the reader (``open_connection(limit=…)``),
+    not an argument to ``readline()``: a payload of exactly ``L`` bytes plus its
+    ``\\n`` is RETURNED, and only a payload longer than ``L`` raises
+    ``ValueError("Separator is found, but chunk is longer than limit")``. Keeping
+    the delimiter in the count buys one byte of margin on a boundary where being
+    wrong costs the whole connection, which is worth more than the byte; it is
+    not a claim about where the limit sits.
 
     ``payload`` is for a caller that has ALREADY encoded the frame: ``_send_to``
     serializes to write, so measuring it here would serialize every frame twice
@@ -3445,8 +3458,9 @@ class RuntimeServer:
         close and its finally is a no-op second removal).
 
         THE CEILING. Every frame the runtime emits reaches the socket through
-        here (``_write_now``'s ``stopping``/``retiring`` announcements are the
-        one exception, and they are constant-size), so the line limit is
+        here (``_write_now``'s ``stopping`` announcement is the one exception and
+        is constant-size by construction; ``retiring`` carries free-text fields
+        and goes through here like everything else), so the line limit is
         enforced here rather than trusted to each family's own guard. A frame
         past ``_MAX_LINE_BYTES`` is not merely large: the peer dials with the
         SAME limit, its ``readline`` raises, and its pump dies — the viewer
@@ -3526,22 +3540,36 @@ class RuntimeServer:
         if op in ("projection", "welcome"):
             if not conn.sending_welcome:
                 # A REPAINT, not a welcome, so there is no canonical sync behind
-                # it to restore what a blank would cost. Dropping it is the
-                # outcome this frame already had before the ceiling existed (the
-                # daemon's own reader drops an over-limit line) and it is the
-                # safe one: pushes are repaints, so the next one — 30 of them a
-                # second while a session streams — supersedes it, and the phone
-                # keeps rendering its last good state meanwhile. Substituting an
-                # identity-only payload here would instead REPLACE that state
-                # with an empty session, and the only thing standing between the
-                # phone and that blank would be the daemon's version fence (a
-                # lower ``version`` is fenced out: see ``mobile/daemon.py``'s
-                # staleness check and ``mobile/web/src/store.ts``), which is not
-                # ours to lean on here.
+                # it to restore what a blank would cost — and dropping an
+                # unreadable frame is what the daemon has always done with one
+                # (it catches the ValueError and continues; its own comment names
+                # the consequence). Pushes are full snapshots, so dropping one
+                # applies nothing half-way, and the ERROR below carries op, size
+                # and limit.
+                #
+                # THE RESIDUAL IS REAL, and is written down rather than glossed:
+                # this branch fires only when a projection is STILL over the
+                # ceiling after every cap tier, which is a property of the
+                # SESSION — tier 6's identity rows did not fit, so the label
+                # column alone is too large — not a transient spike. The next
+                # repaint is therefore over the limit too, nothing supersedes
+                # this frame, and the phone holds its last good projection and
+                # stops updating live with NO client-side surface (it never sees
+                # these frames, so it cannot warn); the only trace is an ERROR per
+                # drop at repaint rate. That is the daemon's documented
+                # ``stale``/skip behaviour, unchanged.
+                #
+                # It is still the right choice: a stall is recoverable once the
+                # state shrinks or the session is reset, while an identity-only
+                # payload would REPLACE the phone's good state with an empty
+                # session, restorable only by the daemon's version fence (a lower
+                # ``version`` is fenced out — ``mobile/daemon.py``'s staleness
+                # check and ``mobile/web/src/store.ts``) — not ours to lean on.
                 logger.error(
                     "session runtime: dropped an unreadable %s repaint for session %s "
-                    "(%d bytes, over the %d-byte line limit) — the next repaint "
-                    "supersedes it; a blank one would not be restorable",
+                    "(%d bytes, over the %d-byte line limit) — a blank one would not "
+                    "be restorable; the session stops updating live until a repaint "
+                    "fits",
                     op,
                     self._record.session_id,
                     size,
