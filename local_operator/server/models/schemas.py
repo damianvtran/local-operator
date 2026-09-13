@@ -723,9 +723,46 @@ class HealthCheckResponse(BaseModel):
 
     Attributes:
         version: Version of the Local Operator
+        instance_id: Identity of the process answering (see below)
+        pid: Process id of the server answering
+        prefix: ``sys.prefix`` of the install that is serving
+        install_kind: ``uv-tool`` / ``pipx`` / ``pip`` / ``editable`` / ``unknown``
+
+    The last four are ADDITIVE, and every one of them is defaulted so this
+    stays wire-compatible in both directions: an older client ignores fields it
+    does not know, and an older server's response (which has none of them)
+    still parses here. ``version`` keeps its spelling and meaning — it is what
+    the update banner reads, and a client must not have to be rewritten to keep
+    working.
+
+    They exist because a 200 does not identify anything. Three daemons were
+    live on one machine at once (``:1111``, ``:7341``, ``:8080``, three
+    different builds), each answered ``/health``, and a dev server eleven
+    releases behind was accepted as "the backend". ``instance_id`` is minted
+    per process at startup and also written into the serve rendezvous record,
+    so a discoverer can tell whether the process it reached is the process the
+    record described; ``prefix``/``install_kind`` name WHICH install is
+    serving, which is not the one on ``PATH``.
     """
 
     version: str = Field(..., description="Version of the Local Operator")
+    instance_id: str = Field(
+        default="",
+        description=(
+            "Identity of the process answering; minted at startup and carried in the "
+            "serve rendezvous record, so a probe can confirm it reached the daemon it "
+            "discovered. Empty on a server predating this field."
+        ),
+    )
+    pid: int = Field(default=0, description="Process id of the server answering")
+    prefix: str = Field(
+        default="",
+        description="sys.prefix of the install that is serving, i.e. WHICH install",
+    )
+    install_kind: str = Field(
+        default="",
+        description="How that install was made: uv-tool, pipx, pip, editable or unknown",
+    )
 
 
 class WebsocketConnectionType(str, Enum):
