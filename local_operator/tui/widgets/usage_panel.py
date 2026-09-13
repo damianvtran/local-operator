@@ -31,6 +31,7 @@ offset and the focus.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from typing import Any
 
@@ -680,10 +681,12 @@ class UsageBody:
     happens to contain the copy.
 
     ``details`` holds the LINE INDICES of limit-detail rows, identified the same
-    way and for the same reason: a detail is the second row of a two-row cut
-    unit whose first row is the meter it annotates, and compaction keeps or
-    drops the pair together. ``100.00 USD paid · 20.00 USD granted`` stranded
-    under some other provider's meter is worse than not showing the split.
+    way and for the same reason. A detail is DECORATION attached to the meter
+    row directly above it — strictly lower priority than any meter — so it lives
+    in this body but not in the tree the window is chosen against
+    (:meth:`skeleton`). ``100.00 USD paid · 20.00 USD granted`` stranded under
+    some other provider's meter is worse than not showing the split, and a
+    window that could have shown a number instead of the split is worse still.
     """
 
     lines: list[Text]
@@ -691,6 +694,54 @@ class UsageBody:
     blocks: tuple[tuple[int, int], ...] = ()
     notes: frozenset[int] = frozenset()
     details: frozenset[int] = frozenset()
+
+    def content_rows(self) -> tuple[int, ...]:
+        """Composed rows that are not annotations, in order.
+
+        The row map between this body and :meth:`skeleton`: ``content_rows()[i]``
+        is the row showing the ``i``-th detail-free row. Derived rather than
+        stored — a second copy of the row order is how a window ends up one row
+        off from the data it is scrolling.
+        """
+        return tuple(row for row in range(len(self.lines)) if row not in self.details)
+
+    def content_at(self, row: int) -> int:
+        """Which detail-free position a composed row (or the body's end) sits at."""
+        return bisect.bisect_left(self.content_rows(), row)
+
+    def row_at(self, content_index: int) -> int:
+        """The composed row showing the ``content_index``-th detail-free row.
+
+        One past the last content row answers the body's end, so a window's tail
+        position can be read back through the same map.
+        """
+        rows = self.content_rows()
+        return rows[content_index] if content_index < len(rows) else len(self.lines)
+
+    def skeleton(self) -> UsageBody:
+        """This body with its annotations taken out — the tree the window is
+        chosen against.
+
+        Windowing in content space is what makes the detail droppable without
+        ever stranding it: the rows a window shows are picked over the meters
+        alone, and the annotations are painted afterwards out of the budget the
+        meters did not need (see :meth:`UsagePanel._window_rows`). Cut points,
+        blocks and notes come across so a block-aware window stops in the same
+        place it always did.
+        """
+        if not self.details:
+            # The identity is the common case: one provider can carry a split.
+            return self
+        rows = self.content_rows()
+        return UsageBody(
+            lines=[self.lines[row] for row in rows],
+            cuts=frozenset(bisect.bisect_left(rows, cut) for cut in self.cuts),
+            blocks=tuple(
+                (bisect.bisect_left(rows, start), bisect.bisect_left(rows, end))
+                for start, end in self.blocks
+            ),
+            notes=frozenset(bisect.bisect_left(rows, note) for note in self.notes),
+        )
 
 
 def build_usage_body(  # noqa: ANN001
@@ -763,20 +814,25 @@ def build_usage_body(  # noqa: ANN001
             continue
         lines.append(Text())
         for limit in report.limits:
-            lines.append(_limit_row(limit, columns, now_ms, degraded=bool(account_note)))
+            meter = _limit_row(limit, columns, now_ms, degraded=bool(account_note))
+            lines.append(meter)
             detail = getattr(limit, "detail", "")
             if detail:
-                # Indented under its meter and truncated to the same body width
-                # as every other composed row, so a long split loses its tail
-                # rather than widening the card.
+                # Indented under its meter and truncated to the row it
+                # ANNOTATES — the meter's own ink, not the card's width. A
+                # balance row's right edge is wherever its number ends, which at
+                # 60 columns is 35 cells (the bar has collapsed to a single dot)
+                # while a split is a fixed 37-cell string; measuring the split
+                # against the card let it out-paint the row it annotates and take
+                # the block's right edge with it.
                 row = Text(f"{TIER_INDENT}{detail}", style=dim)
-                row.truncate(max(1, width), overflow="ellipsis")
+                row.truncate(max(1, cell_len(meter.plain.rstrip())), overflow="ellipsis")
                 lines.append(row)
                 details.add(len(lines) - 1)
-            # The cut point goes AFTER the detail, never between it and its
-            # meter: `cuts` is where a short viewport may stop, so cutting
-            # between them is what would leave an annotation with nothing to
-            # annotate. One cut unit, no new glue mechanism.
+            # The cut closes the meter's GROUP — it is where a block-aligned
+            # window may stop. It does not make the pair indivisible: windows are
+            # chosen over the meters, so a budget that cannot hold the split
+            # keeps the meter and drops the annotation.
             cuts.add(len(lines))
         blocks.append((block_start, len(lines)))
     return UsageBody(lines, frozenset(cuts), tuple(blocks), frozenset(notes), frozenset(details))
@@ -1020,9 +1076,12 @@ class UsagePanel(Static):
     def action_scroll_page(self, delta: int) -> None:
         # A page is what the card is SHOWING, not what it budgeted for: the
         # window stops at a block boundary, so paging by the budget would step
-        # over the heading that the boundary held back.
+        # over the heading that the boundary held back. Measured over the meters
+        # (see :meth:`UsageBody.skeleton`), because a detail row the window never
+        # painted must not count as a row the reader is looking at.
         body = self._body()
-        shown = self._window_end(body, self._body_budget()) - self._offset
+        start = body.content_at(self._offset)
+        shown = self._window_end(body.skeleton(), start, self._body_budget()) - start
         self._scroll_by(delta * max(1, shown))
 
     def action_scroll_home(self) -> None:
@@ -1270,16 +1329,24 @@ class UsagePanel(Static):
         return self._fit()[2]
 
     def _max_offset(self) -> int:
+        """The furthest composed row the viewport may start at.
+
+        Measured in content space (see :meth:`UsageBody.skeleton`): annotations
+        are not rows the reader scrolled to, and clamping against the composed
+        body would let a scroll position rest on a detail whose meter is behind
+        it — a split floating under the title with nothing it could belong to.
+        """
         body = self._body()
         budget = self._body_budget()
-        raw = max(0, len(body.lines) - budget)
+        content = body.skeleton()
+        raw = max(0, len(content.lines) - budget)
         # If the raw tail begins inside a provider block, start at its heading.
         # `_window_rows` then removes notes/blank air and keeps the meters that
         # fit, so End never shows anonymous numbers.
-        for start, end in body.blocks:
+        for start, end in content.blocks:
             if start <= raw < end and end - start > budget:
-                return start
-        return raw
+                return body.row_at(start)
+        return body.row_at(raw)
 
     # -- scrollbar -----------------------------------------------------------
     # ONE source of truth for "which composed rows are the scrolling viewport",
@@ -1625,51 +1692,87 @@ class UsagePanel(Static):
         decorative blank yields before identity or quota values.
 
         A staleness note is kept AHEAD of the meters rather than yielding with
-        the other air. Being a cut point only made it *eligible*: the tail slice
-        below keeps ``data[-(budget - 1):]`` and the note is ``data[0]``, so it
-        was still the first row discarded — which rendered a 169-minute-old
-        meter with nothing on the card saying so, the exact frame this panel was
-        reported for. The note qualifies the meters, so a budget that can show a
-        meter can show the sentence that says the meter is old; dropping a
-        *meter* to keep it is the honest trade, because an unlabelled stale
-        number is worse than one fewer number.
+        the other air. A cut point alone only made it *eligible*: the tail a
+        window keeps is the end of the block and the note is its first row, so it
+        was the first row discarded — which rendered a 169-minute-old meter with
+        nothing on the card saying so, the exact frame this panel was reported
+        for. The note qualifies the meters, so a budget that can show a meter can
+        show the sentence that says the meter is old; dropping a *meter* to keep
+        it is the honest trade, because an unlabelled stale number is worse than
+        one fewer number. ``_select_rows`` therefore reserves the note's rows
+        before it spends any on meters.
 
-        Compaction works in CUT UNITS, not rows: a meter carrying a detail line
-        is two rows the cut set marks as one unit, and a budget that cannot
-        hold both drops the pair rather than keeping either half. Splitting
-        them would show a credit split with no meter, or a meter whose
-        annotation silently belongs to the row above it.
+        Compaction works on the METERS: the window is chosen over the tree
+        without the annotations (:meth:`UsageBody.skeleton`) and the details are
+        painted afterwards, out of rows the meters did not need. Two rules
+        follow, and the second one is what the first draft of this change got
+        wrong — it made a meter and its detail one indivisible unit, so a budget
+        that could not hold both kept neither, and the card announced a provider
+        with no numbers under it:
+
+        * a detail is never painted without its meter in the same window — not
+          as the window's first row, not at any scroll offset, not compacted;
+        * the meter always wins a tie. At every budget and every offset this
+          window shows at least as many meters as the tree without annotations
+          showed, and in fact exactly as many: the annotation is decoration and
+          the number is the reason `/usage` was opened.
         """
-        for start, end in body.blocks:
-            if self._offset == start and end - start > budget:
-                if budget <= 1:
-                    return [body.lines[start]], end
-                tails = [index for index in range(start + 1, end) if index + 1 in body.cuts]
-                # A detail row is the tail of its cut unit but says nothing
-                # without the meter directly above it, so the pair travels as
-                # one. Every other row is its own unit, exactly as before.
-                units = [[i - 1, i] if i in body.details else [i] for i in tails]
-                notes = [unit for unit in units if unit[0] in body.notes]
-                meters = [unit for unit in units if unit[0] not in body.notes]
-                notes = notes[: budget - 1]
-                # Notes first, then as many WHOLE trailing meter units as the
-                # rows left over hold — from the end, because the meters nearest
-                # the tail are the ones the scroll position is asking for. A
-                # pair that does not fit is dropped entire rather than halved.
-                room = budget - 1 - sum(len(unit) for unit in notes)
-                kept: list[list[int]] = []
-                for unit in reversed(meters):
-                    if len(unit) > room:
-                        break
-                    kept.insert(0, unit)
-                    room -= len(unit)
-                rows = [index for unit in (*notes, *kept) for index in unit]
-                return [body.lines[start], *(body.lines[i] for i in rows)], end
-        end = self._window_end(body, budget)
-        return body.lines[self._offset : end], end
+        content = body.skeleton()
+        kept = body.content_rows()
+        start = bisect.bisect_left(kept, self._offset)
+        selected, content_end = self._select_rows(content, start, budget)
+        rows = [kept[index] for index in selected]
+        room = budget - len(rows)
+        if room > 0:
+            # Only rows the meters did not need may go to an annotation, and
+            # they go to the ones nearest the tail first: a compacted window is
+            # anchored on its last rows and a scrolled one is read from the
+            # bottom up, so the split next to the tail is the one being looked
+            # for.
+            for index in reversed(selected):
+                if room <= 0:
+                    break
+                detail = kept[index] + 1
+                if detail in body.details:
+                    rows.append(detail)
+                    room -= 1
+            rows.sort()
+        end = kept[content_end] if content_end < len(kept) else len(body.lines)
+        return [body.lines[row] for row in rows], end
 
-    def _window_end(self, body: UsageBody, budget: int) -> int:
-        """Where the window stops: the last row that COMPLETES a block.
+    def _select_rows(self, body: UsageBody, start: int, budget: int) -> tuple[list[int], int]:
+        """Which rows the window shows, as indices into a detail-free body.
+
+        Split out from :meth:`_window_rows` because the choice is made over the
+        meters alone: an annotation must never be able to cost a window a
+        number, so the selection cannot see the details at all.
+
+        A block taller than the short viewport is compacted from its tail: its
+        heading, then the staleness notes it has room for, then as many of the
+        LAST meters as the budget still holds. Every row it takes is one row, so
+        a budget that can hold a meter always shows it — the earlier version
+        walked trailing units and broke on the first one too large for the room
+        left, which kept nothing at all (a heading with no numbers, one row of
+        the allowance unused) the moment a meter carried an annotation.
+        """
+        for block_start, block_end in body.blocks:
+            if start == block_start and block_end - block_start > budget:
+                if budget <= 1:
+                    return [block_start], block_end
+                tails = [
+                    index for index in range(block_start + 1, block_end) if index + 1 in body.cuts
+                ]
+                notes = [index for index in tails if index in body.notes][: budget - 1]
+                meters = [index for index in tails if index not in body.notes]
+                room = budget - 1 - len(notes)
+                kept = meters[max(0, len(meters) - room) :] if room > 0 else []
+                return sorted([block_start, *notes, *kept]), block_end
+        end = self._window_end(body, start, budget)
+        return list(range(start, end)), end
+
+    def _window_end(self, body: UsageBody, start: int, budget: int) -> int:
+        """Where a window opened at ``start`` stops: the last row that
+        COMPLETES a block.
 
         A budget that ran out mid-block left a provider heading — or a heading
         and the blank under it — as the last thing on the card, announcing a
@@ -1680,11 +1783,11 @@ class UsagePanel(Static):
         it keeps the raw cut: the head of a block reads better than a card with
         an empty body.
         """
-        end = min(self._offset + budget, len(body.lines))
+        end = min(start + budget, len(body.lines))
         pulled = end
-        while pulled > self._offset and pulled not in body.cuts:
+        while pulled > start and pulled not in body.cuts:
             pulled -= 1
-        return pulled if pulled > self._offset else end
+        return pulled if pulled > start else end
 
     def _recentre(self, width: int, height: int) -> None:
         return overlay.recentre(self, width, height)

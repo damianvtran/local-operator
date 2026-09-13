@@ -186,14 +186,21 @@ def report_from_dict(data: Any) -> UsageReport | None:
                 status=limit.get("status"),
                 resets_at=limit.get("resets_at"),
                 resets_at_ms=limit.get("resets_at_ms"),
-                tier=str(limit.get("tier", "")),
+                # ``or ""`` rather than a bare default, because a JSON ``null``
+                # is PRESENT: ``str(None)`` would decode to the four character
+                # string ``None`` and paint it as a tier — and, for ``detail``,
+                # as a bogus annotation under a meter. Our own writer cannot emit
+                # null (``asdict`` over a ``str`` field), so this only fires on a
+                # hand-edited or foreign-written cache, which is exactly the row
+                # a decoder must not trust.
+                tier=str(limit.get("tier") or ""),
                 shared=bool(limit.get("shared", False)),
                 # Decoded explicitly like every other field: this rebuild is
                 # field-by-field rather than ``UsageLimit(**limit)``, so a new
                 # field omitted here is silently dropped on the CACHED path
                 # while the live fetch still carries it — the annotation would
                 # appear on a cold `/usage` and vanish on every warm one.
-                detail=str(limit.get("detail", "")),
+                detail=str(limit.get("detail") or ""),
             )
             for limit in data.get("limits", [])
         ]

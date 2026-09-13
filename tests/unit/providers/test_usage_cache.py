@@ -81,6 +81,21 @@ def test_round_trip_keeps_a_limits_detail_line() -> None:
     assert restored.limits[0].detail == "100.00 USD paid · 20.00 USD granted"
 
 
+def test_a_null_decodes_as_absent_rather_than_as_the_word_none() -> None:
+    """A JSON ``null`` is PRESENT, so ``limit.get(key, "")`` hands it to ``str()``
+    and the four-character string ``None`` lands in the field — as a tier row, and
+    as a bogus annotation line under a meter. Our own writer cannot emit null
+    (``asdict`` over a ``str`` field), so this is the hand-edited or
+    foreign-written row: exactly the row a decoder must not trust."""
+    payload = report_to_dict(_report())
+    payload["limits"][0]["detail"] = None
+    payload["limits"][0]["tier"] = None
+    restored = report_from_dict(payload)
+    assert restored is not None
+    assert restored.limits[0].detail == ""
+    assert restored.limits[0].tier == ""
+
+
 def test_report_from_dict_rejects_garbage_as_a_miss() -> None:
     # A schema change or a corrupt row must read as a cache MISS, never an
     # exception on the /usage path.

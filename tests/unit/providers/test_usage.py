@@ -642,6 +642,26 @@ async def test_an_absent_availability_flag_still_counts_as_available() -> None:
     assert report.notes is None
 
 
+@pytest.mark.parametrize("flag", [None, 0, ""])
+@pytest.mark.asyncio
+async def test_a_falsy_but_non_false_flag_never_suspends_the_account(flag) -> None:
+    """Only the documented boolean suspends. This is a deliberate CHANGE from the
+    old truthiness test, which read ``null``, ``0`` and ``""`` as unavailable —
+    so a schema change that started sending one of them reddened every row of a
+    healthy account. Fail-open on those three, and the row's status still comes
+    from the total rather than from the flag alone."""
+    payload = {
+        "is_available": flag,
+        "balance_infos": [{"currency": "USD", "total_balance": "120.00"}],
+    }
+    client = _client_for(payload)
+    async with client:
+        report = await fetch_usage(client, "deepseek", api_key="sk-ds")
+    assert report is not None
+    assert report.notes is None
+    assert [lim.effective_status() for lim in report.limits] == ["ok"]
+
+
 @pytest.mark.asyncio
 async def test_one_unparsable_deepseek_balance_does_not_drop_the_others() -> None:
     """A garbage row is skipped; the currencies that parsed still report."""

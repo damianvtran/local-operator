@@ -774,10 +774,11 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
     infos = payload.get("balance_infos")
     if not isinstance(infos, list):
         return None
-    # Strictly a JSON ``false``. A missing key or a value of another type is
-    # NOT evidence the account is suspended, and coercing one (``""``, ``0``)
-    # into "unavailable" would paint every row of a healthy account red on a
-    # schema change. Absent stays fail-open, as it was before.
+    # Strictly a JSON ``false``, and that IS a behaviour change for the other
+    # falsy values: the old truthiness test read ``null``, ``0`` and ``""`` as
+    # unavailable, so a schema change that started sending any of them reddened
+    # every row of a healthy account. Only the documented boolean decides now;
+    # a missing key or a non-boolean stays fail-open.
     available = payload.get("is_available") is not False
     limits: list[UsageLimit] = []
     for item in infos:
@@ -796,6 +797,12 @@ async def fetch_deepseek_balance(client: httpx.AsyncClient, api_key: str) -> Usa
                 # currency in the label rather than mislabelled as dollars.
                 amount=UsageAmount(remaining=total, unit="usd" if currency == "USD" else "unknown"),
                 window="lifetime",
+                # `exhausted` is what the PANEL reads; it is not failover's
+                # signal. `usage_health` (the router, reached from `failover.py`
+                # and `auth_store.py`) reads `amount`, `shared` and `tier` and
+                # never `status`, so a funded-but-suspended account is drawn dead
+                # here and still routes normally. The display can afford to be
+                # blunt about a wallet that cannot pay; the router cannot.
                 status="ok" if available and total > 0 else "exhausted",
                 detail=_deepseek_split(item, currency),
             )
