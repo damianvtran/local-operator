@@ -496,3 +496,80 @@ def test_a_recorded_tier_still_re_resolves_strictly_under_the_operator_default(
     with pytest.raises(SubagentModelUnavailable) as caught:
         session._resolve_subagent_model("task", "med", strict=True)
     assert caught.value.tier == "med"
+
+
+# ---------------------------------------------------------------------------
+# the launch result line names the model the child will run on
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_task_result_names_the_model_each_child_will_run_on(tmp_path, monkeypatch):
+    """The line the delegating model reads back states the model, both ways.
+
+    This is the half of the incident that no gate closes: the operator's own
+    tier pin is legitimate, and what made it expensive was that nothing in the
+    loop said a child had moved onto that model until the bill. The result of
+    the call that MADE the delegation is the one place the delegating model is
+    guaranteed to read.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.tools.builtin import execute_task
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents", {"model_choice": "model", "models": {"hi": "anthropic/claude-opus-5"}}
+    )
+    session = make_session(tmp_path)
+    session.jobs.set_max_running(1)  # the second child parks behind capacity
+
+    context = session._build_tool_context()
+    assert context.session_model_label == f"{MODEL.provider}/{MODEL.model_id}"
+    result = await execute_task(
+        "call-1",
+        {
+            "context": "goal",
+            "tasks": [
+                {"label": "inherit", "prompt": "go"},
+                {"label": "pinned", "prompt": "go", "effort": "hi"},
+            ],
+        },
+        None,
+        None,
+        context,
+    )
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+
+    inherited = f"on this session's model ({MODEL.provider}/{MODEL.model_id})"
+    assert f"- inherit (task) {inherited}: job " in text
+    assert "- pinned (task) on anthropic/claude-opus-5: job " in text
+    # The PARKED row is truthful too: it has no runner yet, so its label can
+    # only come from registration.
+    details = result.details or {}
+    parked = session.jobs.get(details["jobs"][1]["job_id"])
+    assert parked is not None and parked.queued
+    assert parked.model_label == "anthropic/claude-opus-5"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp_path, monkeypatch):
+    """A host that keeps no job rows must not get an invented model.
+
+    The reduced hosts (and this file's own ``ToolContext``) hand ``task`` a
+    launcher and nothing else, so the label is unknown rather than inherited —
+    and the line falls back to exactly the shape it had before this field
+    existed, which is what keeps those hosts' assertions honest.
+    """
+    from local_operator.tools.builtin import execute_task
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        return f"job-{label}"
+
+    context = ToolContext(subagent_launcher=launcher, session_model_label="test/m")
+    result = await execute_task("call-1", {"label": "x", "prompt": "go"}, None, None, context)
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+    assert "- x (task): job job-x" in text
+    assert "on " not in text

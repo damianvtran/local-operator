@@ -897,6 +897,17 @@ class ToolContext(BaseModel):
     # Optional and display-only for the same reason ``session_name`` is:
     # identity and authorization continue to use ``session_id``.
     session_name_provider: Callable[[], str] | None = None
+    # The SESSION's own ``provider/model``, as a snapshot taken when this
+    # context was built (its owner re-reads it per turn, so a ``/model`` switch
+    # shows up on the next call).
+    #
+    # Its one consumer is the ``task`` tool's result line, which states the
+    # model each child WILL run on: a child launched with no tier and no role
+    # pin owns no model and inherits this one, and the line has to be able to
+    # say that rather than leaving a blank the reader must interpret. Declared
+    # rather than probed off the launcher's bound session — a tool that has to
+    # read a session off a bound method is a coupling nobody declared.
+    session_model_label: str = ""
     # The DELEGATED-WORK label, set only on a subagent's context: the short
     # name its parent launched it under (``zoom-scroll-fix``, ``bridge-qa``).
     #

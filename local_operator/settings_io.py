@@ -1573,7 +1573,15 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: lo",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the lo effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it. Length is budgeted, not styled: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), so this is 73 cells against the 63 it
+        # replaces and still renders with `subagents.models.lo` at 100 columns.
+        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
         empty_unsets=True,
     ),
     Setting(
@@ -1583,7 +1591,15 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: med",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the med effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it. Length is budgeted, not styled: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), so this is 73 cells against the 63 it
+        # replaces and still renders with `subagents.models.lo` at 100 columns.
+        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
         empty_unsets=True,
     ),
     Setting(
@@ -1593,7 +1609,15 @@ SETTINGS: tuple[Setting, ...] = (
         label="Subagent model: hi",
         kind=Kind.TEXT,
         default="",
-        help="provider/model for the hi effort tier. Empty keeps the parent's model.",
+        # The billing fact and the picker pointer are the two things this row
+        # was missing, and the incident is why: a deliberate tier pin read as
+        # harmless because nothing said a child on it RUNS, and is billed, at
+        # that model's rates, or that "Who picks a subagent's model" is what
+        # decides who may choose it. Length is budgeted, not styled: the detail
+        # line sheds the WHOLE help once the key path no longer fits beside it
+        # (settings_view._detail_clause), so this is 73 cells against the 63 it
+        # replaces and still renders with `subagents.models.lo` at 100 columns.
+        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
         empty_unsets=True,
     ),
     # -- fork ---------------------------------------------------------------

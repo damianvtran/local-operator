@@ -58,7 +58,7 @@ import time
 import traceback
 import unicodedata
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10754,6 +10754,56 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     return spill_truncate(text, "wait", context)
 
 
+def _job_model_label(context: ToolContext | None, job_id: str) -> str:
+    """The model the registered job says its child runs on, or ``""``.
+
+    Read off the JOB rather than off the arguments, because the job row knows
+    two things the arguments cannot: a ROLE PIN resolved inside the session, and
+    the model a child parked behind the capacity gate was stamped with before it
+    ever started. Empty when the host keeps no job manager (a reduced host or a
+    test double) or the row is unknown, and the caller then says nothing about
+    models rather than inventing one.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return ""
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a launch
+        return ""
+    return str(getattr(job, "model_label", None) or "")
+
+
+def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str:
+    """One launched child, NAMING the model it will run on.
+
+    Why this is on the launch line: the failure it answers is a delegated child
+    that moved to a different — and costlier — model without the operator
+    learning it before the bill. ``effort`` is this harness's reasoning-effort
+    vocabulary while its value is a provider/model swap, so the swap has to be
+    stated in the one place the delegating model reads immediately: the result
+    of the call that made it.
+
+    Two wordings, because they are two different facts. ``on <model>`` is a
+    child that owns a model (a tier, or a role's own pin). ``on this session's
+    model (<model>)`` is a child that owns none — saying so is what stops the
+    other wording from reading as "someone chose the model you already had".
+    The session's own label comes from the context (see
+    ``ToolContext.session_model_label``); when the host supplies none the line
+    falls back to today's shape rather than claiming a model it cannot name.
+    """
+    label = entry["label"]
+    agent = entry["agent"]
+    job_id = entry["job_id"]
+    model = str(entry.get("model") or "")
+    session_model = str(getattr(context, "session_model_label", "") or "")
+    if not model:
+        return f"- {label} ({agent}): job {job_id}"
+    if model == session_model:
+        return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
+    return f"- {label} ({agent}) on {model}: job {job_id}"
+
+
 @_guard("task")
 async def execute_task(
     tool_call_id: str,
@@ -10827,11 +10877,24 @@ async def execute_task(
             else:
                 failures.append(f"{item.label}: {exc}")
             continue
-        launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
+        launched.append(
+            {
+                "job_id": job_id,
+                "label": item.label,
+                "agent": item.agent,
+                # The model this child WILL run on, read off the job row rather
+                # than guessed from the arguments: the row is stamped at
+                # registration from the spec the launch resolved, so it is
+                # already true for a child parked behind the capacity gate (see
+                # ``run_subagent``), and it covers a ROLE PIN the arguments do
+                # not mention at all.
+                "model": _job_model_label(context, job_id),
+            }
+        )
     if not launched:
         detail = failures[0] if failures else "no tasks to launch"
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
-    lines = [f"- {entry['label']} ({entry['agent']}): job {entry['job_id']}" for entry in launched]
+    lines = [_launched_line(entry, context) for entry in launched]
     body = (
         f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
         + "\n".join(lines)
