@@ -1508,7 +1508,7 @@ class BridgeService:
         # and a drop writes `extension_connected=false` — without this the file
         # is indistinguishable from a host with no bridge, which is how a paired
         # running bridge got told to run `lop browser install` (design D3-2).
-        self.state.extension_unresponsive = self.link.dropped_unproven()
+        self.state.extension_unresponsive = self.drop_latched()
         # The extension's identity, published for consumers that CANNOT open a
         # socket: `BrowserResource` decides whether it may use the ownership
         # lifecycle from these fields (see `resources.py`), and the session-side

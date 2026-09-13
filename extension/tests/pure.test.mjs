@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { build } from "esbuild";
 import { pathToFileURL } from "node:url";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -998,6 +998,38 @@ test("no hello send site carries a numeric proto literal", async () => {
       `${file} must import PROTO_VERSION from protocol.gen`,
     );
   }
+});
+
+test("no FOURTH hello sender can appear without failing this suite", async () => {
+  // The named list above is only as good as its completeness: a sender added in
+  // a NEW file would be scanned by nobody, and the window/proto story would go
+  // decorative again in exactly the way that list exists to prevent. #1038
+  // rewrote the popup, the worker and the pairing flow, so a fourth sender is a
+  // live risk rather than a theoretical one — assert the SET of files that send
+  // a hello equals the set asserted above.
+  const src = new URL("../src/", import.meta.url);
+  const walk = async (dir, prefix = "") => {
+    const found = [];
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const rel = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        found.push(...(await walk(new URL(`${entry.name}/`, dir), `${rel}/`)));
+      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".gen.ts")) {
+        found.push(rel);
+      }
+    }
+    return found;
+  };
+  const senders = [];
+  for (const rel of await walk(src)) {
+    const source = await readFile(new URL(rel, src), "utf8");
+    if (/event:\s*"hello"/.test(source)) senders.push(rel);
+  }
+  assert.deepEqual(
+    senders.sort(),
+    ["options/options.ts", "popup/popup.ts", "worker.ts"],
+    "every file that sends a hello must be listed in the source scan above",
+  );
 });
 
 // The popup's copy of the sentence is the GENERATED template, so the two cannot
