@@ -712,7 +712,7 @@ cannot be side-loaded) and a path-derived unpacked build:
 | **No war** | Both installs connected for ≥120 s with `/health` sampled throughout: exactly one driver the whole time, **zero** 4000 evictions after settle. This is the §1.4 regression and it must be sampled, not assumed. |
 | **Standby cannot drive** | A session command while B is standby is served by A; B's debugger attachments are gone; B's popup shows the standby card (screenshot). |
 | **Failover** | Kill A's worker; B is promoted within one observed interval; a session command on a **stale handle** returns typed `tab_closed`, and the following `open` succeeds on a fresh tab (§5.3). Capture the timing. |
-| **Unknown ID** | A third build in a third directory is closed **4004**; nothing in the daemon's link state changed. |
+| **Unknown ID** | A third build in a third directory that presents a TOKEN is closed **4004** before `attach()`, and nothing in the daemon's link state changed. One that presents NO token is admitted, gets its own code, and can pair (§3.3: refusing it would make a second install unaddable, which was the reported defect) — measured: token → 4004, no token → `hello_ack{paired:false, role:"standby"}`. |
 | **Revoked ID** | `pair --revoke B` severs B's link within `REVOKE_WATCH_S`; A keeps driving and keeps answering; B's popup shows the pairing form. |
 | **Token mismatch** | B with a corrupted stored token gets `paired: false`, is offered a code, and cannot issue RPCs (`not_paired`). |
 | **Old extension, new daemon** | The **released 0.1.10** build against the new daemon: pairs, drives, ignores the additive ack fields. Load the published store build in the rig profile for this one. |
