@@ -113,8 +113,29 @@ is told to `reauth` (a plain `login` would leave the dead credential in place),
 while one that has never been authorized is told to `login`. A server that
 refuses us with a `401`/`403` but advertises **no** discoverable OAuth endpoint
 is not promised a login it cannot complete — it is told to set its API key or
-headers. Failures that are not authorization failures (a down server, DNS, TLS)
-keep reporting as themselves.
+headers.
+
+Failures that are not authorization failures (a down server, DNS, TLS) are
+reported as **network failures** rather than as whatever the SDK happened to
+say. The copy is `network: <what the exchange did>` (`cannot reach <host>`,
+`cannot resolve <host>`, `TLS handshake with <host> failed`, `no response from
+<host> (timed out)`, `the connection to <host> closed`), and when **every**
+failed server in a round is one of these the startup toast says
+`failed (network): a, b, c` once instead of naming the servers as unrelated
+faults. Why: the transport is the one layer a single local fault takes out for
+**every remote server at once**, and the operator's own boot screen — 10 of 11
+servers "failed" with `Request 'initialize' timed out` and nothing saying the
+machine's connection was the problem — was chased through MCP config and OAuth
+state before a phone hotspot found it. Naming the layer costs nothing and
+points at the one thing the user can act on. The host comes from the server's
+**config**, because the exceptions themselves (`httpx.ConnectError`,
+`socket.gaierror`, `ssl.SSLError`, anyio's resource errors) carry no URL; a
+stdio server has no host to name, so its transport failure is still reported
+but is never counted as the user's connectivity being down. The startup round
+also **settles** on such a failure: anyio delivers a transport death as a bare
+`CancelledError`, which used to be read as a teardown and dropped, leaving
+`startup_settling()` True for the life of the process so the one fault class
+that takes out several servers reported nothing at all.
 
 Re-authorize deliberately with:
 
