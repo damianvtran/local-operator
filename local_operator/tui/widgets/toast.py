@@ -127,6 +127,37 @@ _FAILURE_REASON_SEP = " — "
 #: it is the same spelling the durable notice and the ``/mcp`` row print, which
 #: is what makes one marker legible across all three surfaces (design reviews
 #: D1-6).
+#: The lead-ins a transport phrase puts before the host it names, in the order the
+#: manager's own phrase table composes them. WHY they are listed rather than
+#: searching the whole phrase for the server's name: a short name (``net``,
+#: ``reach``, ``or``) occurs in the layer wording itself, so a substring test
+#: drops the head for a server the phrase never names — the D2-3 harm one step
+#: over (review round 4, R4-4).
+_HOST_LEADS = (
+    "cannot reach ",
+    "cannot resolve ",
+    "no response from ",
+    "the connection to ",
+    "TLS handshake with ",
+)
+
+
+def _phrase_host(text: str) -> str | None:
+    """The host a transport phrase names, or ``None`` when it names none.
+
+    ``None`` is also the answer for a phrase this table does not know, and the
+    caller keeps the head there: naming the server twice is a smaller sin than
+    naming it not at all.
+    """
+    for lead in _HOST_LEADS:
+        _, marker, tail = text.partition(lead)
+        if marker:
+            # The host is the first token after the lead. What follows it is the
+            # phrase's own tail (``(timed out)``, ``failed``, ``closed``).
+            return tail.split(" ", 1)[0].strip() or None
+    return None
+
+
 _NETWORK_MARKER = "network: "
 
 #: The failure glyph, mirrored from the notice spine (``NoticeBlock``'s ``error``
@@ -200,12 +231,21 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       ``https://mcp.acme.com/mcp`` names no part of itself in the phrase, so the
       head is kept there and the row reads ``failed: jira — network: cannot reach
       mcp.acme.com``, which is a pairing rather than the doubling D1-2 objected
-      to (design review D2-3). The hostless stdio copy has no host and therefore
-      keeps the head, which is why the marker (only ever composed WITH a host) is
-      what selects this rung.
+      to (design review D2-3) — decided on the HOST the phrase names, not on the
+      raw phrase: the gate asks :func:`_phrase_host` for the token after the
+      layer's lead-in, so a short name that happens to appear in the wording
+      itself (``net``, ``reach``, ``or``) is not mistaken for a name the host
+      carries (review round 4, R4-4). The hostless stdio copy has no host and
+      therefore keeps the head, which is why the marker (only ever composed WITH
+      a host) is what selects this rung.
     * **Rung 1** — the whole row, whenever it fits. Byte-identical to the clamp
-      for the corpus design review D9 verified at 100 columns (57/53/47 cells at
-      a 6-cell name), so the pinned rows are untouched.
+      for the corpus design review D9 verified, but 2 cells narrower than that
+      corpus: the detail row now opens on its own glyph (D2-2), and that glyph
+      comes out of the same budget, so at the default 58-cell card the 57-cell
+      D9 row no longer fits rung 1 — it sheds one cell of copy and moves the
+      ellipsis, ``,(401) —…`` → ``,(401)…``. The pinned rows are re-measured at the
+      painted width rather than left describing the pre-glyph one (review round
+      4, R4-3).
     * **Rung 2** — the command, marked as having shed the reason. The reason is
       the right part to lose: it is the only piece that is not a command the
       user has to be able to type, and ``/mcp`` plus the durable transcript
@@ -220,15 +260,19 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       a name so long that not even the command fits on the row. Never worse than
       the behaviour it replaces.
 
-    The 44-column card is deliberately UNCHANGED for 8+ cell names, and that is
-    a recorded limit rather than an oversight: the command ALONE is ``23 + 2n``
-    cells against a 36-cell card, so no composition of this line puts a whole
-    ``/mcp reauth <name>`` on that card at ``n >= 7`` without a second row or a
-    different card shape. Both are layout decisions this change does not make
-    (D11's resolution 2), so the fall-through keeps the base's pixels there and
-    the named constraint is recorded on the deferral instead.
+    The D11 fall-through is 2 cells WIDER than it was, for the same reason, and
+    that is a recorded COST rather than a claim of parity: at a 44-cell card the
+    detail budget is 42 cells, so the row now reads
+    ``failed: minerva-qa — /mcp reauth minerva-…`` — the command's own name
+    argument truncated, a command that errors if followed — where before the
+    glyph it showed ``failed: minerva-qa — /mcp reauth minerva-qa…`` whole. The
+    rungs above are unchanged and the boundary simply moved (46/45 where it was
+    44/43); what is NOT true any more is that the fall-through keeps the base's
+    pixels at 8+ cell names on that card. A future maintainer weighing a glyph
+    on this row should read this paragraph as priced: 2 cells is exactly one
+    character of the name argument at the tight end.
     """
-    if text.startswith(_NETWORK_MARKER) and name.lower() in text.lower():
+    if text.startswith(_NETWORK_MARKER) and name.lower() in (_phrase_host(text) or "").lower():
         # Case-insensitive on purpose: the host is lower-cased by the SDK/HTTP
         # layer while a configured name need not be, and a name that differs only
         # in case is still the name the user reads twice.

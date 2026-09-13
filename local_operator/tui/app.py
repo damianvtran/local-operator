@@ -2342,16 +2342,6 @@ BOOT_COMPOSITION_MIN_SPARE = 2
 #: clips (code review round 1, M3).
 SCREEN_INSET = APP_SCREEN_INSET
 
-#: Cells the transcript lane spends between the boot box and a notice block's own
-#: box — both of them the LANE's, not the card's: its one-cell left padding, and
-#: the one-cell column `scrollbar-gutter: stable` reserves at the right edge
-#: (``TranscriptView`` in the sheet: ``padding: 1 0 1 1`` plus
-#: ``scrollbar-size-vertical: 1``). A notice below the card threshold fills the
-#: lane, so this is the difference between the column the composition models and
-#: the column the block is PAINTED in; the card clamp happens to equal the painted
-#: column only while the card is up and its width is assigned explicitly.
-NOTICE_LANE_INSET = 2
-
 
 def boot_card_width(box: int) -> int:
     """Width the card's clamp resolves to inside a content box of ``box`` cells.
@@ -2373,15 +2363,13 @@ class NoticeFn(Protocol):
     the real closures default ``kind`` — a plain two-positional Callable makes
     every ``notice("...")`` call site a type error while the code is correct.
 
-    The return type is ``object`` rather than ``None`` because a producer MAY
-    hand back what it made — ``_system_notice`` returns the ``NoticeBlock`` so the
-    MCP failure notices can be re-fitted when their column moves — and a callback
-    shaped ``-> None`` would be rejected at the one call site that passes it, for
-    a value the handlers never read. ``-> None`` functions remain assignable here
-    (``None`` is a subtype of ``object``), so nothing else changes.
+    ``-> None``, precisely: a handler calls it for effect and reads nothing back,
+    so a producer that returns a block must NOT be passed here (the MCP failure
+    path wants one, and calls :meth:`OperatorApp._system_notice_block` directly
+    instead — review round 4, R4-5).
     """
 
-    def __call__(self, body: str, kind: NoticeKind = "info") -> object: ...
+    def __call__(self, body: str, kind: NoticeKind = "info") -> None: ...
 
 
 class _PendingUserEcho(NamedTuple):
@@ -15486,6 +15474,9 @@ class OperatorApp(App[None]):
             if notice_key in self._mcp_failure_notices:
                 continue
             self._mcp_failure_notices.add(notice_key)
+            # ONE resolution of the column for this notice, used by both the
+            # composition and the fit record below (see there).
+            column = self._mcp_notice_painted_column()
             # The pointer is appended ONLY when the line does not already name
             # ``/mcp`` itself. The auth requirement leads with its own
             # ``/mcp reauth`` command, so appending "— /mcp for details" gave the
@@ -15496,11 +15487,17 @@ class OperatorApp(App[None]):
             # rather than an instruction; when the text is already the command,
             # the reader has the answer. WHICH form it takes is now a budget
             # question as well — see :meth:`_mcp_notice_line`.
-            block = self._system_notice(self._mcp_notice_line(name, str(error)), "error")
+            block = self._system_notice_block(
+                self._mcp_notice_line(name, str(error), budget=NoticeBlock.body_budget(column)),
+                "error",
+            )
             # What the ladder needs to re-run if the column moves, carried ON the
             # block — see ``NoticeBlock.mcp_failure_fit`` for why it is not a side
-            # table. The column recorded is the one the line was just fitted to.
-            block.mcp_failure_fit = (name, str(error), self._mcp_notice_painted_column())
+            # table. The column is resolved ONCE here and handed to both the
+            # composition and the record: asking a second time after the line was
+            # built let the two describe different columns if anything moved
+            # between the calls (review round 4, R4-1).
+            block.mcp_failure_fit = (name, str(error), column)
 
     def _mcp_notice_line(self, name: str, error: str, *, budget: int | None = None) -> str:
         """``MCP <name> failed: <error>`` plus its signpost, fitted to the column.
@@ -15562,14 +15559,63 @@ class OperatorApp(App[None]):
                 return trimmed + _MCP_NOTICE_POINTER_SHORT
         return head
 
+    def _boot_notice_box(self, terminal_width: int) -> tuple[int, int, bool]:
+        """Resolve the box, the card clamp and the card state a notice is composed in.
+
+        The ONE place that answers this, because the layout pass
+        (:meth:`_sync_boot_column_width`) and the composition
+        (:meth:`_mcp_notice_painted_column`) disagreeing about the BOX is what put
+        the ladder over budget twice: first by 2 cells at 60-84 columns (design
+        round 2, D2-1), and then by the session sidebar's whole width once the
+        arithmetic was shared but the box was not — 25 cells at 150x40, which
+        orphaned ``for details`` on the sidebar-click adoption path (review round
+        4, R4-1).
+
+        The box is the LANE and comes from :meth:`_boot_lane_width`, which is
+        ``#1068``'s one owner of that measurement — the docked sidebar's columns
+        off, and a floating overlay excluded because it displaces nothing. This
+        method used to carry its own copy of that subtraction; sharing the owner
+        is what keeps the two from drifting again.
+
+        The clamp is then ``boot_card_width`` of that LANE, and NOT re-floored to
+        ``BOOT_CARD_MIN_WIDTH`` afterwards: the sheet's ``min-width: 75`` is
+        resolved inside the dock's content box, so on a 100-cell terminal with
+        the sidebar docked the lane is 65 and the card IS 65 — a re-floored 75
+        would model a panel wider than the box it is drawn in, which is the
+        phantom ``#1068`` removed. The card is UP only while the class the sheet
+        is using says so and the ground left beside it reads as a margin; the
+        class is :meth:`_sync_boot_card`'s decision (it also stands the card down
+        under a live prompt, #168), read here rather than re-derived so this can
+        never disagree with the pass that set it.
+        """
+        box = self._boot_lane_width(terminal_width)
+        card = boot_card_width(box)
+        card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        return box, card, card_up
+
+    def _mcp_notice_lane_inset(self) -> int:
+        """Cells the lane spends between the boot box and a notice block's own box.
+
+        Derived from the LIVE styles, not restated as a number: the transcript's
+        one-cell left padding plus the column ``scrollbar-gutter: stable``
+        reserves (``TranscriptView`` in the sheet). :meth:`_sync_boot_composition`
+        computes the same quantity from the same inputs, and a hand-written copy
+        here is how the composition would silently go 2 cells wider than the
+        painted block again if either declaration moved (review round 4, R4-2).
+        """
+        transcript = self._transcript_view()
+        return transcript.styles.gutter.width + transcript.scrollbar_size_vertical
+
     def _mcp_notice_column(self, box: int, card: int, *, carded: bool) -> int:
         """Cells the durable MCP notice block is actually painted in.
 
         The mirror of the width :meth:`_sync_boot_column_width` assigns, for the
-        same ``box`` and the same card state: the CARD's width while the card is
-        up (the notice is pinned to the card's column), and otherwise the lane the
-        block fills, ``NOTICE_LANE_INSET`` narrower than the box the card clamp is
-        measured in.
+        same ``box`` and the same card state — and ``box``/``card``/``carded`` are
+        resolved by the same :meth:`_boot_notice_box` on both sides, which is the
+        only way the two can agree (R4-1): the CARD's width while the card is up
+        (the notice is pinned to the card's column), and otherwise the lane the
+        block fills, ``_mcp_notice_lane_inset`` narrower than the box the card
+        clamp is measured in.
 
         WHY it exists as its own function: :meth:`_mcp_notice_budget` composes a
         10-minute-lived line ONCE and :meth:`_sync_boot_column_width` places the
@@ -15580,19 +15626,18 @@ class OperatorApp(App[None]):
         ladder was handed 2 cells it did not have, and ``— /mcp`` split at 68 and
         74 columns on the boot frame (design round 2, D2-1).
         """
-        return card if carded else max(0, box - NOTICE_LANE_INSET)
+        return card if carded else max(0, box - self._mcp_notice_lane_inset())
 
     def _mcp_notice_painted_column(self) -> int:
         """Column a durable MCP notice is painted in RIGHT NOW.
 
-        The live half of :meth:`_mcp_notice_column`: the box and the card state
-        are read here, the arithmetic stays in one place so the composition and
-        the layout pass (:meth:`_sync_boot_column_width`) cannot disagree.
+        The live half: the box and the card state are read through
+        :meth:`_boot_notice_box`, the SAME resolution the layout pass runs, so the
+        composition and the painter cannot disagree about the sidebar or the card
+        (review round 4, R4-1).
         """
-        box = max(0, self.size.width - SCREEN_INSET)
-        card = boot_card_width(box)
-        carded = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        return self._mcp_notice_column(box, card, carded=carded)
+        box, card, card_up = self._boot_notice_box(self.size.width)
+        return self._mcp_notice_column(box, card, carded=card_up)
 
     def _mcp_notice_budget(self) -> int:
         """Cells a durable MCP notice's body is given, in the column it is painted in."""
@@ -16650,15 +16695,16 @@ class OperatorApp(App[None]):
         which is how the width assigned below arrives.
         """
         transcript = self._transcript_view()
-        # The lane, and it is the SAME box `_sync_boot_card` decided the class on:
-        # the card is centred by the sheet in the dock's content box, so the column
-        # a notice adopts is a property of that box. This pass used to carry its own
-        # copy of that subtraction and then re-add the 75-cell floor on top, which
-        # is how a notice kept a 75-cell width inside a 65-cell lane after the
-        # class had been withheld — the two measurements agreeing on a phantom.
-        box = self._boot_lane_width(terminal_width)
-        card = boot_card_width(box)
-        card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
+        # The box, the card clamp and the card state come from ONE resolution
+        # shared with the composition (``_boot_notice_box``): the docked-sidebar
+        # debit and the card floor used to live only here, which is how the
+        # composition came to measure against a box 25 cells too wide (R4-1).
+        # The lane itself is `_boot_lane_width`'s measurement (#1068), read
+        # through that one resolution rather than copied — this pass used to
+        # carry its own copy and then re-add the 75-cell floor on top, which is
+        # how a notice kept a 75-cell width inside a 65-cell lane after the
+        # class had been withheld, the two measurements agreeing on a phantom.
+        box, card, card_up = self._boot_notice_box(terminal_width)
         # The card is centred by the stylesheet in `box` — the main lane's
         # content box — so the offset that lands a notice on the card's column
         # has to be computed against THAT box, then rebased into the transcript's
@@ -26581,7 +26627,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — a note is never worth a broken prompt
             logger.debug("the parked approval card could not be annotated", exc_info=True)
 
-    def _system_notice(self, body: str, kind: NoticeKind = "info") -> NoticeBlock:
+    def _system_notice(self, body: str, kind: NoticeKind = "info") -> None:
         """A notice about the HARNESS that leaves the empty state intact.
 
         Separate from :meth:`_notice` because the two answer different questions.
@@ -26593,10 +26639,20 @@ class OperatorApp(App[None]):
         collapsed the boot composition on launch for anyone with one broken
         server, which is how the centred prompt became unreachable.
 
-        Returns the block, because a caller whose text is fitted to the terminal
-        has to be able to settle it later: the MCP failure notices re-run their
-        signpost ladder when the column they are painted in moves
-        (``_refit_mcp_failure_notices``).
+        ``-> None`` because this is the shape the slash-command closures receive
+        (``NoticeFn``); a caller that must keep the block calls
+        :meth:`_system_notice_block` instead.
+        """
+        self._system_notice_block(body, kind)
+
+    def _system_notice_block(self, body: str, kind: NoticeKind = "info") -> NoticeBlock:
+        """The same notice, handing back the block it created.
+
+        One caller needs the block — the MCP failure notices re-run their signpost
+        ladder when the column they are painted in moves
+        (``_refit_mcp_failure_notices``) — and that caller is a method on this app,
+        so it calls this directly rather than widening the notice callback's type
+        for every closure that produces nothing (review round 4, R4-5).
         """
         block = NoticeBlock(body, kind)
         # While the boot CARD is up the notice is part of a centred composition;

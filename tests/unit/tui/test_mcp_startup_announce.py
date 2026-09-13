@@ -1243,9 +1243,12 @@ def _network_fleet() -> McpStartupOutcome:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("columns", [60, 64, 66, 68, 70, 72, 74, 76, 80, 84, 90, 100])
-async def test_the_notice_budget_is_the_column_the_block_is_painted_in(columns: int) -> None:
-    """D2-1: the ladder's input must be the column the notice is PAINTED in.
+@pytest.mark.parametrize("columns", [60, 68, 74, 84, 100, 150, 190])
+@pytest.mark.parametrize("sidebar", [False, True])
+async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
+    columns: int, sidebar: bool
+) -> None:
+    """D2-1/R4-1: the composer's column must be the column the block is PAINTED in.
 
     The composition modelled the boot CARD's clamp at every width, but that clamp
     IS the painted column only while the card is up (85 columns and above). Below
@@ -1253,8 +1256,21 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(columns: 
     box the clamp is measured in — so the ladder accepted a line the fold then
     broke, deterministically, at 68 and 74 columns on the boot frame.
 
+    The SIDEBAR state is why this test has a second parameter. The layout pass
+    debits a DOCKED session sidebar from the box and re-applies the card floor;
+    the composition did not, so at 150x40 the helper answered a 100-cell column
+    for a 75-cell block — 25 cells over budget — and a line fitted to it orphaned
+    ``for details`` on the next row through the ordinary sidebar-click adoption
+    path (review round 4, R4-1). Both states run at every width, and the sweep
+    covers widths either side of the card threshold.
+
     The assertion is the invariant itself rather than a table of numbers: the
-    budget the composer used must be the budget of the box the block was given.
+    column the composer used must be the column the layout pass ASSIGNED. Where
+    the layout pinned a number, that pin is compared (``styles.width``); where the
+    block fills the lane, the engine's own reconciled width is the check — a
+    reconciled ``size`` can still hold the previous card in the frame a walk runs
+    in, which is why the pin is preferred where there is one (review round 4,
+    R4-6).
     """
     from local_operator.tui.widgets.transcript import NoticeBlock
 
@@ -1262,13 +1278,27 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(columns: 
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(columns, 24)) as pilot:
         assert await _until(pilot, lambda: app.query(".notice-block")), "no notice painted"
-        widths = {block.size.width for block in app.query(".notice-block")}
-        budget = app._mcp_notice_budget()
-        for width in sorted(widths):
-            assert budget == NoticeBlock.body_budget(width), (
-                f"at {columns} columns the composer spent {budget} cells on a "
-                f"{width}-cell block"
-            )
+        if sidebar:
+            app.action_toggle_sidebar()
+            assert await _until(pilot, lambda: app._session_sidebar.display)
+            await _quiet(pilot)
+        blocks = [block for block in app.query(".notice-block") if isinstance(block, NoticeBlock)]
+        assert blocks, "no notice painted"
+        column = app._mcp_notice_painted_column()
+        for block in blocks:
+            # ``Scalar.cells`` is the cell count the layout pass assigned, and None
+            # when the block was left at ``1fr`` (the fraction the lane resolves).
+            cells = getattr(block.styles.width, "cells", None)
+            if isinstance(cells, int):
+                assert cells == column, (
+                    f"at {columns} columns (sidebar={sidebar}) the layout pinned "
+                    f"{cells} but the composer measured {column}"
+                )
+            else:
+                assert block.size.width == column, (
+                    f"at {columns} columns (sidebar={sidebar}) the lane painted "
+                    f"{block.size.width} but the composer measured {column}"
+                )
 
 
 @pytest.mark.asyncio
