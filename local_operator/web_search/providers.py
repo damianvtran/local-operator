@@ -484,12 +484,23 @@ async def _search_perplexity(
         )
         _ensure_success("Perplexity", response)
         payload = response.json()
+        # ``keyless=False`` is the whole point of this object: without a usage
+        # report the ledger priced a BILLED Sonar call as ``free (anonymous)``
+        # (round-1 review MAJOR-1), and the free/paid counters then printed that
+        # as an explicit claim. The tokens come from the API when it sends them;
+        # the request fee stands on its own when it does not.
+        api_usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         return SearchResponse(
             provider="perplexity",
             auth_mode="api-key",
             sources=_perplexity_sources(payload, limit),
             answer=_perplexity_answer(payload),
             request_id=str(payload.get("id") or "").strip() or None,
+            usage=SearchUsage(
+                input_tokens=api_usage.get("prompt_tokens"),
+                output_tokens=api_usage.get("completion_tokens"),
+                keyless=False,
+            ),
         )
 
     request_id = str(uuid.uuid4())
@@ -539,8 +550,12 @@ async def _search_perplexity(
         sources=sources,
         answer=_perplexity_answer(payload),
         request_id=str(payload.get("uuid") or request_id),
-        # Anonymous mode is free; the Sonar key path (below) is token-billed and
-        # leaves this unset so the estimate uses the Sonar rate instead.
+        # ``keyless=True`` is what makes this the free tier, and it is the only
+        # thing that does: the keyed path above reports its tokens and its
+        # ``keyless=False``, so the estimator routes each to its own rate. (This
+        # comment used to say the keyed path left ``usage`` unset; it has reported
+        # usage since round-1 review MAJOR-1, and the stale wording described the
+        # opposite of the code -- round-2 review NIT-3.)
         usage=SearchUsage(keyless=True),
     )
 

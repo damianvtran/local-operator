@@ -256,8 +256,11 @@ async def test_session_panel_prints_search_spend_and_each_provider(tmp_path, mon
     assert " ├ tavily" in text and " └ deepseek" in text
     assert "$0.0080+" in text and "2 searches · 1 unpriced" in text
     assert "$0.0051" in text
-    # The split, in prose: the band's headline covers both, this screen does not.
-    assert "added to the model estimate" in flowed(text)
+    # The footnote follows the HEADLINE rather than contradicting it. It used to
+    # say this screen kept the two halves apart; the moment ``Est. cost`` above
+    # started including the search money, that sentence described the opposite of
+    # what the row showed -- a note explaining a figure it disagrees with.
+    assert "includes this money and names it" in flowed(text)
 
 
 @pytest.mark.asyncio
@@ -621,3 +624,384 @@ async def test_a_mixed_sessions_share_row_names_both_kinds(tmp_path, monkeypatch
 
     assert "This session" in text
     assert "1 search · 1 read" in text
+
+
+# -- usage metrics: free vs paid, and search money in the headline ----------
+
+
+def test_the_ledger_counts_free_and_paid_operations_exactly() -> None:
+    """Counts and money per half, at the WRITE.
+
+    The stored ``usd`` is a sum, so a provider that served one free and one paid
+    call could not be split correctly at render time; the split has to be taken
+    where each call's own price is still in hand. Six free searches and no
+    searches at all both total $0.0000, which is why the counts exist.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot
+    from local_operator.web_search.cost import SEARCH_SPEND
+    from local_operator.web_search.models import SearchCost
+
+    SEARCH_SPEND.reset()
+    SEARCH_SPEND.record("sess", "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    SEARCH_SPEND.record("sess", "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+    snapshot = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+
+    assert snapshot.free_operations == 2
+    assert snapshot.paid_operations == 1
+    assert snapshot.free_usd == pytest.approx(0.0)
+    assert snapshot.paid_usd == pytest.approx(0.004)
+    SEARCH_SPEND.reset()
+
+
+def test_combined_spend_is_one_rule_for_every_surface() -> None:
+    """Model plus search, with the flags each surface has to render.
+
+    The band folded search in while both panels' headline said model-only, so one
+    session reported two different costs. This function is the single answer, and
+    these are the four shapes it has to get right.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot, combined_spend
+    from local_operator.web_search.cost import SEARCH_SPEND
+    from local_operator.web_search.models import SearchCost
+
+    SEARCH_SPEND.reset()
+    empty = SearchSpendSnapshot()
+    # A priced model with no searches: the combined figure IS the model figure.
+    plain = combined_spend(1.20, empty)
+    assert plain.total_usd == pytest.approx(1.20)
+    assert (plain.is_unknown, plain.is_floor) == (False, False)
+
+    # A model figure that is itself a floor stays a floor once search is added.
+    floored = combined_spend(1.20, empty, model_is_partial=True)
+    assert floored.is_floor is True
+
+    # Real search money beside an UNPRICEABLE model: a floor, never "unknown".
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="rate"))
+    search = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    mixed = combined_spend(None, search)
+    assert mixed.total_usd == pytest.approx(0.004)
+    assert (mixed.is_unknown, mixed.is_floor) == (False, True)
+
+    # Nothing priceable at all: unknown, and not a floor (there is no known part
+    # for it to be a floor of).
+    nothing = combined_spend(None, empty)
+    assert (nothing.is_unknown, nothing.is_floor) == (True, False)
+    SEARCH_SPEND.reset()
+
+
+@pytest.mark.asyncio
+async def test_the_session_headline_includes_search_and_names_it(tmp_path, monkeypatch) -> None:
+    """``Est. cost`` is the session's WHOLE money, with the search half named.
+
+    The band already folded search in; this row did not, so the figure a person
+    reads first was the one that omitted retrieval.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_text(app)
+
+    assert "Est. cost" in text
+    assert "incl. $0.0040 search" in text
+    # The usage half. This ledger is one paid search and no free ones, so the
+    # line prints the paid half alone (D5: a zero for the other half is a
+    # statement about nothing) -- and the money is the point at this width.
+    assert "1 paid ($0.0040)" in text
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_searched_claims_no_search_spend(tmp_path, monkeypatch) -> None:
+    """No searches must not read as ``incl. $0.0000 search``.
+
+    A zero there is a claim about retrieval rather than a report of none, and it
+    would also imply the combined figure had a search component to name.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_text(app)
+
+    assert "Est. cost" in text
+    assert "search" not in text.split("Est. cost")[1].split("\n")[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [80, 100, 120])
+async def test_the_headline_names_its_search_component_at_every_width(
+    tmp_path, monkeypatch, width
+) -> None:
+    """MAJOR-2: the note was cropped mid-note, losing the fact it exists to state.
+
+    At 80 columns the single wide note rendered ``≈ list price × tokens · incl``:
+    the search component, on the row whose whole purpose is to name it.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(width, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_text(app)
+
+    assert "Est. cost" in text
+    assert "$0.0040 search" in flowed(
+        text
+    ), f"the search component is not on screen at {width} columns"
+
+
+def test_the_free_paid_line_reconciles_with_the_unpriced_tally() -> None:
+    """MINOR-1: three numbers that look like a breakdown have to BE one.
+
+    Without the unpriced clause, ``3 free · 2 paid`` sat under
+    ``4 searches · 1 unpriced`` and the reader was left recomputing by hand.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot
+    from local_operator.tui.widgets.analytics_panel import search_spend_section
+
+    SEARCH_SPEND.reset()
+    SEARCH_SPEND.record("sess", "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="rate"))
+    SEARCH_SPEND.record("sess", "serpapi", None)  # no published rate
+    snapshot = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    text = "\n".join(
+        line.plain if hasattr(line, "plain") else str(line)
+        for line in search_spend_section(snapshot, 120, meta="this session · live")
+    )
+
+    # D5: "N of M priced free" states the denominator, and the unpriced clause
+    # closes the gap to the count on the row above -- 1 free + 1 paid = 2 priced,
+    # + 1 unpriced = the 3 searches the block's total row reports.
+    assert "1 of 2 priced free" in text and "$0.0040 paid" in text
+    assert "1 unpriced" in text
+    assert (
+        snapshot.free_operations + snapshot.paid_operations + snapshot.unpriced_searches
+        == snapshot.count
+    )
+    SEARCH_SPEND.reset()
+
+
+def test_an_all_search_figure_does_not_wear_a_token_priced_note() -> None:
+    """MINOR-3: the note described a model half the figure does not contain."""
+    from local_operator.tui.costs import (
+        SearchSpendSnapshot,
+        combined_spend,
+        cost_note_rungs,
+    )
+
+    SEARCH_SPEND.reset()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="rate"))
+    snapshot = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    spend = combined_spend(None, snapshot)
+
+    rungs = cost_note_rungs(spend, search_component="incl. $0.0040 search")
+    assert spend.model_usd is None
+    assert all("list price × tokens" not in rung for rung in rungs)
+    assert any("search only" in rung for rung in rungs)
+    SEARCH_SPEND.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_frame_drops_the_note_column_rather_than_cropping_it(
+    tmp_path, monkeypatch
+) -> None:
+    """At 60 columns the whole note column goes, and that is the DESIGN.
+
+    ``session_panel._NOTE_MIN`` drops the trailing note below 60 columns (the
+    same rule that drops the ``$x subagent`` split), so the honest assertion here
+    is the documented behaviour and not a component the frame cannot hold. Pinned
+    so a later change to the ladder cannot quietly start cropping mid-note
+    instead -- the failure MAJOR-2 was about.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_text(app)
+
+    assert "Est. cost" in text
+    # Nothing HALF-written: no fragment of the note survives into the frame.
+    assert "incl" not in text.split("Est. cost")[1].split("\n")[0]
+    assert "≈ list price × tokens" not in flowed(text)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 findings: the label, the bar policy, unpriced-is-not-free, D9
+# ---------------------------------------------------------------------------
+
+
+def _ledger(rows):
+    from local_operator.tui.costs import SearchSpendSnapshot
+
+    SEARCH_SPEND.reset()
+    for provider, cost, *rest in rows:
+        SEARCH_SPEND.record("sess", provider, cost, kind=(rest[0] if rest else "search"))
+    return SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+
+
+def test_unpriced_searches_are_not_called_free() -> None:
+    """R2-MAJOR-1: the headline branched on money, and ``usd`` is zero when unpriced.
+
+    The ledger counts free/paid/unpriced AT THE WRITE precisely because a summed
+    ``usd`` cannot tell them apart; inferring "free" from "no money" at render time
+    put two contradicting claims on one screen.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_component_text
+
+    unpriced_only = _ledger([("future-engine", None), ("future-engine", None)])
+    assert search_component_text(unpriced_only) == "incl. 2 unpriced searches"
+
+    # Free AND unpriced: the unpriced part is what cannot be claimed, so it is
+    # what the headline names.
+    mixed = _ledger([("duckduckgo", SearchCost(usd=0.0, basis="free")), ("future-engine", None)])
+    assert "free" not in search_component_text(mixed)
+
+    assert search_component_text(_ledger([("duckduckgo", SearchCost(usd=0.0, basis="free"))])) == (
+        "incl. 1 free search"
+    )
+    # R2-MINOR-2: a page read is not a search.
+    assert search_component_text(
+        _ledger([("deepseek:read", SearchCost(usd=0.0, basis="free"), "read")])
+    ) == ("incl. 1 free read")
+
+
+def test_the_bar_is_drawn_only_where_this_ledgers_note_still_fits() -> None:
+    """R2-MAJOR-2: a fixed threshold drew the bar where it CAUSED the orphan.
+
+    Whether the bar pays for itself depends on the note it shares the row with,
+    so the decision is taken from this ledger's own widest note: at 81 cells the
+    30-cell note fits beside it, at 70 it does not and there is no bar. Pin both
+    ends, and that the count never lands on a line of its own.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_spend_section
+
+    snapshot = _ledger([("future-engine", None), ("future-engine", None)])
+
+    def render(width: int) -> str:
+        return "\n".join(
+            line.plain if hasattr(line, "plain") else str(line)
+            for line in search_spend_section(snapshot, width, meta="this session · live")
+        )
+
+    narrow, wide = render(70), render(90)
+    assert "█" not in narrow and "bars:" not in narrow, "no bar, and nothing promising one"
+    assert "2 searches · no published price" in narrow
+    assert "█" in wide and "bars: operations" in wide
+    # The count is never orphaned onto its own line, at either end.
+    for text in (narrow, wide):
+        assert not any(
+            line.strip().startswith(("1 search", "2 searches")) and line.startswith("    ")
+            for line in text.splitlines()
+        )
+
+
+@pytest.mark.asyncio
+async def test_analytics_never_paints_a_cropped_money_fragment(tmp_path, monkeypatch) -> None:
+    """R2-MAJOR-3 / D9: the shortest rung was drawn anyway, then cropped.
+
+    At 60 columns that painted ``incl. $0.0`` -- a well-formed FALSE figure, two
+    rows above a block showing the real total on the same frame.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.0069, basis="per-rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 44)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [line for line in _panel_lines(app).splitlines() if "Est. cost" in line]
+
+    assert rows, "the headline row is on screen"
+    row = rows[0]
+    assert "Est. cost · search" in row
+    # No fragment of any width: the row ends at the FIGURE, with nothing but
+    # padding after it, so no half-token can be mistaken for money.
+    assert "incl" not in row
+    assert row.split()[-1].startswith("$"), f"something follows the figure: {row!r}"
+
+
+def test_the_bar_threshold_measures_the_reference_rows_too() -> None:
+    """R3-MAJOR-2: the threshold only measured provider notes.
+
+    The Total row's note is the longest in the block (it names both kinds), so a
+    threshold that ignored it drew the bar where that row then orphaned its count
+    -- at the canonical 80-column frame.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_spend_section
+
+    snapshot = _ledger(
+        [("duckduckgo", SearchCost(usd=0.0, basis="free"))] * 5
+        + [("deepseek:read", SearchCost(usd=0.0, basis="free"), "read")] * 3
+    )
+
+    def render(width: int):
+        return [
+            line.plain if hasattr(line, "plain") else str(line)
+            for line in search_spend_section(snapshot, width, meta="this session · live")
+        ]
+
+    for width in (57, 60, 64, 66):
+        lines = render(width)
+        assert not any("█" in line for line in lines), "bar drawn where the total row cannot fit"
+        assert any("5 searches · 3 reads" in line for line in lines)
+        # No continuation line at all: every count is on its row.
+        assert not any(line.startswith("    ") and line.strip() for line in lines)
+
+    wide = render(68)
+    assert any("█" in line for line in wide), "the bar returns where everything fits"
+
+
+def test_the_headline_component_carries_the_search_floors_mark() -> None:
+    """R3-MAJOR-3: a bare money figure dropped the ``+``.
+
+    With a paid AND an unpriced search the headline said ``incl. $0.0069 search``
+    while the block below rendered ``$0.0069+`` and ``2 searches · 1 unpriced``.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_component_text
+
+    mixed = _ledger(
+        [
+            ("brave", SearchCost(usd=0.0069, basis="per-search rate")),
+            ("future-engine", None),
+        ]
+    )
+    assert search_component_text(mixed) == "incl. $0.0069+ search"
+    # A fully priced ledger carries no mark.
+    priced = _ledger([("brave", SearchCost(usd=0.0069, basis="per-search rate"))])
+    assert search_component_text(priced) == "incl. $0.0069 search"

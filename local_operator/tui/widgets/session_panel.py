@@ -55,7 +55,13 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
-from local_operator.tui.costs import SearchSpendSnapshot
+from local_operator.tui.costs import (
+    MoneyFigure,
+    SearchSpendSnapshot,
+    combined_spend,
+    cost_label,
+    cost_note_rungs,
+)
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
@@ -67,6 +73,7 @@ from local_operator.tui.widgets.analytics_panel import (
     format_tokens,
     proportion_bar,
     scope_needs_cost_legend,
+    search_component_text,
     search_spend_section,
     section_header,
     semantic_style,
@@ -871,11 +878,22 @@ def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
         search_spend_section(
             snapshot,
             body.width,
+            # ``bars: operations`` follows the convention every sibling table on
+            # this screen already keeps (``bars: tokens``, ``bars: cost``): the
+            # section meta states what its bar is a share OF. Without it the
+            # eight cells count operations while the column beside them counts
+            # dollars, and on a row where the two point in opposite directions --
+            # twenty free searches beside one paid one -- the reader has to infer
+            # the scale (design review D3).
             meta="this session · live",
             note=(
+                # Rewritten with the combined headline: the old note told the reader
+                # this screen kept the two apart, which stopped being true the moment
+                # ``Est. cost`` above started including the search half. A note that
+                # contradicts the row it explains is worse than no note.
                 "Read from the live search ledger, plus any rows recovered from this "
-                "conversation's transcript on resume. The status band's figure shows it "
-                "added to the model estimate; this screen keeps the two apart."
+                "conversation's transcript on resume. The Est. cost row above includes "
+                "this money and names it; the status band shows the same combined figure."
             ),
         )
     )
@@ -1023,14 +1041,44 @@ def _draw_recorded_usage(
         # tree figure that looks like the own figure it replaced. Every rung
         # still says the scope; the narrow ones trade the breakdown for it,
         # which is the right thing to lose last.
+        # The figure is the session's WHOLE money: model plus retrieval, combined
+        # in ONE place (``costs.combined_spend``) so this screen, ``/analytics``
+        # and the band cannot report three different totals for one session. The
+        # ladder keeps a rung that names the search half at every width, because
+        # the reader must be able to tell a combined figure from a model-only one
+        # -- the failure this row had (the band folded search in, this row did
+        # not, and this is the row a person reads first).
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
+        )
+        ladder = (
+            f"{own} own · {subs} subagents",
+            f"{own} + {subs} subagents",
+            "incl. subagents",
+        )
+        search_note = search_component_text(runtime.search_spend)
+        if search_note:
+            # Appended rather than always present: a session that never searched
+            # must not carry a search clause, which reads as a claim about
+            # retrieval that did not happen.
+            #
+            # The clause drops its own ``incl.`` on a rung that already opens with
+            # one (round-2 design D12): ``incl. subagents · incl. $0.0049 search``
+            # read as a repetition rather than a scope list, where the widest rung
+            # already sounds right (``$0.39 own · $0.98 subagents · incl. …``).
+            def _joined(rung: str) -> str:
+                clause = (
+                    search_note.removeprefix("incl. ") if rung.startswith("incl.") else search_note
+                )
+                return f"{rung} · {clause}"
+
+            ladder = tuple(_joined(rung) for rung in ladder) + (search_note,)
         body.kv(
-            "Est. cost",
-            format_cost(subtree),
-            notes=(
-                f"{own} own · {subs} subagents",
-                f"{own} + {subs} subagents",
-                "incl. subagents",
-            ),
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=ladder,
         )
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
@@ -1044,8 +1092,20 @@ def _draw_recorded_usage(
             "other sections are this session only."
         )
     else:
-        note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
-        body.kv("Est. cost", format_cost(subtree), note)
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
+        )
+        # Laddered for the same reason the descendants branch above is (round-1
+        # MAJOR-2): one flat string was cropped mid-note at 60-80 columns, and
+        # the part it lost was the search component this row exists to name.
+        search_note = search_component_text(runtime.search_spend)
+        body.kv(
+            cost_label(bool(search_note)),
+            format_cost(MoneyFigure.of(spend)),
+            notes=cost_note_rungs(spend, search_component=search_note),
+        )
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:
