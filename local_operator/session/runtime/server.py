@@ -278,11 +278,19 @@ def _reference_image_payloads(
     An image block is identified by carrying a LONG ``data`` string alongside
     either the ``image`` type or a ``mime_type``, rather than by ``data`` alone
     the way the durable encoder does it. The durable encoder has to key on
-    ``data`` because it dumps with ``exclude_defaults`` and so loses the
-    block's discriminant; the live wire dumps the models whole, so the
-    discriminant is right there to check, and checking it keeps a tool's
-    free-form ``details`` payload — which admits a ``data`` key this module has
-    never heard of — from being rewritten into an image it never was.
+    ``data`` because it dumps with ``exclude_defaults`` and so loses the block's
+    discriminant; the live wire dumps the models whole, so the discriminant is
+    right there to check.
+
+    That NARROWS the exposure of a tool's free-form ``details`` payload rather
+    than removing it, and the difference is worth stating: a ``details`` blob
+    carrying BOTH a long ``data`` string and a string ``mime_type`` is still
+    rewritten into a reference (and resolves back to the same bytes on every in
+    repo client, so it is harmless today). It is unreachable in this tree for
+    the reason QA checked rather than by construction — the only ``details``
+    producer that emits ``mime_type`` is ``read``'s image path, which carries no
+    ``data``. A future producer that puts a mime type beside a payload under
+    ``data`` should expect this pass to see it as an image block.
 
     A store that refuses the write (read-only home, full disk) leaves the
     payload inline. The frame then stays large and the guard degrades it
@@ -378,6 +386,13 @@ def _shed_tool_result_payloads(frame: dict[str, Any], cap_bytes: int) -> dict[st
     tried, because a settled card with nothing in it still beats the notice,
     which loses the event and with it the settling. Only a frame with no tool
     end at all — or one too large regardless of them — reaches the guard.
+
+    The emptied form is tried in BOTH places the bounded one can fail, including
+    the band where the share itself is non-positive. There the whole frame is
+    within ``_FIT_SHED_RESERVE_BYTES`` of the line: the bounded form cannot be
+    afforded, but the frame that fits is exactly the emptied one, and returning
+    the original instead degraded a delta that had a settled-card form available
+    (`degraded: True`, which costs the viewer a full re-sync).
     """
     from local_operator.session.frontend_state import _bound_live_result_in_place
 
@@ -386,9 +401,10 @@ def _shed_tool_result_payloads(frame: dict[str, Any], cap_bytes: int) -> dict[st
     )
     if not count:
         return frame
-    residual = cap_bytes - _frame_line_bytes(emptied) - _FIT_SHED_RESERVE_BYTES
+    emptied_size = _frame_line_bytes(emptied)
+    residual = cap_bytes - emptied_size - _FIT_SHED_RESERVE_BYTES
     if residual <= 0:
-        return frame
+        return emptied if emptied_size <= cap_bytes else frame
     share = residual // count
 
     def bounded(result: dict[str, Any]) -> dict[str, Any]:
@@ -401,7 +417,7 @@ def _shed_tool_result_payloads(frame: dict[str, Any], cap_bytes: int) -> dict[st
     shed, _ = _map_tool_results(frame, bounded)
     if _frame_line_bytes(shed) <= cap_bytes:
         return shed
-    if _frame_line_bytes(emptied) <= cap_bytes:
+    if emptied_size <= cap_bytes:
         return emptied
     return shed
 
@@ -465,14 +481,20 @@ def fit_frame_for_wire(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
         frame = referenced
     shed = _shed_tool_result_payloads(frame, cap_bytes)
     if shed is not frame:
+        # Name only what actually happened: the shed stage runs on frames with
+        # no image payload at all (a 2 MB text result is the measured case), and
+        # "0 image payload(s) moved" in the one log line an operator can find
+        # reads as a bug in the fit rather than as the stage that did the work.
+        what = "tool result payload(s) bounded in place of degrading the event"
+        if moved:
+            what = f"{moved} image payload(s) moved to the attachment store, then {what}"
         logger.info(
             "session runtime: fitted an oversized %s frame to the socket line: "
-            "%d -> %d bytes, %d image payload(s) moved and tool result payload(s) "
-            "bounded in place of degrading the event",
+            "%d -> %d bytes; %s",
             op,
             original,
             _frame_line_bytes(shed),
-            moved,
+            what,
         )
         frame = shed
     return relay_frame_or_degraded(frame, cap_bytes)

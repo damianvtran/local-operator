@@ -5135,7 +5135,7 @@ def test_the_live_delta_bounds_a_job_rows_free_text() -> None:
     assert row["result_text"].endswith("…"), "a clipped preview must read as clipped"
 
 
-def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event() -> None:
+def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event(caplog: Any) -> None:
     """A payload no reference can carry: shed the payload, keep the EVENT.
 
     The operator's invisible failure was the card that never settled, and the
@@ -5143,6 +5143,11 @@ def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event() -> Non
     bounded in place rather than degraded away. ``LIVE_EVENT_BLOCK_ELIDED_
     PLACEHOLDER`` is the marker the in-flight seed already uses for the same
     row, so a live card and a reconnected card elide identically.
+
+    The INFO line is asserted too: the shed stage runs on frames carrying no
+    image payload at all, and "0 image payload(s) moved" in the one log line an
+    operator can find reads as a bug in the fit rather than as the stage that
+    did the work.
     """
     from local_operator.session.runtime.server import (
         _MAX_LINE_BYTES,
@@ -5152,7 +5157,8 @@ def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event() -> Non
     frame = {"op": "event", "data": _live_end("call_text", text="x" * (2 * _MAX_LINE_BYTES))}
     assert _line_bytes(frame) > _MAX_LINE_BYTES
 
-    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+    with caplog.at_level(logging.INFO):
+        fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
 
     assert _line_bytes(fitted) <= _MAX_LINE_BYTES
     assert fitted["data"]["type"] == "tool_execution_end"
@@ -5160,3 +5166,73 @@ def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event() -> Non
     bounded = fitted["data"]["result"]["content"][0]["text"]
     assert bounded != "x" * (2 * _MAX_LINE_BYTES)
     assert bounded.endswith("…"), "a clipped preview must read as clipped"
+    fits = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+    assert not [line for line in fits if "0 image payload(s)" in line], fits
+    assert any("tool result payload(s) bounded" in line for line in fits), fits
+
+
+def _payload_free_tool_end(target_bytes: int) -> dict[str, Any]:
+    """A tool end whose PAYLOAD-FREE form measures ``target_bytes``.
+
+    ``_shed_tool_result_payloads`` measures the frame with every result payload
+    blanked, so the band this fixture needs is a band of EMPTIED sizes.
+    """
+
+    def build(filler: int) -> dict[str, Any]:
+        return {
+            "op": "event",
+            "data": {
+                "type": "tool_execution_end",
+                "tool_call_id": "call_text",
+                "tool_name": "read",
+                "is_error": False,
+                "note": "y" * filler,
+                "result": {
+                    "tool_call_id": "call_text",
+                    "tool_name": "read",
+                    "content": [],
+                    "details": None,
+                    "is_error": False,
+                },
+            },
+        }
+
+    filler = target_bytes
+    for _ in range(80):
+        size = _line_bytes(build(filler))
+        if size == target_bytes:
+            break
+        filler += target_bytes - size
+    return build(filler)
+
+
+def test_the_emptied_card_is_preferred_over_degrading_the_delta() -> None:
+    """A frame inside the reserve band must settle its card, not lose the event.
+
+    The residual share is only affordable when the payload-free frame is more
+    than ``_FIT_SHED_RESERVE_BYTES`` under the line. Below that the bounded form
+    cannot be bought — but the EMPTIED form fits by construction, and returning
+    the original instead degraded a delta that had a settled card available
+    (`degraded: True` on a canonical delta costs the viewer a full re-sync).
+    Reproduced before the fix: emptied forms at 1,045,314 / 1,046,314 /
+    1,047,814 B all fitted, yet the fit returned a 178-byte ``notice``.
+    """
+    from local_operator.session.runtime.server import (
+        _FIT_SHED_RESERVE_BYTES,
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    target = _MAX_LINE_BYTES - _FIT_SHED_RESERVE_BYTES + 1_000
+    frame = _payload_free_tool_end(target)
+    assert _line_bytes(frame) == target, "the fixture is not in the band it claims"
+    frame["data"]["result"]["content"] = [{"type": "text", "text": "x" * (2 * _MAX_LINE_BYTES)}]
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "tool_execution_end", fitted["data"]
+    assert fitted["data"]["tool_call_id"] == "call_text"
+    # The settled card the emptied form gives the viewer.
+    assert fitted["data"]["result"]["content"] == []

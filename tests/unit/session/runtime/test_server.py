@@ -2980,6 +2980,28 @@ def _image_tool_end(*, images: int, call_id: str = "call_image") -> dict[str, An
     }
 
 
+def _text_tool_end(*, size: int, call_id: str = "call_text") -> dict[str, Any]:
+    """One ``tool_execution_end`` whose result is a single oversized TEXT block.
+
+    The shape no reference can help: the payload IS the text, so the only way to
+    keep the event (and with it the card that settles) is to bound the text in
+    place. That makes it the frame the SHEDDING stage exists for.
+    """
+    long_text = "x" * size
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "read",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "read",
+            "content": [{"type": "text", "text": long_text}],
+            "is_error": False,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_a_three_image_tool_end_frame_is_referenced_not_degraded() -> None:
     """The chokepoint must fit an image-bearing event, not shed it.
@@ -3046,4 +3068,42 @@ async def test_the_reference_pass_does_not_mutate_the_shared_frame() -> None:
     for frame in frames:
         assert _wire_bytes(frame) <= _MAX_LINE_BYTES
         assert "data" not in frame["data"]["result"]["content"][1]
+    assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_the_shedding_pass_does_not_mutate_the_shared_frame() -> None:
+    """The shed stage edits its argument, and its argument is the producer's.
+
+    ``_bound_live_result_in_place`` clips the result dict and its blocks IN
+    PLACE, and the result it is handed comes straight out of the frame the relay
+    fans out — so without the copy the first recipient's clip would rewrite the
+    payload every later recipient measures, and the producer would be left
+    holding a frame it never built. This test is what pins the copy: with it
+    removed, all 205 tests in the three touched files still passed while the
+    producer's own result was already clipped.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    server._closed = threading.Event()
+    first, second = _stalled_conn(), _stalled_conn()
+    server._clients[id(first.writer)] = first
+    server._clients[id(second.writer)] = second
+    data = _text_tool_end(size=2 * _MAX_LINE_BYTES)
+    before = json.dumps(data, sort_keys=True)
+
+    server._relay_on_loop(data)
+
+    assert json.dumps(data, sort_keys=True) == before, "the producer frame was mutated"
+    frames = [conn.event_queue.get_nowait() for conn in (first, second)]
+    for frame in frames:
+        assert _wire_bytes(frame) <= _MAX_LINE_BYTES
+        # The EVENT survived, which is the whole point of shedding instead of
+        # degrading: the card it settles.
+        assert frame["data"]["type"] == "tool_execution_end"
+        assert frame["data"]["tool_call_id"] == "call_text"
+    clipped = frames[0]["data"]["result"]["content"][0]["text"]
+    assert clipped != "x" * (2 * _MAX_LINE_BYTES), "the shed stage did not run"
+    assert clipped.endswith("…")
     assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
