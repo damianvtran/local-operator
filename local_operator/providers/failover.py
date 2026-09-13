@@ -22,7 +22,14 @@ import inspect
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
