@@ -1157,3 +1157,572 @@ async def test_a_cold_fork_does_not_list_its_parents_children(tmp_path: Path, mo
         assert state.cumulative_parent_cost == 4.5
     finally:
         await viewer.dispose()
+
+
+def _stamped(context_tokens: int, *, provider: str = "anthropic", model_id: str = "claude-opus-5"):
+    """An assistant turn carrying the provider receipt a real turn persists."""
+    from local_operator.harness.types import Usage
+
+    return Usage(
+        input_tokens=1_000,
+        output_tokens=120,
+        context_tokens=context_tokens,
+        provider=provider,
+        model_id=model_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_less_resume_seeds_the_readings_from_the_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The operator's report, reproduced: a cold conversation reads its own history.
+
+    A desktop detaches between requests, so the durable frontend checkpoint —
+    the cold path's only source of accounting — is usually absent on this
+    surface. The conversation then opened with an empty context and no spend for
+    a session already deep into its window, and stayed that way until the user
+    spent a whole turn. The transcript holds the readings; nothing else did.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("how far along are we?"))
+    await transcript.append_message(Message.assistant("deep in it", usage=_stamped(322_546)))
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert viewer.is_cold is True, "seeding accounting must not start a runtime"
+        assert state.context_tokens == 322_546
+        assert (
+            state.context_is_estimate is False
+        ), "a provider receipt is exact, so it must not be replaced by the local estimate"
+        assert state.cumulative_parent_cost is not None
+        assert state.cost_knowledge == CostKnowledge.FLOOR
+        assert state.last_usage is not None and state.last_usage.context_tokens == 322_546
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_seeded_cost_is_a_marked_floor_not_an_exact_total(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One receipt prices ONE point in time, so the total is a floor.
+
+    Summing the transcript's receipts would double-count a growing context (each
+    reading already includes the previous ones), and calling the single newest
+    receipt the lifetime total would hide every dollar spent before it. ``floor``
+    is the only honest label, and the cost chip already prints its mark.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.costs import turn_cost
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("first"))
+    await transcript.append_message(Message.assistant("old", usage=_stamped(90_000)))
+    await transcript.append_message(Message.user("second"))
+    newest = _stamped(322_546)
+    await transcript.append_message(Message.assistant("new", usage=newest))
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.cost_knowledge == CostKnowledge.FLOOR
+        newest_cost = turn_cost("anthropic/claude-opus-5", newest)
+        older_cost = turn_cost("anthropic/claude-opus-5", _stamped(90_000))
+        assert (
+            newest_cost is not None and older_cost is not None
+        ), "precondition: both readings must be priceable, or the comparison is vacuous"
+        assert state.cumulative_parent_cost == newest_cost
+        assert (
+            state.cumulative_parent_cost != older_cost + newest_cost
+        ), "the floor prices the newest reading, it does not sum the transcript"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_seeded_reading_keeps_no_window_it_cannot_vouch_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Absolute tokens, no arc — never a defaulted 128k denominator.
+
+    The UNRESOLVED-flag half of the window rule. The placeholder half — the case
+    where ``context_metadata_resolved`` is True and the window is still a guess —
+    is ``test_a_cold_openai_session_does_not_divide_by_the_placeholder_window``
+    below and, at the function itself, ``tests/unit/session/test_usage_seed.py``.
+    This test cannot fail on the window assertion alone (with the seed neutered it
+    fails on the numerator), which is exactly why the placeholder case needed its
+    own evidence.
+
+    ``ModelSpec`` supplies a 128k default when no metadata row was resolved, and
+    the seed's reading was measured against whatever window the provider really
+    had. Dividing it by the default is the ``268.2%/128k`` defect the checkpoint
+    path already guards against (``context_metadata_resolved``); the seeded path
+    needs the same refusal, so the strip renders its honest ``window unknown``
+    state while still showing the tokens it does know.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(Message.assistant("hi", usage=_stamped(322_546)))
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        spec = state.selected_model
+        assert spec is not None and spec.context_metadata_resolved is False, (
+            "precondition: this config-only spec has no resolved window, so there is "
+            "no denominator to vouch for"
+        )
+        assert spec.context_window == 128_000, "precondition: the spec's DEFAULT is still there"
+        assert (
+            state.context_window is None
+        ), "a defaulted window must not be adopted as the denominator for a real reading"
+        assert state.context_tokens == 322_546, "the numerator is still a fact"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_receipts_before_the_newest_prune_are_not_seeded(tmp_path: Path, monkeypatch) -> None:
+    """A reading the pass invalidated must not be restored as the current one.
+
+    The pruning counterpart of the compaction boundary: a blanked tool result
+    shrinks the live context without leaving a marker, so a receipt from before
+    the shrink describes a context that no longer exists (measured: 640_000
+    restored for a real 31_715). The seed runs the SAME positional scan the owner
+    runs, so it is refused here too — while a reading taken AFTER the prune is
+    still seeded.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message, TextContent, ToolCall
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    call = ToolCall(name="read", arguments={"path": "big.py"})
+    await transcript.append_message(Message.user("read it"))
+    await transcript.append_message(Message.assistant("reading", usage=_stamped(640_000)))
+    tool_row = Message(
+        role="tool",
+        tool_call_id=call.id,
+        tool_name="read",
+        content=[TextContent(text="X" * 30_000)],
+        provider_payload={"details": {"path": "big.py"}},
+    )
+    await transcript.append_message(tool_row)
+    await transcript.append_prune(tool_row.id, "[pruned]")
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens is None, "every receipt here predates the prune"
+        assert state.cumulative_parent_cost is None
+        assert state.last_usage is None
+    finally:
+        await viewer.dispose()
+
+    # A turn taken after the prune is a reading the shrink did not invalidate.
+    await transcript.append_message(Message.user("what now?"))
+    await transcript.append_message(Message.assistant("carry on", usage=_stamped(31_715)))
+    resumed = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        assert resumed.frontend_state.context_tokens == 31_715
+    finally:
+        await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_with_no_receipts_seeds_nothing(tmp_path: Path, monkeypatch) -> None:
+    """``None`` is not ``0``: an empty reading must stay empty.
+
+    A brand-new conversation, a provider that reports no usage, and a history of
+    nothing but user messages all look the same on disk. None of them justifies
+    a confident ``0``, which the strip would render as a real reading of an empty
+    context rather than as "nothing reported yet".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("first words"))
+    await transcript.append_message(Message.assistant("no receipt on this row"))
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens is None
+        assert state.cumulative_parent_cost is None
+        assert state.last_usage is None
+        assert state.cost_knowledge == CostKnowledge.UNKNOWN
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_that_carried_accounting_wins_over_the_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The seed fills nulls; it never overwrites what the last turn end knew.
+
+    The checkpoint is the conversation's LAST turn-end state, while a receipt is
+    one point in time, and the checkpoint's figures were already reconciled by
+    the owner that wrote them. A transcript that also carries older receipts must
+    not drag those figures backwards.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        CostKnowledge,
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(Message.assistant("hi", usage=_stamped(90_000)))
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=322_546,
+        context_window=1_000_000,
+        cumulative_parent_cost=12.5,
+        cost_knowledge=CostKnowledge.EXACT,
+        selected_model=FrontendModelSpec(
+            provider="anthropic", model_id="claude-opus-5", context_window=1_000_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens == 322_546
+        assert state.cumulative_parent_cost == 12.5
+        assert state.cost_knowledge == CostKnowledge.EXACT
+        assert state.context_window == 1_000_000
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_openai_session_does_not_divide_by_the_placeholder_window(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """B1 end to end: an openai spec whose window is the 128k PLACEHOLDER.
+
+    This is the ordinary openai shape on a machine whose credential cannot be
+    resolved: ``context_spec_for_access`` returns ``UNKNOWN_CONTEXT_WINDOW``
+    together with ``context_metadata_resolved: True``. Trusting that flag divided
+    a real 322_546-token receipt by 128_000 and printed a measured ``252.0%/128k``
+    — a confidently wrong reading where the cold path previously showed none.
+
+    The numerator is still a fact (the receipt names this model), and the floor
+    cost is still the receipt's own, so this test fails on the WINDOW assertion if
+    the placeholder guard is removed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=tmp_path).update_config(
+        {"hosting": "openai", "model_name": "gpt-5.6-sol"}
+    )
+
+    from local_operator.harness.types import Message
+    from local_operator.model.configure import UNKNOWN_CONTEXT_WINDOW
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("how far along are we?"))
+    await transcript.append_message(
+        Message.assistant(
+            "deep in it",
+            usage=_stamped(322_546, provider="openai", model_id="gpt-5.6-sol"),
+        )
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        spec = state.selected_model
+        assert (
+            spec is not None and spec.context_window == UNKNOWN_CONTEXT_WINDOW
+        ), "precondition: this is the placeholder pair the guard exists for"
+        assert spec.context_metadata_resolved is True, "precondition: the flag alone is not enough"
+        assert state.context_tokens == 322_546
+        assert state.context_window is None, (
+            "a placeholder window is not a denominator, however resolved the metadata claims "
+            "to be"
+        )
+        assert state.cost_knowledge == CostKnowledge.FLOOR
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_window_is_not_replaced_under_its_own_tokens(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """M1: the window write obeys the method's own fill-only contract.
+
+    A checkpoint's ``context_tokens``/``context_window`` pair is self-consistent —
+    measured together, against the same budget. Importing a fresh denominator
+    under the stored numerator computes a percentage the tokens were never
+    measured on (a checkpoint at 500_000/1_050_000 printed as 390.6% of the fresh
+    window), which is the same class of wrong reading as B1 reached from the other
+    direction.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    from local_operator.config import ConfigManager
+
+    ConfigManager(config_dir=tmp_path).update_config(
+        {"hosting": "openai", "model_name": "gpt-5.6-sol"}
+    )
+
+    # A spec the seed WOULD otherwise take a window from: resolved True and a real,
+    # non-placeholder value (so the B1 guard is not what keeps it out).
+    async def _resolved(config_dir, model, *, stickiness_key):
+        return model.model_copy(
+            update={"context_window": 400_000, "context_metadata_resolved": True}
+        )
+
+    monkeypatch.setattr("local_operator.session.attached.resolve_context_metadata", _resolved)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        CostKnowledge,
+        FrontendModelSpec,
+        FrontendSessionState,
+    )
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(
+        Message.assistant("hi", usage=_stamped(322_546, provider="openai", model_id="gpt-5.6-sol"))
+    )
+    durable = FrontendSessionState(
+        session_id=SESSION_ID,
+        epoch="previous-owner",
+        context_tokens=500_000,
+        context_window=1_050_000,
+        cost_knowledge=CostKnowledge.EXACT,
+        cumulative_parent_cost=12.5,
+        selected_model=FrontendModelSpec(
+            provider="openai", model_id="gpt-5.6-sol", context_window=1_050_000
+        ),
+    )
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": durable.model_dump(mode="json")},
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens == 500_000, "the checkpoint's numerator wins"
+        assert state.context_window == 1_050_000, (
+            "the checkpoint's own denominator must survive; replacing it computes a percentage "
+            "its tokens were never measured on"
+        )
+        assert state.cumulative_parent_cost == 12.5
+        assert state.cost_knowledge == CostKnowledge.EXACT
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_seeded_floor_is_priced_on_the_receipts_own_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """m3: a receipt from another model was BILLED at that model's rates.
+
+    The conversation here runs on anthropic; the newest receipt was served by
+    openai. The reading is the spend that actually happened, so it is priced on the
+    model that served it — pricing it on the session's model reported 0.008 where
+    the receipt's own stamp gives 0.0064.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+    from local_operator.tui.costs import turn_cost
+
+    receipt = _stamped(322_546, provider="openai", model_id="gpt-5.6-sol")
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(Message.assistant("hi", usage=receipt))
+
+    own = turn_cost("openai/gpt-5.6-sol", receipt)
+    session_model = turn_cost("anthropic/claude-opus-5", receipt)
+    assert own is not None and session_model is not None, "precondition: both must be priceable"
+    assert own != session_model, "precondition: the two rate tables differ"
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.context_tokens is None, "the numerator was measured on another model"
+        assert state.cost_knowledge == CostKnowledge.FLOOR
+        assert state.cumulative_parent_cost == own
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unattributable_receipt_seeds_no_cost(tmp_path: Path, monkeypatch) -> None:
+    """m3: no stamp and no saved selection means the receipt is not billable to anyone.
+
+    Before this, an unattributable reading was still priced at whatever model the
+    session happens to be configured with — a number with no evidence behind it.
+    ``None`` means no chip, which is the honest answer.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message, Usage
+    from local_operator.session.frontend_state import CostKnowledge
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("hello"))
+    await transcript.append_message(
+        Message.assistant(
+            "hi", usage=Usage(input_tokens=1_000, output_tokens=50, context_tokens=90_000)
+        )
+    )
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        state = viewer.frontend_state
+        assert state.last_usage is not None, "the receipt itself is still shown"
+        assert state.context_tokens is None
+        assert state.cumulative_parent_cost is None
+        assert state.cost_knowledge == CostKnowledge.UNKNOWN
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_cut_read_leaves_the_cold_seed_unset(tmp_path: Path, monkeypatch) -> None:
+    """n1: the seed follows the same cut as the replay it rides on.
+
+    ``_read_transcript`` stashes the accounting fallback from the rows it read,
+    but a ``through_id`` cursor discards rows ABOVE the cursor from that replay. A
+    receipt from those rows describes a window this viewer is not showing, so the
+    seed is skipped there rather than a second copy of the cut rule being written
+    beside the replay's — a second boundary is exactly the disagreement the shared
+    scan exists to prevent.
+
+    Cold passes no cursor today, which is why this pins the SHAPE: a future
+    ``want_checkpoint=True`` caller that negotiates a window must not seed from
+    receipts the window excludes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("older turn"))
+    cursor = await transcript.append_message(
+        Message.assistant("receipt below the cursor", usage=_stamped(90_000))
+    )
+    await transcript.append_message(Message.user("newer turn"))
+    await transcript.append_message(
+        Message.assistant("receipt above the cursor", usage=_stamped(322_546))
+    )
+
+    # Built the way ``cold()`` builds one, WITHOUT its consume-and-clear step:
+    # the stash is explicitly one-shot, so the read has to be observed directly.
+    viewer = AttachedSession(
+        config_dir=tmp_path,
+        session_id=SESSION_ID,
+        takeover_factory=_never,
+        surface="terminal",
+    )
+    try:
+        # An uncut read seeds from every receipt in the file...
+        await viewer._load_history(None, want_checkpoint=True)
+        seeded = viewer._cold_seed_usage
+        assert seeded is not None and seeded.context_tokens == 322_546
+
+        # ...a read cut at a row BEFORE the newest receipt must not seed from it.
+        await viewer._load_history(cursor.id, want_checkpoint=True)
+        assert (
+            viewer._cold_seed_usage is None
+        ), "a receipt above the cursor is not part of the window this viewer replays"
+
+        # And the gate is the cut alone: the same read without one seeds again.
+        await viewer._load_history(None, want_checkpoint=True)
+        restored = viewer._cold_seed_usage
+        assert restored is not None and restored.context_tokens == 322_546
+    finally:
+        await viewer.dispose()
