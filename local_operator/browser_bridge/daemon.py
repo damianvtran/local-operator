@@ -1132,7 +1132,13 @@ class BridgeService:
         and a revoke that promotes. Cheap and synchronous because callers run it
         inside the no-await decision blocks (audit A1); it writes only when the
         name would CHANGE, so a reconnect that leaves the wheel where it was
-        costs one file read and no atomic write.
+        costs three file reads and no atomic write — `_pairing_path().exists()`,
+        `_identities()` and two `_previous_record_id()` calls for the comparison
+        (review round 3, N3: this comment said ONE read, which is what a future
+        reader would size this path by). The reads are cheap and the write is the
+        expensive part, so the comparison is deliberately not hoisted yet: a
+        cached previous id would have to be invalidated on every write path for
+        an amount of work measured in microseconds.
 
         Declines to write while the daemon is going down (round 2, R2-1, QA's
         half): a promotion during teardown is an artifact of us closing sockets,
