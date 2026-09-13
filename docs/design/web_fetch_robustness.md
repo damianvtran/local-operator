@@ -346,9 +346,13 @@ resolver's own timeout ends it), and that distinction is stated in
 
 ### 3.4 `Retry-After`
 
-Honoured on 429 and on 503 (both define it). Parsed as delta-seconds; the
-HTTP-date form is also parsed (`email.utils.parsedate_to_datetime`) because CDNs
-do emit it. Then:
+Recognised on 429 and across the retryable `server` class — 500/502/503/504 and
+any other 5xx — which is where the header is defined. A 4xx other than 429 never
+carries it: `classify_response` parses the header on every response >= 400, but
+only the `ratelimit` and `server` returns keep the value, so
+`details["retry_after_s"]` is `None` for a `client` 4xx even when the origin sent
+one. Parsed as delta-seconds; the HTTP-date form is also parsed
+(`email.utils.parsedate_to_datetime`) because CDNs do emit it. Then:
 
 - If `retry_after <= min(remaining - 0.25, 10.0)`: sleep exactly that (plus
   jitter), then retry. Honouring the origin's own number is the polite and

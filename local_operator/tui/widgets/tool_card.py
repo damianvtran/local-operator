@@ -118,7 +118,11 @@ from local_operator.tui.widgets.transcript import (
 # round found the two hand-rolled copies had already drifted apart. ``failure``
 # is a pure module (no I/O, no settings, no client); ``httpx``, its only
 # third-party import, is already a hard dependency of this app.
-from local_operator.web_fetch.failure import attempt_summary, block_lead
+from local_operator.web_fetch.failure import (
+    RETRY_AFTER_NOTE_LEAD,
+    attempt_summary,
+    block_lead,
+)
 
 #: Control-sequence stripping lives in `local_operator.ansi` because the
 #: headless renderer needs the identical behaviour and must not import a
@@ -849,28 +853,46 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
     # identity means only a byte count can ever be dropped, and the escalation
     # survives every width the card is read at.
     #
-    # Bound to locals so the narrowing holds for the type checker and the call
-    # reads as one decision rather than three inline guards.
+    # D12 (round 3): the summary is EVIDENCE ABOUT A RENDER, so it may only ride a
+    # row that has a render field of its own — the method, the line count, the
+    # byte count. A terminal no-response card (the silent-block stall this PR
+    # exists for) has none of them: nothing was rendered and no response ever
+    # arrived, so the summary alone was painting ``Rendered: 2 attempts (default,
+    # browser-profile)`` — a false claim, in the card's own words for what was
+    # produced, duplicating the ``(N attempts: …)`` clause one row up in the ⚠
+    # lead, and landing wholly in ``dim`` because a clause at the start of a row
+    # is not what :func:`_split_attempt_clause` matches. Gating the summary on the
+    # row's own fields drops that row and leaves D7's ordering untouched: on a
+    # response-bearing card the escalation still leads the row it rides, so it is
+    # still the last thing clipped.
+    #
+    # Bound to locals so the narrowing holds for the type checker, the row's own
+    # fields read as one decision, and ``summary`` can be gated on them.
     attempts_n = details.get("attempts")
     profiles_n = details.get("profiles")
     summary = attempt_summary(
         attempts_n if isinstance(attempts_n, int) else 1,
         profiles_n if isinstance(profiles_n, list) else (),
     )
+    own_bits = (
+        method,
+        f"{lines_n} lines" if isinstance(lines_n, int) else "",
+        # D2: humanise (KB/MB) so the structured row agrees with the binary
+        # notice body two lines below, which already prints e.g. "2.4 MB".
+        # Suppressed for a replaced body: see the docstring (DN2).
+        (
+            _humanize_bytes(byte_n)
+            if isinstance(byte_n, int) and details.get("failure_kind") != "blocked"
+            else ""
+        ),
+    )
     render_bits = " · ".join(
         part
         for part in (
-            method,
-            summary,
-            f"{lines_n} lines" if isinstance(lines_n, int) else "",
-            # D2: humanise (KB/MB) so the structured row agrees with the binary
-            # notice body two lines below, which already prints e.g. "2.4 MB".
-            # Suppressed for a replaced body: see the docstring (DN2).
-            (
-                _humanize_bytes(byte_n)
-                if isinstance(byte_n, int) and details.get("failure_kind") != "blocked"
-                else ""
-            ),
+            own_bits[0],
+            summary if any(own_bits) else "",
+            own_bits[1],
+            own_bits[2],
         )
         if part
     )
@@ -1261,6 +1283,14 @@ class ToolCard(ExpandableActionBlock):
         #: origin's own bytes — a code sample, a log excerpt — would change what
         #: the card claims the origin said.
         self._fetch_statement = False
+        #: True when the fetch reported a parsed ``Retry-After`` interval, i.e.
+        #: when ``tool.py::_header_line`` emitted §3.4's interval sentence into
+        #: the body. That sentence is OUR prose but sits beside the origin's own
+        #: bytes, so it needs its own reflow permission (design review round 3,
+        #: D13); requiring the key makes that permission structural rather than a
+        #: bare prefix match, since no card that reported no interval can carry
+        #: the sentence at all. Set in :meth:`_absorb_result`.
+        self._fetch_reported_retry_after = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -1960,6 +1990,7 @@ class ToolCard(ExpandableActionBlock):
         # Reset per result: a card is written once, but a rebuilt card must never
         # inherit the previous body's reflow permission.
         self._fetch_statement = False
+        self._fetch_reported_retry_after = False
         if not search_output and _is_fetch_details(name, details):
             # Bound once: everything below reads the same mapping, and the
             # narrowing has to survive the type checker to keep the guards
@@ -2006,6 +2037,11 @@ class ToolCard(ExpandableActionBlock):
                 self._fetch_statement = (
                     fetch_details.get("failure_kind") == "blocked" or terminal_no_response
                 )
+                # D13: ``_header_line`` emits the §3.4 interval sentence ONLY for a
+                # failure whose ``retry_after_s`` it parsed, so this key is the
+                # exact precondition for the body painter's per-line carve-out —
+                # no card that reported no interval can reflow a body line.
+                self._fetch_reported_retry_after = bool(fetch_details.get("retry_after_s"))
                 fetch_output = fetch_header + [""] + body
         # Remembered so the body painter and the rest-visibility rule can select
         # the fetch presentation without re-inspecting details every repaint.
@@ -2513,6 +2549,10 @@ class ToolCard(ExpandableActionBlock):
             # carries the attempt count, and clipping it would hide the count the
             # body no longer repeats (D5).
             wrap = not is_header
+            # D13: set by the §3.4 interval-note branch below. A DEFAULT of False
+            # keeps every origin byte on the clip rule unless a branch here has
+            # positively identified the line as ours.
+            our_note = False
             if stripped.startswith("⚠ HTTP"):
                 # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1). D8: this
                 # classified row IS the card's headline now, so it reflows like the
@@ -2541,9 +2581,28 @@ class ToolCard(ExpandableActionBlock):
             elif stripped.startswith("sparse/JS-gated"):
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note`.
                 ink = signal
+            elif self._fetch_reported_retry_after and stripped.startswith(RETRY_AFTER_NOTE_LEAD):
+                # D13: §3.4's interval sentence is OUR prose, but on a
+                # response-bearing failure (a 503 or 429 carrying the header) it
+                # rides the BODY beside the origin's own bytes, where
+                # ``_fetch_statement`` is deliberately false (D6). Painted with
+                # the body's clip rule it lost exactly the clause it exists for
+                # at 80 columns — ``…the wait was not spen…`` — even though the
+                # header it reports on had already been read. It keeps the body's
+                # ink on purpose: the terminal shape of the same sentence (a 429
+                # with no response at all) rides the statement path, which paints
+                # ``muted``, so the two shapes of one sentence must not disagree
+                # about ink. Only the wrap permission is granted, and only when the
+                # result itself reported a parsed interval AND the line matches the
+                # lead ``failure.py`` exports — recognised BY VALUE, so no origin
+                # byte is reflowed by a blanket "this body is ours" flag.
+                our_note = True
+                ink = muted
             else:
                 ink = muted
-            for segment in self._fetch_segments(line, line_width, wrap=wrap):
+            for segment in self._fetch_segments(
+                line, line_width, wrap=wrap, prose=self._fetch_statement or our_note
+            ):
                 row.append("\n" + indent, style=dim)
                 row.append(truncate_cells(segment, line_width), style=ink)
         hidden = len(self._output) - len(shown)
@@ -2552,17 +2611,23 @@ class ToolCard(ExpandableActionBlock):
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(marker, line_width), style=dim)
 
-    def _fetch_segments(self, line: str, line_width: int, *, wrap: bool) -> list[str]:
+    def _fetch_segments(self, line: str, line_width: int, *, wrap: bool, prose: bool) -> list[str]:
         """The painted row(s) for one body line: the line itself, or its reflow.
 
-        Reflowing is limited to a line that is OUR prose (``_fetch_statement``),
-        because wrapping is a claim about the text: a code sample, a log excerpt
+        Two facts have to hold, and the caller ANDs them: ``wrap`` (the line is in
+        the body, not a fixed-width structured row) and ``prose`` (the text is
+        OURS). Wrapping is a claim about the text, so a code sample, a log excerpt
         or a table silently re-flowed would change what the card says the origin
-        sent. Long tokens are never broken — a URL stays one token and is clipped
-        by ``truncate_cells`` exactly as it was before — and an empty line stays
-        an empty line rather than becoming no row at all.
+        sent — that is why ``prose`` is false for every origin byte. It is
+        ``_fetch_statement`` for the statement body, with one carve-out: the §3.4
+        interval sentence, recognised by its own lead and only on a result that
+        reported a parsed interval (D13), which is ours but rides the body of a
+        response-bearing failure where ``_fetch_statement`` is deliberately false.
+        Long tokens are never broken — a URL stays one token
+        and is clipped by ``truncate_cells`` exactly as it was before — and an
+        empty line stays an empty line rather than becoming no row at all.
         """
-        if not wrap or not self._fetch_statement or not line.strip():
+        if not wrap or not prose or not line.strip():
             return [line]
         wrapped = textwrap.wrap(
             line,

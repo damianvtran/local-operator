@@ -444,6 +444,17 @@ def block_lead(vendor: str | None) -> str:
 #:
 #: `describe` says the same thing in its own words for the terminal case; this is
 #: the response-bearing one.
+#:
+#: ``RETRY_AFTER_NOTE_LEAD`` is the same sentence's opening, exported so the TUI
+#: card can recognise OUR prose BY VALUE. The sentence rides the BODY of a
+#: response-bearing failure — beside the origin's own bytes, which the card may
+#: never reflow (D6) — so the painter has to find it structurally rather than
+#: through a blanket "this body is ours" flag (design review round 3, D13). The
+#: lead is a constant rather than a second literal so the producer and the
+#: recogniser cannot drift apart.
+RETRY_AFTER_NOTE_LEAD = "The origin asked us to wait "
+
+
 def retry_after_note(retry_after_s: float) -> str:
     """``The origin asked us to wait 600s before retrying; …``
 
@@ -452,7 +463,7 @@ def retry_after_note(retry_after_s: float) -> str:
     than a silent one-attempt stop.
     """
     return (
-        f"The origin asked us to wait {retry_after_s:.0f}s before retrying; the "
+        f"{RETRY_AFTER_NOTE_LEAD}{retry_after_s:.0f}s before retrying; the "
         "wait was not spent inside this call."
     )
 
