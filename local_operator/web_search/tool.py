@@ -423,6 +423,24 @@ async def execute_web_search(
     text, omitted = _render_response(response)
     details = response.model_dump(mode="json")
     details["context_chars"] = len(text)
+
+    # Search spend is its own cost line: model-token accounting never saw it, and
+    # a search-heavy session can spend more on retrieval than on generation. The
+    # ledger is session-keyed, so /session can show this session's total and
+    # /analytics can show the cross-session one, with per-provider detail.
+    from local_operator.web_search.cost import SEARCH_SPEND
+
+    session_id = context.session_id if context is not None else ""
+    entry = SEARCH_SPEND.record(session_id, response.provider, response.cost)
+    session_totals = SEARCH_SPEND.session(session_id)
+    details["search_cost"] = {
+        "usd": response.cost.usd if response.cost else None,
+        "basis": response.cost.basis if response.cost else "",
+        "priced_from_usage": bool(response.cost and response.cost.priced_from_usage),
+        "session_usd": round(session_totals.usd, 6),
+        "session_searches": session_totals.searches,
+        "provider_searches": None if entry is None else entry.searches,
+    }
     details["context_max_chars"] = MODEL_CONTEXT_MAX_CHARS
     details["context_truncated"] = omitted > 0
     return _result(tool_call_id, text, details=details)

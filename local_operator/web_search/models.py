@@ -53,6 +53,50 @@ class SearchSource(BaseModel):
     relevance: int | None = None
 
 
+class SearchUsage(BaseModel):
+    """Provider-reported usage for one search, when the provider reports any.
+
+    Every field is optional because the transports differ: a scraped HTML search
+    reports nothing, a token-billed one reports tokens, and a credit-billed one
+    reports credits. ``keyless`` is how a keyed provider's free tier is
+    distinguished from its paid path, since both return normally.
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    credits: float | None = None
+    server_searches: int | None = None
+    keyless: bool = False
+
+    def merge(self, other: "SearchUsage | None") -> "SearchUsage":
+        """Fold another leg's usage into this one (a search plus its evidence pass)."""
+        if other is None:
+            return self
+        return SearchUsage(
+            input_tokens=(self.input_tokens or 0) + (other.input_tokens or 0) or None,
+            output_tokens=(self.output_tokens or 0) + (other.output_tokens or 0) or None,
+            cache_read_tokens=(self.cache_read_tokens or 0) + (other.cache_read_tokens or 0)
+            or None,
+            credits=(self.credits or 0) + (other.credits or 0) or None,
+            server_searches=(self.server_searches or 0) + (other.server_searches or 0) or None,
+            keyless=self.keyless and other.keyless,
+        )
+
+
+class SearchCost(BaseModel):
+    """What one search cost, and how that number was arrived at.
+
+    ``usd=None`` means "no published rate", which is not the same as ``0.0``
+    ("free, and known to be"); ``basis`` states the provenance so a list-price
+    estimate is never mistaken for a bill.
+    """
+
+    usd: float | None = None
+    basis: str = ""
+    priced_from_usage: bool = False
+
+
 class SearchResponse(BaseModel):
     """Normalized response returned by the load-balancing service."""
 
@@ -62,6 +106,8 @@ class SearchResponse(BaseModel):
     answer: str | None = None
     request_id: str | None = None
     failures: list[str] = Field(default_factory=list)
+    usage: SearchUsage | None = None
+    cost: SearchCost | None = None
 
 
 class ProviderStatus(BaseModel):
