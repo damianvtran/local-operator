@@ -3728,6 +3728,40 @@ async def test_attach_mcp_dispose_installs_the_recovery_sink() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attach_mcp_dispose_survives_a_raising_store_refresh() -> None:
+    """A store push must not be able to disarm the manager's sinks.
+
+    ``attach_mcp_dispose`` is reached from the deferred wiring task, whose caller
+    swallows exceptions with one warning ("background MCP wiring failed"), and
+    the store refresh it performs sits BETWEEN the disconnect hook and the two
+    sink installs. So an unguarded raise there does not merely lose a repaint: it
+    skips ``on_incident`` and ``on_recovery`` entirely, and the model never
+    learns a server's tools are gone — the exact consequence the sibling guard in
+    ``_fire_mcp_sink`` names (review round 1, MINOR-1; QA round 1, Q1, which
+    measured the escape 5/5 on the base).
+
+    Asserted on the CONSEQUENCE rather than on the absence of an exception: the
+    test fails if the sinks are not installed, however the call got there.
+    """
+    session = FakeSessionShell()
+    # What the ``hasattr`` gate above reads, so the guarded call is reached.
+    session._frontend_state_store = object()  # type: ignore[attr-defined]
+
+    def exploding() -> None:
+        raise RuntimeError("frontend store refresh exploded")
+
+    session.refresh_frontend_state = exploding  # type: ignore[method-assign]
+
+    manager = FakeMcpManager()
+    attach_mcp_dispose(session, cast("McpManager", manager))
+
+    assert manager.on_incident == session._on_mcp_incident
+    assert manager.on_recovery == session._on_mcp_recovery
+    assert manager.disconnect_all in session._dispose_hooks
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_mcp_auth_revalidation_runs_from_the_composition_root(monkeypatch) -> None:
     """Every host polls the shared credential store, and stops on dispose.
 
