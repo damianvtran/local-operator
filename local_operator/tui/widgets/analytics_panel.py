@@ -376,7 +376,9 @@ def search_spend_section(
         lines.append(label)
         for index, entry in enumerate(snapshot.rows):
             glyph = " └ " if index == len(snapshot.rows) - 1 else " ├ "
-            row(glyph + entry.provider, entry, search_notes(entry.searches, entry.unpriced_searches))
+            row(
+                glyph + entry.provider, entry, search_notes(entry.searches, entry.unpriced_searches)
+            )
     if note:
         # Wrapped with the continuation indented, for the reason
         # ``session_panel._Body.note`` documents: handed to the container's
@@ -388,7 +390,6 @@ def search_spend_section(
             lines.append(para)
     lines.append(Text())
     return lines
-
 
 
 def proportion_bar(fraction: float, width: int) -> str:
