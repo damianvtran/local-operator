@@ -166,9 +166,12 @@ PAIR_MAX_ATTEMPTS = 5
 #: this flag for the life of the process, which freezes the durable record and
 #: disables failover (a denial of service against the bridge, not a disclosure).
 #: Closing it would need the daemon to corroborate "the server is leaving" from a
-#: trusted signal — the production entrypoint has one (`watch_server_exit` polls
-#: `server.should_exit`, which is why that path is tested separately), an ASGI
-#: app with no server object does not.
+#: trusted signal — the production entrypoint has one (`watch_server_exit` attaches
+#: the server object and `_daemon_leaving()` reads `server.should_exit` lazily when
+#: asked, which is why that path is tested separately), an ASGI app with no server
+#: object does not. (Review round 6, NIT 2: this used to say the watcher "polls"
+#: the flag, which sizes the mechanism the wrong way — there is no poll loop to
+#: look for, and no interval at which the signal is sampled.)
 SERVER_GOING_DOWN_CLOSE_CODE = 1012
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
@@ -397,14 +400,23 @@ def note_identity_seen(root: Path | None, extension_id: str) -> None:
         skipped if this id is gone from that fresh read — ``lop browser pair
         --revoke`` runs in a SEPARATE process and writes this same file, and the
         failure direction of clobbering it is authority-critical (a revoke that
-        reports success and does not stick). The race window is the microseconds
-        between that read and ``os.replace``; it cannot be closed from here because
-        the file has no lock and the other writer is another process, which is why
-        the window is also stated in ``_write_pairing``'s contract rather than
-        implied to be zero.
+        reports success and does not stick). The race window is the span between
+        that read and ``os.replace``, measured on a loaded host (QA round 6) at
+        **261 µs min / 351 µs median / 108.8 ms max** over 50 refreshes — the
+        worst case is two orders of magnitude above the typical one, because the
+        process can be suspended anywhere in that span. It cannot be closed from
+        here because the file has no lock and the other writer is another process,
+        so the window is NARROWED, not closed, which is why it is also stated in
+        ``_write_pairing``'s contract rather than implied to be zero — do not read
+        the typical figure as a guarantee under contention.
       - ``OSError`` is absorbed, because this runs on the handshake path where a
-        full or read-only config root must not fail the connection — the same
-        reason ``publish_safely`` exists next door. A refresh that cannot be
+        config root that is full or read-only must not fail the connection — this
+        CALL, specifically. ``_record_driver()`` runs two lines earlier on the same
+        path and is deliberately NOT guarded (a wheel move that cannot be written
+        must fail loudly rather than serve a route the record does not name), so a
+        read-only root still raises out of the handshake whenever the trio has to
+        move. Absorbing here only keeps a cosmetic timestamp from doing the same.
+        Same reason ``publish_safely`` exists next door. A refresh that cannot be
         written is a stale timestamp, not a broken bridge.
 
     Deliberately routed through ``_write_pairing``, the single writer, so the legacy
@@ -2515,6 +2527,26 @@ class BridgeService:
             # forged origin and sends 1012 holds neither, so its frame is inert
             # instead of latching the daemon's permanent flag. See the constant for
             # the residual this does NOT close.
+            #
+            # ``link.paired`` covers the PAIRED NON-DRIVER, and it is the half a
+            # reader cannot size from the code alone (review round 6, MINOR 1), so
+            # both the harm and its present status:
+            #
+            # * The harm it covers: a paired link is one whose identity is in the
+            #   durable record and which the daemon may promote — a retiring link
+            #   can hand the wheel to a standby and move the record on its way out,
+            #   which is the same class of state change this flag must not
+            #   mis-attribute to the server leaving.
+            # * Its status TODAY: a non-driver retirement can neither promote nor
+            #   persist (the promotion and record paths both read the link's own
+            #   generation against the wheel, and a standby's close leaves the
+            #   driver untouched), so this half is currently defence in depth rather
+            #   than load-bearing — deleting it changes no reachable behaviour. That
+            #   is exactly why it is pinned by a row
+            #   (``test_r5_7_a_paired_standbys_1012_latches``) instead of being
+            #   assumed to be required: a future edit that makes a retiring link
+            #   able to move the record must not find this predicate already
+            #   narrowed away, silently.
             if exc.code == SERVER_GOING_DOWN_CLOSE_CODE and (
                 link.paired or link.generation == self.driver_generation
             ):
