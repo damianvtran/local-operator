@@ -108,6 +108,11 @@ class SearchResponse(BaseModel):
     failures: list[str] = Field(default_factory=list)
     usage: SearchUsage | None = None
     cost: SearchCost | None = None
+    #: Handle to the page context this search captured, when the provider's
+    #: payload can be replayed to read those pages without fetching them (see
+    #: :mod:`local_operator.web_search.pages`). ``None`` for providers that only
+    #: return links.
+    page_context_id: str | None = None
 
 
 class ProviderStatus(BaseModel):
@@ -133,6 +138,11 @@ class WebSearchSettings(BaseModel):
     #: source carries a verbatim quote and a relevance score. Off by default:
     #: it is a second model turn (~4-11s measured) on top of the search.
     deepseek_evidence: bool = False
+    #: Offer the ``web_read`` tool, which answers questions from pages a previous
+    #: search already retrieved instead of fetching them again. On by default
+    #: because it costs nothing until it is used, and it degrades to an explicit
+    #: "no pages captured, use web_fetch" rather than a silent fetch.
+    read_enabled: bool = True
 
 
 DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
@@ -145,4 +155,5 @@ DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
     "timeout_seconds": 20.0,
     "searxng_endpoint": "",
     "deepseek_evidence": False,
+    "read_enabled": True,
 }
