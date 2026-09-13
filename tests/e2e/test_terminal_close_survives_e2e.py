@@ -106,8 +106,9 @@ LANDING_S = 90.0
 #: full pty write in **0.60-0.65 s**. This is therefore a backstop by more than
 #: two orders of magnitude rather than a performance assertion, with the same
 #: role as ``BOOT_S``/``LANDING_S`` — and it is NOT the number to reach for when
-#: this fails. A miss here means the kernel did not deliver or did not finish
-#: the kill, so the failure message is built to say which.
+#: this fails. A miss here means the interface's death did not become observable:
+#: its own exit or terminal teardown on the two polite arms, the kill on
+#: ``sigkill-group``. The failure message is built to say which, per arm.
 DEATH_S = 30.0
 
 #: One pass of the death loop: drain, poll, re-arm. A CADENCE rather than a sleep,
@@ -281,7 +282,6 @@ class _Pty:
         own teardown would make the ``pty-close`` arm's precondition vacuous.)
         """
         return self._eof
-        return self._eof
 
     def tail(self, limit: int = 1200) -> str:
         return bytes(self.output[-limit:]).decode("utf-8", errors="replace")
@@ -436,11 +436,11 @@ def _interface_state(pid: int) -> str:
     try:
         sid = str(os.getsid(pid))
     except ProcessLookupError:
-        # A ZOMBIE answers `_alive` yes and `getsid` with nothing: it has no
-        # session of its own any more, so an unlabelled "gone" here would read as
-        # "the process is gone" beside a `kill(pid, 0) => yes`. Labelled, the two
-        # facts stay distinguishable, and `ps` on the same line still shows the
-        # zombie state.
+        # A zombie answers `_alive` yes and `getsid` with nothing — measured on
+        # macOS, and true wherever a dead-but-unreaped process has no session left
+        # to report. An unlabelled "gone" here would read as "the process is gone"
+        # beside a `kill(pid, 0) => yes`. Labelled, the two facts stay
+        # distinguishable, and `ps` on the same line shows the zombie state.
         sid = "unavailable (exited, not yet reaped?)" if exists == "yes" else "gone"
     try:
         pgid = str(os.getpgid(pid))
@@ -487,15 +487,17 @@ def _kill_interface(pid: int) -> None:
 def _await_interface_death(
     terminal: _Pty, pid: int, *, timeout: float, rearm_kill: bool = False
 ) -> bool:
-    """Whether the pty child has actually died — the death shape's precondition.
+    """Whether the pty child is gone — the death shape's precondition.
 
     Without this, "the runtime survived" would be consistent with "nothing died
-    at all", which is the vacuous pass this exists to prevent. Two independent
-    witnesses are accepted for that one fact:
+    at all", which is the vacuous pass this exists to prevent. Two witnesses are
+    accepted for that one fact, and they are not interchangeable:
 
-    * the child is **reaped** (``_reaped``);
-    * the pty master reads **EOF** (``_Pty.at_eof``, which carries the argument
-      for why only the interface's death can produce it).
+    * the child is **reaped** (``_reaped``) — the process exited;
+    * the pty master reads **EOF** (``_Pty.at_eof``, which carries what this does
+      and does not certify: the interface's terminal stream ended, which for a
+      painting interface means death and for one that closed its own stdio does
+      not).
 
     WHY TWO. The macOS leg of this repo's CI (``tui-e2e``) failed this arm in 7 of
     8 recent failing runs across `main` and two open branches, always as "the
@@ -529,11 +531,13 @@ def _await_interface_death(
         # nobody reads fills its buffer and parks the painter in write(). This loop
         # must not manufacture the state it then reports.
         #
-        # The REAP is consulted first, deliberately. Both witnesses are polled on
-        # every pass anyway (`or` only short-circuits the second), and the reap is
-        # the one that answers "the process exited" rather than "its terminal is
-        # closed" — see `at_eof` for why those differ. Where both are available the
-        # stronger fact should be the one that returns.
+        # The REAP is polled first, deliberately, because it is the witness that
+        # answers "the process exited" rather than "its terminal stream ended" —
+        # see `at_eof` for why those differ and QA's counterexample. The ORDER
+        # decides which fact is reported when both hold, never the verdict: `or`
+        # is symmetric, so a pass that either witness would have satisfied is a
+        # pass on either order. Both are therefore polled every pass except when
+        # the first already answered.
         step = time.monotonic()
         terminal.drain(_DEATH_POLL_S)
         if _reaped(pid) or terminal.at_eof:

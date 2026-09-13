@@ -208,14 +208,16 @@ def test_eof_reports_a_closed_terminal_not_a_dead_process() -> None:
     """QA round 1's falsification, pinned: EOF can fire for a LIVE process.
 
     A child that closes its own stdio and keeps running still ends the master's
-    stream — the witness certifies that the interface's TERMINAL is gone, not
+    stream — the witness certifies that the interface's TERMINAL stream ended, not
     that its process exited (`_Pty.at_eof` says so and records why the two are
-    usually the same here). This is the residual the reap covers, and the reason
-    `_await_interface_death` polls `_reaped` first: where both are available the
-    stronger fact is the one that returns. No arm in the e2e closes its own
-    stdio — the interface paints until it dies — which is what keeps the premise
-    true in place, and `_await_pty_eof` is what makes a future violation of it
-    fail loudly.
+    usually the same here).
+
+    THIS IS NOT COVERED BY THE REAP, and saying otherwise was a mistake worth
+    naming: in this state `reaped` is False by construction, so preferring the reap
+    changes which witness is *reported*, never the verdict — `or` is symmetric. The
+    premise that keeps it harmless is the one the arms satisfy: a real interface
+    paints into this terminal, so it holds its stdio until it dies, and
+    `_await_pty_eof` makes a future violation fail loudly rather than quietly.
     """
     with _pty_child(_CLOSES_STDIO_AND_LIVES) as (pid, terminal):
         deadline = time.monotonic() + 10.0
