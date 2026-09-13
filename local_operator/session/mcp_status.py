@@ -66,7 +66,7 @@ class McpStartupOutcome:
     #: The SUBSET of ``failures`` whose cause was the transport rather than the
     #: server or the config. Carried as its own field rather than folded into
     #: the failure text so a front end can group on the FACT instead of parsing
-    #: prose: when every failure is connectivity, the toast says ``(network)``
+    #: prose: when every failure is connectivity, the toast says ``network:``
     #: once instead of naming nine servers, which is the operator-requested
     #: distinction between "your link is down" and "nine MCP servers are
     #: broken". Empty on every manager that does not report it, which renders
@@ -83,7 +83,7 @@ class McpStartupOutcome:
         """True when EVERY reported failure was a transport failure.
 
         The question the toast's footer asks before it replaces its list of
-        bare server names with ``(network)``: when the failures are all
+        bare server names with ``network:``: when the failures are all
         connectivity, naming them adds nothing the head line's count does not
         already say, while the fact that they share one cause is the only part
         the user can act on (tether, wait, change network). False for an empty
