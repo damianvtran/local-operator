@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { getSubagentDetail, getSubagentHistory } from "../api";
+import { HttpError, getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
 import {
 	AGENT_GLYPH,
@@ -9,6 +9,7 @@ import {
 import { Markdown } from "../components/markdown";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
+import { Button } from "../components/ui/button";
 import { WorkingLine } from "../components/working-line";
 import { DetailRequestCoordinator } from "../detail-loader";
 import { cn } from "../lib/cn";
@@ -266,7 +267,6 @@ function ConversationTail({
 						sessionId={sessionId}
 						subagents={projection.subagents}
 						parentJobId={detail.job_id}
-						collapsible
 						embedded
 						label="child agents"
 					/>
@@ -461,11 +461,27 @@ interface LazyTranscript {
 	/** A fetch is in flight and nothing has landed yet: the body shows its
 	 * loading affordance instead of a blank window (U2). */
 	loading: boolean;
-	/** The (single, for a settled child) fetch failed and no entries are shown:
-	 * the body must surface an error + retry rather than a silent blank (U1). */
+	/** The newest fetch failed for a reason a retry could clear. Recorded for
+	 * both kinds of child because it is a fact about the LAST fetch; what the
+	 * body paints depends on whether a poll can recover it — a SETTLED child
+	 * has no poll, so its single dropped fetch must surface an error + retry
+	 * rather than a silent blank (U1), while a running child's drop stays quiet
+	 * over the rows its earlier fetches LANDED (see ``transientCard`` — the
+	 * synthesized launch head does not count as a landed row). Mutually
+	 * exclusive with ``unavailable``, so the newest fetch decides. */
 	failed: boolean;
+	/** The route answered 404: this child has no readable transcript (the daemon
+	 * could not resolve its session dir). Terminal, not a link drop — a retry
+	 * can never succeed, so the body must say so instead of offering one.
+	 * Mutually exclusive with ``failed`` (see the catch branch). */
+	unavailable: boolean;
 	/** Imperative re-pull for the retry affordance. */
 	retry: () => void;
+	/** Whether the addressed child is still running, i.e. whether the 1.5 s poll
+	 * will pull again. Exposed rather than re-derived by the caller so the
+	 * body's recovery rule and the poll itself cannot disagree about which
+	 * children own a poll: they read the same value the interval is built from. */
+	running: boolean;
 }
 
 function useLazySubagentTranscript(
@@ -481,6 +497,9 @@ function useLazySubagentTranscript(
 	const [fetched, setFetched] = useState<TranscriptEntry[]>([]);
 	const [loading, setLoading] = useState(!inlined);
 	const [failed, setFailed] = useState(false);
+	// Terminal 404 (see ``LazyTranscript.unavailable``). Held apart from
+	// ``failed`` so the transient branch keeps its retry affordance.
+	const [unavailable, setUnavailable] = useState(false);
 	// A monotonic nonce the retry button bumps to force the fetch effect to
 	// re-run even when nothing else in its dep list changed (a settled child on
 	// the same connection). Mirrors the detail loader's explicit retry signal.
@@ -492,6 +511,7 @@ function useLazySubagentTranscript(
 		setFetched([]);
 		setLoading(true);
 		setFailed(false);
+		setUnavailable(false);
 	}, [sessionId, jobId]);
 	useEffect(() => {
 		if (inlined) return;
@@ -517,16 +537,36 @@ function useLazySubagentTranscript(
 					setFetched((prev) => (sameTail(prev, entries) ? prev : entries));
 					setLoading(false);
 					setFailed(false);
+					setUnavailable(false);
 				}
 			} catch (err) {
 				/* An aborted request is a teardown/replacement, not a failure:
 				   the successor pull owns the state. A real drop for a RUNNING
-				   child self-heals on the next poll tick, so it only reflects as
-				   loading; for a SETTLED child there is no poll, so the single
-				   dropped fetch is terminal and must surface a retry (U1). */
+				   child self-heals on the next poll tick, so it is recorded here
+				   but must not be painted over that child's live rows; for a
+				   SETTLED child there is no poll, so the single dropped fetch is
+				   terminal and must surface a retry (U1). The flag describes the
+				   LAST fetch for both; ``transientCard`` owns the rendering side
+				   of that distinction. */
 				if (!alive || (err instanceof DOMException && err.name === "AbortError")) return;
 				setLoading(false);
+				/* A 404 is the daemon saying this child has no transcript to serve
+				   (its route resolved no session dir). No amount of retrying changes
+				   that answer, so the body must not offer one; only the transient
+				   branch keeps its retry. A running child's poll still ticks, so a
+				   route that later becomes readable clears this again. */
+				if (err instanceof HttpError && err.status === 404) {
+					setUnavailable(true);
+					setFailed(false);
+					return;
+				}
+				/* The two flags are mutually exclusive so neither sticks: a transient
+				   drop is a fact about this link, not about the child, and the LAST
+				   fetch is what the body must describe (NIT-1). Without this clear a
+				   child that 404'd once kept the terminal card — and lost its Retry —
+				   even after the route started answering again. */
 				setFailed(true);
+				setUnavailable(false);
 			}
 		};
 		void pull();
@@ -547,42 +587,84 @@ function useLazySubagentTranscript(
 	const retry = () => {
 		setLoading(true);
 		setFailed(false);
+		setUnavailable(false);
 		setAttempt((n) => n + 1);
 	};
 	if (inlined) {
-		return { entries: detail.transcript, loading: false, failed: false, retry };
+		return {
+			entries: detail.transcript,
+			loading: false,
+			failed: false,
+			unavailable: false,
+			running,
+			retry,
+		};
 	}
-	return { entries: fetched, loading, failed, retry };
+	return { entries: fetched, loading, failed, unavailable, running, retry };
 }
 
-/** The body shown when a settled child's single transcript fetch failed and no
- * entries are on screen (U1). Without this the body was a permanent blank on a
- * transient link drop, with no signal anything failed and no way to recover
- * short of navigating away — the exact flaky-link case this surface targets.
- * The Outcome/todos tail still renders below via ``tailContent``; this only
- * fills the empty transcript window with a reason and an in-place retry. */
+/** The body shown when the child's own transcript is not on screen, whether
+ * that is a fetch in flight, a dropped fetch, or a terminal 404 (U1/U2).
+ * Without this the body was a permanent blank on a transient link drop, with no
+ * signal anything failed and no way to recover short of navigating away — the
+ * exact flaky-link case this surface targets. The Outcome/todos tail still
+ * renders below it, because that tail is detail, not transcript.
+ *
+ * ``unavailable`` is the terminal sibling: a 404 means there is nothing to
+ * fetch, so the same card must not offer a Retry that cannot succeed — it says
+ * so and points back at the parent instead. All user-facing copy for both
+ * branches lives here, so a design pass edits one place. */
 function TranscriptFetchError({
 	connected,
+	unavailable,
+	parentPath,
 	onRetry,
 }: {
 	connected: boolean;
+	unavailable: boolean;
+	parentPath: string;
 	onRetry: () => void;
 }) {
+	if (unavailable) {
+		return (
+			<div className="flex flex-col items-start gap-2 py-4">
+				{/* The live region is the TEXT, not the card: wrapping the card put
+				   the button inside an alert with an empty accessible name (D4),
+				   which announces a control as part of the message. The same shape
+				   ``AgentUnavailable`` uses. ``gap-2`` because the wrapper took the
+				   pair spacing over from the card's own ``flex … gap-2``: without it
+				   title and body sit flush at 0 px where this app's equivalent pair
+				   (``AgentUnavailable`` → ``InlineState``) is 8 px (D6). */}
+				<div role="alert" className="flex flex-col gap-2">
+					<p className="text-body-sm font-medium text-ink">No transcript for this agent.</p>
+					<p className="text-meta text-ink-dim">
+						Its conversation steps couldn't be read, so only the result and activity below
+						are shown.
+					</p>
+				</div>
+				{/* ``navigateUp``, not ``navigate``: the identically-labelled control in
+				   the header replaces the hierarchy fallback rather than pushing it
+				   (router.ts documents the rule), so on a deep-linked child the dead
+				   child must not stay as the predecessor the phone's Back key returns
+				   to (D2). */}
+				<Button onClick={() => navigateUp(parentPath)}>Back to parent</Button>
+			</div>
+		);
+	}
 	return (
-		<div role="alert" className="flex flex-col items-start gap-2 py-4">
-			<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
-			<p className="text-meta text-ink-dim">
-				{connected
-					? "The conversation steps didn't load. Retry to pull them again."
-					: "You're offline. Reconnecting will retry automatically."}
-			</p>
-			<button
-				type="button"
-				onClick={onRetry}
-				className="min-h-11 rounded-sm border border-control px-3 text-body-sm active:bg-elevated"
-			>
-				Retry
-			</button>
+		<div className="flex flex-col items-start gap-2 py-4">
+			{/* Same live-region shape and pair gap as the terminal branch above (D4,
+			   D6) — the two cards are one component so a design pass edits one place,
+			   and both must read with the same title/body rhythm. */}
+			<div role="alert" className="flex flex-col gap-2">
+				<p className="text-body-sm font-medium text-ink">Couldn't load the transcript.</p>
+				<p className="text-meta text-ink-dim">
+					{connected
+						? "The conversation steps didn't load. Retry to pull them again."
+						: "You're offline. Reconnecting will retry automatically."}
+				</p>
+			</div>
+			<Button onClick={onRetry}>Retry</Button>
 		</div>
 	);
 }
@@ -610,7 +692,8 @@ export function AgentConversation({
 	const parentPath = detail.parent_job_id
 		? agentPath(sessionId, detail.parent_job_id)
 		: rootPath;
-	const { entries: transcript, loading, failed, retry } = useLazySubagentTranscript(
+	const { entries: transcript, loading, failed, unavailable, running, retry } =
+		useLazySubagentTranscript(
 		sessionId,
 		jobId,
 		detail,
@@ -624,13 +707,62 @@ export function AgentConversation({
 		[detail, transcript],
 	);
 	const entries = useMemo(() => agentConversationEntries(detailForRender), [detailForRender]);
-	// The transcript body owns three off-happy-path states when the wire carries
-	// no entries: a fetch in flight (loading affordance, not a blank window —
-	// U2), a settled child whose one fetch failed (visible error + retry so it is
-	// recoverable in place, never a silent blank — U1), or genuinely empty. The
-	// header/outcome above stay put; only the BODY reflects these.
-	const emptyBody = failed ? (
-		<TranscriptFetchError connected={connected} onRetry={retry} />
+	// The transcript body owns three off-happy-path states when the child's own
+	// transcript is not on screen: a fetch in flight (loading affordance, not a
+	// blank window — U2), a child whose newest fetch failed (visible error +
+	// retry so it is recoverable in place, never a silent blank — U1), or
+	// genuinely empty. The header/outcome above stay put; only the BODY reflects
+	// these.
+	//
+	// Keyed on the FETCH, never on whether rows are on screen. The parent's
+	// launch prompt is synthesized into a ``parent_message`` head row by
+	// ``agentConversationEntries``, so a launched child — i.e. nearly every child
+	// this screen exists for — renders a row even while its transcript is
+	// unreadable or still in flight. Deriving these states from an empty body
+	// made the terminal card and the Retry card unreachable for exactly that
+	// shape (D1/Q1, Q2), so ``emptyContent`` is now only for a body with nothing
+	// in it at all and the rows get the state underneath them.
+	const hasRows = entries.length > 0;
+	// ``transcript`` — the entries the FETCH landed — and never ``entries``, the
+	// painted list. ``entries`` carries synthesized rows: ``agentConversationEntries``
+	// prepends a ``prompt:<job_id>`` head whenever ``detail.prompt`` is non-empty,
+	// and the daemon sends that prompt for every launched child
+	// (``mobile/daemon.py:623``, ``run_subagent`` → ``record_launch``). So for the
+	// production shape — running, launched, transcript never fetched — the painted
+	// list is non-empty with ZERO transcript rows on screen, and gating on it
+	// swallowed the error surface for exactly the child this screen exists for: a
+	// persistent non-404 failure (5xx, unparseable body, a throw in the fetch path)
+	// painted the launch row and the running header and nothing else, for as long as
+	// the child ran, while the comment below promised the opposite (MAJOR-1).
+	// The trap is the head row: it is a durable label for the child, not evidence
+	// that content arrived.
+	const landedRows = transcript.length > 0;
+	// A dropped poll on a RUNNING child whose rows have already been FETCHED must
+	// NOT paint the transient card: that child's own 1.5 s poll is its recovery
+	// path (see the hook's catch block), so the drop self-heals on the next tick
+	// while the card would contradict rows that are still live — and on a flaky
+	// link flash an error once per drop over a transcript the user can read. It
+	// stays quiet until a tick lands. Two shapes keep the card: a SETTLED child's
+	// single fetch (U1), and a child with no landed rows, running or not — while
+	// its poll is live the card is the only signal anything failed, and if the poll
+	// never lands the body must not stay silent forever.
+	// The terminal 404 card is deliberately not gated: a 404 is a verdict about
+	// the child, not a transient fact about the link (D3).
+	const transientCard = failed && !(running && landedRows);
+	const fetchState = unavailable ? (
+		<TranscriptFetchError
+			connected={connected}
+			unavailable
+			parentPath={parentPath}
+			onRetry={retry}
+		/>
+	) : transientCard ? (
+		<TranscriptFetchError
+			connected={connected}
+			unavailable={false}
+			parentPath={parentPath}
+			onRetry={retry}
+		/>
 	) : loading ? (
 		<div className="py-4">
 			<TranscriptLoading connected={connected} />
@@ -653,8 +785,16 @@ export function AgentConversation({
 				pid={sessionId}
 				jobId={jobId}
 				entries={entries}
-				tailContent={<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />}
-				emptyContent={emptyBody}
+				tailContent={
+					<>
+						{/* The notice belongs to the rows it explains, so it sits after them
+						   and above the result/activity tail (D1); the launch row stays as
+						   context rather than being suppressed to make room for it. */}
+						{hasRows ? fetchState : null}
+						<ConversationTail detail={detail} sessionId={sessionId} projection={projection} />
+					</>
+				}
+				emptyContent={hasRows ? null : fetchState}
 			/>
 			{detail.status === "running" ? (
 				<footer className="flex min-h-11 items-center justify-between border-t border-hairline bg-surface px-3 pb-[max(env(safe-area-inset-bottom),0.25rem)] text-meta">

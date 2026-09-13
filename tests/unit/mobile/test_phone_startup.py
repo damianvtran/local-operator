@@ -283,7 +283,7 @@ async def test_different_owner_is_never_acknowledged_as_spawned_pid(
 
     queries = 0
 
-    def swapped_owner(_config, session_id):
+    def swapped_owner(_config, session_id, **_probe):
         nonlocal queries
         queries += 1
         # No owner before spawn; another owner wins its lease before our

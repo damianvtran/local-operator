@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
     ModelSpec,
+    ToolResult,
     Usage,
 )
 from local_operator.session.naming import ConversationName
@@ -813,6 +814,48 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """Wall-clock start instant per call executing RIGHT NOW, keyed by id.
+
+        The timestamped sibling of :meth:`executing_display_tool_ids`, and the
+        one thing that makes a live row's elapsed clock survive a change of
+        viewer. Both surfaces answer it off the SAME folded fact — the
+        ``tool_execution_start`` epochs the producer stamped (see
+        ``ToolExecutionStartEvent.started_at_epoch``) — so a sidebar switch
+        seeds the replayed row and the band's phase from one anchor rather
+        than from whenever each of them was painted.
+
+        Declared here beside the id accessors it accompanies, and implemented
+        by BOTH session shapes: a local owner answers from its own fold (it is
+        the producer, so the instants are its own), and an attached viewer
+        answers from the same fold applied to the events it received. A call
+        whose start carried no epoch — a legacy producer, an older runtime —
+        is deliberately ABSENT from the map rather than present with a
+        guessed value, so consumers withhold the clock instead of printing an
+        age nobody measured. An empty map is therefore a valid, supported
+        answer and not an error.
+        """
+        ...
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The folded working-line phase, and the instant that phase began.
+
+        The companion :meth:`live_tool_start_epochs` cannot supply, and the
+        reason the operator's report names TWO clocks rather than one: the
+        thinking indicator has no tool call behind it, so there is no id to key
+        an epoch by and nothing for a per-call map to answer with. The phase is
+        what the band's number is anchored to, so the phase's own start is what
+        has to survive a switch.
+
+        Read together on purpose. The consumer's rule is "use this instant only
+        when this phase is the phase I just derived", and two independent reads
+        could pair one phase with the previous phase's zero — a wrong age that
+        would look perfectly plausible. A facade with no fold answers
+        ``("", None)``, which matches nothing and therefore withholds the
+        clock rather than inventing one.
+        """
+        ...
+
     async def ensure_display_anchor(self, anchor: str) -> bool:
         """Load whichever page contains ``anchor``; False when it is gone."""
         ...
@@ -1016,4 +1059,172 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """The recall twin of :meth:`set_cancel_resolution`."""
+        ...
+
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Called with the id of a queued steer whose bind was refused.
+
+        The third asynchronous refusal, and the only one with no sender to
+        report it: ``steer_message`` spawns a task nobody awaits, so a message
+        the app has already echoed as sent can fail without the user ever
+        learning. See ``AttachedSession._send_steer_when_ready``.
+        """
+        ...
+
+    # --- engine state a viewer host renders --------------------------------
+    #
+    # The MCP status segment and its menus, the subagent and job views, the
+    # sidebar's gate identity, the wake panel, the ``/agent`` and ``/team``
+    # listings, and the saved-usage band. These live on THIS protocol rather
+    # than on ``SessionProtocol`` because that is where the duck-typed readers
+    # land. BOTH
+    # classes implement them — the owner exposes the live manager, scheduler or
+    # registry, and a viewer a read-only SNAPSHOT the runtime published — and
+    # every host that reaches them through a DUCK-TYPED binding holds an
+    # attached facade: the TUI's ``self._session`` / ``source.session``, the
+    # desktop routes' ``bridge.remote``, and ``info/collect.py``'s ``session``
+    # parameter.
+    #
+    # The OWNER-side readers of these same members are NOT an exception to that.
+    # ``harness/subagent.py`` types its ``parent_session`` as ``Session`` and
+    # reads ``mcp_manager`` / ``mcp_startup`` / ``jobs`` off it, so pyright is
+    # already checking those against the real class.
+    #
+    # ``session/runtime/serving.py`` reads ``self._session.jobs`` on the owner
+    # too, and those reads are UNCHECKED: ``ServingSessionHandle.__init__``
+    # takes ``session: Any``, so ``self._session`` is ``Any`` there and pyright
+    # verifies nothing — not against the real class, not against a protocol.
+    # Restating the difference matters because it is the reason a declaration on
+    # ``SessionProtocol`` would buy those readers nothing either: what would
+    # check them is typing the handle's constructor, not widening the protocol.
+    # Either way the placement is a claim about the DUCK-TYPED population and
+    # not the claim "only a viewer has these".
+    #
+    # Declaring them is deliberately NOT the same as making them safe for any
+    # host to read. A snapshot member answers from the last sync, so a caller
+    # that needs the live object — or the owner-only extra argument, as
+    # ``subscribe_frontend``'s ``display_window`` is — must hold the concrete
+    # engine type. What the declaration buys is that a rename, a typo or a
+    # deletion is now a pyright error and a guard failure instead of the silent
+    # ``None`` that shipped a fabricated zero-subagent ``/info``.
+    #
+    # The wider-protocol claim is not hypothetical: declaring these on
+    # ``SessionProtocol`` would add only conformance obligations — the duck-typed
+    # hosts read the same members either way — and it put the whole
+    # ``tests/unit/tui`` double population off conformance (measured: 213
+    # pyright errors across 19 files, from ~10 reduced local ``FakeSession``
+    # classes alone; 1996 when every member of the old exclusion list went
+    # there). A double that has to grow an MCP manager to keep compiling is a
+    # double describing an object the hosts never read. The viewer protocol is
+    # the narrower claim, it is true of every duck-typed reader above, and it
+    # costs the doubles nothing.
+
+    # Job, wake and subagent plumbing. Read by the subagent view, the wake
+    # panel and ``/fork``'s "cannot leave work running" check.
+
+    @property
+    def jobs(self) -> Any:
+        """Background-job ledger: the live manager, or the runtime's snapshot."""
+        ...
+
+    @property
+    def wake_scheduler(self) -> Any:
+        """Armed wakes: the live scheduler, or the runtime's snapshot."""
+        ...
+
+    @property
+    def subagent_comms(self) -> Any:
+        """Channel to launched subagents: live on an owner, a view on a viewer."""
+        ...
+
+    # MCP status and its menus. Both are optional by design: a session may
+    # carry no manager at all, and the startup outcome is None until one runs.
+
+    @property
+    def mcp_manager(self) -> Any | None:
+        """The MCP manager: live on an owner, a snapshot on a viewer, or ``None``."""
+        ...
+
+    @property
+    def mcp_startup(self) -> Any | None:
+        """The MCP startup outcome (discovery failures), or ``None``."""
+        ...
+
+    # The registries behind ``/agent`` and ``/team``. Each is the registry of
+    # the machine the VIEWER runs on, which is why a viewer is a real
+    # implementation and not a passthrough.
+
+    @property
+    def agent_registry(self) -> Any | None:
+        """The user's agent-profile registry, or ``None`` when none is wired."""
+        ...
+
+    @property
+    def team_registry(self) -> Any | None:
+        """The user's team registry, or ``None`` when none is wired."""
+        ...
+
+    # Per-frame reads with a narrow accessor, so a frame does not pay the
+    # whole-state clone ``frontend_state`` costs.
+
+    @property
+    def pending_gate(self) -> Any:
+        """The parked approval gate, read without the whole-state clone."""
+        ...
+
+    @property
+    def epoch(self) -> str:
+        """The runtime epoch, read without the whole-state clone."""
+        ...
+
+    def subscribe_frontend(self, handler: Callable[[Any], Any]) -> Any:
+        """Refresh, snapshot and subscribe to canonical state in one step.
+
+        Only the argument every session can honour is declared. The owner
+        version also accepts ``display_window`` (it can capture a signed page
+        of its own transcript); a host that needs that holds the owner type.
+        """
+        ...
+
+    # The status band and the transcript. ``record_shell`` is routed by a
+    # viewer and persisted by the owner; ``restored_usage`` is the provider's
+    # own last reading, so the band can seed a truthful zero-cost state.
+
+    def context_breakdown(self) -> dict[str, int]:
+        """On-demand token breakdown for the context the next request sends."""
+        ...
+
+    def restored_usage(self) -> Usage | None:
+        """The provider's own last usage reading for this conversation."""
+        ...
+
+    async def record_shell(self, command: str, result: ToolResult) -> None:
+        """Persist a user-typed bang-mode command into the conversation."""
+        ...
+
+    # The capability-style members. Each is a REAL operation on both classes,
+    # and each host reads it through ``getattr`` + a ``callable`` check even
+    # now; declaring them is what turns "the double quietly lacks it" into a
+    # static failure, which is the entire point of this block.
+
+    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+        """Fork the committed prefix without interrupting the live loop."""
+        ...
+
+    async def refresh_attention(self) -> dict[str, Any]:
+        """Reconcile cross-process attention receipts."""
+        ...
+
+    async def acknowledge_attention(self, token: str) -> dict[str, Any]:
+        """Acknowledge one observed attention outcome."""
+        ...
+
+    @property
+    def active_agent(self) -> str:
+        """Display name of the ``/agent`` profile in force (``""`` when none)."""
+        ...
+
+    @property
+    def active_team_name(self) -> str:
+        """Name of the team this session manages (``""`` when none)."""
         ...

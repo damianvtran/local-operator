@@ -1,8 +1,34 @@
+/**
+ * Subagent roster: collapsible, one line per agent, shared by the session
+ * screen's root roster and every descendant roster on the agent screen.
+ *
+ * Same phone constraint the todos panel documents, and the same two guards.
+ * The roster sits ABOVE the transcript in the session column, so a roster
+ * expanded on arrival pushes the conversation off the top: a real session with
+ * `subagents 1/22 running` painted 22 rows and left the transcript a 16px
+ * sliver with the composer off screen entirely. It therefore starts COLLAPSED
+ * (the header's `n/m running` count is the at-a-glance signal; tap to work the
+ * list) and its expanded body is capped to ~40% of the viewport with internal
+ * scrolling, so even a long fan-out can never crowd out the messages.
+ *
+ * The previous default was `running > 0`, which made "a subagent is working"
+ * — the normal state of a coordinating session — the trigger for covering the
+ * screen. The count in the header carries that signal without the cost.
+ *
+ * The header carries FAILURES as well as the running count, which the glyphs
+ * used to carry on their own. Collapsing by default is right, but it hid the
+ * one status a user must not miss: 3 of 22 agents failed rendered exactly like
+ * a healthy fan-out, `subagents 1/22 running`, with no ✗ anywhere on screen and
+ * the word "failed" absent from the page (U5). `· 3 failed` in `text-danger`
+ * restores that at a glance and costs no vertical space.
+ */
+import { useRef } from "react";
 import { cn } from "../lib/cn";
+import { PANEL_FRACTION, columnCap } from "../lib/column";
 import { formatElapsed } from "../lib/format";
 import { navigate } from "../router";
 import type { SubagentRow } from "../types";
-import { Disclosure } from "./ui/disclosure";
+import { Disclosure, HELD_DIM } from "./ui/disclosure";
 
 export const AGENT_GLYPH: Record<SubagentRow["status"], string> = {
 	running: "⟳",
@@ -69,20 +95,31 @@ export function AgentRoster({
 	sessionId,
 	subagents,
 	parentJobId,
-	collapsible = false,
 	embedded = false,
 	label = "subagents",
+	forceCollapsed = false,
 }: {
 	sessionId: string;
 	subagents: SubagentRow[];
 	parentJobId: string | null;
-	collapsible?: boolean;
 	embedded?: boolean;
 	label?: string;
+	/** Collapse and refuse to expand while something needs a decision — see
+	    the session view's panel-budget comment (D1). */
+	forceCollapsed?: boolean;
 }) {
 	const direct = subagents.filter((agent) => agent.parent_job_id === parentJobId);
+	/* The body's own scroll offset, kept OUTSIDE the collapsed body. `Disclosure`
+	   unmounts its children, so a user who scrolled to row 21, collapsed the
+	   panel to read the conversation and re-expanded was returned to row 1 with
+	   22 rows to re-scroll (U6). A ref, not state: restoring it must not repaint,
+	   and it is per mounted roster rather than per session, which is the right
+	   lifetime — a route change should not resurrect a stale offset. */
+	const scrollTopRef = useRef(0);
+	const bodyRef = useRef<HTMLDivElement>(null);
 	if (direct.length === 0) return null;
 	const running = direct.filter((agent) => agent.status === "running").length;
+	const failed = direct.filter((agent) => agent.status === "failed").length;
 	const rows = (
 		<div className="flex w-full flex-col gap-1 pb-2">
 			{direct.map((agent) => (
@@ -90,21 +127,93 @@ export function AgentRoster({
 			))}
 		</div>
 	);
-	if (!collapsible) return <section className={cn("border-t border-hairline", embedded ? "pt-1" : "px-3")}>{rows}</section>;
 	return (
 		<Disclosure
-			defaultOpen={running > 0}
-			className="border-t border-hairline px-3"
+			/* Collapsed by default, including when agents are running: see the
+			   module docstring. `running > 0` opened the roster on arrival for
+			   every coordinating session. */
+			defaultOpen={false}
+			forceClosed={forceCollapsed}
+			className={cn(
+				"border-t border-hairline",
+				/* `min-h-0` so this panel can give space back to the column
+				   instead of pushing a sibling past its clipped foot (D1). */
+				"min-h-0",
+				embedded ? "pt-1" : "px-3",
+			)}
 			header={
-				<span className="text-body-sm text-ink-muted">
-				{label}{" "}
-					<span className="font-mono text-mono-sm text-ink-dim">
-						{running}/{direct.length} running
+				/* A FLEX line, not inline text, so the row has an explicit order of
+				   who yields first. Held shut, this row carries three claims on one
+				   44px line — label + running count, the failure count, and the
+				   `· answer first` hint — and at 360px wide (a supported viewport)
+				   they add up to within ~6px of the width. Something has to give. As
+				   inline text nothing could: `truncate` needs a block box to clip, so
+				   the label just wrapped, and the LAST inline content — the danger
+				   count — was what broke across two lines at a two-digit count
+				   (`· 10 failed`), the one glyph U5 and D4 exist to protect. Flex lets
+				   the label absorb the pressure instead.
+
+				   `relative` restores the PAINT ORDER that inline text got for free.
+				   Below the viewport ladder the column is height-starved, this panel's
+				   container collapses to ~12px and the pending card — a LATER sibling —
+				   overlaps the row. As inline content the header always drew above that
+				   card's background, because CSS paints in-flow block backgrounds before
+				   inline content. Flex blockifies these children and moves them into the
+				   block phase, where tree order decides and the later card wins:
+				   measured at 320x568, the count went to 0 painted danger-red pixels
+				   while keeping its box. Positioning lifts the row back above in-flow
+				   block backgrounds; no z-index, since paint phase is the whole
+				   problem. */
+				<span className="relative flex min-w-0 items-baseline gap-1 text-body-sm text-ink-muted">
+					{/* The held-shut dim is applied per PART, and the failure count
+					    is deliberately a SIBLING of the dimmed span rather than a
+					    child of it: opacity composites the whole subtree, so a dim
+					    any higher takes the count with it — 7.08:1 down to 3.30:1,
+					    measured from the painted frame (design D4). The label and
+					    running count may fade, because a pending card already
+					    implies the roster is held; a failed fan-out may not, and it
+					    matters most while a decision is waiting.
+
+					    `min-w-0 truncate` makes the label the span that YIELDS: it is
+					    the only one here that degrades gracefully, because a clipped
+					    label still reads and the tail it loses is recoverable by
+					    opening the panel. This is the mechanism the hint's `shrink-0`
+					    in `disclosure.tsx` already assumes exists. */}
+					<span className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
+						{label}{" "}
+						<span className="font-mono text-mono-sm text-ink-dim">
+							{running}/{direct.length} running
+						</span>
 					</span>
+					{failed > 0 ? (
+						/* `shrink-0 whitespace-nowrap`: the count is the row's least
+						   expendable token, so it neither shrinks nor breaks between
+						   `10` and `failed`. Undimmed at 7.08:1 per D4. */
+						<span className="shrink-0 font-mono text-mono-sm whitespace-nowrap text-danger">
+							· {failed} failed
+						</span>
+					) : null}
 				</span>
 			}
 		>
-			{rows}
+			{/* Capped to a fraction of the COLUMN and scrolls internally, the same
+			   bound the todos panel uses: a 22-row roster can never crowd out the
+			   messages, even fully expanded. Column units rather than `dvh` — see
+			   `lib/column.ts`; the two diverge while the keyboard is open, and a cap
+			   that does not tighten with the column is not a cap. */}
+			<div
+				ref={(el) => {
+					bodyRef.current = el;
+					if (el) el.scrollTop = scrollTopRef.current;
+				}}
+				onScroll={() => {
+					scrollTopRef.current = bodyRef.current?.scrollTop ?? 0;
+				}}
+				style={columnCap(PANEL_FRACTION)}
+				className="lo-scroll overflow-y-auto"
+			>
+				{rows}
+			</div>
 		</Disclosure>
 	);
 }
@@ -113,16 +222,18 @@ export function AgentRoster({
 export function SubagentsPanel({
 	subagents,
 	pid = "",
+	forceCollapsed = false,
 }: {
 	subagents: SubagentRow[];
 	pid?: string;
+	forceCollapsed?: boolean;
 }) {
 	return (
 		<AgentRoster
 			sessionId={pid}
 			subagents={subagents}
 			parentJobId={null}
-			collapsible
+			forceCollapsed={forceCollapsed}
 		/>
 	);
 }

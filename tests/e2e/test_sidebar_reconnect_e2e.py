@@ -151,7 +151,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
     config = headless_tui_env
     servers = {name: await _runtime(config, name) for name in ("origin", "target")}
 
-    def find_owner(_config_dir, session_id):
+    def find_owner(_config_dir, session_id, **_probe):
         server = servers.get(session_id)
         return (server._record, server._record.pid) if server else (None, None)
 
@@ -258,6 +258,117 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
 
 
 @pytest.mark.asyncio
+async def test_a_loss_in_the_bind_to_paint_window_heals_instead_of_latching(
+    headless_tui_env: Path,
+) -> None:
+    """THE WINDOW ITSELF, which the two tests above only approach.
+
+    ``during`` reselects a session that is ALREADY cold, so the connect body's
+    bind postcondition refuses it before anything is committed. The operator's
+    report is the other ordering: the session was live when the bind check ran
+    and the owner was lost in the gap between that check and the first painted
+    frame — the window ``post_display_hook``'s readiness gate owns. A cold
+    session committed in that window satisfies no frame the gate can ever
+    accept (its FIRST check is ``is_cold``), so pre-fix the gate refused every
+    frame for 15 s, each refusal buying a forced full-screen relayout (measured
+    on the architect's rig: 15.10 s, 1,820 refusals, all recoveries), and the
+    timer's ``SurfaceNotReady`` — terminal on first by #883's design — latched a
+    loss the user's reselect healed in 0.17 s.
+
+    The injection is deterministic rather than raced: ``ensure_display_current``
+    is the first await AFTER the bind postcondition and BEFORE presentation, so
+    evicting the viewer inside it puts a REAL ``ATTACH_MAX_CLIENTS`` eviction
+    exactly in the window while every other line of the real connect body runs.
+    Racing it (as the architect's offset sweep does) is load-dependent: on a
+    fast host the connect's fast path lands first and no frame is ever armed.
+    """
+    config = headless_tui_env
+    servers = {name: await _runtime(config, name) for name in ("origin", "target")}
+
+    def find_owner(_config_dir, session_id, **_probe):
+        server = servers.get(session_id)
+        return (server._record, server._record.pid) if server else (None, None)
+
+    async def resume(session_id):
+        return await AttachedSession.connect(
+            servers[session_id]._record,
+            session_id,
+            config_dir=config,
+            takeover_factory=_never_take_over,
+            display_window=True,
+        )
+
+    app = OperatorApp(lambda: resume("origin"), resume_factory=resume)
+    hogs: list[AttachedSession] = []
+    with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):
+        async with app.run_test(size=(120, 36)) as pilot:
+            await wait_for_adoption(app, pilot)
+            await asyncio.wait_for(app._sidebar_navigation.select("target"), 30)
+            source = app._sidebar_sources["target"]
+            if source.connection_task is not None:
+                await asyncio.wait_for(asyncio.shield(source.connection_task), 30)
+            await pilot.pause()
+            viewer = source.session
+            assert isinstance(viewer, AttachedSession)
+            assert not source.display_only
+            assert not viewer.is_cold
+
+            original_display = AttachedSession.ensure_display_current
+
+            async def evicting_display(self) -> None:
+                await original_display(self)
+                if self is viewer and not hogs:
+                    # REAL eviction: the same number of genuine attach clients
+                    # as the cap, so the LRU drop is the runtime's own.
+                    hogs.extend(
+                        [
+                            await AttachedSession.connect(
+                                servers["target"]._record,
+                                "target",
+                                config_dir=config,
+                                takeover_factory=_never_take_over,
+                                display_window=True,
+                            )
+                            for _ in range(ATTACH_MAX_CLIENTS)
+                        ]
+                    )
+
+            try:
+                with patch.object(AttachedSession, "ensure_display_current", evicting_display):
+                    # The state the connect task is always entered from: the
+                    # saved excerpt is on screen, and the user asks for the
+                    # session again.
+                    source.display_only = True
+                    recoveries_before = app._sidebar_gate_recoveries
+                    app._start_sidebar_connection(source)
+                    seen = await _settle(app, pilot, source)
+
+                # PRECONDITION: the eviction really landed in the window, so a
+                # pass cannot mean "nothing was ever lost".
+                assert hogs, "the eviction never fired; this test proves nothing"
+                assert (
+                    viewer.is_cold is False
+                ), "the reconnect did not heal: the owner was never recovered"
+                assert source.display_only is False
+                assert source.connection_error == ""
+                # THE HEADLINE: the transient loss healed with NO user action,
+                # and a cold session was never presented as LIVE on the way.
+                #
+                # Only `(False, cold)` is forbidden. `(True, True)` — the saved
+                # excerpt on screen while the owner is gone — is the HONEST
+                # state (that is what "Saved · Connecting…" means), and the
+                # point of this fix is that it is a state the app RETRIES out
+                # of rather than a verdict it latches.
+                assert (False, True) not in seen
+                # NO SPIN: the commit->paint window is where the 15 s refusal
+                # storm lived, so its counter is the sharpest reading here.
+                assert app._sidebar_gate_recoveries - recoveries_before <= _GATE_RECOVERY_CEILING
+            finally:
+                for hog in hogs:
+                    await hog.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_plain_socket_loss_reconnects_with_no_attach_pressure(
     headless_tui_env: Path,
 ) -> None:
@@ -273,7 +384,7 @@ async def test_a_plain_socket_loss_reconnects_with_no_attach_pressure(
     session_id = "target"
     server = await _runtime(config, session_id)
 
-    def find_owner(_config_dir, requested):
+    def find_owner(_config_dir, requested, **_probe):
         return (server._record, server._record.pid) if requested == session_id else (None, None)
 
     with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):

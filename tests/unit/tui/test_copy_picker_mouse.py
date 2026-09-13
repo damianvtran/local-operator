@@ -27,6 +27,8 @@ both arrive as ``chain=1`` and never double-click at all.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from rich.cells import cell_len
 from textual import events
@@ -147,6 +149,41 @@ def _wheel(screen: CopyPickerScreen, x: int, y: int, down: bool):
     )
 
 
+#: Spacing between hand-posted clicks, in seconds of *event* time.
+_CLICK_STEP_S = 0.12
+
+#: Event-time clock for `_full_click`, seeded from the real monotonic so the
+#: stamps stay plausible to anything that ever inspects them.
+_click_events_at = time.monotonic()
+
+
+def _next_click_time() -> float:
+    """The ``event.time`` to stamp the next hand-posted click with.
+
+    Textual decides whether two clicks are ONE gesture by comparing the two
+    events' own ``event.time`` values against ``CLICK_CHAIN_TIME_THRESHOLD``
+    (0.9 s in this app), and `_full_click` used to let those times come from the
+    wall clock at construction. That makes the fixture's verdict a measurement
+    of the machine: under a loaded shard runner the two clicks straddle the
+    window, Textual resets ``_chained_clicks`` to 1, the picker's double-click
+    branch is never reached, and a test asserting a copy fails with a message
+    that blames the REFUSAL instead — the frame it names really did not change.
+    Measured on red `main`: forcing a 1.2 s gap leaves ``app._chained_clicks``
+    at 1 and fails
+    `test_a_movement_that_moves_nothing_does_not_disarm_the_double_click` with
+    CI's own message, while the same pair stamped inside the window passes.
+
+    So the stamp is what pins the gesture the fixture MEANS — two clicks of one
+    double-click, not two clicks at whatever speed the box could post them —
+    and the picker's clamping and refusal logic stays under test. The spacing is
+    `_CLICK_STEP_S` against a 0.9 s window: an order of magnitude of margin, and
+    still a plausible human double-click.
+    """
+    global _click_events_at
+    _click_events_at += _CLICK_STEP_S
+    return _click_events_at
+
+
 async def _full_click(app, x: int, y: int) -> None:
     """A REAL press and release at ``(x, y)``, with Textual computing the chain.
 
@@ -156,26 +193,37 @@ async def _full_click(app, x: int, y: int) -> None:
     lives. The tests that assert on the CLIPBOARD need that path; the tests
     that assert on the picker's own row arithmetic do not, and keep using the
     posted `_click` for the no-loop-turn case it exists to reach.
+
+    Both events of the click are stamped by `_next_click_time`, so a pair of
+    consecutive calls is a chained double-click by construction rather than by
+    luck; see that helper for what the wall clock used to do here.
     """
+    at = _next_click_time()
     for kind in (events.MouseDown, events.MouseUp):
         # Spelled out per event rather than splatted from a shared dict: a
         # `dict(...)` literal widens every value to the union of its types, so
         # `**common` type-checks as `int | None` against every parameter.
-        await app.on_event(
-            kind(
-                widget=None,
-                x=x,
-                y=y,
-                delta_x=0,
-                delta_y=0,
-                button=1,
-                shift=False,
-                meta=False,
-                ctrl=False,
-                screen_x=x,
-                screen_y=y,
-            )
+        event = kind(
+            widget=None,
+            x=x,
+            y=y,
+            delta_x=0,
+            delta_y=0,
+            button=1,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            screen_x=x,
+            screen_y=y,
         )
+        # `MouseEvent` takes no `time` argument — `Message.__init__` stamps
+        # construction time — so the stamp is set on the instance. That
+        # attribute is exactly what the chain comparison reads, and nothing
+        # else on this path reads it at all (the picker's own logic is
+        # position- and state-based), so an explicit stamp changes only the
+        # gesture's identity, never the code under test.
+        event.time = at
+        await app.on_event(event)
 
 
 async def _full_wheel(app, x: int, y: int, down: bool) -> None:
@@ -1904,6 +1952,16 @@ async def test_a_refused_click_leaves_the_clipboard_exactly_as_it_found_it() -> 
 
             clipboard = app._clipboard
             copied = got[0] if got else None
+            # The gesture's premise, asserted for the same reason the caller
+            # asserts its own below: a pair scored as two SEPARATE singles never
+            # reaches the picker's double-click branch, so `copied is None`
+            # would be a broken chain wearing the refusal's clothes. That is how
+            # a loaded runner reddened `main`; the stamp in `_full_click` makes
+            # it unreachable, and this is what makes it audible if it ever is.
+            assert app._chained_clicks >= 2, (
+                f"a {interlude} between the clicks was scored as two separate singles, "
+                "so nothing below is about a double-click"
+            )
             if screen.is_attached:
                 app.pop_screen()
                 await pilot.pause()
@@ -1946,6 +2004,12 @@ async def test_a_refused_click_leaves_the_clipboard_exactly_as_it_found_it() -> 
             await _full_click(app, x, y)
             await pilot.pause()
             await pilot.pause()
+            # Only a CHAINED click reaches `Widget._on_click`, which is where
+            # the select-all that leaked the chrome lives; two singles would
+            # satisfy the assertion below without ever exercising it.
+            assert (
+                app._chained_clicks >= 2
+            ), f"the two clicks on the {label} were scored as separate singles"
             assert app._clipboard == prior, (
                 f"double-clicking the {label} wrote {len(app._clipboard)} characters of "
                 f"card chrome to the clipboard: {app._clipboard[:60]!r}"
@@ -2042,6 +2106,17 @@ async def test_a_movement_that_moves_nothing_does_not_disarm_the_double_click() 
             await _full_click(app, x, y)
             await pilot.pause()
             await pilot.pause()
+            # The gesture's other premise, next to the caller's `noop` and for the
+            # same purpose: the two clicks above must have been scored as ONE
+            # double-click, or `copied is None` below would be a chain broken by
+            # the clock rather than the refusal this test is about — the exact
+            # mis-attribution that reddened `main` on a loaded runner. The stamp
+            # in `_full_click` is what keeps this true; this assert is what fails
+            # loudly if a future change re-opens it.
+            assert app._chained_clicks >= 2, (
+                f"{interlude!r} after {pre_key!r}: the two fixture clicks were scored "
+                "as separate singles, so nothing below is about a double-click"
+            )
 
             copied = got[0] if got else None
             if screen.is_attached:

@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import (
     CustomMessage,
     Message,
@@ -16,6 +18,7 @@ from local_operator.harness.types import (
     ToolCall,
     ToolResult,
 )
+from local_operator.incidents import format_model_switch_message
 from local_operator.session.attached import AttachedSession
 from local_operator.session.history_window import (
     _AUDIT_TAIL_CURSOR,
@@ -36,6 +39,13 @@ from local_operator.session.transcript import (
 )
 from tests.e2e.harness import ScriptedStream, build_session, seed_transcript, text_turn
 from tests.unit.session.test_remote import _never_take_over
+
+#: A notice written before the ``harness_injected`` stamp existed: a plain user
+#: row with no provenance, which a compaction pass lifted into its marker.
+LEGACY_NOTICE = (
+    "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+    "Reason: provider failure"
+)
 
 
 def window(transcript: Transcript, **kwargs):  # noqa: ANN003, ANN201
@@ -987,3 +997,88 @@ async def test_an_empty_kept_suffix_pages_the_audit_tail_and_terminates(tmp_path
     assert pages[-1].before_token is None, "the chain did not terminate"
     delivered = {row.id for row in walked}
     assert delivered >= {row.id for row in rows}, "audit tail paging lost rows"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_skips_a_harness_injected_first_row(tmp_path):
+    """The opener TITLES the conversation, so it must be a row a person wrote.
+
+    A transcript an older build wrote can begin with a leaked failover notice —
+    the rendered copy of a live-only ``CustomMessage``, stamped
+    ``harness_injected``. Taking it as the opener names the session "[model
+    switch] You are now running as …", which is the user-visible form of the
+    leak. The scan therefore keys on the stamp, not on the role alone, through
+    the shared decision in ``harness/rows.py`` — the same helper the TUI's own
+    provisional-name scan uses, so the two cannot disagree.
+    """
+    transcript = Transcript(tmp_path / "s")
+    notice = format_model_switch_message(
+        "zai/glm-5.3",
+        "anthropic/claude-opus-5",
+        reason="anthropic quota exhausted (0% remaining)",
+        transient=True,
+    )
+    await transcript.append_message(
+        Message(
+            role="user",
+            content=[TextContent(text=notice)],
+            provider_payload={RENDERED_INJECTION_KEY: True},
+        )
+    )
+    await transcript.append_message(Message.user("fix the login redirect loop"))
+
+    page = window(transcript)
+    assert page.opener_text == "fix the login redirect loop"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_still_takes_a_real_first_row(tmp_path):
+    """Negative control: with nothing injected, the opener is the first row."""
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_message(Message.user("fix the login redirect loop"))
+
+    assert window(transcript).opener_text == "fix the login redirect loop"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_and_the_retitle_unit_skip_a_carried_notice(tmp_path):
+    """QA Q3 / reviewer m1: a harness notice must not title the conversation.
+
+    On the reported session the opener read the ELISION notice's own prose
+    ("[... harness-injected message(s) ... were not authored by the user]"), and
+    a marker's carried notice copies inflated ``theme_turn_count`` — the unit the
+    TUI's retitle gate reads — by eight. Both are harness words, and the two
+    decisions have to agree with the rows the fold paints, which hide them.
+
+    ``total_message_count`` stays exactly counted: it is the unit the reader's
+    paging is checked against, so it must keep counting the rows DELIVERED.
+    """
+    directory = tmp_path / "s"
+    transcript = Transcript(directory)
+    rows = [Message.user(f"row {index}") for index in range(4)]
+    await transcript.append_messages(rows)
+    await transcript.append_compaction(
+        "summary",
+        rows[-1].id,
+        500,
+        preserved_user_turns=[
+            {"id": "legacy-notice", "text": LEGACY_NOTICE},
+            {"id": "mine", "text": "fix the login redirect loop"},
+        ],
+        preserved_turns_cap=100_000,
+    )
+
+    page = window(transcript)
+
+    assert page.opener_text == "fix the login redirect loop"
+    # The paging invariant is untouched: the total is the canonical replay's
+    # row count, notice rows included.
+    assert page.total_message_count == len(transcript.build_llm_history())
+    # …and the theme unit counts conversation turns, not the notices among them.
+    history = transcript.build_llm_history()
+    assert page.theme_turn_count == sum(
+        1
+        for message in history
+        if getattr(message, "role", "") in ("user", "assistant")
+        and not is_harness_notice_row(message)
+    )

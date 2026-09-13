@@ -466,7 +466,10 @@ Every failure is one actionable string; act on it rather than retrying blindly:
      page in that browser:
      `open -g -a "Google Chrome" "https://example.com"` — or ask the user to
      click the extension's toolbar icon (opening the popup wakes the worker
-     instantly). Reconnection then happens within seconds.
+     instantly). Reconnection then happens within seconds. Note the limit of
+     that trick: it wakes a SUSPENDED worker, and does **not** unwedge a
+     WORKER THAT IS STILL RUNNING but no longer answering — for that case see
+     `extension_unresponsive` below, where the toolbar icon does nothing.
   3. **Still nothing?** The extension may be disabled or removed — ask the
      user to check `chrome://extensions`.
 - **"browser bridge not paired"** — run `lop browser pair` and have the user
@@ -485,6 +488,73 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   — the daemon is fine; the command is likely stuck in the browser, e.g.
   waiting on a site-permission decision. Point the user at the extension
   popup rather than restarting anything (the error text says exactly this).
+- **"the browser extension is attached and paired but has stopped answering…"
+  (`extension_unresponsive`)** — the browser IS open and the extension's
+  socket IS up; the worker has simply stopped answering, so nothing can be
+  driven. The bridge drops the link (close code 4000) and the extension re-dials
+  on its own, usually in about a second (up to ~1 minute if the worker was
+  suspended), so **retry once after a few seconds** before doing anything else.
+  The daemon keeps answering `extension_unresponsive` — not
+  `extension_disconnected` — for 60 s after it drops the link
+  (`phase: "dropped"`), precisely so that retry cannot land on the "no browser
+  is attached" line, which would tell the user to open a browser that is open.
+
+  `lop browser status` tells the two states apart for that same 60 s window:
+  `extension connected: no` plus
+  "(browser attached but not answering; the bridge will drop and re-dial the
+  link — retry once in a few seconds)" while the socket is still attached, or
+  "(browser attached but not answering; the bridge dropped the link and is
+  re-dialling it — retry once in a few seconds)" after the drop. A browser that
+  is genuinely closed prints "(browser not currently attached; it reconnects
+  when opened)" instead — if THAT is what you see *inside the 60 s window the
+  latch covers*, the toggle step below is not your remedy. Past the window the
+  daemon genuinely cannot tell a closed browser from a wedged one — memory is
+  the only alternative to honesty, and `LINK_DROP_TTL_S` records the trade — so
+  read the 60 s window as the span that distinction is promised for.
+
+  If it repeats, the worker is WEDGED rather than merely restarting, and the
+  recovery is a reload — but use the one that works:
+
+  1. **Ask the user to toggle the extension OFF then ON in
+     `chrome://extensions`.** This reloads the worker and
+     **preserves pairing** — verified on the operator's own machine against a
+     real wedge. Everything else the session owns is lost with the worker
+     (open tab handles, snapshot refs, pending site-permission decisions), so
+     re-`open` and re-`snapshot` afterwards. This is the same wording the error
+     text uses, and it is deliberate: Chrome shows Update and Remove next to it,
+     and neither of those is the measured cure.
+  2. **Clicking the extension's toolbar icon does NOT wake a wedged worker.**
+     No popup appears when the worker is unresponsive — the popup is served BY
+     that worker — so this is a dead end here even though it is the right first
+     move for an idle-suspended worker (see the "extension not connected"
+     checklist above). Measured on the operator's machine during the incident
+     that produced this section.
+  3. **Restarting the browser** also clears it (measured ~0.5 s to recover, and
+     pairing plus site grants survive), but it costs the user every tab.
+
+  A daemon restart does **not** help: the wedged state is in the extension
+  worker's own heap, not in the bridge.
+- **"the browser extension received `<method>` but did not answer within
+  `<N>`s"** (`internal`, `timeout_s`) — the DAEMON gave up on the extension
+  after the method's whole budget, which means the browser side never produced a
+  typed answer at all. The error text names the action, its budget and the same
+  toggle remedy: **retry once**, and if it repeats treat it as a wedged worker
+  and use the toggle step above. Do not restart the daemon — this is not a
+  bridge fault.
+- **"the browser extension stalled on `<call>` and gave up on this command"** —
+  one chrome/CDP call inside the extension exceeded its own deadline and was
+  abandoned, which is by design: it is what lets the NEXT command run instead
+  of queueing behind a stuck one. **Retry the command.** If it repeats on the
+  same call, the browser side is unhealthy rather than merely slow — ask the
+  user to toggle the extension OFF then ON in `chrome://extensions` (pairing is
+  preserved). The named call (`chrome.debugger.sendCommand(…)`,
+  `chrome.storage.local.get(…)`, `chrome.tabs.get(…)`) says which layer gave
+  up, which is the useful part when reporting it.
+- **"that tab cannot be driven: it is another extension's page"** —
+  Chrome refuses to attach the debugger to a page belonging to a DIFFERENT
+  extension, and that refusal is permanent for that tab. The bridge has already
+  dropped the handle; `open` the URL again to get a new tab. Do not retry
+  against the old handle.
 - **"tab is gone" / "tab crashed"** — the user closed or crashed it; `open` the
   URL again to get a fresh surface.
 - **"another debugger is attached"** — ask the user to close DevTools on that
