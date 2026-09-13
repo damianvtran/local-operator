@@ -286,20 +286,24 @@ SCREEN_INSET = 1
 #: horizontal figure is the app's existing unit for a floating read surface
 #: rather than a new one — ``/copy``'s card carries ``padding: 1 2`` on this same
 #: overlay ground, and ``/move``, this picker's declared twin, already does too.
-#: Matching them keeps the read surfaces the same distance from the terminal's
-#: edge instead of inventing a fourth inset. Together with ``SCREEN_INSET`` the
-#: frame the user sees is 2 rows and 3 cells on every side.
+#: Matching them shares the app's 2-CELL PADDING UNIT rather than inventing a
+#: fourth inset. Together with ``SCREEN_INSET`` the picker's CONTENT sits 2 rows
+#: and 3 cells inside the terminal on every side — content and not ground:
+#: the panel's own background still fills the whole box ``Screen`` gives it
+#: (unlike the two cards, which are centred and content-sized and so sit further
+#: in, at col 10 / row 7 in the 100x30 frame). The sheet's comment carries the
+#: measurement and why the reading still reads as breathing room.
 #:
 #: WHY THE PANEL CARRIES IT RATHER THAN THE PANES: the picker is FULL-SCREEN
 #: (``width: 100%; height: 100%``, deliberately no cap of its own), so without
-#: this its ground, its row bands and its divider rules ran to within one cell of
+#: this its text, its row bands and its divider rules ran to within one cell of
 #: every edge and read as content that had run out of room. The inset is spent
 #: out of the panes' budgets in :func:`plan_layout` and never out of the filter
 #: row, which is the one row that says how to leave.
 #:
 #: AND AT THE SHORTEST HEIGHTS THE ROW COMES OUT OF THE PANE ITSELF: the preview
 #: is drawn only from ``LIST_MIN + PREVIEW_DRAW_MIN`` content rows, so at 40x15
-#: the frame paints 12 list rows and the filter row where it used to paint 6 list
+#: the frame paints 10 list rows and the filter row where it used to paint 6 list
 #: rows beside a 6-row preview. Measured, deliberate, and the trade this row was
 #: asked for — but it is the first thing a review of a short-terminal frame will
 #: see, so it is written down here rather than discovered there.
@@ -320,14 +324,18 @@ OUTER_INSET_ROWS = SCREEN_INSET + PICKER_INSET_ROWS
 FILTER_ROWS = 1
 
 #: Rows between the bottom of the panes' text and the box the real-stylesheet
-#: height test measures (``.session-picker``'s own ``region``): the filter row
-#: plus the screen's two inset rows.
+#: height test measures (``.session-picker``'s own ``region``), MEASURED as
+#: ``region.height - cols_h``: the filter row plus the PANEL's own two padding
+#: rows — ``FILTER_ROWS + 2 * PICKER_INSET_ROWS``.
 #:
-#: The picker's OWN padding rows are deliberately NOT in here. A widget's
-#: ``region`` is its BORDER box, so those two rows are already inside the card
-#: region the test compares against, and counting them a second time would assert
-#: a clip that cannot happen — the arithmetic claiming room the paint does not
-#: have, one row the other way.
+#: The SCREEN's two inset rows are deliberately NOT in here. ``region`` is a
+#: widget's BORDER box, and the screen's padding lies outside it, so those two
+#: rows are already absent from both sides of the comparison; counting them would
+#: assert a clip that cannot happen — the arithmetic claiming room the paint does
+#: not have, one row the other way. Written as the decomposition rather than as
+#: the number, because the two agree only while
+#: ``SCREEN_INSET == PICKER_INSET_ROWS`` (both 1 today): move either and this
+#: sentence has to move with it instead of justifying 3 by luck.
 #:
 #: It has a reader rather than a legacy: the real-stylesheet height test adds it
 #: to the composed line count to check nothing is clipped
@@ -335,9 +343,8 @@ FILTER_ROWS = 1
 #: Textual clips SILENTLY — rows past the region are simply not drawn and nothing
 #: reads back that it happened — so that test is the only thing standing between
 #: a layout change and an invisible clip. 3 is the EXACT value rather than a
-#: slack term: the panes' rows are capped at ``cols_h = height - FILTER_ROWS -
-#: 2 * OUTER_INSET_ROWS`` and the card's region is ``height - 2 * SCREEN_INSET``,
-#: so the two differ by exactly these three rows at every height.
+#: slack term: the panes' rows are capped at ``cols_h`` and the card's region is
+#: ``cols_h + FILTER_ROWS + 2 * PICKER_INSET_ROWS``, at every height.
 CARD_PADDING_ROWS = 3
 
 #: The cursor glyph, matching the command picker's. A caret plus a row ground
@@ -654,8 +661,17 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
             preview_rows = 0
         list_rows = max(1, cols_h - preview_rows)
 
-    list_width = max(12, list_width)
-    preview_width = max(12, preview_width)
+    # THE FLOOR MUST NOT CLAIM CELLS THE WIDGET DOES NOT HAVE — the same rule
+    # ``_pane_width`` states for the preview. 12 is there so the arithmetic
+    # cannot degenerate at a tiny pane, and it bound unconditionally: at 14
+    # columns the pane's own content box is 4 cells while the plan claimed 12,
+    # so every row the pane built was wider than the box it was drawn into,
+    # wrapped onto a second painted line, and spent a row the budget never
+    # counted. Below the floor the MEASURED box wins, which is what makes
+    # ``list_width`` the pane's text width at EVERY width — the equality the
+    # row builder's ``_usable`` now reports too.
+    list_width = max(1, list_width)
+    preview_width = max(1, preview_width)
 
     # ONE definition of the name width, and nothing else computes it. The
     # prototype's own note says inlining it meant D16 could only be argued on
@@ -691,7 +707,27 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
     fixed = GUTTER_CELLS + 2 + AGE_CELLS + SOFT_GUTTER_CELLS
     show_id = (list_width - fixed - 2 - ID_CELLS) >= NAME_P75
     raw_name = list_width - fixed - ((2 + ID_CELLS) if show_id else 0)
-    name_width = max(NAME_MIN_CELLS, min(NAME_MAX, raw_name))
+    # THE NAME FLOOR IS A PREFERENCE, AND THE BOX IS THE CLAIM.
+    #
+    # ``NAME_MIN_CELLS`` is the shortest field that still reads as a name, and
+    # the plan lifts the name to it whenever the pane can hold it — which is how
+    # a 30-column terminal still paints 16-cell names with the age dropped. What
+    # it may not do is EXCEED the box: below the width that can hold the floor
+    # plus the caret, a name at the floor is a row wider than the pane, and
+    # Textual wraps it onto a second painted line that the row budget never
+    # counted (measured on the inset head at 25 columns: an 18-cell row in a
+    # 17-cell box, three sessions painted as six lines).
+    #
+    # ``room_without_age`` is the budget the name may borrow UP TO, and it is the
+    # age's cells it borrows: ``plan_columns`` drops the age before it cuts the
+    # name, so wherever the age cannot be drawn beside a floor-width name the
+    # name takes its cells. That is exactly the band the floor yields in — the
+    # two rungs meet, and no width is left claiming a row it cannot paint. The
+    # id is NOT borrowable: ``show_id`` means it is drawn.
+    room_without_age = (
+        list_width - GUTTER_CELLS - SOFT_GUTTER_CELLS - ((2 + ID_CELLS) if show_id else 0)
+    )
+    name_width = min(NAME_MAX, max(raw_name, min(NAME_MIN_CELLS, room_without_age)))
 
     return PickerLayout(
         mode=mode,
@@ -712,7 +748,12 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
         name_width=name_width,
         show_id=show_id,
         age_width=AGE_CELLS,
-        context_width=max(10, list_width - CONTEXT_INDENT),
+        # The indent off the pane width, floored at one cell rather than at ten:
+        # the same rule as the list and the preview above. At 14 columns the box
+        # is 4 cells and this answered 10, so the context line — which the row
+        # wraps to the next painted line — was three rows wide in a four-cell
+        # pane.
+        context_width=max(1, list_width - CONTEXT_INDENT),
     )
 
 
@@ -958,7 +999,15 @@ def plan_columns(
     fixed = GUTTER_CELLS + marker_col + 2 + age_col
     if width - fixed >= NAME_MIN_CELLS:
         return width - fixed, age_col, 0
-    return max(NAME_MIN_CELLS, width - GUTTER_CELLS - marker_col), 0, 0
+    # LAST RUNG: the age and the id are gone, so the name takes everything the
+    # caret and the pre-name columns leave — INCLUDING the cells the floor asks
+    # for, if they are there, and no more if they are not. Flooring this at
+    # ``NAME_MIN_CELLS`` (it did) built rows wider than the pane at every width
+    # where `GUTTER + marker + the floor` exceeds the box, which Textual wraps
+    # onto a second painted line the row budget never counted. The plan's
+    # ceiling is the binding value in that band (see ``plan_layout``); this
+    # rung states the same room so the two models cannot disagree about it.
+    return max(1, width - GUTTER_CELLS - marker_col), 0, 0
 
 
 def render_rows(
@@ -1839,16 +1888,36 @@ class SessionPickerScreen(ModalScreen[str | None]):
         app: ``3fr`` of the split is what the row actually gets, and guessing
         it wrapped every row onto a second line at 80 columns. The fallback
         matters on the first paint, before layout resolves.
+
+        IT IS THE CONTENT BOX, WITH NOTHING TAKEN OFF IT. An earlier version
+        subtracted two cells on the belief that "the widget's own padding is
+        inside its reported width"; it is not — Textual's ``region`` is the
+        border box and ``size`` is the box INSIDE the padding, so the pane's
+        text width is exactly ``size.width``. That belief left this number two
+        cells below ``plan_layout.list_width`` (the same box) and truncated every
+        grep context line two cells early, which is the "two arithmetics for one
+        quantity" this file keeps having to close.
+
+        THE FLOOR MUST NOT CLAIM CELLS THE WIDGET DOES NOT HAVE, which is the
+        same rule ``_pane_width`` states for the preview: a ``12`` applied
+        unconditionally answered 12 in a 4-cell pane and put the ROW WIDER THAN
+        THE PANE, wrapping a row the budget counted once onto two painted lines.
         """
         measured = _widget_size(getattr(self, "_results", None), "width")
         if measured:
-            # The widget's own padding is inside its reported width.
-            return max(12, measured - 2)
-        return max(12, self._layout().list_width)
+            return max(1, measured)
+        return max(1, self._layout().list_width)
 
     def _context_width(self) -> int:
-        """Cells the grep context line gets: the indent off the pane width."""
-        return max(10, self._usable() - CONTEXT_INDENT)
+        """Cells the grep context line gets: the indent off the pane width.
+
+        Floored at one cell rather than at ten, for the reason ``_usable`` gives:
+        a floor above the box wraps the context line onto painted lines the row
+        budget never counted. At 24 columns and above this changes nothing — the
+        measured box is the larger value there, which is where every frame the
+        design round looked at lives.
+        """
+        return max(1, self._usable() - CONTEXT_INDENT)
 
     def _pane_width(self) -> int:
         """The preview's REAL text width, measured off the resolved widget.
@@ -1871,7 +1940,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         measured = _widget_size(getattr(self, "_preview", None), "width")
         if measured:
             return min(measured, max(PREVIEW_MIN_TEXT, measured - 2))
-        return max(PREVIEW_MIN_TEXT, self._layout().preview_width)
+        # The plan's own preview width, NOT floored at PREVIEW_MIN_TEXT: the
+        # floor belongs over a MEASUREMENT (it exists so a wrap width cannot
+        # degenerate), and applying it to the plan's number instead claimed 20
+        # cells for a pane the plan had just been told is 8 — the same over-claim
+        # as the header's, one paint earlier.
+        return max(1, self._layout().preview_width)
 
     def _content_rows(self) -> int:
         """Rows INSIDE the pane's own border and padding: its text budget.
@@ -2621,9 +2695,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
             query = self._query.strip()
             if not query:
                 return Text("no session", style=dim)
-            return Text(
-                truncate_cells(f"no match for “{query}”", max(10, self._pane_width())), style=dim
-            )
+            return Text(truncate_cells(f"no match for “{query}”", self._pane_width()), style=dim)
 
         # THE READ IS RESOLVED FIRST: the header's size is a function of it. The
         # optional ``model · cwd`` row is claimed LAST of the pane's rows, after
@@ -2653,7 +2725,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # total` at all, which is the silent clip D1/U2 exist to prevent.
         # Truncating keeps the reservation true; teaching it to predict
         # ``Text.wrap`` would be a second width model beside this one.
-        width = max(10, self._pane_width())
+        #
+        # AND THE WIDTH IS THE PANE'S OWN, with no floor on top of it. This read
+        # ``max(10, self._pane_width())``, which re-floored an already-honest
+        # measurement: below a 10-cell pane the name and the clock row were
+        # built wider than the pane, wrapped onto a second line, and — because
+        # the header's reservation counts ONE row per header line — spent the
+        # pane's last row, which is the status row this comment exists to
+        # protect. Measured at 16x30: the title painted over two rows with the
+        # pane 8 cells wide.
+        width = self._pane_width()
         out.append(
             f"{truncate_cells(row.name or row.id, width)}\n",
             style=Style(color=fg_colour, bold=True),
