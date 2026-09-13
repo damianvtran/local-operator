@@ -98,9 +98,9 @@ long the worker can be busy on one item. An attempt that hangs rather than
 failing fast costs a full :data:`CALL_TIMEOUT_S` (5 s), and an item gets
 ``len(RETRY_BACKOFF_S) + 1`` = 4 of them, so the real worst case is
 ``4 x 5 s + 10.5 s = 30.5 s`` before the WARNING is logged — measured end to
-end at **30.82 s** against a wedged supervisor, which is what a reviewer
-timed. The prose here used to imply 10.5 s, which is the backoff alone
-(review round 1, MINOR-2).
+end at **30.82 s** against a wedged supervisor, which is what QA timed at
+runtime. The prose here used to imply 10.5 s, which is the backoff alone
+(review round 2, MINOR-2).
 
 Nothing about that 30.5 s reaches the exit path. The drain gives up after
 :data:`EXIT_DRAIN_TIMEOUT_S` (2 s), and the interpreter then kills the daemon
@@ -470,7 +470,7 @@ class HerdrReporter:
         ``release-agent``. Differs from :attr:`last_state` when a delivery is
         in flight, being retried, or was dropped on exhaustion — and after a
         DELIVERED ``release-agent``, which clears this one while ``_last``
-        keeps whatever state the released row ended on (review round 1,
+        keeps whatever state the released row ended on (review round 2,
         NIT-2).
         """
         return self._delivered
@@ -532,7 +532,7 @@ class HerdrReporter:
             # "attaching to a released reporter stores nothing" is only true
             # if the check and the assignment cannot be separated by a
             # concurrent `release`, which is exactly what checking outside the
-            # window and assigning after it allowed (review round 1, NIT-3).
+            # window and assigning after it allowed (review round 2, NIT-3).
             if self._released.is_set():
                 return
             # Stored even when a heartbeat is already running: the loop
