@@ -20,8 +20,9 @@ two steps never hash to the same artifact.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from lop_osworld_v2_adapter.cleanup import (
     EVIDENCE_INSTANCE_ABSENT,
@@ -52,9 +53,21 @@ class FakeProvider:
         blind_cause: str | None = None,
         has_user_simulator: bool = False,
         simulator_answer: str = "simulated user answer",
+        evaluator_prints: tuple[str, ...] = (),
+        evaluator_logs: tuple[str, ...] = (),
+        evaluator_cache_files: Mapping[str, str] | None = None,
     ) -> None:
         self._scripted_score = scripted_score
         self._fail_evaluate = fail_evaluate
+        # The evaluator-diagnostics seams. Real evaluators compute per-checkpoint
+        # values and emit them as prints, log records on the ``desktopenv``
+        # namespaces, or files in the task's cache directory; the fake has to do
+        # the same to drive ``diagnostics`` at all. Empty by default, so every
+        # existing test (and every episode whose evaluator says nothing) behaves
+        # exactly as it did before these knobs existed.
+        self._evaluator_prints = tuple(evaluator_prints)
+        self._evaluator_logs = tuple(evaluator_logs)
+        self._evaluator_cache_files = dict(evaluator_cache_files or {})
         # How many upcoming observe() calls return NO frame, reproducing a
         # guest whose screenshot server is starved (the burstable-instance
         # failure that destroyed five paid episodes). OSWorld's own
@@ -90,10 +103,14 @@ class FakeProvider:
         # guest (screenshot + a11y tree), so a duplicated call is real cost,
         # not a cosmetic issue. Counted here so a test can pin it.
         self.observe_calls = 0
-        # Where the adapter told us to cache. Recorded (never written to: the
-        # fake downloads nothing) so tests assert the cache root actually
-        # crossed the adapter -> provider boundary. None until allocate.
+        # Where the adapter told us to cache. Recorded (never written to unless
+        # a diagnostics seam asks for it) so tests assert the cache root
+        # actually crossed the adapter -> provider boundary. None until allocate.
         self.cache_root: Path | None = None
+        # The task id upstream would name its own cache subdirectory with
+        # (``DesktopEnv`` derives ``cache_dir_base/<task_id>``), so a seam that
+        # writes cache files lands exactly where a real evaluator writes.
+        self._task_id: str | None = None
 
     def _frame(self) -> bytes:
         """A deterministic but sequence-varying 1920x1080 PNG frame."""
@@ -112,6 +129,7 @@ class FakeProvider:
         # The ref is the tag; allocation registers the instance under it, so
         # teardown-by-ref is the same operation a rescue worker performs.
         self.cache_root = cache_root
+        self._task_id = task.task_id
         self._instances[plan.tag_dict()["Name"]] = {
             "state": "running",
             "task_id": task.task_id,
@@ -153,7 +171,30 @@ class FakeProvider:
         self.evaluate_calls += 1
         if self._fail_evaluate:
             raise RuntimeError("scripted evaluator failure")
+        self._emit_evaluator_diagnostics()
         return self._scripted_score
+
+    def _emit_evaluator_diagnostics(self) -> None:
+        """Reproduce what a real evaluator emits while it scores.
+
+        The three shapes are the ones the archived runs could not recover:
+        prints (task_016's ``email_avg``), log records on a ``desktopenv``
+        namespace (task_002's INFO-level ``Task002 partials``, which the
+        WARNING gate drops before any handler sees it), and files written into
+        the task's own cache directory (task_098).
+        """
+
+        for line in self._evaluator_prints:
+            print(line)
+        for line in self._evaluator_logs:
+            logging.getLogger("desktopenv.fake_evaluator").info(line)
+        if self._evaluator_cache_files:
+            assert self.cache_root is not None
+            task_id = self._task_id or "task"
+            directory = Path(self.cache_root) / task_id
+            directory.mkdir(parents=True, exist_ok=True)
+            for name, content in self._evaluator_cache_files.items():
+                (directory / name).write_text(content)
 
     async def terminate(self, instance_ref: str) -> str:
         instance = self._instances.get(instance_ref)

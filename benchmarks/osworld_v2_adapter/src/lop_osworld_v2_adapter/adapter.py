@@ -48,7 +48,7 @@ from typing import Any, Callable, cast
 
 from lop_osworld_v2_adapter import actions
 from lop_osworld_v2_adapter import cleanup as cleanup_mod
-from lop_osworld_v2_adapter import provisioning
+from lop_osworld_v2_adapter import diagnostics, provisioning
 from lop_osworld_v2_adapter import requirements as requirements_mod
 from lop_osworld_v2_adapter import scoring, taskfile, vendor_bridge
 from lop_osworld_v2_adapter.observation import ObservationBuilder
@@ -308,6 +308,7 @@ class OSWorldV2Adapter:
         self._provider: EnvironmentProvider | None = None
         self._observation_builder: ObservationBuilder | None = None
         self._artifact_root: Path | None = None
+        self._evaluator_cache_dir: Path | None = None
         self._current_observation: Any = None
         self._sequence = 0
 
@@ -540,6 +541,20 @@ class OSWorldV2Adapter:
         _enter_episode_scratch(cache_root)
         await provider.allocate(self._plan, self._task, cache_root=cache_root)
         self._provider = provider
+        # Where upstream keeps per-task state: ``DesktopEnv`` derives
+        # ``cache_dir_base/<task_id>`` (desktop_env.py:471) and creates it
+        # during setup, so this is the directory the evaluator's own getters and
+        # writers touch. Scoring reads it back as the fetched-state half of the
+        # retained diagnostics; the adapter's own ``guest-preparation.json``
+        # sits one level up and is deliberately NOT part of that snapshot.
+        #
+        # The direct-child test is a read guard, not path cosmetics: the id
+        # arrives as a wire field, and a value like ``../..`` would otherwise
+        # point the snapshot at a directory outside the episode's own cache.
+        # Upstream's layout is always one level deep, so refusing anything else
+        # loses no evidence.
+        candidate = Path(cache_root) / params.task_id
+        self._evaluator_cache_dir = candidate if candidate.parent == Path(cache_root) else None
 
         # Capture observation 0 eagerly so the runner's immediately-following
         # observe is free and the sequence counter starts from a known state.
@@ -661,6 +676,13 @@ class OSWorldV2Adapter:
             return FakeProvider(
                 scripted_score=float(config.get("scripted_score", 1.0)),
                 has_user_simulator=bool(config.get("has_user_simulator", False)),
+                # Diagnostics seams: a workspace that declares them gets an
+                # evaluator which emits on the scoring path, which is how the
+                # real-spawn tests and the operator's demonstration drive the
+                # capture through the real supervisor and worker.
+                evaluator_prints=tuple(config.get("evaluator_prints", ())),
+                evaluator_logs=tuple(config.get("evaluator_logs", ())),
+                evaluator_cache_files=dict(config.get("evaluator_cache_files", {})),
             )
         if kind in (None, "aws"):
             return self._build_aws_provider()
@@ -812,8 +834,22 @@ class OSWorldV2Adapter:
             # NOT 0.0: a task with no evaluator scored as failed would record
             # a failure the agent did not commit.
             raise scoring.ScoringUnavailable("task declares no evaluator")
-        raw = await self._provider.evaluate()
-        return ScoreResult(score=scoring.score_to_artifact(raw, artifact_root=self._artifact_root))
+        # The evaluator computes per-checkpoint values and discards them on the
+        # way out (see diagnostics.py). Capture what it emits around the ONE call
+        # that runs it, so the detail artifact can answer "which checkpoint
+        # failed / did the evaluator bail early". Nothing here inspects or
+        # alters the return value: the score is mapped from ``raw`` exactly as
+        # before, and a capture that retained nothing leaves the staged detail
+        # bytes unchanged.
+        with diagnostics.capture_evaluator_diagnostics(
+            cache_dir=self._evaluator_cache_dir
+        ) as capture:
+            raw = await self._provider.evaluate()
+        return ScoreResult(
+            score=scoring.score_to_artifact(
+                raw, artifact_root=self._artifact_root, diagnostics=capture.payload()
+            )
+        )
 
     # ------------------------------------------------------------------
     # cleanup / close / begin_rescue

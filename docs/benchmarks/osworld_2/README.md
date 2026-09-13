@@ -72,8 +72,52 @@ mapped by `scoring.score_to_artifact` on a **scored-or-raise** contract:
 - the full upstream return value is retained as bounded canonical JSON in
   `score.details`, including any returned checkpoint, safety or error fields.
   A scalar return cannot recover checkpoint data upstream already discarded;
+- the evaluator's OWN scoring-path output is retained in the same artifact, so a
+  `0.00%` row can be told apart from one whose evaluator bailed out before
+  checking a checkpoint. See "Evaluator diagnostics" below;
 - NaN, infinity, out-of-range, non-numeric, missing evaluator, or invalid or
   over-budget detail data → **raise**.
+
+#### Evaluator diagnostics
+
+Upstream evaluators compute the values that decide a score and then discard
+almost all of them: `task_002` computes four checkpoint booleans and returns
+their mean, `task_016` computes `email_avg`/`linkedin_avg` and returns the
+pairing's mean, `task_098` writes its normalised results into the task's cache
+directory and returns a scalar. `score.details` used to hold only the return
+value, so the archived bundles could not answer "which checkpoint failed, or did
+the evaluator return early" — the single question that separates an apparatus
+bug from an agent that genuinely failed.
+
+The adapter now captures, around the one call that runs the evaluator:
+
+- the evaluator's `sys.stdout` (its `print` lines) and `sys.stderr`;
+- its log records, for the namespaces its modules use (`desktopenv.*`,
+  `desktop_env.*`, `llm_metrics`, and the `osworld_task_<id>` names the adapter
+  registers task modules under). Their level is raised to `INFO` for the window
+  only, because OSWorld never configures logging and the default `WARNING` gate
+  drops a task's `logger.info` partials before any handler can see them;
+- a bounded manifest of the state the evaluator fetched, from the task's own
+  cache directory (`cache_dir_base/<task_id>`, `desktop_env.py:471`), with the
+  text of its small files inline and a reported reason for every file whose
+  content is withheld.
+
+The retained block rides inside the SAME detail artifact, under
+`evaluator_diagnostics`, with the evaluator's return value preserved verbatim
+under `evaluator_result`. It is therefore bounded by the same limits, scanned by
+the same redaction pass, and referenced by the same digest — no second artifact
+and no new protocol field. The capture is additive: an evaluator that emitted
+nothing and fetched nothing produces no block, and the staged detail bytes are
+byte-identical to what they were before it existed. Nothing an evaluator
+returns changes, no task file is touched, and the worker's own stdout/stderr
+still carry what they carried (the capture tees rather than diverts).
+
+Retention is bounded, and every cut is reported rather than absorbed: each
+captured stream keeps its last 32k characters and counts what it dropped, the
+per-file text budget is 8k with a 64k aggregate, and at most 128 cache entries
+and 256 directories are walked. A diagnostics block that could not be attached
+within the score-detail limits is replaced by a one-field `refused` marker — a
+report, not a silent drop — and the score is never affected either way.
 
 The worker stages the raw detail bytes. The runner verifies them, then the
 writer publishes them through its existing confinement, redaction, media and
