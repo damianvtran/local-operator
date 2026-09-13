@@ -514,7 +514,80 @@ async def _drain_inbox_into(handle: object) -> int:
     return delivered
 
 
+def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
+    """Make ``SIGHUP`` a no-op for this runtime, logged once per process.
+
+    WHY AN IGNORE AND NOT A CLEAN EXIT. Only two things may end a session's
+    work: the runtime's own residency predicate (``_should_exit``) and the
+    deliberate kill switch (``control.stop_session`` → socket stop → SIGTERM →
+    SIGKILL). SIGHUP is neither — no front end and no user asked for anything —
+    and it is the classic "the terminal that started me is gone" signal, the one
+    ``nohup`` exists to ignore, while this process is spawned detached
+    (``start_new_session=True``) and writes its log to a file. Left at its
+    DEFAULT disposition a HUP kills the interpreter outright: no caused turn
+    outcome, no lease release, no record unpublish, not even the
+    ``session runtime: exiting`` line — the session is left reading as an
+    anonymous "cause could not be determined" cut-off.
+
+    CALLED FROM THE FIRST STATEMENT OF ``amain``, so the guarantee covers the
+    whole substantive boot (lease arbitration, session construction, MCP
+    bring-up, ``start_in_process``). The residual window is ``main()``'s logging
+    setup and the ``asyncio.run`` bootstrap — milliseconds, and nothing is
+    spawned in it. A process-wide ``signal.signal(SIG_IGN)`` installed in
+    ``main()`` instead would close even that, and is deliberately NOT done:
+    ``main()`` is callable in-process (the suite does exactly that for the CLI —
+    see ``procname.is_own_launch``, which exists for the same hazard), and a
+    disposition set there would leak into the embedder's process for the rest of
+    its life, with nothing to restore it.
+
+    The latch, not a per-signal log line: a terminal that re-delivers on its way
+    down must not be able to fill the runtime log.
+    """
+    hup_logged = False
+
+    def _on_sighup() -> None:
+        nonlocal hup_logged
+        if hup_logged:
+            return
+        hup_logged = True
+        logger.info(
+            "session runtime: ignoring SIGHUP (pid %d); this runtime is detached from interfaces",
+            os.getpid(),
+        )
+
+    # ``SIGHUP`` is POSIX-only, and a platform without it must not fail to boot a
+    # runtime over a signal it could not have received.
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is None:
+        return
+    try:
+        loop.add_signal_handler(sighup, _on_sighup)
+        return
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+    # THE FALLBACK CANNOT BE ALLOWED TO RAISE, and it is the branch that plants
+    # an INHERITABLE ignore: ``signal.signal`` works only on the main thread
+    # (``ValueError`` otherwise, which is exactly how a loop that refused for
+    # that reason would then kill the boot this function protects), and a SIG_IGN
+    # survives ``exec`` — CPython's ``restore_signals`` resets only
+    # SIGPIPE/SIGXFZ/SIGXFSZ — so anything spawned after it would inherit an
+    # ignored HUP. Nothing reaches here on the shipped path (the loop takes the
+    # callback), so this is the belt for a platform whose loop will not.
+    try:
+        signal.signal(sighup, signal.SIG_IGN)
+    except (ValueError, OSError, RuntimeError):
+        logger.warning("could not install the SIGHUP ignore", exc_info=True)
+
+
 async def amain() -> int:
+    # SIGHUP FIRST, before the deferred imports below, the lease arbitration,
+    # session construction, MCP bring-up and ``start_in_process``: the guarantee
+    # is "no interface can end this session's work", and a HUP during boot has
+    # exactly the unattributed shape it exists to remove (review round 1,
+    # MINOR-3). See ``_install_sighup_ignore`` for the scope this does and does
+    # not cover.
+    _install_sighup_ignore(asyncio.get_running_loop())
+
     # Deferred for startup cost, not to break a cycle: importing the owned
     # handle pulls the composition root, and `python -m` on this module must
     # not pay for it before the log file is configured in main().
