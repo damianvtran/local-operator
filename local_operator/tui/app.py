@@ -15888,13 +15888,61 @@ class OperatorApp(App[None]):
         self._sync_boot_card(size.width)
         self._sync_boot_composition(size)
 
+    def _boot_lane_width(self, terminal_width: int) -> int:
+        """Cells the composer's lane actually has, for every boot width decision.
+
+        ONE owner for a measurement that three passes used to each guess at, and
+        the reason the measurement is not simply the terminal: ``#input-dock`` is
+        laid out INSIDE the narrowed main lane, so the box the sheet resolves a
+        percentage against is the terminal's content box minus a DOCKED
+        sidebar's columns. Reading the terminal alone is what produced the
+        clipped band. ``Screen.boot.boot-card #input-shell``'s ``min-width: 75``
+        is an ABSOLUTE floor, so on a 100-cell terminal with the sidebar docked
+        the sheet resolved 75 cells inside a 65-cell lane: the shell overflowed
+        its parent, the dock's ``align-horizontal: center`` displaced it instead
+        of reflowing it (``[12, 24, 75, 5]`` -> ``[34, 24, 75, 5]``, width
+        unchanged), and the status band — which is the shell's own CHILD, one
+        row of ink carrying the connection sentence — tracked that phantom box
+        to a right edge of 108 on a 98-cell screen, where it was clipped with no
+        ellipsis. The class decision, the notice column and the composition's
+        row budget all resolve from HERE so they cannot drift apart again.
+
+        Everything is a live layout INPUT — the sidebar's stylesheet width and
+        the workspace's own overlay class — never a region read off a preceding
+        frame, so a sidebar toggle and a terminal resize land on the same painted
+        frame and neither needs a second pass to converge (the discipline
+        ``_sync_boot_column_width`` states for the notice column, now shared).
+        The overlay case is excluded because a floating drawer displaces
+        nothing: subtracting it there would narrow the lane to a box no widget is
+        drawn in.
+        """
+        box = max(0, terminal_width - SCREEN_INSET)
+        sidebar = self._session_sidebar
+        sidebar_width = sidebar.styles.width
+        if sidebar.display and sidebar_width is not None:
+            if not self.query_one("#session-workspace").has_class("sidebar-overlay"):
+                box = max(0, box - int(sidebar_width.value))
+        return box
+
     def _sync_boot_card(self, terminal_width: int) -> None:
-        """Decide whether this terminal is wide enough for the boot CARD.
+        """Decide whether this terminal's COMPOSER LANE is wide enough for the CARD.
 
         The stylesheet cannot ask how wide the terminal is, so the width the card
         WOULD take is resolved here and the class only goes on when the ground left
         beside it is wide enough to read as a margin. Computing a width in Python
         for want of a media query is the same move ``Toast._refit`` already makes.
+
+        The box is the LANE, not the terminal (``_boot_lane_width``), and that is
+        load-bearing rather than tidy. The sheet resolves the clamp against the
+        dock's own content box, so a card decision taken on the terminal's width
+        lets a docked sidebar hide the overflow: the floor wins, and the panel is
+        drawn wider than its parent. Measuring the lane makes the app's model and
+        the sheet agree by construction — at 100 cells with the sidebar docked
+        the lane is 65, ``boot_card_width`` clamps the 75-cell floor to 65, the
+        8-cell margin test fails, and the panel degrades to the full-width bar of
+        its lane, which is the SAME honest degradation a 65-column terminal
+        already gets (the threshold is a property of the box the panel is drawn
+        in, never of the terminal).
 
         A LIVE PROMPT stands the card down entirely (#168). The card composition
         is the empty-state splash resting on a clamped composer, and a question
@@ -15928,7 +15976,7 @@ class OperatorApp(App[None]):
         # removed — a wide terminal with a populated transcript is a bar, not a
         # card. Riding the same "the transcript is empty" condition keeps the
         # class honest on every re-resolution, not only on the boot path.
-        box = max(0, terminal_width - SCREEN_INSET)
+        box = self._boot_lane_width(terminal_width)
         card = boot_card_width(box)
         card_up = (
             self.screen.has_class(BOOT_LAYOUT_CLASS)
@@ -15936,7 +15984,7 @@ class OperatorApp(App[None]):
             and box - card >= BOOT_CARD_MIN_INSET
         )
         self.screen.set_class(card_up, BOOT_CARD_CLASS)
-        self._sync_boot_column_width(box)
+        self._sync_boot_column_width()
 
     def _prompt_is_live(self) -> bool:
         """Is the dock holding a question the user still has to answer?
@@ -15959,7 +16007,7 @@ class OperatorApp(App[None]):
             return False
         return bool(host.display) and bool(host.children)
 
-    def _sync_boot_column_width(self, box: int) -> None:
+    def _sync_boot_column_width(self) -> None:
         """Reconcile every boot notice against the card it shares an axis with.
 
         A notice under the splash (an MCP server that failed to connect) is part
@@ -15979,25 +16027,15 @@ class OperatorApp(App[None]):
         which is how the width assigned below arrives.
         """
         transcript = self._transcript_view()
+        # The lane, and it is the SAME box `_sync_boot_card` decided the class on:
+        # the card is centred by the sheet in the dock's content box, so the column
+        # a notice adopts is a property of that box. This pass used to carry its own
+        # copy of that subtraction and then re-add the 75-cell floor on top, which
+        # is how a notice kept a 75-cell width inside a 65-cell lane after the
+        # class had been withheld — the two measurements agreeing on a phantom.
+        box = self._boot_lane_width(self.size.width)
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
-        # A docked sidebar has already displaced the transcript AND reduced the
-        # composer's containing box. Reusing the screen width here spends that
-        # space twice: at 190 columns the notice started 23 cells right of the
-        # composer. Use the sidebar's resolved layout inputs, not last frame's
-        # widget regions, so toggles and resizes land on the same painted frame.
-        sidebar = self._session_sidebar
-        sidebar_width = sidebar.styles.width
-        if (
-            sidebar.display
-            and not self.query_one("#session-workspace").has_class("sidebar-overlay")
-            and sidebar_width is not None
-        ):
-            box = max(0, box - int(sidebar_width.value))
-            # The existing card class keeps the stylesheet's 75-cell floor even
-            # when a docked sidebar leaves less room; match that composer rather
-            # than changing its layout as a side effect of moving a notice.
-            card = max(BOOT_CARD_MIN_WIDTH, boot_card_width(box))
         # The card is centred by the stylesheet in `box` — the main lane's
         # content box — so the offset that lands a notice on the card's column
         # has to be computed against THAT box, then rebased into the transcript's
@@ -16071,7 +16109,10 @@ class OperatorApp(App[None]):
             # Rows left reserved here would be a hole below a populated transcript.
             self._reserve_boot_rows(dock, gap=False, lift=0)
             return
-        box = Size(max(0, size.width - SCREEN_INSET), max(0, size.height - SCREEN_INSET))
+        # The LANE, for the same reason the card's class decision uses it: the
+        # rows the dock measures at below depend on how wide the shell is drawn,
+        # and the shell is the lane's width when the card is withheld.
+        box = Size(self._boot_lane_width(size.width), max(0, size.height - SCREEN_INSET))
         transcript = self._transcript_view()
         # Rows the region above the card would have with NO reserve in it, and the
         # width the splash is drawn at. The transcript's own gutter is part of the
@@ -19838,7 +19879,7 @@ class OperatorApp(App[None]):
             # the next resize — `_sync_boot_card`, the other reconciliation
             # point, does not run on this transition.
             self.screen.remove_class(BOOT_CARD_CLASS)
-            self._sync_boot_column_width(max(0, self.size.width - SCREEN_INSET))
+            self._sync_boot_column_width()
         self._sync_boot_layout()
 
     def _ensure_welcome_view(self) -> WelcomeView | None:

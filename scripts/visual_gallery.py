@@ -42,11 +42,15 @@ def cases() -> list[dict[str, Any]]:
                 args += ["100x30", *(["focus"] if variant == "focus" else [])]
             elif script in {
                 "copy_shot.py",
+                "dock_band_shot.py",
                 "fork_shot.py",
                 "settings_shot.py",
                 "settings_suggest_shot.py",
                 "sibling_shot.py",
             }:
+                # `100x30` then the variant: `dock_band_shot.py`'s variant is the
+                # band's connection state, and its whole point is the docked
+                # composer at the size the clipped row was reported at.
                 args += ["100x30", variant]
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
