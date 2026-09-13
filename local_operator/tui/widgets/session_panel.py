@@ -862,7 +862,10 @@ def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
     row whose only content is the absence of a problem.
     """
     snapshot = runtime.search_spend
-    if snapshot is None or not snapshot.searches:
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # READS has money to show, and guarding on searches drew nothing here while
+    # the band above kept the figure.
+    if snapshot is None or not snapshot.count:
         return
     body.extend(
         search_spend_section(
@@ -1091,20 +1094,18 @@ def _draw_recorded_usage(
     # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
     # own scope has no reason to report, and omitting it here would put that
     # mark on screen with its footnote suppressed.
+    # The search-spend block's own marks are NOT in this list: it draws its
+    # footnote beside itself (``search_spend_section``), because the screens that
+    # render the block are not always the screens that render these totals --
+    # `/session`'s loading frame draws the block with no totals at all -- and a
+    # footnote here would both miss that frame and sit far from the marks on
+    # `/analytics`.
     scopes: list[_CostLike] = [
         aggregate,
         subtree,
         *report.by_model.values(),
         *report.by_purpose.values(),
     ]
-    # The search-spend block is a SECOND money vocabulary on this screen (`+`
-    # for a lower bound, `$—` for an unpriced engine) and it drew its marks with
-    # no footnote at all: the INVARIANT above failed the moment a section below
-    # rendered `$`-figures from scopes outside this list. Its total and its
-    # per-provider rows are those scopes.
-    if runtime.search_spend is not None:
-        scopes.append(runtime.search_spend)
-        scopes.extend(runtime.search_spend.rows)
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()

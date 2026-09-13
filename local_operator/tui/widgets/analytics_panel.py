@@ -203,9 +203,7 @@ def scope_needs_cost_legend(scope: "_CostLike") -> bool:
 
 
 def _needs_cost_legend(
-    aggregate: "UsageAggregate",
-    forest: list["SessionNode"] | None = None,
-    search_scopes: "list[_CostLike] | None" = None,
+    aggregate: "UsageAggregate", forest: list["SessionNode"] | None = None
 ) -> bool:
     """Whether any scope on screen shows a ``+`` (partial) or ``$—`` (unknown).
 
@@ -234,10 +232,9 @@ def _needs_cost_legend(
         *aggregate.by_session.values(),
         *(node.total for node in _iter_nodes(forest)),
     ]
-    # The search block is a second money vocabulary on this screen and it is not
-    # in the aggregate at all, so its scopes are handed in explicitly.
-    if search_scopes:
-        scopes.extend(search_scopes)
+    # The search block's marks are not covered here on purpose: that block draws
+    # its own footnote beside itself (see ``search_spend_section``), so listing
+    # its scopes here would print the same legend twice on one screen.
     return any(scope_needs_cost_legend(s) for s in scopes)
 
 
@@ -315,7 +312,10 @@ def search_spend_section(
     session that never searched carries no empty heading.
     """
     lines: list[Text] = []
-    if not snapshot.searches:
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # READS has money to show and no searches at all, and guarding on searches
+    # dropped its section entirely while the band kept the figure.
+    if not snapshot.count:
         return lines
 
     def row(name: str, scope: "_CostLike", notes: Sequence[str] = ()) -> None:
@@ -370,13 +370,24 @@ def search_spend_section(
                 f"{n} {word} · no published price",
                 f"{n} {word} · unpriced",
             )
+        # No nounless rung: ``5 · 1 unpriced`` reads as a fragment, and the
+        # wrap-and-continuation path already covers the widths that used to need
+        # it (the continuation line takes the widest rung that fits there).
         return (
             f"{n} {word} · {unpriced} unpriced",
-            f"{n} · {unpriced} unpriced",
+            f"{n} {word} · unpriced",
         )
 
     def total_notes() -> tuple[str, ...]:
-        """The total's own counts, reads named separately when there are any."""
+        """The total's own counts, in the kinds it actually has.
+
+        A read-only conversation says ``1 read`` rather than ``0 searches · 1
+        read``: the zero is noise, and leading with it buries the figure that
+        explains the money. A mixed total names both, because either number
+        alone would misstate what the dollar figure covers.
+        """
+        if not snapshot.searches:
+            return search_notes(snapshot.reads, snapshot.unpriced_searches, kind="read")
         base = search_notes(snapshot.searches, snapshot.unpriced_searches)
         if not snapshot.reads:
             return base
@@ -423,12 +434,25 @@ def search_spend_section(
                 entry,
                 search_notes(entry.count, entry.unpriced_searches, kind=entry.kind),
             )
-    if note:
+    # The money footnote for THIS block, drawn here rather than with the model
+    # figures: these are the marks it explains (`+` lower bound, `$—` unknown),
+    # and the screens that draw the block are not always the screens that draw
+    # the totals -- `/session`'s loading frame draws the block with no totals at
+    # all, and `/analytics` puts the model legend at the foot of a body this
+    # block sits nowhere near. Beside the marks is the only placement that is
+    # always co-visible with them.
+    block_scopes: list[_CostLike] = [snapshot, *snapshot.rows]
+    footnote = ""
+    if any(scope_needs_cost_legend(scope) for scope in block_scopes):
+        footnote = COST_LEGEND
+    for paragraph in (note, footnote):
+        if not paragraph:
+            continue
         # Wrapped with the continuation indented, for the reason
         # ``session_panel._Body.note`` documents: handed to the container's
         # ``fold`` instead, a continuation lands at column 0 and reads as a new
         # record in the middle of the block (design D2).
-        for visual in textwrap.wrap(note, max(1, width - 2)) or [""]:
+        for visual in textwrap.wrap(paragraph, max(1, width - 2)) or [""]:
             para = Text(no_wrap=True, overflow="crop")
             para.append(f"  {visual}", style=semantic_style("dim"))
             lines.append(para)
@@ -1186,12 +1210,7 @@ def build_report(
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    search_scopes: list[_CostLike] = []
-    for snapshot in (search_spend, session_search_spend):
-        if snapshot is not None:
-            search_scopes.append(snapshot)
-            search_scopes.extend(snapshot.rows)
-    if _needs_cost_legend(aggregate, forest, search_scopes):
+    if _needs_cost_legend(aggregate, forest):
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)

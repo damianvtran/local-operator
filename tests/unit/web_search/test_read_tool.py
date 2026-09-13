@@ -284,10 +284,15 @@ async def test_read_records_spend_under_its_own_provider_key(monkeypatch) -> Non
     result = await read_tool.execute_web_read("call-5", {"question": "q"}, None, None, _context())
 
     totals = SEARCH_SPEND.session("s1")
-    assert totals.searches == 1
-    assert "deepseek:read" in totals.by_provider
+    # A read is money but NOT a search: the count must land in ``reads`` and
+    # leave the session's search count alone, and the row must carry its kind so
+    # the panels can say "read" instead of claiming it was a search.
+    assert totals.searches == 0
+    assert totals.reads == 1
+    assert totals.by_provider["deepseek:read"].kind == "read"
     assert totals.usd > 0
     assert result.details["read_cost"]["usd"] == pytest.approx(totals.usd, abs=1e-6)
+    assert result.details["read_cost"]["session_searches"] == 0
 
 
 @pytest.mark.asyncio

@@ -382,7 +382,11 @@ async def execute_web_read(
     # A read is spend, and it is not a search: it is recorded under its own
     # provider key so the counts stay truthful while the money still lands in the
     # session's search-spend total.
-    entry = SEARCH_SPEND.record(session_id, "deepseek:read", cost, searches=1)
+    # ``kind="read"``: this is the ledger write for a SUCCESSFUL read, and the
+    # one that matters. Without it the read is booked as a search -- the row
+    # renders "1 search" and the session's search count is inflated by reads,
+    # which is the opposite of why the key carries a ``:read`` suffix at all.
+    entry = SEARCH_SPEND.record(session_id, "deepseek:read", cost, searches=1, kind="read")
     session_totals = SEARCH_SPEND.session(session_id)
 
     refused = answer.strip().upper().startswith(NOT_IN_PAGES)
