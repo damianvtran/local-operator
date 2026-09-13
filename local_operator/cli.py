@@ -3989,6 +3989,14 @@ def _bind_serve_socket(host: str, port: int) -> socket.socket:
     on the socket it is handed, which is the same sequence uvicorn uses on its
     own path. Raising is deliberate: the caller reports a bind failure the way
     uvicorn would, rather than letting it surface as a traceback.
+
+    ``SO_REUSEADDR`` is kept because it is what lets a daemon restart
+    immediately after a crash, and its consequence is worth naming: on
+    BSD/macOS (and on Linux for two sockets that are both merely bound) it can
+    let a second socket bind an address a first NON-LISTENING socket holds, so
+    the friendly "cannot bind" refusal above is only guaranteed against a
+    LISTENING holder. Against a bound-but-not-listening one the collision
+    instead surfaces from uvicorn's own ``listen``, as its own error.
     """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family=family)
