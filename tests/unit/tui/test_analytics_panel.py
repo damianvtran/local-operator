@@ -93,6 +93,28 @@ def test_format_percent():
     assert format_percent(None) == "—"
 
 
+def test_a_non_finite_cost_renders_instead_of_raising():
+    """R1-7: a figure the ladder cannot take must not take the frame down.
+
+    ``format_cost`` reads the exact integer when the aggregate carries one, and
+    falls back to the float. That fallback used to be ``int(round(cost * 1e6))``,
+    which raises on a NaN/inf — against ``tui/costs.py``'s own contract that
+    nothing there raises. The panel prints what the accounting holds instead.
+    """
+
+    class _Stub:
+        cost_is_known = True
+        cost_is_partial = False
+        cost_micro = None
+
+        def __init__(self, usd: float) -> None:
+            self.cost_usd = usd
+
+    assert format_cost(_Stub(float("nan"))) == "$nan"
+    assert format_cost(_Stub(float("inf"))) == "$inf"
+    assert format_cost(_Stub(2.5)) == "$2.50"
+
+
 def test_format_cost_states():
     def agg(cost_micro, known, calls):
         return UsageAggregate(calls=calls, cost_micro=cost_micro, cost_known_calls=known)

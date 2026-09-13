@@ -3819,14 +3819,14 @@ class AttachedSession:
             suffix = read_replay_suffix(
                 directory,
                 through_id=through_id,
-                # TWO types out of ONE pass: the frontend checkpoint and the spend
-                # record. Asking twice would re-read a 100 MB journal for a row
-                # the same backward scan already passed.
-                checkpoint_types=(
-                    (FRONTEND_CHECKPOINT_CUSTOM_TYPE, SESSION_SPEND_CUSTOM_TYPE)
-                    if want_checkpoint
-                    else ()
-                ),
+                # TWO types out of ONE pass, and the distinction between the two
+                # parameters is load-bearing (review R1-2): the checkpoint is
+                # REQUIRED (the stop condition may wait for it), the spend record
+                # is OPPORTUNISTIC — a pre-ledger journal legitimately has none,
+                # and requiring it made this read the whole file on every cold
+                # open of exactly the sessions that have a checkpoint.
+                checkpoint_types=((FRONTEND_CHECKPOINT_CUSTOM_TYPE,) if want_checkpoint else ()),
+                opportunistic_types=((SESSION_SPEND_CUSTOM_TYPE,) if want_checkpoint else ()),
             )
             cut = through_id
             if cut is not None and not suffix.through_present and not strict_cut:

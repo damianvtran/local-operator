@@ -535,9 +535,11 @@ Fires when a session has usage rows but no `session_spend.v1` row — measured a
 - **Scope**: parse the transcript and sum the money on **every** usage row, with
   **no compaction boundary** (§2.2). Price each row through the full resolver
   off-loop; use `usd_cost`/`estimated_usd_cost` verbatim where present.
-- **Classification**: `floor = the journal carries any compaction or prune
-  marker` (rows may have been dropped and the sum cannot be whole);
-  `unpriced_calls` = rows with tokens the resolver could not price.
+- **Classification**: `floor` is earned ONLY by a positive report that a money
+  row is gone — never by a compaction or prune marker, which rewrite and hide
+  rows without removing one (see §12.1 item 10, revised by review R1-4);
+  `unpriced_calls` = rows with tokens the resolver could not price, which is the
+  bound a rebuild can earn honestly (and the reason `≥` still appears).
 - **Off the loop, always.** The `refresh_model_info_background` seam named in
   the brief is for *pricing*; the rebuild's blocking work is the parse, so it
   goes through `asyncio.to_thread` from a session-owned task, and publishes
@@ -661,6 +663,7 @@ is a rounded reading, not a clipped one. Two real defects remain:
 | `EXACT`, < $1 | `$0.213` | 3dp |
 | `EXACT`, < $0.01 | `$0.0042` | 4dp |
 | `EXACT`, < $0.00005 and > 0 | **`<$0.0001`** (8 cells, was 7) | the only new spelling on the cell, and the only case where the ladder lies |
+| `PARTIAL`/`FLOOR`, < $0.00005 and > 0 | **`≥<$0.0001`** (9 cells) | **correction (review R1-3): the mark and the sub-resolution spelling genuinely CO-OCCUR** — a sub-half-micro-cent total with an unpriced call beside it is a lower bound, so `≥` is owed, and the digits round to zero, so `<` is owed. Both are true and the cell must carry both |
 | `PARTIAL` | `≥$1.90` | today's `RESTORED_COST_PREFIX`, now earned |
 | `FLOOR` | `≥$1.90` | same spelling — both are real lower bounds |
 | `UNKNOWN` | `$—` | no mark; `≥$—` is a contradiction (`analytics_panel.py:683-689`) |
@@ -668,10 +671,18 @@ is a rounded reading, not a clipped one. Two real defects remain:
 
 Width budget: the cost segment is one of the last things shed
 (`_DROP_LADDER`, `status_line.py:300-345`; it is not shed until the ladder's
-tail), and the only widening here is one cell, in a state (`<$0.0001`) that
-cannot co-occur with the marks. `RESTORED_COST_PREFIX` already costs a cell in
+tail), and the only widening here is one cell — to **8** for the unmarked
+sub-micro-cent spelling and **9** for the marked one (`≥<$0.0001`), because the
+mark cannot be avoided by construction: an unpriced call makes the total a lower
+bound (`PARTIAL`) whatever the digits say, and an amount under half a
+micro-cent rounds to `$0.0000` whatever the mark says (review R1-3). The
+earlier claim that the two "cannot co-occur" was wrong, and a width budget
+built on it would have been one cell short in exactly the state a partial
+session reaches first. `RESTORED_COST_PREFIX` already costs a cell in
 the marked states. **The designer must still capture the band at 80, 100 and
-150 columns before and after** (§10) — a one-cell widening is exactly the kind
+150 columns before and after** (§10) — and the marked sub-micro-cent state
+(`≥<$0.0001`) is one of the frames to capture, not only the unmarked one — a
+one-cell widening is exactly the kind
 of change that a green test cannot see.
 
 ### 8.3 Where the exact micro-USD is readable
@@ -1055,6 +1066,45 @@ rebuilt, i.e. the rebuild was disabled for exactly the population it exists for
 (92.3% of the store). Only a call that accrued LIVE in this process makes a
 reconstruction redundant, because only its message may be missing from the
 journal a reconstruction reads.
+
+8. **The turn-end remainder is told about a correction** (`note_spend_correction`,
+review R1-1). The remainder is `max(0, aggregate_price - accrued_this_turn)` and
+`accrued_this_turn` was fed by the PAINT prices alone, so a correction that moved
+the accumulator mid-turn left the remainder to re-bill the whole delta: paint
+$1.00 → corrected $2.00 → aggregate $2.00 persisted **$3.00** as `EXACT`. The two
+numbers stay separate — one is money, the other is "what this turn's aggregate
+has already been charged" — and are moved together. The mirror is scoped by call
+index to the turn that accrued the call, so a correction outliving its turn does
+NOT suppress the next turn's remainder: that turn's aggregate was paint-grade
+over the same calls, so the delta on top of it is the corrected total.
+9. **The suffix reader separates REQUIRED from OPPORTUNISTIC types** (review
+R1-2). Requiring the spend record meant a pre-ledger journal — which by
+definition has none — could never satisfy the stop condition, so a cold open read
+to the start of the file: 4,194,304 bytes became 16,701,655 (the whole journal)
+on `28a800c6a783`, and 18,192,882 on `560f212a892c`. Opportunistic types are
+collected when the backward scan passes them and never gate the stop; the
+compaction boundary still does, so a row inside the replayed window is still
+found.
+10. **`floor` is never earned by a marker** (review R1-4). Every writer that
+rewrites a row keeps its money: `_pruned_entry` replaces only
+`payload["content"]` (a pruned row's `usage` survives, and a pruned tool result's
+`search_cost` lives in `provider_payload.details`), `compact_file` drops prune
+entries and superseded collapsible customs but never a message row, and the
+compaction boundary hides rows from the CONTEXT replay without removing them —
+which is why §2.2's rule exists at all. A marker is evidence of rewriting, not of
+loss, so the 494 sessions the census classified `rebuild_would_be_floor` are
+exact or partial in fact, and `≥` now means only what it can: a call the pricing
+could not size (`PARTIAL`). The predicate that remains
+(`transcript.lost_money_rows`) reads a positive report that a usage row is gone.
+11. **A downward re-price is not a broken attach invariant** (review R1-6). The
+record's backwards-total WARNING fired for every legitimate cheaper re-price; it
+is now debug-level when a correction caused the drop (one-shot token, cleared on
+every write) and stays a warning for an unexplained one.
+12. **A float the ladder cannot take renders, it does not raise** (review R1-7).
+`micro_from_usd` returns `None` for a non-finite value, and the two wrappers that
+still hold a float print what the accounting holds (`$nan`) rather than letting
+`int(round(nan))` take a frame down — `tui/costs.py`'s own contract. R1-3's
+corrected width claim (9 cells, not 8) is in §8.2.
 
 ## 13. What I could not settle from the code, and what would settle it
 

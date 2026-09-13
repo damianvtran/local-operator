@@ -480,6 +480,7 @@ def read_replay_suffix(
     *,
     through_id: str | None = None,
     checkpoint_types: tuple[str, ...] | str | None = None,
+    opportunistic_types: tuple[str, ...] | str | None = None,
 ) -> ReplaySuffix:
     """Read only the journal suffix :func:`replay_entries` needs, from EOF.
 
@@ -504,14 +505,17 @@ def read_replay_suffix(
       today's whole-file cost, which is the correct fallback, not a shortcut);
     - ``through_id``, when given, is in the buffer — a cursor not yet seen
       means "read further", never "cut at the tail" (the strict-cut contract);
-    - the newest custom row of EVERY requested type is in the buffer, so the
-      caller does not pay a second read for it. A TUPLE, not one type: the cold
-      money reader wants the frontend checkpoint AND the spend record out of the
-      same pass, and two parameters would mean two stop conditions (`seen`
-      flags computed from the same buffer) that could disagree — the single
-      predicate is what keeps "I have everything I asked for" one fact. A bare
-      ``str`` is still accepted, because a single-type caller must not have to
-      change. Types are parameters rather than imports: the frontend
+    - the newest custom row of EVERY REQUIRED type is in the buffer, so the
+      caller does not pay a second read for it. "Required" is the load-bearing
+      word (review R1-2): a type that may legitimately be ABSENT from a journal
+      must not gate this, or the reader walks to the start of the file for the
+      whole population that lacks it — which is what happened when the spend
+      record joined the request, taking a 16.7 MB journal from a 4.19 MB read to
+      its full length on every cold open, and making a store-wide census cost
+      29 s. Such types go in ``opportunistic_types``: collected when the backward
+      scan already passes them (the scan still reaches the compaction boundary,
+      so anything inside the replayed window IS collected) and never a stop
+      condition. Types are parameters rather than imports: the frontend
       checkpoint's type constant lives in ``frontend_state``, whose import
       graph reaches the TUI, and this module must stay a leaf.
 
@@ -537,6 +541,13 @@ def read_replay_suffix(
     wanted: tuple[str, ...] = (
         (checkpoint_types,) if isinstance(checkpoint_types, str) else tuple(checkpoint_types or ())
     )
+    # Collected but never required: see the stop-condition note in the docstring.
+    opportunistic: tuple[str, ...] = (
+        (opportunistic_types,)
+        if isinstance(opportunistic_types, str)
+        else tuple(opportunistic_types or ())
+    )
+    collectible = wanted + opportunistic
     checkpoints: dict[str, dict[str, Any]] = {}
     compaction: TranscriptEntry | None = None
     first_kept_id: str | None = None
@@ -601,11 +612,11 @@ def read_replay_suffix(
                 ):
                     compaction = entry
                     first_kept_id = entry.payload.get("first_kept_entry_id") or None
-                if wanted and entry.type == ENTRY_CUSTOM:
+                if collectible and entry.type == ENTRY_CUSTOM:
                     custom_type = entry.payload.get("custom_type")
                     if (
                         isinstance(custom_type, str)
-                        and custom_type in wanted
+                        and custom_type in collectible
                         and custom_type not in checkpoints
                     ):
                         details = dict(entry.payload.get("details", {}))
@@ -1207,13 +1218,14 @@ class Transcript:
         """
         return all_usage_rows(self._entries)
 
-    def journal_shrank(self) -> bool:
-        """Whether this journal's money can never be whole again.
+    def lost_money_rows(self) -> bool:
+        """Whether this journal POSITIVELY reports a dropped money row.
 
-        True when a compaction or a prune removed rows — the only justification
-        for a FLOOR after this change, and therefore the rebuild's ``floor``.
+        Not a marker count: compactions and prunes rewrite and hide rows without
+        removing any money (see :func:`lost_money_rows`), so a marker is not a
+        reason to claim ``≥``.
         """
-        return journal_shrank(self._entries)
+        return lost_money_rows(self._entries)
 
     def search_spend_rows(self) -> list[dict[str, Any]]:
         """Every ``web_search`` cost this conversation recorded, oldest first.
@@ -1733,30 +1745,40 @@ def all_usage_rows(entries: Sequence[TranscriptEntry]) -> list[dict[str, Any]]:
     ]
 
 
-def journal_shrank(entries: Sequence[TranscriptEntry]) -> bool:
-    """Whether rows carrying money may already have been dropped from the file.
+#: How a journal reports that rows were DROPPED (not merely rewritten). Nothing
+#: writes this today: see the note in ``Session._rebuild_spend``. It exists so the
+#: rebuild's ``floor`` has one place to read a real loss from, rather than
+#: inferring one from markers that provably remove no money (review R1-4).
+LOST_USAGE_KEY = "lost_usage_rows"
 
-    The rebuild's ``floor`` is this predicate and nothing else: it says the sum
-    cannot be whole IN PRINCIPLE because a compaction or a prune removed rows,
-    which is the only situation ``≥`` is allowed to mean after this change (the
-    old meaning — "we restored a point-in-time reading" — is what made the mark
-    noise on 93.8% of the store, design §5.4).
 
-    Both spellings of the shrink are consulted, exactly as
-    :func:`usages_since_newest_shrink` consults them: the live journal's
-    ``compaction``/``prune`` entries, and the marks a fold leaves behind
-    (``SHRUNK_KEY`` on the boundary row, ``provider_payload.pruned`` on a
-    blanked row). A folded journal keeps the marks and loses the entries, so
-    reading only the entries would classify a folded session as complete when
-    rows are demonstrably gone.
+def lost_money_rows(entries: Sequence[TranscriptEntry]) -> bool:
+    """Whether the file POSITIVELY reports that a money-carrying row is gone.
+
+    The rebuild's ``floor`` is this predicate and nothing else, and what it must
+    NOT be is a marker count. This was ``journal_shrank``, which returned True
+    for any ``compaction``/``prune`` entry or fold mark, and every writer in this
+    module keeps its money when it rewrites:
+
+    * ``_pruned_entry`` replaces ``payload["content"]`` and keeps the rest of the
+      payload, so a pruned row's ``usage`` survives — and the only prune call
+      site targets tool RESULTS, whose money is ``provider_payload.details
+      .search_cost``, also outside ``content``;
+    * ``compact_file`` drops prune ENTRIES and superseded collapsible customs
+      (the roster, this record), never a message row;
+    * the compaction boundary hides older rows from the CONTEXT replay
+      (``usages_since_newest_shrink``) without removing them from the file —
+      which is exactly why the rebuild must ignore that boundary (§2.2).
+
+    So a marker is evidence of rewriting, not of loss, and marking 494 sessions
+    ``≥`` for one spends the meaning the mark was rebuilt to carry (review R1-4).
+    ``≥`` is for money the file cannot show, which after this change means calls
+    the pricing could not size at all (``CostKnowledge.PARTIAL``).
     """
     for entry in entries:
-        if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
-            return True
         payload = entry.payload or {}
-        provider_payload = payload.get("provider_payload") or {}
-        if provider_payload.get(SHRUNK_KEY) or (
-            entry.type == ENTRY_MESSAGE and provider_payload.get("pruned")
+        if payload.get(LOST_USAGE_KEY) or (
+            (payload.get("provider_payload") or {}).get(LOST_USAGE_KEY)
         ):
             return True
     return False

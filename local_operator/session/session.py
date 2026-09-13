@@ -235,6 +235,29 @@ _PROCESS_BOOT_BUILD: Any = None
 _PROCESS_BOOT_BUILD_READ = False
 
 
+def scan_and_price_spend(
+    transcript: Transcript,
+) -> tuple[list[dict[str, Any]], bool, list[tuple[int, bool]]]:
+    """The rebuild's whole body except the publish: scan, loss check, price.
+
+    A module-level function so the WHOLE job is one ``asyncio.to_thread`` unit
+    (review R1-5). The scan is as much of the open as the pricing is:
+    ``all_usage_rows`` copies one dict per usage row and the loss check walks the
+    same entries a second time, over an entry list the worst real session
+    measures at ~255 MB / 8,466 rows. Returns ``(rows, lost_money, priced)``,
+    with ``rows`` empty for a session that has nothing to reconstruct.
+
+    ``lost_money`` is :func:`~local_operator.session.transcript.lost_money_rows`:
+    a POSITIVE report that a money row is gone. Compaction and prune markers are
+    deliberately not it (review R1-4) — every writer that rewrites a row keeps
+    its ``usage``, and the compaction boundary hides rows without removing them.
+    """
+    rows = transcript.all_usage_rows()
+    if not rows:
+        return [], False, []
+    return rows, transcript.lost_money_rows(), price_rows(rows)
+
+
 def _process_boot_build() -> Any:
     """The ``BuildStamp`` this process booted from, or ``None`` if unreadable."""
     global _PROCESS_BOOT_BUILD, _PROCESS_BOOT_BUILD_READ
@@ -2166,6 +2189,12 @@ class Session:
         #: than from a durable record. In-memory only: see
         #: :meth:`seed_spend_floor` for why the seed must not reach the disk.
         self._spend_seeded = False
+        #: Set when a downward re-price is applied, consumed by the next record
+        #: write. A cheaper resolved price is legitimate (the paint answer can be
+        #: staler and dearer — ``tui/costs.py``), so the backwards-total log must
+        #: not call it a broken attach invariant (review R1-6). One-shot, cleared
+        #: on every write, so a later unexplained decrease still warns.
+        self._spend_downward_correction = False
         #: How many calls have accrued LIVE in this process. Distinct from
         #: ``spend.calls``, which the legacy SEED also increments: the seed is a
         #: reconstruction of money already in the journal, so it must never look
@@ -6132,7 +6161,21 @@ class Session:
             return
         if not known:
             return
-        if self.spend.correct(index, micro):
+        delta = self.spend.correct(index, micro)
+        if delta:
+            if delta < 0:
+                self._spend_downward_correction = True
+            # The front end's turn-end remainder measures the turn against the
+            # prices it already counted. A correction it cannot see there is
+            # billed a second time by the remainder, so tell it how much of this
+            # accumulator arrived as a re-price (review R1-1). The index is
+            # passed so a correction whose turn has already closed is not charged
+            # to the NEXT turn's reconciliation (the aggregate of the closed turn
+            # was paint-grade over the same calls, so the delta on top of it is
+            # the right total, not a double bill).
+            store = self._frontend_state_store
+            if store is not None:
+                store.note_spend_correction(index, delta)
             self.schedule_spend_persist()
             # Republish so the band converges on the authoritative figure
             # instead of keeping the optimistic one it painted this tick.
@@ -6174,16 +6217,30 @@ class Session:
         details = self.spend.to_details()
         previous = self._spend_persisted_micro
         if details["micro"] < previous:
-            # The attach protocol (``resume.live_runtime_pid``) is what prevents
-            # this; a log is the observability that says it was broken, exactly
-            # as the ``remainder < 0`` case is logged rather than swallowed.
-            logger.warning(
-                "session %s spend went backwards: %d < %d (writer %s)",
-                self.session_id,
-                details["micro"],
-                previous,
-                details.get("writer", ""),
-            )
+            if self._spend_downward_correction:
+                # A re-price can legitimately come out cheaper, and it is the
+                # one writer that is ALLOWED to move the total down. Debug, not
+                # warning: this is not the broken-attach signal (review R1-6).
+                logger.debug(
+                    "session %s spend re-priced downward: %d < %d (writer %s)",
+                    self.session_id,
+                    details["micro"],
+                    previous,
+                    details.get("writer", ""),
+                )
+            else:
+                # The attach protocol (``resume.live_runtime_pid``) is what
+                # prevents this; a log is the observability that says it was
+                # broken, exactly as the ``remainder < 0`` case is logged rather
+                # than swallowed.
+                logger.warning(
+                    "session %s spend went backwards: %d < %d (writer %s)",
+                    self.session_id,
+                    details["micro"],
+                    previous,
+                    details.get("writer", ""),
+                )
+        self._spend_downward_correction = False
         try:
             await self._transcript.append_custom(
                 SESSION_SPEND_CUSTOM_TYPE, details, preserve_mtime=True
@@ -6208,6 +6265,11 @@ class Session:
         - **never blocking the open**: the task is fire-and-forget and publishes
           through the frontend mutation path, so the band paints the pre-rebuild
           state (today's behaviour) until the correction lands;
+        - **nothing on the event loop, the SCAN included** (review R1-5):
+          ``all_usage_rows`` copies one dict per row and ``journal_shrank``
+          walks the same list again, over an entry list the worst real session
+          measures at ~255 MB / 8,466 rows. The worker therefore does scan,
+          shrink check and price, and only the publish returns to the loop;
         - **never decreasing a persisted total**, checked again after the work.
         """
         if self._spend_rebuild_started or self._spend_recorded:
@@ -6219,21 +6281,16 @@ class Session:
         # too, so it cannot answer this question.
         if self._spend_live_calls:
             return
-        transcript = self._transcript
-        rows = transcript.all_usage_rows()
-        if not rows:
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
         self._spend_rebuild_started = True
-        shrunk = transcript.journal_shrank()
-        task = loop.create_task(self._rebuild_spend(rows, shrunk))
+        task = loop.create_task(self._rebuild_spend())
         self._spend_tasks.add(task)
         task.add_done_callback(self._spend_tasks.discard)
 
-    async def _rebuild_spend(self, rows: list[dict[str, Any]], shrunk: bool) -> None:
+    async def _rebuild_spend(self) -> None:
         """Sum EVERY usage row (no compaction boundary) through the full resolver.
 
         The boundary rule is the load-bearing part: money already spent is not
@@ -6241,13 +6298,27 @@ class Session:
         boundary here would delete 8.8x of one real session's bill (§2.2).
         ``floor`` therefore comes from whether rows were DROPPED, not from
         whether we reconstructed the number.
+
+        The scan runs on the worker with the pricing (review R1-5), so the only
+        thing this coroutine does on the event loop is decide what to publish.
         """
-        rebuilt = SessionSpend(floor=shrunk, rebuilt=True, writer=writer_stamp())
         try:
-            priced = await asyncio.to_thread(price_rows, rows)
+            rows, lost_money, priced = await asyncio.to_thread(
+                scan_and_price_spend, self._transcript
+            )
         except Exception:  # noqa: BLE001 — an unpriced rebuild is not an error
             logger.debug("session spend rebuild pricing failed", exc_info=True)
             return
+        if not rows:
+            return
+        # ``floor`` is earned by a POSITIVE report that a money row is gone, never
+        # by a compaction or prune marker (review R1-4): every writer in
+        # ``transcript`` keeps a row's ``usage`` when it rewrites it, and the
+        # boundary only hides rows from the context replay. A marker-based floor
+        # claimed ``≥`` on 494 of the store's sessions whose every row is readable,
+        # which is the noise this mark exists to remove. The remaining bound is
+        # honest and different in kind: an unpriced call makes the total PARTIAL.
+        rebuilt = SessionSpend(floor=lost_money, rebuilt=True, writer=writer_stamp())
         for row, (micro, known) in zip(rows, priced, strict=False):
             identity = {
                 "provider": str(row.get("provider", "") or ""),

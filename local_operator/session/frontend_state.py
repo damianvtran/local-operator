@@ -3140,6 +3140,13 @@ class FrontendStateStore:
         #: facade, a test double). ONE arithmetic site still: this is the same
         #: ``SessionSpend``, not a second sum computed here.
         self._local_spend: SessionSpend | None = None
+        #: Call indices accrued in the turn currently being reconciled. A
+        #: per-call CORRECTION has to move ``current_turn_accrued_cost`` (review
+        #: R1-1), and the index is what says whether it belongs to this turn: a
+        #: correction that lands after its turn closed must NOT be charged to the
+        #: next turn's remainder, because the closed turn's aggregate was priced
+        #: over the same calls and the delta on top of it IS the right total.
+        self._turn_spend_calls: set[int] = set()
 
     @property
     def state(self) -> FrontendSessionState:
@@ -3867,8 +3874,33 @@ class FrontendStateStore:
         schedule = getattr(session, "schedule_spend_price", None)
         if callable(schedule) and not usage_prices_known(usage):
             # A provider receipt is already the exact bill; nothing to converge.
+            self._turn_spend_calls.add(index)
             cast("ScheduleSpendFn", schedule)(index, usage, identity)
         return spend
+
+    def note_spend_correction(self, index: int, delta_micro: int) -> None:
+        """Move the turn's already-accrued figure with a call's re-price.
+
+        The turn-end remainder is ``max(0, aggregate_price - accrued_this_turn)``
+        and ``accrued_this_turn`` is fed by the PAINT prices, so a correction
+        that moved the durable accumulator without moving that counter made the
+        remainder re-bill the whole correction: paint $1.00, corrected $2.00,
+        aggregate $2.00 persisted **$3.00** and published as EXACT (review
+        R1-1). The two numbers exist for different reasons — one is money, the
+        other is "what the turn's aggregate price has already been charged" — so
+        they are moved together rather than merged.
+
+        Scoped to the turn by ``index``. For a call the current turn did not
+        accrue (the correction outlived its turn), the counter is left alone on
+        purpose: that turn's aggregate already claimed the call at paint grade,
+        so the delta on top of it is the corrected total, not a second bill.
+        """
+        if not delta_micro or index not in self._turn_spend_calls:
+            return
+        state = self._state
+        self.mutate(
+            current_turn_accrued_cost=state.current_turn_accrued_cost + delta_micro / 1_000_000.0
+        )
 
     def _spend_remainder(self, session: Any, remainder: float) -> SessionSpend:
         """Apply a turn-end remainder to the accumulator, if it is worth one."""
@@ -4182,6 +4214,11 @@ class FrontendStateStore:
             )
         elif isinstance(event, AgentEndEvent):
             duration = state.active_duration_s
+            # The turn is over, so no later correction may claim a place in its
+            # reconciliation (``note_spend_correction`` reads this set). Cleared
+            # here rather than at each reset site because both branches below
+            # end the same turn.
+            self._turn_spend_calls.clear()
             if state.activity_started_at is not None:
                 duration += max(0.0, now - state.activity_started_at)
             if event.error:

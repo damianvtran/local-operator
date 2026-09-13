@@ -37,6 +37,7 @@ Nothing here raises. A price is never worth a broken frame.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +49,7 @@ __all__ = [
     "SearchSpendSnapshot",
     "format_usd",
     "format_usd_exact",
+    "micro_from_usd",
     "turn_cost",
     "job_cost",
     "cost_summary",
@@ -74,7 +76,11 @@ def format_usd(micro: int) -> str:
     - ``$1.90`` above a dollar, ``$0.213`` above a cent, ``$0.0042`` below it;
     - a NONZERO amount under half a ten-thousandth of a dollar renders
       ``<$0.0001`` — the one spelling where the ladder would otherwise lie, and
-      8 cells wide, in a state that cannot co-occur with a ``≥`` (design §8.2);
+      8 cells wide, or 9 when marked (``≥<$0.0001``). The mark and the spelling
+      DO co-occur: an unpriced call makes the total a lower bound regardless of
+      the digits, and the digits round to zero regardless of the mark (review
+      R1-3 corrected the design's earlier "cannot co-occur" claim, which would
+      have budgeted one cell short);
     - zero renders ``$0.0000``, unchanged: for a genuine zero that spelling is
       correct, and the band's zero policy already drops the segment entirely.
 
@@ -91,6 +97,25 @@ def format_usd(micro: int) -> str:
     if cost < 1.0:
         return f"${cost:.3f}"
     return f"${cost:.2f}"
+
+
+def micro_from_usd(cost: Any) -> int | None:
+    """The exact integer micro-USD of a FLOAT dollar figure, or ``None``.
+
+    ``None`` means "not a figure this ladder can take": non-finite (a NaN
+    restored from a corrupt checkpoint, an inf from a division the accounting
+    did not guard) or not a number at all (a ``None`` from a reduced host).
+    ``int(round(nan))`` RAISES, so the two display wrappers that still hold a
+    float — the band's and ``/analytics``' — used to be able to take a frame
+    down over a bad figure, against this module's own contract that nothing here
+    raises (review R1-7). The caller decides what to print for a value the
+    ladder cannot take; this function only refuses to lie about one.
+    """
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    if not math.isfinite(cost):
+        return None
+    return int(round(cost * 1_000_000))
 
 
 def format_usd_exact(micro: int) -> str:

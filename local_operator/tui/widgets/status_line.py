@@ -678,9 +678,15 @@ def format_cost(cost: float) -> str:
     figure) must reach ``/analytics`` and ``/session`` by construction, not by
     three edits that can drift.
     """
-    from local_operator.tui.costs import format_usd
+    from local_operator.tui.costs import format_usd, micro_from_usd
 
-    return format_usd(int(round(cost * 1_000_000)))
+    micro = micro_from_usd(cost)
+    if micro is None:
+        # Not a figure the ladder can take (``micro_from_usd``): print what the
+        # accounting actually holds instead of raising mid-frame, which is this
+        # module's contract and what the pre-ladder spelling did (review R1-7).
+        return f"${cost:.2f}"
+    return format_usd(micro)
 
 
 def format_agents(count: int) -> str:

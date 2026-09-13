@@ -107,6 +107,12 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
     }
     for directory in directories:
         try:
+            # ``checkpoint_types`` names a type a PRE-LEDGER journal does not
+            # have, which is exactly what makes this read walk to the start of
+            # the file: the census sums WHOLE journals by design, so it pays for
+            # every row. The cold path must never do this (review R1-2) — hence
+            # ``opportunistic_types`` there, where the record is a bonus rather
+            # than the reason to read.
             suffix = read_replay_suffix(
                 directory,
                 checkpoint_types=(SESSION_SPEND_CUSTOM_TYPE,),
@@ -116,7 +122,6 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
         entries = suffix.entries
         rows = all_usage_rows(entries)
         survivors = usages_since_newest_shrink(entries)
-        shrunk = any(entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE) for entry in entries)
         default_label = "unknown/unknown"
         priced_survivors = [p for p in (_price(r, default_label) for r in survivors) if p]
         priced_all = [p for p in (_price(r, default_label) for r in rows) if p]
@@ -154,9 +159,13 @@ def census(store: Path, db_path: Path | None, session_dir: Path | None) -> dict[
             for row in rows
         ):
             stats["rebuild_would_be_partial"] += 1
-        elif shrunk:
-            stats["rebuild_would_be_floor"] += 1
         else:
+            # No ``floor`` bucket: the rebuild claims ``≥`` only for a POSITIVE
+            # report that a money row is gone, which no journal on this store
+            # carries (review R1-4) — a compaction or prune marker rewrites and
+            # hides rows without removing one. ``rebuild_would_be_floor`` stays
+            # in the payload at 0 so a reader comparing snapshots sees the
+            # classification change rather than a missing key.
             stats["rebuild_would_be_exact"] += 1
     if stats["ratios"]:
         stats["survivor_share_median"] = round(statistics.median(stats["ratios"]), 3)
@@ -192,7 +201,9 @@ def session_detail(directory: Path, db_path: Path | None) -> dict[str, Any]:
         "surviving_rows": len(survivors),
         "compaction_markers": sum(1 for e in entries if e.type == ENTRY_COMPACTION),
         "prune_markers": sum(1 for e in entries if e.type == ENTRY_PRUNE),
-        "journal_shrank": transcript.journal_shrank(),
+        # R1-4: a marker is NOT evidence that money is missing, so the rebuild no
+        # longer claims ``floor`` for one; the key that used to report
+        # ``journal_shrank`` here is gone with the predicate.
         "all_rows_priced_usd": round(
             sum(p for p in (_price(r, default_label) for r in rows) if p), 4
         ),
