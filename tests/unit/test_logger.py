@@ -596,3 +596,62 @@ def test_the_wire_client_list_names_both_httpx_distributions() -> None:
     """
     assert "httpx" in _CHATTY_WIRE_CLIENTS
     assert "httpx2" in _CHATTY_WIRE_CLIENTS
+
+
+def test_every_rotated_file_is_private_not_only_the_first(log_home: Path) -> None:
+    """A rotation creates the next file itself, so the mode must be re-applied.
+
+    ``_open_rotating_handler`` chmods the file it opens, but
+    ``RotatingFileHandler`` opens every subsequent file through the same private
+    opener — the one place a long-lived writer could drift back to umask-created
+    0644 on a file that carries prompt and error text (a reviewer measured exactly
+    that: five rotations, every file 0644).
+    """
+    import os
+
+    with file_logging(max_bytes=2_000, backup_count=3) as rotated:
+        assert rotated == log_home
+        payload = "y" * 512
+        for index in range(40):
+            logging.getLogger("local_operator.test.rotation.modes").warning("%d %s", index, payload)
+
+    files = sorted(log_home.parent.glob(f"{LOG_FILE_NAME}*"))
+    assert len(files) > 1, [path.name for path in files]
+    modes = {path.name: oct(path.stat().st_mode & 0o777) for path in files}
+    assert all(mode == "0o600" for mode in modes.values()), modes
+    os.stat(log_home)  # the live file exists under its own name, not only as a backup
+
+
+def test_quiet_wire_clients_holds_regardless_of_the_console_level() -> None:
+    """The daemon's pin must not be a side effect of the level it configures.
+
+    ``configure_console_logging`` quietens the wire clients only through the level
+    it is handed, so a supervised daemon whose stderr is a launchd log file pins
+    them explicitly. This pins that the explicit call holds even at a level that
+    would otherwise restore one record per HTTP request — the trap being that a
+    future ``configure_console_logging(level=INFO)`` there looks reasonable and
+    re-creates the flood.
+    """
+    from local_operator.logger import _CHATTY_WIRE_CLIENTS, quiet_wire_clients
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    saved_clients = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}
+    try:
+        configure_console_logging(level=logging.DEBUG)
+        # The trap, measured rather than asserted in prose: the console call alone
+        # leaves them at DEBUG, one record per request.
+        assert all(logging.getLogger(name).level == logging.DEBUG for name in _CHATTY_WIRE_CLIENTS)
+        quiet_wire_clients()
+        assert all(
+            logging.getLogger(name).level == logging.WARNING for name in _CHATTY_WIRE_CLIENTS
+        )
+    finally:
+        for name, level in saved_clients.items():
+            logging.getLogger(name).setLevel(level)
+        for open_handler in list(root.handlers):
+            open_handler.close()
+            root.removeHandler(open_handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)

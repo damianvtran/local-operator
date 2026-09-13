@@ -2378,22 +2378,31 @@ def largest_frame_fields(frame: dict[str, Any], *, limit: int = 3) -> str:
     data = frame.get("data")
     if not isinstance(data, dict):
         return ""
-    fields: dict[str, Any] = {}
+    # A key can arrive twice: once as a child of an unwrapped wrapper and once as
+    # a sibling of it (the update's own keys and the state's fields do not
+    # intersect today, but a future field named in both would be silently lost by
+    # a first-writer-wins merge). Keep the LARGER of the two, because the frame's
+    # size is the sum and the larger entry is the one worth naming.
+    candidates: dict[str, tuple[int, Any]] = {}
+
+    def offer(key: str, value: Any) -> None:
+        size = len(json.dumps(value).encode())
+        previous = candidates.get(key)
+        if previous is None or size > previous[0]:
+            candidates[key] = (size, value)
+
     for key, value in data.items():
         if key in ("snapshot", "changes") and isinstance(value, dict):
-            fields.update(value)
+            for inner_key, inner_value in value.items():
+                offer(inner_key, inner_value)
         else:
-            fields.setdefault(key, value)
-    if not fields:
+            offer(key, value)
+    if not candidates:
         return ""
-    sizes = sorted(
-        ((len(json.dumps(value).encode()), key, value) for key, value in fields.items()),
-        reverse=True,
-        key=lambda row: row[0],
-    )[:limit]
+    sizes = sorted(candidates.items(), key=lambda row: row[1][0], reverse=True)[:limit]
     return ", ".join(
         f"{key}={size:,}B" + (f", n={len(value)}" if isinstance(value, (list, dict)) else "")
-        for size, key, value in sizes
+        for key, (size, value) in sizes
     )
 
 
