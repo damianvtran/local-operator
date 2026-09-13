@@ -1282,27 +1282,17 @@ _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 def _credential_file_names(provider: str) -> list[str]:
     """The ``CredentialManager`` keys worth trying for ``provider``.
 
-    ``env_key_name`` answers this for the plain-string ``env_keys`` form and
-    returns ``None`` for the callable one, which today is exactly ``anthropic``.
-    Stopping there would leave half of the defect in place: an install whose key
-    came from ``local-operator credential update ANTHROPIC_API_KEY`` writes the
-    credential FILE, so the listing would still go out unauthenticated. The
-    provider table already declares the key name that command writes, so it is the
-    right second source — a second hard-coded map here could drift from the one
-    the CLI, the server schema and the setup prompt all read.
+    Delegates to :func:`~local_operator.providers.registry.credential_file_names`,
+    which is where this question is answered for the whole repo. It lived here
+    first; the mobile picker needed the identical answer, and two readers of the
+    two ``env_keys`` forms is exactly how one of them ends up handling only the
+    plain-string form and dropping ``anthropic``. Kept as a module-private alias
+    rather than deleted because this module's call sites read better against a
+    local name and the indirection costs nothing.
     """
-    from local_operator.providers.registry import env_key_name
+    from local_operator.providers.registry import credential_file_names
 
-    name = env_key_name(provider)
-    if name:
-        return [name]
-
-    from local_operator.model.registry import SupportedHostingProviders
-
-    for detail in SupportedHostingProviders:
-        if detail.id == provider:
-            return list(detail.requiredCredentials)
-    return []
+    return credential_file_names(provider)
 
 
 def _catalogue_api_key(provider: str) -> str:

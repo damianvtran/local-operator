@@ -646,3 +646,42 @@ def env_key_name(provider_id: str) -> str | None:
     if definition is None or definition.env_keys is None or callable(definition.env_keys):
         return None
     return definition.env_keys
+
+
+def credential_file_names(provider_id: str) -> list[str]:
+    """The ``CredentialManager`` key names ``provider_id`` can be configured under.
+
+    THE reader for the legacy credential file, for both ``env_keys`` forms.
+    ``env_key_name`` answers only for the plain-string form and returns ``None``
+    for the callable one — today exactly ``anthropic`` — so any caller built on
+    it alone silently drops the provider whose key the user is most likely to
+    have set by hand. That is not hypothetical: it is how an install configured
+    with ``lop credential update ANTHROPIC_API_KEY`` came back with an empty
+    model sheet on the phone while the desktop listed 18 rows.
+
+    ``SupportedHostingProviders.requiredCredentials`` is the right second source
+    rather than a hard-coded map here, because it is the same table the CLI, the
+    server schema and the setup prompt already read — a private map beside them
+    is free to drift from the name the command actually writes.
+
+    Alias-aware in the same way :func:`resolve_env_key` is: a login flavour
+    (``xai-oauth``) declares no key name of its own but the provider it stores
+    under does, and that is the name the legacy file holds.
+
+    Returns an empty list for an unknown provider or one with no key name at
+    all, so it is safe to call unconditionally and iterate over.
+    """
+    from local_operator.model.registry import SupportedHostingProviders
+
+    names: list[str] = []
+    for candidate in (provider_id, credential_provider_id(provider_id)):
+        name = env_key_name(candidate)
+        if name and name not in names:
+            names.append(name)
+        for detail in SupportedHostingProviders:
+            if detail.id != candidate:
+                continue
+            for required in detail.requiredCredentials:
+                if required and required not in names:
+                    names.append(required)
+    return names

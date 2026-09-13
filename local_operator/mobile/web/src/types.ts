@@ -271,11 +271,41 @@ export interface SlashCommand {
 	arguments: "none" | "optional" | "required";
 }
 
+/** One offerable model, as `GET /api/models` ranks it.
+ *
+ * The array order IS the ranking — direct-connected providers first, newest
+ * version first, aggregators last — computed server-side by the same
+ * `rank_rows` the desktop `/model` picker uses. Anything here that re-sorts or
+ * regroups the array throws that away, which is the bug these fields were added
+ * alongside: the sheet grouped by provider and put ~445 Radient rows ahead of
+ * the first direct provider.
+ *
+ * The fields below `name` are additive; `selector`, `provider`, `model_id` and
+ * `name` keep the meanings they always had, so a stale cached bundle still
+ * renders against a current daemon.
+ *
+ * The field set is deliberately WHAT THE PHONE RENDERS. An earlier revision also
+ * shipped `routed`, `context_window`, `input_price` and `output_price` as a
+ * forward contract; no `.tsx` read any of them and they cost 159 KB of a 301 KB
+ * response on a mobile link. Add a field back here and on the daemon's row when
+ * a surface actually renders it — a payload is not free just because it is
+ * additive. */
 export interface ModelEntry {
 	selector: string;
 	provider: string;
 	model_id: string;
+	/** The model's display name — the listing's own, falling back to its id. */
 	name: string;
+	/** The picker's resolved label, exactly as the desktop spells it — equal to
+	    `selector` when no name can be vouched for (always so for a reseller,
+	    whose listing names cannot say which route is answering). This is the
+	    parity contract, not a display string; render `name`. */
+	label?: string;
+	/** Whether the provider has a credential that can run this model now. */
+	connected?: boolean;
+	/** The provider RESELLS this model rather than serving it; the direct route
+	    for the same model ranks ahead of it. */
+	aggregated?: boolean;
 }
 
 export interface PastSession {
