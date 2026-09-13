@@ -1969,3 +1969,315 @@ async def test_child_transcript_refuses_a_limit_outside_the_page_ceiling(tmp_pat
 
     with pytest.raises(ValueError):
         await DesktopSessions(tmp_path).child_transcript(PARENT_ID, CHILD_ID, limit=limit)
+
+
+@pytest.mark.asyncio
+async def test_a_visible_lease_warms_the_runtime_and_records_presence_first(tmp_path, monkeypatch):
+    """B1: a window LOOKING at a session starts its runtime, off the request path.
+
+    The ordering half is the load-bearing one rather than a style choice.
+    `_ensure_bound`'s dial re-asserts whatever presence the facade last
+    recorded (TTL-bounded), and a runtime whose viewer was never asserted
+    judges itself unwatched and idle-exits about 3 s after the bind
+    (`DEFAULT_GRACE_S`) -- so the renderer's next 15 s heartbeat starts
+    another one. A spawn per heartbeat is worse than the stall this removes,
+    which is why the lease is recorded BEFORE the engage is scheduled.
+
+    The envelope half pins that the warm is the ordinary BACKGROUND bind: a
+    foreground envelope would claim the 15 s budget nobody is waiting on and,
+    worse, announce itself as a user-visible caller and preempt itself
+    (`warm_runtime`'s docstring).
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        order: list[tuple[Any, ...]] = []
+
+        async def record_watch(*, visible: bool, can_notify: bool) -> None:
+            order.append(("presence", visible, can_notify))
+
+        async def record_engage(*, foreground: bool = True) -> None:
+            order.append(("engage", foreground))
+
+        monkeypatch.setattr(bridge.remote, "update_desktop_watch", record_watch)
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        task = bridge.warm_task
+        assert task is not None, "a live visible lease did not start a warm"
+        await asyncio.wait_for(task, timeout=10)
+        assert order == [("presence", True, True), ("engage", False)], order
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_or_notify_only_lease_creates_no_runtime(tmp_path, monkeypatch):
+    """The other half of B1's boundary: delivery reachability is not attention.
+
+    Term 3 still counts `visible or can_notify` to PRESERVE a runtime that
+    exists, and that policy is untouched here -- but a lease nobody is looking
+    at must not CREATE one, or every hidden window in the app would pin ~283 MB
+    per session it happens to have open. The visible lease at the end is the
+    positive control: the gate is a gate, not a dead path.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    engages: list[bool] = []
+
+    async def record_engage(*, foreground: bool = True) -> None:
+        engages.append(foreground)
+
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
+        hidden = bridge.subscribe()
+        await bridge.watch(hidden.id, visible=False, can_notify=True)
+        assert bridge.warm_task is None, "a hidden notifiable lease created a runtime"
+        never = bridge.subscribe()
+        await bridge.watch(never.id, visible=False, can_notify=False)
+        assert bridge.warm_task is None, "a lease with neither term created a runtime"
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=False)
+        task = bridge.warm_task
+        assert task is not None, "a live visible lease created nothing"
+        await asyncio.wait_for(task, timeout=10)
+    assert engages == [False]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, monkeypatch):
+    """B1 hands the session back exactly as it found it.
+
+    The runtime this change creates leaves through the SAME machinery as
+    before: the lease expires (`WATCH_TTL`), term 3 stops counting the desktop
+    client, and the existing idle drain reaps it. What the bridge owes is the
+    other end of that bargain -- after expiry nothing re-creates the process
+    and nothing keeps asserting presence for it.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    writes: list[dict[str, Any]] = []
+    engages: list[bool] = []
+
+    async def record_watch(*, visible: bool, can_notify: bool) -> None:
+        writes.append({"visible": visible, "can_notify": can_notify})
+
+    async def record_engage(*, foreground: bool = True) -> None:
+        engages.append(foreground)
+
+    now = 100.0
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "update_desktop_watch", record_watch)
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        task = bridge.warm_task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=10)
+        assert writes == [{"visible": True, "can_notify": True}], writes
+
+        # The window stops heartbeating (closed, killed, navigated away) and the
+        # expiry loop runs out. The COLD half of the bargain: nothing
+        # re-creates the process this change started, and there is no runtime
+        # left holding a presence it no longer has.
+        now = 100.0 + module.WATCH_TTL + 1
+        await bridge._expire_watches()
+        assert engages == [False], "the expired lease started a second engage"
+        assert bridge.warm_task is task, "the expired lease replaced the settled task"
+        assert writes == [
+            {"visible": True, "can_notify": True}
+        ], "a viewer with no runtime was asserted at anyway"
+
+        # A hidden notifiable subscriber on the same bridge, live and fresh,
+        # re-warms nothing either -- which is the state the session was in
+        # before the visible lease ever arrived.
+        hidden = bridge.subscribe()
+        hidden.can_notify, hidden.expires = True, now + 10
+        await bridge.refresh_watch()
+        assert engages == [False], "a notify-only lease created a runtime"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_an_expired_lease_is_released_from_the_owner_that_was_warm(tmp_path, monkeypatch):
+    """The other state the same expiry must handle: a runtime that IS up.
+
+    With a bound viewer there is nothing to create -- so the assertion is that
+    nothing is, and that the presence which was holding term 3 is WITHDRAWN on
+    expiry. That withdrawal is what makes the runtime reapable through the
+    existing drain rather than resident for the life of the process, and it is
+    the one thing a warm must never change.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        original = bridge.remote
+        writes: list[dict[str, Any]] = []
+
+        async def record_watch(*, visible: bool, can_notify: bool) -> None:
+            writes.append({"visible": visible, "can_notify": can_notify})
+
+        bridge.remote = cast(Any, SimpleNamespace(is_cold=False, update_desktop_watch=record_watch))
+        try:
+            now = 200.0
+            monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
+            watcher = bridge.subscribe()
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            assert bridge.warm_task is None, "a bound session was warmed again"
+            assert writes[-1] == {"visible": True, "can_notify": True}
+
+            now = 200.0 + module.WATCH_TTL + 1
+            await bridge._expire_watches()
+            assert writes[-1] == {
+                "visible": False,
+                "can_notify": False,
+            }, "the owner was left believing a watcher is present after its lease expired"
+        finally:
+            bridge.remote = original
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_command_arriving_during_the_warm_shares_one_engage(tmp_path):
+    """A click that beats the warm must not deadlock, and must not spawn twice.
+
+    Both callers take the SAME `_bind_lock` -- the warm as the ordinary
+    background engage, the command's `bind_runtime()` as the foreground one
+    that announces itself and preempts. Pinned structurally rather than on a
+    stopwatch: the background bind is parked INSIDE the lock, so a command that
+    did not queue on it would get past the park and the engage count would be
+    2, and a command that queued on something else could never finish.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    engages: list[bool] = []
+
+    async def parked_bind(*, foreground: bool) -> None:
+        engages.append(foreground)
+        if not foreground:
+            entered.set()
+            await release.wait()
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._bind_under_lock = parked_bind  # type: ignore[method-assign]
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await asyncio.wait_for(entered.wait(), timeout=10)
+
+        command = asyncio.create_task(bridge.remote.bind_runtime())
+        # The announcement is set BEFORE the acquire, so waiting on it is
+        # waiting for the queue rather than for a duration.
+        await asyncio.wait_for(bridge.remote._foreground_arrived.wait(), timeout=10)
+        assert not command.done(), "the command did not wait for the warm's bind"
+        assert engages == [False], "the command started a second engage"
+
+        release.set()
+        await asyncio.wait_for(command, timeout=10)
+        assert engages == [False, True]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repeated_visible_heartbeats_do_not_stack_warms(tmp_path):
+    """The renderer re-asserts the lease every 15 s; each one costs at most one.
+
+    A heartbeat during an engage must return without touching `warm_task` --
+    the second task would escape `_detach()`'s cancel and duplicate the spawn
+    the first one is already performing.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    engages: list[bool] = []
+
+    async def parked_bind(*, foreground: bool) -> None:
+        engages.append(foreground)
+        entered.set()
+        await release.wait()
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._bind_under_lock = parked_bind  # type: ignore[method-assign]
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        first = bridge.warm_task
+        assert first is not None
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        for _ in range(3):
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            assert bridge.warm_task is first, "a heartbeat during the engage stacked a task"
+        release.set()
+        await asyncio.wait_for(first, timeout=10)
+    assert engages == [False]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_watch_route_returns_while_the_warm_is_still_binding(tmp_path, monkeypatch):
+    """The non-blocking half, driven through the real route.
+
+    `/watch` is on a 15 s heartbeat that also drives the sidebar's live
+    markers, so a handler that awaited the spawn would move the cold cost onto
+    the heartbeat instead of removing it. Parked engage plus a bounded wait, so
+    a handler that awaited it could not answer at all.
+
+    The bridge is held for the whole test on purpose: in production the SSE
+    subscription is the second user that keeps an in-flight warm alive, and a
+    warm with no holder is cancelled when its own request releases.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_sessions as routes
+
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "warm-token")
+    app = FastAPI()
+    app.state.config_manager = SimpleNamespace(config_dir=tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(routes.router)
+    sid = await pool.create(str(tmp_path))
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked_bind(*, foreground: bool = True) -> None:
+        entered.set()
+        await release.wait()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer warm-token"},
+    ) as client:
+        async with pool.session(sid) as bridge:
+            assert bridge.remote is not None
+            monkeypatch.setattr(bridge.remote, "_ensure_bound", parked_bind)
+            subscription = bridge.subscribe()
+            response = await asyncio.wait_for(
+                client.post(
+                    f"/v1/desktop/sessions/{sid}/watch",
+                    json={
+                        "subscription_id": subscription.id,
+                        "visible": True,
+                        "can_notify": True,
+                    },
+                ),
+                timeout=10,
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["result"] == {"lease_seconds": 45}
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            task = bridge.warm_task
+            assert task is not None and not task.done()
+            release.set()
+            await task
+    await pool.close()
