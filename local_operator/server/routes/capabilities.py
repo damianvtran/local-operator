@@ -76,6 +76,15 @@ async def capabilities():
                 "notification_contract": 1,
                 "mcp": 1,
                 "radient": 1,
+                # Reading a SUBAGENT's own transcript through its parent's
+                # child route (design § 9.1) — the run sidebar's child reader.
+                # Its own key rather than a bump of `session_catalogue`,
+                # because the roster and the to-dos ship with the renderer and
+                # work against any backend: only the reader is gated, and a
+                # missing capability has to mean exactly "this backend cannot
+                # serve a child transcript", not "this renderer cannot show a
+                # roster".
+                "subagent_transcript": 1,
             },
         },
     )

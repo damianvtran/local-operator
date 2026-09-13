@@ -216,6 +216,10 @@ async def test_catalogue_is_authenticated_and_never_allocates(api):
     # backend without the search route, so gating the list on it would hide a
     # working surface because a newer one is missing.
     assert features["session_search"] == 1
+    # The run sidebar's child reader (design § 9.2): its own key because the
+    # roster and the to-dos ship with the renderer and work against any
+    # backend, so only the reader may be gated on the capability.
+    assert features["subagent_transcript"] == 1
 
 
 async def test_install_edit_preserves_policy_and_provenance(api):
