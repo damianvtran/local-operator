@@ -13,8 +13,9 @@ the next test's band total.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -900,9 +901,18 @@ def test_the_bar_is_drawn_only_where_this_ledgers_note_still_fits() -> None:
     """R2-MAJOR-2: a fixed threshold drew the bar where it CAUSED the orphan.
 
     Whether the bar pays for itself depends on the note it shares the row with,
-    so the decision is taken from this ledger's own widest note: at 81 cells the
-    30-cell note fits beside it, at 70 it does not and there is no bar. Pin both
-    ends, and that the count never lands on a line of its own.
+    so the decision is taken from this ledger's own ladders -- and from the rung
+    that is drawn LAST (issue #1073): ``row()`` only wraps when NO rung fits, so
+    the bar is withheld until the shortest rung fits beside it. On this ledger
+    that rung is ``2 searches · unpriced`` (21 cells), so the boundary sits at
+    68 -- 47 cells of name, value and gutters plus the bar's own 12 -- and 67
+    withholds it.
+
+    The widths here used to be 70 and 90, taken from the WIDEST rung
+    (``2 searches · no published price``, 31 cells, threshold 78): 70 drew no bar
+    even though every row still had a rung that fitted there. The ends are
+    re-derived, not relaxed -- 67 is still a frame where the count would be
+    orphaned by the bar, and the no-orphan check below pins that it is not.
     """
     from local_operator.tui.widgets.analytics_panel import search_spend_section
 
@@ -914,10 +924,12 @@ def test_the_bar_is_drawn_only_where_this_ledgers_note_still_fits() -> None:
             for line in search_spend_section(snapshot, width, meta="this session · live")
         )
 
-    narrow, wide = render(70), render(90)
+    narrow, wide = render(67), render(90)
     assert "█" not in narrow and "bars:" not in narrow, "no bar, and nothing promising one"
-    assert "2 searches · no published price" in narrow
+    assert "2 searches · unpriced" in narrow
     assert "█" in wide and "bars: operations" in wide
+    # A frame wide enough for the longer rung still buys it.
+    assert "2 searches · no published price" in wide
     # The count is never orphaned onto its own line, at either end.
     for text in (narrow, wide):
         assert not any(
@@ -1005,3 +1017,164 @@ def test_the_headline_component_carries_the_search_floors_mark() -> None:
     # A fully priced ledger carries no mark.
     priced = _ledger([("brave", SearchCost(usd=0.0069, basis="per-search rate"))])
     assert search_component_text(priced) == "incl. $0.0069 search"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1073: the bar threshold measures the SHORTEST rung of each ladder
+# ---------------------------------------------------------------------------
+
+
+def _rung_ledger():
+    """One ledger whose ladders all bottom out on the SAME rung.
+
+    ``6 searches · 3 reads`` (20 cells) is what every ladder in the block ends
+    on, while the ``/analytics`` reference row's WIDEST rung -- ``6 searches · 3
+    reads · 100% of search spend``, 43 cells -- belongs to a row ``/session``
+    never draws. That asymmetry is #1073's whole subject: measuring the widest
+    rung gave the two screens two different thresholds for one ledger.
+    """
+    return _ledger(
+        [("duckduckgo", SearchCost(usd=0.0, basis="free"))] * 5
+        + [("deepseek:read", SearchCost(usd=0.0, basis="free"), "read")] * 3
+        + [("brave", SearchCost(usd=0.0069, basis="per-search rate"))]
+    )
+
+
+def test_the_bar_threshold_is_the_shortest_rung_of_every_ladder() -> None:
+    """#1073: one ledger, two screens, ONE threshold -- measured from rung [-1].
+
+    ``row()`` reaches its continuation line only when NO rung fits, so a rung too
+    long for the row yields to a shorter one and the row still paints one line.
+    The threshold that decides whether the bar is drawn is therefore the ladder's
+    LAST rung, not its first: under the widest rule ``/analytics`` started at body
+    90 while ``/session`` started at 67 for the same ledger, because the 43-cell
+    ``This session ... of search spend`` rung belongs to a reference row only
+    ``/analytics`` draws.
+    """
+    from local_operator.tui.widgets.analytics_panel import (
+        _SEARCH_NAME_COL,
+        _SEARCH_VALUE_CELL,
+        search_spend_section,
+    )
+
+    def threshold_for(note: str) -> int:
+        """The body width the bar policy needs for a note of this length.
+
+        Two cells of row indent, the name and money gutters, and the bar's own
+        eight cells plus the two-cell gutter on either side of it.
+        """
+        return 2 + _SEARCH_NAME_COL + _SEARCH_VALUE_CELL + 2 + 8 + 2 + len(note)
+
+    snapshot = _rung_ledger()
+    shortest = "6 searches · 3 reads"
+    threshold = threshold_for(shortest)
+    # The literal, not only the formula: these are the numbers the issue quotes
+    # and the ones measured in docs/evidence/search-bar-rung.
+    assert (len(shortest), threshold) == (20, 67), "the ladder moved; re-measure the frames"
+
+    def block(width: int, session: Any) -> list[str]:
+        return [
+            line.plain if hasattr(line, "plain") else str(line)
+            for line in search_spend_section(snapshot, width, meta="m", session=session)
+        ]
+
+    def bars(width: int, session: Any) -> bool:
+        return any("█" in line for line in block(width, session))
+
+    for session in (None, snapshot):
+        assert not bars(threshold - 1, session), "a bar one cell before the threshold"
+        assert bars(threshold, session), "no bar at the shortest-rung threshold"
+        # Nothing wrapped AT the threshold: the bar did not buy the count a
+        # continuation line (round-3 MAJOR-2), on either screen.
+        assert not any(
+            line.startswith("    ") and line.strip() for line in block(threshold, session)
+        )
+
+    # The widest rung no longer governs: that 43-cell reference rung alone would
+    # put the threshold at 90, and the bar is drawn 23 cells before it.
+    widest = "6 searches · 3 reads · 100% of search spend"
+    widest_threshold = threshold_for(widest)
+    assert (len(widest), widest_threshold) == (43, 90), "the rung changed; re-measure the frames"
+    assert bars(widest_threshold - 1, snapshot), "the widest rung still holds the bar back"
+
+    # The property the issue asks for, stated at EVERY width rather than at the
+    # boundary: the two screen shapes cannot disagree about the bar.
+    assert [w for w in range(40, 140) if bars(w, None) != bars(w, snapshot)] == []
+
+
+def _search_spend_block(text: str) -> list[str]:
+    """The Search-spend block's own lines, out of a rendered screen body."""
+    lines: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if "Search spend" in line:
+            inside = True
+        elif inside and (line.startswith("▌") or (line and not line.startswith(" "))):
+            inside = False
+        if inside:
+            lines.append(line)
+    return lines
+
+
+def _count_column(lines: Sequence[str]) -> int:
+    """The column the block's first count starts in -- 47 with the bar, 37 without.
+
+    The column is the evidence (#1073): a bar that is drawn and one that is not
+    differ by exactly the bar's ten cells, so the measured column says which
+    state the frame is in and that both screens landed on the same one.
+    """
+    for line in lines:
+        match = re.search(r"\d+ (?:search|read)", line)
+        if match:
+            return match.start()
+    raise AssertionError("the block printed no count at all")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal, expect_bar, expect_column",
+    [
+        # Below, exactly on, and above the 67-cell threshold the builder test
+        # above pins. The two panels measure the SAME section width at each of
+        # these terminals (65/65, 67/67 and 83/83 through the real app), so a
+        # disagreement here is the bar POLICY and not panel geometry.
+        (80, False, 37),
+        (83, True, 47),
+        (100, True, 47),
+    ],
+)
+async def test_the_two_screens_agree_on_the_bar_at_the_same_terminal_width(
+    tmp_path, monkeypatch, terminal: int, expect_bar: bool, expect_column: int
+) -> None:
+    """#1073's frame pair: /session and /analytics, one ledger, one terminal width.
+
+    100 is the width the issue measured the split at, where ``/analytics`` drew
+    no bar at all while ``/session`` drew them; 83 is where both bodies reach the
+    threshold; 80 is below it.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    _rung_ledger()
+
+    async def block_for(command: str) -> list[str]:
+        session = FakeSession()
+        app = OperatorApp(_async_factory(cast(Any, session)))
+        async with app.run_test(size=(terminal, 46)) as pilot:
+            await _settle_boot(pilot, app, session)
+            await _submit(pilot, app, command)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            # The diagnostics screen renders through _report_text and the
+            # analytics screen through _report_lines; both are the block as the
+            # real screens compose it.
+            text = _panel_lines(app) if command == "/analytics" else _panel_text(app)
+        return _search_spend_block(text)
+
+    for command in ("/session", "/analytics"):
+        lines = await block_for(command)
+        where = f"{command} at terminal {terminal}"
+        assert any("█" in line for line in lines) is expect_bar, where
+        assert ("bars: operations" in lines[0]) is expect_bar, where
+        assert _count_column(lines) == expect_column, where
