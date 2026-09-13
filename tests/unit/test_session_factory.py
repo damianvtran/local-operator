@@ -907,6 +907,7 @@ class FakeMcpManager:
         connected: list[str] | None = None,
         settling: bool = False,
         startup_failures: dict[str, str] | None = None,
+        network_failures: list[str] | None = None,
     ):
         self.disconnected = 0
         self.callback: Callable[[list[Any]], Any] | None = None
@@ -916,6 +917,10 @@ class FakeMcpManager:
         self.meta: dict[str, dict[str, Any]] = {}
         self._settling = settling
         self._startup_failures = dict(startup_failures or {})
+        # The transport-failure subset, mirroring the real manager's accumulator:
+        # the wiring reads it into ``McpStartupOutcome.network_failures`` so the
+        # toast and the durable notice group on the same fact.
+        self._network_failures: set[str] = set(network_failures or [])
         self.on_startup_settled: Callable[[], None] | None = None
         # Declared like the real manager's, so ``attach_mcp_dispose`` installing
         # the incident/recovery sinks is type-checked here rather than silently
@@ -937,6 +942,9 @@ class FakeMcpManager:
 
     def startup_failures(self) -> dict[str, str]:
         return dict(self._startup_failures)
+
+    def startup_network_failures(self) -> set[str]:
+        return set(self._network_failures)
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -1082,6 +1090,121 @@ async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
     assert settled.failures == {}
     # The session's settle sink was handed the final outcome.
     assert settled_outcomes == [settled]
+
+
+@pytest.mark.asyncio
+async def test_the_boot_snapshot_carries_which_failures_were_the_network(monkeypatch) -> None:
+    """The front end groups on a FACT, so the session has to carry it.
+
+    The manager records the transport-failure subset BESIDE the messages; the
+    session snapshot is what the toast and the durable notice read. A manager
+    that knew and a session that did not would render a fleet-wide outage as
+    unrelated server faults, which is the defect this field exists to close.
+    """
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(
+        configured=["linear", "slack"],
+        connected=[],
+        startup_failures={
+            "linear": "network: cannot resolve linear.example.com",
+            "slack": "network: cannot reach slack.example.com",
+        },
+        network_failures=["linear", "slack"],
+    )
+
+    async def fake_discover(cwd, auth_store=None):
+        return (
+            manager,
+            [],
+            [
+                {"path": "mcp:linear", "error": "network: cannot resolve linear.example.com"},
+                {"path": "mcp:slack", "error": "network: cannot reach slack.example.com"},
+            ],
+        )
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+
+    boot = session.mcp_startup
+    assert boot is not None
+    assert boot.network_failures == frozenset({"linear", "slack"})
+    assert boot.all_failures_are_network is True
+
+
+@pytest.mark.asyncio
+async def test_the_grouping_survives_a_manager_that_does_not_report_network_failures(
+    monkeypatch,
+) -> None:
+    """A reduced manager double must lose the GROUPING, not the wiring.
+
+    ``startup_network_failures`` is read behind the same guard as
+    ``startup_settling``: this wiring is exercised with fakes that implement only
+    part of the manager's surface, and an AttributeError here would take down the
+    whole MCP startup record — including the failures the user needs — over a
+    piece of presentation.
+    """
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(
+        configured=["slack"],
+        connected=[],
+        startup_failures={"slack": "network: cannot reach slack.example.com"},
+    )
+
+    async def fake_discover(cwd, auth_store=None):
+        return (
+            manager,
+            [],
+            [{"path": "mcp:slack", "error": "network: cannot reach slack.example.com"}],
+        )
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    monkeypatch.delattr(FakeMcpManager, "startup_network_failures")
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+
+    boot = session.mcp_startup
+    assert boot is not None
+    assert boot.failures == {"slack": "network: cannot reach slack.example.com"}
+    assert boot.network_failures == frozenset()
+    # Degraded to the plain list: the failure is still reported, just not grouped.
+    assert boot.all_failures_are_network is False
+
+
+@pytest.mark.asyncio
+async def test_the_settled_re_report_carries_the_network_subset_of_that_round(
+    monkeypatch,
+) -> None:
+    """The settle re-report is the ONLY surface a missed-gate failure reaches,
+    so it has to carry the grouping too — and it must not inherit a name the
+    settled failure map no longer holds (a collapsed SDK-missing round folds to
+    one key, and a stale server name beside it is not a network story)."""
+    builtin = MagicMock(name="builtin_tool")
+    session = FakeSessionShell()
+    session.tools = [builtin]
+    manager = FakeMcpManager(configured=["linear"], connected=[], settling=True)
+
+    async def fake_discover(cwd, auth_store=None):
+        return manager, [], []
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", fake_discover)
+    await wire_mcp_into_session(session, [builtin], ".", has_ui=True)
+    assert manager.on_startup_settled is not None
+
+    # The round settles with one network failure, plus a name the settle map does
+    # not hold: the phantom must be dropped, not carried into the outcome.
+    manager._settling = False
+    manager._startup_failures = {"linear": "network: cannot resolve linear.example.com"}
+    manager._network_failures = {"linear", "gone"}
+    manager.on_startup_settled()
+
+    settled = session.mcp_startup
+    assert settled is not None
+    assert settled.settling is False
+    assert settled.network_failures == frozenset({"linear"})
+    assert settled.all_failures_are_network is True
 
 
 @pytest.mark.asyncio
