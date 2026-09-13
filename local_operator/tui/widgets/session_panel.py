@@ -36,7 +36,7 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -198,7 +198,10 @@ class SessionDiagnostics:
         # neither (a reduced facade) reports ``None`` and the panel simply omits
         # the exact row rather than inventing a figure.
         restored_spend = getattr(session, "restored_spend", None)
-        spend: SessionSpend | None = restored_spend() if callable(restored_spend) else None
+        # ``cast`` because the declaration lives on ``SessionProtocol`` while this
+        # probe is duck-typed: pyright sees ``object`` here, and the ``callable``
+        # guard is the actual runtime contract.
+        spend = cast("SessionSpend | None", restored_spend()) if callable(restored_spend) else None
         if spend is None:
             live = getattr(session, "spend", None)
             if isinstance(live, SessionSpend) and live.calls:

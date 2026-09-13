@@ -2166,6 +2166,14 @@ class Session:
         #: than from a durable record. In-memory only: see
         #: :meth:`seed_spend_floor` for why the seed must not reach the disk.
         self._spend_seeded = False
+        #: How many calls have accrued LIVE in this process. Distinct from
+        #: ``spend.calls``, which the legacy SEED also increments: the seed is a
+        #: reconstruction of money already in the journal, so it must never look
+        #: like work the rebuild would overwrite (that mistake silently disabled
+        #: the rebuild for every pre-ledger session, which is 92.3% of the
+        #: store). A live call is the opposite -- its message may not be
+        #: persisted yet, so a reconstruction may not contain it.
+        self._spend_live_calls = 0
         # The per-conversation prompt-cache TTL hint (see
         # ``ChatRequest.context_tokens_hint``): the provider-reported context
         # size of THIS session's last turn call, excluding isolated errands
@@ -6038,6 +6046,7 @@ class Session:
         the addition happens in one place and cannot be billed twice.
         """
         index = self.spend.accrue(micro, identity)
+        self._spend_live_calls += 1
         self.schedule_spend_persist()
         return index
 
@@ -6205,9 +6214,10 @@ class Session:
             return
         # A SEEDED floor is not a reason to skip: it carries one restored
         # receipt, and the whole point of the rebuild is to replace it with the
-        # session's real history. Only live accruals made during THIS process
-        # make the reconstruction redundant.
-        if (self.spend.calls or self.spend.micro) and not self._spend_seeded:
+        # session's real history. Only calls accrued LIVE in this process make
+        # the reconstruction redundant -- ``self.spend.calls`` counts the seed
+        # too, so it cannot answer this question.
+        if self._spend_live_calls:
             return
         transcript = self._transcript
         rows = transcript.all_usage_rows()
@@ -6249,12 +6259,18 @@ class Session:
                 rebuilt.accrue(None, identity)
         if not rebuilt.calls:
             return
-        # A record written (or a call accrued) while this ran is newer and
-        # must not be overwritten by a reconstruction of older rows.
-        if self._spend_recorded or self.spend.calls:
-            if self.spend.micro >= rebuilt.micro:
-                return
+        # Bail if anything NEWER landed while this ran: a record that reached the
+        # disk, or a call accrued live in this process (whose message the journal
+        # may not carry yet, so the reconstruction is not a superset of it). A
+        # SEED is deliberately not in that set -- it is the very figure this
+        # replaces, and treating it as newer silently disabled the rebuild for
+        # every pre-ledger session. The trade in the live-call case is stated in
+        # the design doc §12.1: the accumulator keeps a truthful ``floor`` record
+        # rather than an exact reconstruction of older rows.
+        if self._spend_recorded or self._spend_live_calls:
+            return
         self.spend = rebuilt
+        self._spend_seeded = False
         self._spend_recorded = True
         self._spend_persisted_micro = rebuilt.micro
         await self._write_spend_record()

@@ -215,9 +215,7 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
             self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
         ):
             await asyncio.sleep(0.15)  # the payload was read BEFORE this
-            return await super().append_custom(
-                custom_type, details, preserve_mtime=preserve_mtime
-            )
+            return await super().append_custom(custom_type, details, preserve_mtime=preserve_mtime)
 
     session = Session(
         model=MODEL,
@@ -308,9 +306,7 @@ async def test_a_slow_but_real_write_keeps_its_title(tmp_path, monkeypatch) -> N
             self, custom_type: str, details: dict[str, Any], *, preserve_mtime: bool = False
         ):
             await asyncio.sleep(delay)
-            return await super().append_custom(
-                custom_type, details, preserve_mtime=preserve_mtime
-            )
+            return await super().append_custom(custom_type, details, preserve_mtime=preserve_mtime)
 
     session = Session(
         model=MODEL,

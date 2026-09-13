@@ -30,18 +30,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from collections.abc import Callable
-
-    #: The duck-typed session members this store calls when a real session is
-    #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
-    #: signature rather than passing ``object`` around; the guard itself is the
-    #: runtime contract, and a reduced host simply has none of them.
-    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
-    SeedSpendFn = Callable[..., SessionSpend]
-    ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
-    IdentityFn = Callable[[Any], dict[str, str]]
-
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -80,6 +68,18 @@ from local_operator.session.spend import (
     usage_prices_known,
 )
 from local_operator.tui.costs import cost_summary, job_cost, turn_cost
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    #: The duck-typed session members this store calls when a real session is
+    #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
+    #: signature rather than passing ``object`` around; the guard itself is the
+    #: runtime contract, and a reduced host simply has none of them. Declared
+    #: AFTER the imports, not in the typing block above, because flake8 resolves
+    #: a name used here against the module's import order.
+    AccrueSpendFn = Callable[[int | None, dict[str, str] | None], int]
+    SeedSpendFn = Callable[..., SessionSpend]
+    ScheduleSpendFn = Callable[[int, Any, dict[str, str]], None]
+    IdentityFn = Callable[[Any], dict[str, str]]
 
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
