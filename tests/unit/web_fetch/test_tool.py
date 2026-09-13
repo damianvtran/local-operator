@@ -674,6 +674,43 @@ async def test_a_large_retry_after_reaches_the_model_text(context: ToolContext) 
 
 
 @pytest.mark.asyncio
+async def test_a_503_retry_after_reaches_the_model_text_too(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2, R2-2: §3.4 honours ``Retry-After`` on **429 and 503**.
+
+    The note was gated on ``failure_kind == "ratelimit"``, so a 503 carrying
+    ``Retry-After: 600`` put the interval in ``details`` and never in the text the
+    agent reads — silently refusing after one attempt with no reason, the exact
+    hole Q2 closed for the 429 shape. The gate is on the value now, and only the
+    ratelimit/server classes ever populate it (``classify_response`` parses the
+    header for both), so a client-class 4xx cannot slip through here.
+    """
+    # A retryable 503 with no ``Retry-After`` would legitimately be retried up to
+    # ``max_attempts``; patch the sleep so the assertion is about the text, not
+    # about wall clock.
+    monkeypatch.setattr(service, "_backoff_sleep", lambda delay: asyncio.sleep(0))
+    transport = _CountingTransport(
+        lambda req: httpx.Response(
+            503,
+            text="unavailable",
+            headers={"content-type": "text/plain", "retry-after": "600"},
+        )
+    )
+    preview, details, is_error = await run_fetch(
+        "https://draining.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    assert details["failure_kind"] == "server"
+    assert details["retry_after_s"] == 600.0
+    assert "600" in preview
+    assert "asked us to wait" in preview
+    # Not slept on at 600 s — the interval is reported, not obeyed.
+    assert details["attempts"] == 1
+
+
+@pytest.mark.asyncio
 async def test_repeated_5xx_is_never_cached_and_a_retried_200_is(
     context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

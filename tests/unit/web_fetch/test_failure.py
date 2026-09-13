@@ -255,19 +255,36 @@ def test_the_stock_page_bound_is_bytes_not_characters() -> None:
 
 
 def test_attempt_summary_collapses_a_repeated_identity() -> None:
-    """Review round 1, Q3: ``3 attempts (default, default, default)`` is accurate
-    and reads like a bug.
+    """Review round 1, Q3 + design round 2, D10.
 
     The sequence exists to show a CHANGE of identity — that is the fact a reader
-    cannot get from the count — so consecutive repeats collapse while the mixed
-    case (the one that matters) is untouched.
+    cannot get from the count — so consecutive repeats collapse. D10 extends the
+    same rule to a run with only one distinct identity: the parenthetical is then
+    a word with no information in it, so it is dropped. ``2 attempts (default)``
+    reads as a count with a stray word attached; the count alone is what happened.
     """
-    assert attempt_summary(3, ("default", "default", "default")) == "3 attempts (default)"
+    assert attempt_summary(3, ("default", "default", "default")) == "3 attempts"
     assert attempt_summary(2, ("default", "browser")) == "2 attempts (default, browser-profile)"
-    assert attempt_summary(2, ("default", "default")) == "2 attempts (default)"
+    assert attempt_summary(2, ("default", "default")) == "2 attempts"
     # One attempt says nothing, and an absent identity list is not a lie.
     assert attempt_summary(1, ("default",)) == ""
     assert attempt_summary(2, ()) == "2 attempts"
+
+
+def test_a_same_identity_retry_does_not_name_an_identity() -> None:
+    """D10 in the model-facing text: ``(3 attempts: default)`` reads ``(3 attempts)``.
+
+    ``_with_attempts`` is one rule with ``attempt_summary`` (the card's row), so
+    the text the agent reads and the card the operator reads cannot disagree
+    about whether the retries changed identity.
+    """
+    request = httpx.Request("GET", "https://dead.example/x")
+    failure = classify_exception(httpx.ConnectTimeout("no route", request=request))
+    text = " ".join(
+        describe(failure, attempts=3, profiles=("default", "default", "default")).split()
+    )
+    assert text.endswith("(3 attempts)")
+    assert "default" not in text
 
 
 def test_2xx_and_3xx_are_not_failures() -> None:

@@ -291,11 +291,13 @@ def _blocked_after_text() -> str:
     )
     details = _blocked_details()
     lead = _header_line(dict(details))
-    return (
-        lead
-        + "\n\n"
-        + describe(failure, attempts=2, profiles=("default", "browser"), url=BLOCKED_URL)
-    )
+    # No ``url=`` here (D11): the shipped blocked path calls ``describe`` WITHOUT
+    # one (``service.py``, where the challenge body is replaced), so passing it
+    # painted a trailing URL row the app never shows — 12 card rows against the
+    # app's 11. The terminal-failure fixture below DOES pass it, because
+    # ``service.py`` passes it there. The artifact must match the real path or it
+    # argues for a shape the card does not have.
+    return lead + "\n\n" + describe(failure, attempts=2, profiles=("default", "browser"))
 
 
 async def main() -> None:

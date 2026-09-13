@@ -162,7 +162,7 @@ drift.
 | Class | Detector | Retry? |
 |---|---|---|
 | `transport` | `httpx.ConnectError`, `httpx.ConnectTimeout`, `httpx.ReadError`, `httpx.WriteError`, `httpx.RemoteProtocolError`, `httpx.PoolTimeout` | yes |
-| `stall` | `httpx.ReadTimeout` / `httpx.WriteTimeout` (headers or body never arrived) | yes, once, on a shortened budget (§3.3) |
+| `stall` | `httpx.ReadTimeout` / `httpx.WriteTimeout` (headers or body never arrived) | yes; the browser-shaped escalation is funded only by budget this attempt leaves behind (§3.3) — there is **no** shortened budget |
 | `server` | status in {500, 502, 503, 504} | yes |
 | `ratelimit` | status 429 | yes, honouring `Retry-After` (§3.4) |
 | `blocked` | status in {403, 401-with-anti-bot-marker, 503-with-challenge-marker} **and** a marker below | not a retry — a **profile escalation**, once (§4) |
@@ -502,22 +502,24 @@ Next step: use the `browser` tool on this URL — it drives the real browser
 interactive challenge.
 ```
 
-And for the stall-turned-block (canadiantire):
+And for a stall that turns out to be a silent block: the escalation still fires,
+because the final outcome of the hop is `stall` — but only when the stalled
+attempt leaves budget behind, because it is funded opportunistically rather than
+reserved (§3.3). The preview then takes the blocked shape above; only the
+terminal text below differs. A stall that spends the **whole** budget funds no
+second request, so the `2 attempts (default timed out after 12.0s,
+browser-profile)` sequence this example used to show on canadiantire is no longer
+reachable there. That 12.0 s grant was bought with the withdrawn first-attempt
+cap; on canadiantire the honest attempt now spends ~20 s and the outcome is the
+classified terminal message below, not a 403.
+And when nothing is retrievable at all, the terminal text names the class and the
+count rather than trailing off (the figure is the LAST attempt's granted read
+budget, not the call total — here a truncated first attempt left the escalation
+the remainder, and it stalled too):
 
 ```
-⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content.
-https://www.canadiantire.ca/en/pdp/…-0527211p.html
-markdownify · text/html · cache miss · 2 attempts (default timed out after 12.0s,
-browser-profile)
-…
-```
-
-And when nothing is retrievable at all (both attempts stalled), the terminal text
-names the class and the count rather than trailing off:
-
-```
-read timed out after 20.0s (2 attempts: default, browser-profile) —
-the origin accepted the connection but never sent a response.
+Read timed out after 14.9s — the origin accepted the connection but never sent
+a response (2 attempts: default, browser-profile).
 https://…
 ```
 
@@ -858,7 +860,8 @@ capture go on the PR.
    (§2.2). The markers are in one table with captured evidence in comments, so
    refreshing them is a small, obvious edit.
 8. **Latency on the block path.** +0.25 s on a failing fetch. Acceptable; the
-   stall path is 8 s *faster*.
+   stall path is **unchanged** at ~T — the −8 s this line used to claim was bought
+   with the withdrawn first-attempt cap, and is withdrawn with it (§3.3).
 
 ### 8.1 The approval boundary — decisive, and it constrains the design
 
