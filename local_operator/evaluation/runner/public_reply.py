@@ -3,6 +3,14 @@
 Screenshots leave the shared context before text summarization. Concise facts
 from the model's *visible reply* therefore need the same ordinary assistant
 text path as interactive sessions; private reasoning is never an input here.
+
+One reply, one shape, however it was framed. The envelope a reply is validated
+against is ``{"actions": [...], "public_observations": ""}``; the
+``action_batch`` object around the array, a ``reply_version``, a generic
+tool-call wrapper and trailing text are all FRAMING, and framing is normalised
+here rather than refused. Nothing in this module reads a model, a provider or a
+benchmark: the accepted set is a statement about our own contract and about the
+serializations any harness uses to wrap a function call.
 """
 
 from __future__ import annotations
@@ -16,10 +24,30 @@ from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import canonical_bytes, canonical_digest
 from local_operator.evaluation.protocol import ComputerAction
 from local_operator.evaluation.receipts import RedactionSet
+from local_operator.logger import get_logger
 
-REPLY_VERSION = "1.0"
+logger = get_logger(__name__)
+
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
+
+#: The keys that mark a reply as the PUBLIC-OBSERVATION envelope rather than a
+#: bare action batch. Reserved for exactly one job now: a REJECTED reply
+#: carrying any of them is withheld from corrective history instead of being
+#: replayed as facts, because its notes are unvalidated text (see
+#: :func:`looks_like_public_reply`).
+#:
+#: ``reply_version`` is tolerated rather than required, and is deliberately left
+#: in this set: a reply that carries it is envelope-shaped, and withholding such
+#: a reply is the conservative direction. It is no longer part of the accepted
+#: contract -- it carried nothing the channel and the schema did not already
+#: pin, and requiring the model to restate it was a refusal class of its own.
 _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
+
+#: The keys a bare or enveloped reply may carry without being framing noise.
+#: Everything else in a reply is IGNORED rather than refused: task, episode and
+#: observation ids are pinned by the harness, so no sibling key can change what
+#: executes -- but extras are still reported, never silently dropped.
+_REPLY_KEYS = {"actions", "action_batch", "public_observations", "reply_version"}
 
 #: The rule ``action_batch`` is held to, worded as it has always been worded.
 #: Kept as one literal because ``classify_rejection`` reads this sentence out of
@@ -27,32 +55,63 @@ _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
 #: defect -- a reworded opening would silently reclassify them.
 _BATCH_SHAPE_RULE = "model reply action_batch requires exactly an actions array"
 
-#: The two legal shapes, offered together for a reply that never committed to
-#: the envelope: the version-less legacy batch, or the full envelope. Named so
-#: the clause can be dropped from the ONE sentence that must not offer the
-#: legacy batch (see :data:`_MISPLACED_REPLY_VERSION`).
-_EITHER_SHAPE_CLAUSE = (
-    '. Reply with EITHER the plain batch {"actions": [...]} and no other top-level '
-    "keys, OR the full envelope with exactly reply_version, action_batch, public_observations"
-)
+#: The same rule with the accepted shape stated, for the one branch that still
+#: raises it: a reply whose ``action_batch`` carries no actions array at all.
+#: The rule alone names nothing a model can act on -- the doctrine on
+#: ``rejection_hint`` is that every refusal states the accepted shape, literal or
+#: bound, and this sentence is the whole repair turn for a reply that put its
+#: actions somewhere else. The classifier keys on the rule, which is the prefix.
+_BATCH_SHAPE_ACCEPTED = _BATCH_SHAPE_RULE + ' -- the batch is exactly {"actions": [...]}'
 
-#: Present in the envelope diagnostic exactly when ``reply_version`` was found
-#: somewhere OTHER than the top level of the envelope: nested inside
-#: ``action_batch``, or duplicated at both levels. It is the discriminator
-#: ``classify_rejection`` keys the ``env-version-misplaced`` class on, so both
-#: branches that can report the defect carry this phrase verbatim -- a branch
-#: that named the key without it would report the defect without measuring it.
+#: The sentence ``reply_version`` used to be refused with when it was nested
+#: inside ``action_batch`` or duplicated at both levels. This build never emits
+#: it -- a key in the wrong place is tolerated now, so there is no defect left to
+#: report -- but ``classify_rejection`` still keys ``env-version-misplaced`` on
+#: this exact literal, and every artifact that class was ever measured from
+#: carries it. Deleting or rewording it would silently reclassify all of them.
 _MISPLACED_REPLY_VERSION = (
     "'reply_version' belongs at the top level of the envelope, beside "
     "'action_batch' and 'public_observations', not inside 'action_batch'"
 )
 
+#: One generic function-call serialization layer: a call is a NAME plus an
+#: argument object, and the reply already arrives on a channel that names the
+#: contract. These are the keys any harness puts those arguments under, so
+#: unwrapping one of them normalises WHERE the envelope is framed, never what it
+#: says. A per-model or per-vendor marker table would be a different thing
+#: entirely, and is refused in writing by ``harness/reply_channel.py``.
+_TOOL_CALL_ARGUMENT_KEYS = (
+    "parameters",
+    "arguments",
+    "input",
+    "payload",
+    "action",
+    "data",
+    "tool_input",
+)
 
-#: Bounds on how much of a rejected reply's OWN key names may appear in the
-#: diagnostic sent back to the model. The reserved keys are safe to name (they
-#: come from a fixed set), but any other key is model-supplied text: echoing it
-#: whole turns a malformed reply into an unbounded retry prompt and re-opens
-#: the replay channel the reserved-key suppression exists to close.
+#: How many serialization layers may be unwrapped before giving up. One covers
+#: every shape observed in the field -- ``{"tool_name": ..., "parameters":
+#: {...}}``, ``{"tool_call": ..., "input": "{...}"}``, ``{"input": {...}}``
+#: -- and two leaves room for a wrapper inside a wrapper without turning the
+#: decoder into a search over arbitrary nesting.
+_MAX_UNWRAP_DEPTH = 2
+
+#: How many candidate ``{`` positions the trailing-remainder scan may try before
+#: giving up. Each failed decode rescans forward one character, so an unbounded
+#: scan over a remainder full of bare braces goes quadratic -- the same bound,
+#: and the same reason, as ``_iter_json_objects`` in the tool layer. Giving up
+#: means "no competing batch found", which degrades to the tolerant path rather
+#: than to an error.
+_MAX_TRAILING_DECODE_ATTEMPTS = 256
+
+
+#: Bounds on how much of a rejected reply's OWN key names may appear in a
+#: diagnostic or a log line. The reserved keys are safe to name (they come from
+#: a fixed set), but any other key is model-supplied text: echoing it whole turns
+#: a malformed reply into an unbounded retry prompt, and now turns a bounded log
+#: line into an unbounded one, re-opening the replay channel the reserved-key
+#: suppression exists to close.
 #:
 #: A key is quoted WHOLE or not at all -- :func:`_unexpected_key_summary`
 #: owns both the rendering and the guard that decides what may be quoted.
@@ -71,8 +130,8 @@ def _unexpected_key_summary(keys: Sequence[str]) -> str:
     leak. Quoting whole-or-nothing means nothing is ever reshaped on the way
     out.
 
-    Shared by the two branches that name keys the model put in the wrong place
-    -- a top-level near-miss and a key nested inside ``action_batch`` -- because
+    Shared by every branch that names model-supplied keys back to the reader --
+    a tolerated-but-ignored extra key, or a near-miss key in a hint -- because
     the bound and the guard are the security property here, and a second copy
     of them is a second place to get it wrong.
     """
@@ -104,29 +163,6 @@ def is_quotable_key(key: str) -> bool:
         return False
     rendered = repr(key)
     return rendered[1:-1] == key
-
-
-def _misplaced_envelope_keys(value: Mapping[str, Any], missing: Sequence[str]) -> list[str]:
-    """Required envelope keys that were found inside ``action_batch`` instead.
-
-    The distinction this exists for: ``omitted 'reply_version'`` is literally
-    true whenever the key is absent from the TOP level, and it was the repair
-    turn for replies that had actually put the key somewhere -- the model is
-    then told to add a key it can see in its own reply, which is a rule it
-    cannot act on. A key that is present but nested was misplaced, not omitted,
-    and only the decoder can tell the two apart: the nesting is visible in the
-    parsed value and nowhere in the rendered rule.
-
-    Only keys the top level is missing are reported, and each must clear
-    :func:`is_quotable_key`, so the reported names are always a subset of the
-    reserved ones. ``action_batch`` itself takes exactly ``actions``, so no
-    reserved key can be inside it legitimately.
-    """
-
-    batch = value.get("action_batch")
-    if not isinstance(batch, Mapping):
-        return []
-    return [key for key in missing if key in batch and is_quotable_key(key)]
 
 
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
@@ -193,14 +229,22 @@ _MAX_ESCAPE_LEVELS = 3
 #: rides in the request's cache prefix on every call of every episode.
 PUBLIC_REPLY_TOOL_DESCRIPTION = (
     "Submit your decision for the current observation. This means exactly the "
-    "same thing as replying with the JSON envelope described in your "
+    "same thing as replying with the JSON object described in your "
     "instructions -- use whichever is natural, and never both."
 )
 
 
 def is_public_reply(value: Any) -> bool:
-    # Reserve every envelope key: a misspelled/missing version must not silently
-    # downgrade a reply with notes to the legacy actions-only interpretation.
+    """Whether a PARSED reply carries one of the reserved envelope keys.
+
+    Two jobs, both about PUBLIC OBSERVATIONS rather than about acceptance. It
+    commits a REJECTED reply to the withheld-from-history rule (the notes it
+    wanted to publish are unvalidated text), and it is how a competing-batch
+    scan finds the batch inside an ``action_batch`` wrapper. Acceptance itself no
+    longer turns on this: :func:`normalise_public_reply` decodes every accepted
+    spelling, so a reply is never refused for missing a key it may omit.
+    """
+
     return isinstance(value, Mapping) and bool(_ENVELOPE_KEYS.intersection(value))
 
 
@@ -264,158 +308,354 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _nested_key_clause(keys: Sequence[str]) -> str:
-    """Where reserved keys other than the version key belong, when nested.
+class DecisionParseError(ValueError):
+    """The provider returned something that is not a usable action batch.
 
-    Split from :data:`_MISPLACED_REPLY_VERSION` deliberately: this clause names
-    the key and stays inside ``envelope-shape``, because a reply that put its
-    notes inside the batch still has the envelope's shape as its defect. Only
-    ``reply_version`` gets the dedicated class, and only when IT is the key that
-    was nested -- a reply whose ``public_observations`` is nested while the
-    version key is simply absent must not be told that ``reply_version`` is in
-    the wrong place, which is a key the model never wrote.
+    Declared here, beside the decoders that raise it, because this module owns
+    what counts as a reply; ``provider_client`` re-exports the name for callers
+    that treat it as a client error.
     """
 
-    return (
-        f"It carried {', '.join(repr(key) for key in keys)} inside 'action_batch'; "
-        "the envelope's own keys belong at the top level, not inside a batch"
-    )
+
+#: Distinguishes "the model wrote no ``public_observations`` key" from "the
+#: model wrote an empty one". The first is a legacy actions-only batch and has
+#: nothing to publish; the second is an envelope that recorded an empty note and
+#: is replayed as the model's visible reply.
+_ABSENT = object()
 
 
-def _batch_shape_diagnostic(batch: Any) -> str:
-    """Why ``action_batch`` was refused, naming the keys that landed in it.
+def _decode_leading_json(payload: str) -> tuple[Any, str]:
+    """Decode the leading JSON value and return it with any trailing noise.
 
-    The bare rule is information-free for the defect it actually receives: the
-    rejected reply is withheld from the repair turn, so a model told only
-    "requires exactly an actions array" cannot see which key it put in the wrong
-    place. Measured on the DeepSeek canary arm this sentence was the whole
-    repair turn for 9 of 15 ``envelope-shape`` rejections -- 4 of those with
-    ``reply_version`` in the batch, the rest with an action's own fields there
-    -- and the two episodes that repeated it verbatim both sealed: the same
-    "name the defect vs repeat the rule" gap the envelope diagnostic was written
-    for (4/10 bare rule against 9/10 with the keys named).
+    ``json.loads`` demands that the WHOLE string be one value, so a model that
+    emitted a complete, correct batch and then appended a stray token lost the
+    entire turn to ``Extra data: line 1 column 318 (char 317)``. That is a real
+    and repeated failure -- one sealed episode paid for it three times, each a
+    billed call discarded over noise the harness had already finished reading
+    past. ``raw_decode`` stops at the end of the first complete value and says
+    where it stopped, which is exactly the question being asked here.
 
-    ``reply_version`` inside ``action_batch`` is reported under its own marker
-    because it is the one case where the key belongs at the TOP level: that
-    placement is a rejection class of its own (see
-    :data:`_MISPLACED_REPLY_VERSION`), not a batch-shape defect.
+    The tolerance is deliberately ONE-SIDED, because the three shapes are not
+    equally knowable:
 
-    Keys are rendered by :func:`_unexpected_key_summary`, so the same guard and
-    the same bound apply as on the envelope diagnostic's own unexpected keys.
+    * **Trailing noise** (``{...}原始内容``, ``{...} Hope that helps!``) is
+      tolerated. The decision is already complete and unambiguous at the point
+      the junk starts; nothing after it can change which actions were chosen.
+    * **Leading noise** (``Sure, here you go: {...}``) is NOT skipped. Hunting
+      forward for the first ``{`` means guessing where the value begins, and a
+      preamble that itself contains a brace makes that guess wrong silently --
+      the failure mode is executing a DIFFERENT batch than the model sent,
+      which is far worse than losing the turn. A leading-junk reply still gets
+      the ordinary parse error and a corrective re-prompt.
+    * **A second batch for the SAME observation**, anywhere in the remainder,
+      is genuinely ambiguous -- which one did the model mean? -- so it is NOT
+      tolerated. Taking the first would execute a decision the model may have
+      superseded.
+
+    What makes the third rule safe to apply ANYWHERE, rather than only to an
+    immediately adjacent object, is that it keys on ``observation_id``. Two
+    weaker probes were measured against the real bundle and both fail:
+
+    * "Does the remainder start with ``{``?" only catches a directly adjacent
+      object. One character of anything else -- a comma, a newline, prose,
+      ``原始内容`` -- disables it, so a superseding batch behind a separator is
+      dropped silently, which is precisely what this rule claims to prevent.
+    * "Does anything in the remainder parse as JSON?" over-fires: it rejects
+      all three real bundle turns, because a model that quotes the harness's
+      own ``The rejected reply was: {...}`` feedback back at itself carries a
+      well-formed batch in its prose. Those batches are HISTORY, not a
+      competing decision -- in every one of the three they bind a DIFFERENT
+      observation than the turn being decided.
+
+    Binding on the observation id separates those two cases exactly: a batch
+    naming this observation is a decision about the screen in front of the
+    model and therefore competes; a batch naming any other observation is a
+    quotation of an older turn and cannot.
+
+    Shared by BOTH decode paths since the contract collapsed to one shape: the
+    envelope decoder used to call ``json.loads`` over the whole string and so
+    refused exactly the reply this tolerance exists for, which is an internal
+    inconsistency rather than a contract decision.
     """
 
-    if not isinstance(batch, Mapping):
-        return _BATCH_SHAPE_RULE
-    unexpected = sorted(set(batch) - {"actions"})
-    if not unexpected:
-        return _BATCH_SHAPE_RULE
-    named = _unexpected_key_summary(unexpected)
-    diagnostic = f"{_BATCH_SHAPE_RULE}; it carried {len(unexpected)} unexpected key(s): {named}"
-    if not any(is_quotable_key(key) for key in unexpected):
-        # Every stray key was unquotable or over the cap, so the count is all
-        # that can be said about THEM -- and a count on its own is not something
-        # the model can act on. State the accepted batch instead: it is the shape
-        # the model has to emit, and it is the only half of this sentence that
-        # survives a key that cannot be quoted.
-        diagnostic += ' -- the batch is exactly {"actions": [...]}'
-    if "reply_version" in unexpected:
-        return f"{diagnostic}; {_MISPLACED_REPLY_VERSION}"
-    return diagnostic
-
-
-def decode_public_reply(payload: str) -> dict[str, Any]:
-    """Require one exact envelope; the legacy decoder keeps its own tolerance."""
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_object)
+    # ``json.loads`` skips leading whitespace and ``raw_decode`` does not, so
+    # stripping here keeps this helper's contract identical to the call it
+    # replaced. Doing it inside rather than relying on the caller matters
+    # because this is a general entry point: a second caller that forgot to
+    # strip would lose a turn to a leading newline, which is exactly the class
+    # of loss this function exists to prevent. Only leading WHITESPACE is
+    # skipped -- leading junk still fails at offset 0, by design.
+    payload = payload.lstrip()
     try:
-        value = json.loads(payload, object_pairs_hook=_unique_object)
+        decoded, end = decoder.raw_decode(payload)
     except (ValueError, RecursionError) as error:
-        raise ValueError(
-            "model reply must be one duplicate-free JSON object, with no trailing text"
-        ) from error
-    if not isinstance(value, dict) or set(value) != _ENVELOPE_KEYS:
-        # Name the DEFECT, not just the rule. Validation is unchanged -- a
-        # partial envelope is still rejected, because silently downgrading one
-        # to the legacy interpretation would drop whatever the model meant to
-        # put in ``public_observations``. What changes is what the model is
-        # told, and that decides whether the correction can land.
-        #
-        # Reserving every envelope key means touching ONE of them commits the
-        # reply to strict decoding, so the common failure is a near-miss: a
-        # model emits ``{"action_batch": {...}}`` and gets told the rule it
-        # already half-followed, without being told which half it missed.
-        # Measured on minimax/minimax-m3, which produces exactly that shape in
-        # ~1 of 10 replies: re-prompting with the bare rule recovered 4/10,
-        # while naming the keys present and missing recovered 9/10. The
-        # difference is the whole gap between an episode that continues and one
-        # that spends its retry bound and seals as a model failure -- which is
-        # how a paid canary episode died at three calls.
-        if isinstance(value, dict):
-            present = sorted(_ENVELOPE_KEYS & set(value))
-            missing = sorted(_ENVELOPE_KEYS - set(value))
-            extra = sorted(set(value) - _ENVELOPE_KEYS)
-            parts = []
-            if present:
-                parts.append("carried " + ", ".join(repr(key) for key in present))
-            if missing:
-                parts.append("omitted " + ", ".join(repr(key) for key in missing))
-            if extra:
-                # ``present``/``missing`` are intersections with a fixed set, so
-                # they can only ever name the three reserved keys. ``extra`` is
-                # arbitrary MODEL-SUPPLIED text and must never be echoed whole:
-                # a 50,000-character key produced a 50,000-character retry
-                # prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
-                # ``_diagnostic``'s cap intercepts, and which re-opens the
-                # replay channel the reserved-key suppression below closes.
-                # :func:`_unexpected_key_summary` owns the guard that keeps a
-                # key whole-or-nothing; see it for why truncation is unsafe.
-                parts.append(
-                    f"added {len(extra)} unexpected key(s): {_unexpected_key_summary(extra)}"
-                )
-            sentence = "model reply used the reserved envelope but " + "; ".join(parts)
-            misplaced = _misplaced_envelope_keys(value, missing)
-            if "reply_version" in misplaced:
-                # The key is not missing, it is in the wrong PLACE, and that is
-                # a different repair -- so it is a different class (see
-                # ``classify_rejection``) and a different sentence. The
-                # carried/omitted wording stays byte-verbatim as the prefix
-                # because it is the measured half (9/10 recovered on the model
-                # it was measured against, against 4/10 for the bare rule); what
-                # is dropped is the EITHER clause, which offers the
-                # version-less plain batch as an equal alternative -- advice
-                # that costs a model already inside the envelope its notes, to
-                # fix a defect that is one key's position.
-                raise ValueError(f"{sentence}. {_MISPLACED_REPLY_VERSION}")
-            if misplaced:
-                # Some OTHER reserved key was nested in ``action_batch``. It is
-                # named for the same reason, but it stays in ``envelope-shape``:
-                # the class above exists for the key whose PLACEMENT is the whole
-                # defect, and a reply that put, say, its notes inside the batch
-                # has the envelope's shape as its defect. Firing the
-                # version-specific sentence here would misdirect the model to a
-                # key it never wrote -- and would take the class key's
-                # measurement with it.
-                raise ValueError(
-                    f"{sentence}. {_nested_key_clause(misplaced)}{_EITHER_SHAPE_CLAUSE}"
-                )
-            raise ValueError(sentence + _EITHER_SHAPE_CLAUSE)
-        raise ValueError(
-            "model reply requires exactly reply_version, action_batch, public_observations"
+        # Includes the leading-junk case: raw_decode starts at offset 0, so a
+        # preamble fails here rather than being skipped past. Duplicate keys are
+        # refused by the hook, and their wording is kept as it has always been
+        # worded: ``classify_rejection`` keys the class on the phrase, and a
+        # re-spelled sentence would reclassify every sealed artifact that
+        # carries it.
+        if "duplicate JSON keys" in str(error):
+            raise DecisionParseError(
+                "model reply must be one duplicate-free JSON object"
+            ) from error
+        raise DecisionParseError(f"decision is not valid JSON: {error}") from error
+    trailing = payload[end:].strip()
+    if trailing and _competing_batch_offset(trailing, decoded, decoder) is not None:
+        raise DecisionParseError(
+            "decision carries a second action batch for the same observation; "
+            "send exactly one action batch"
         )
-    if value["reply_version"] != REPLY_VERSION:
-        raise ValueError("unsupported model reply version")
-    notes = value["public_observations"]
-    if not isinstance(notes, str) or len(notes) > MAX_PUBLIC_OBSERVATIONS_CHARS:
-        raise ValueError(
+    return decoded, trailing
+
+
+def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecoder) -> int | None:
+    """Offset of a second batch in ``trailing`` that competes with ``decoded``.
+
+    "Competes" means it names the SAME ``observation_id``: only a decision
+    about the screen currently in front of the model can supersede the one
+    already parsed. See :func:`_decode_leading_json` for why that test, rather
+    than adjacency or bare JSON-ness, is the one that separates a superseding
+    batch from the harness feedback a model quotes back at itself.
+
+    Returns ``None`` when the remainder is ordinary prose, which is the common
+    case and the one that must stay cheap.
+    """
+
+    observation_ids = _batch_observation_ids(decoded)
+    if not observation_ids:
+        return None
+    # A decision is always an object, so only "{" can start a competing batch;
+    # the scan is bounded the same way ``_iter_json_objects`` is bounded, since
+    # a remainder full of bare braces would otherwise cost a rescan each.
+    index = 0
+    attempts = 0
+    while attempts < _MAX_TRAILING_DECODE_ATTEMPTS:
+        start = trailing.find("{", index)
+        if start < 0:
+            return None
+        attempts += 1
+        try:
+            candidate, end = decoder.raw_decode(trailing, start)
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: the C decoder recurses per
+            # nesting level and raises it (NOT a ValueError subclass) on a
+            # deeply nested payload. Untrusted model output must degrade to
+            # "no competing batch found", never to an unexpected exception.
+            index = start + 1
+            continue
+        index = max(end, start + 1)
+        if not isinstance(candidate, Mapping):
+            continue
+        if _batch_observation_ids(candidate) & observation_ids:
+            return start
+    return None
+
+
+def _batch_observation_ids(value: Any) -> set[str]:
+    """The observation ids an action-batch-shaped object binds to.
+
+    Read from the ACTIONS rather than from a top-level ``observation_id``: a
+    model reply carries the id per action (the runner supplies the batch-level
+    one itself), so a top-level lookup finds nothing on the very shape this
+    needs to compare. Returns an empty set for anything that is not batch
+    shaped, which the caller treats as "not a competing decision".
+
+    The batch is located through the same normalisation an accepted reply gets,
+    so a WRAPPED second batch competes exactly as a bare one does -- otherwise
+    normalising the framing would have quietly disabled this rule for the very
+    shapes the normalisation admits.
+    """
+
+    try:
+        value = _unwrap_tool_call(value)
+    except DecisionParseError:
+        # A wrapper whose payload is not JSON at all cannot be a batch this
+        # scan is looking for. Degrading here is required: this runs over
+        # untrusted trailing text on the decode hot path.
+        return set()
+    if not isinstance(value, Mapping):
+        return set()
+    actions = value.get("actions")
+    if not isinstance(actions, list):
+        nested = value.get("action_batch")
+        actions = nested.get("actions") if isinstance(nested, Mapping) else nested
+    if not isinstance(actions, list) or not actions:
+        return set()
+    return {
+        action["observation_id"]
+        for action in actions
+        if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
+    }
+
+
+def _carries_decision(value: Mapping[str, Any]) -> bool:
+    """Whether a parsed object already carries THIS reply's decision.
+
+    The guard that keeps unwrapping from ever running past a reply's own
+    envelope: a decision that happens to mention a wrapper key beside its
+    actions stays the decision it is, because nothing is ever unwrapped out of
+    an object that has already stated one.
+    """
+
+    return "actions" in value or "action_batch" in value
+
+
+def _unwrap_tool_call(value: Any) -> Any:
+    """Strip up to :data:`_MAX_UNWRAP_DEPTH` generic function-call layers.
+
+    A tool call is a name plus an argument object, so a harness that carries a
+    call as TEXT carries one of :data:`_TOOL_CALL_ARGUMENT_KEYS` around the
+    envelope. The reply already arrives on a channel that names the contract, so
+    the wrapper holds no decision information at all -- unwrapping it normalises
+    where the envelope is framed and leaves what it says untouched.
+
+    A layer whose value is a STRING is parsed as JSON (that is the
+    ``input``-as-a-JSON-string shape) through :func:`_decode_leading_json`, not
+    through a second parser, so the tolerance and the competing-batch rule a
+    wrapped reply gets are the ones a prose reply gets.
+
+    Bounded twice over: by the depth, and by refusing to look inside an object
+    that already carries a decision (see :func:`_carries_decision`). Anything
+    still wrapped after the bound is left alone to be refused as the malformed
+    reply it then is -- this is a normaliser, not a search.
+    """
+
+    for _ in range(_MAX_UNWRAP_DEPTH):
+        if not isinstance(value, Mapping) or _carries_decision(value):
+            return value
+        candidates = [key for key in _TOOL_CALL_ARGUMENT_KEYS if key in value]
+        if len(candidates) != 1:
+            return value
+        key = candidates[0]
+        inner = value[key]
+        if isinstance(inner, str):
+            inner, _trailing = _decode_leading_json(inner)
+        value = inner
+    return value
+
+
+def _public_note(framed: Mapping[str, Any], batch: Any) -> str | None:
+    """The model's public note, from either level, or ``None`` if it wrote none.
+
+    The note is the one part of a reply the harness carries VERBATIM into the
+    next turn's context, so it is read from wherever the model put it rather
+    than dropped for landing beside the actions instead of above them.
+
+    Validation itself is unchanged: a note that is not a string, is over
+    :data:`MAX_PUBLIC_OBSERVATIONS_CHARS`, or is not encodable as Unicode text
+    still refuses the whole reply. A note that cannot be read must not be
+    silently discarded, because that would publish a reply the model did not
+    send.
+    """
+
+    note = framed.get("public_observations", _ABSENT)
+    if note is _ABSENT and isinstance(batch, Mapping):
+        note = batch.get("public_observations", _ABSENT)
+    if note is _ABSENT:
+        return None
+    if not isinstance(note, str) or len(note) > MAX_PUBLIC_OBSERVATIONS_CHARS:
+        raise DecisionParseError(
             "public_observations must be a string of at most "
             f"{MAX_PUBLIC_OBSERVATIONS_CHARS} characters"
         )
     try:
-        notes.encode("utf-8")
+        note.encode("utf-8")
     except UnicodeEncodeError as error:
-        raise ValueError("public_observations must be valid Unicode text") from error
-    batch = value["action_batch"]
-    if not isinstance(batch, dict) or set(batch) != {"actions"}:
-        raise ValueError(_batch_shape_diagnostic(batch))
-    return value
+        raise DecisionParseError("public_observations must be valid Unicode text") from error
+    return note
+
+
+def _report_ignored_keys(framed: Mapping[str, Any], batch: Any) -> None:
+    """Report -- never refuse -- keys the reply contract has no use for.
+
+    Tolerated is not the same as silent. An unexpected key is a signal worth
+    seeing (it usually means the model is guessing at a shape it was not given),
+    and a tolerance nobody can observe is indistinguishable from the harness
+    quietly mangling a reply.
+
+    Every name travels through :func:`_unexpected_key_summary`, so a
+    50,000-character model-supplied key cannot turn a bounded log line into an
+    unbounded one -- the same guard, and the same reason, that used to bound the
+    diagnostic this class of reply was refused with.
+    """
+
+    stray = sorted(set(framed) - _REPLY_KEYS)
+    if isinstance(batch, Mapping):
+        stray += sorted(set(batch) - {"actions", "public_observations"})
+    if stray:
+        logger.warning(
+            "model reply carried %d key(s) the reply contract does not use; ignored: %s",
+            len(stray),
+            _unexpected_key_summary(stray),
+        )
+
+
+def normalise_public_reply(value: Any) -> tuple[list[Any], str | None]:
+    """The one accepted reply shape, however the reply was framed.
+
+    Returns the action array and the model's public note -- ``None`` for the
+    note when the reply carried no ``public_observations`` key at all, which is
+    what still separates a legacy actions-only batch (nothing to publish) from
+    an envelope that recorded an empty note.
+
+    What is ACCEPTED here is deliberately framing-blind: a bare action array, a
+    bare array under ``action_batch``, the full envelope, any of those inside
+    one generic tool-call wrapper, and any of those with a ``reply_version`` or
+    with extra keys beside them. What is still REFUSED is what cannot be read as
+    a decision: malformed or duplicated JSON, two action arrays that could each
+    be the decision, and a batch that is not an object carrying ``actions``.
+    Those are the refusals that are doing real work, and they are the only ones
+    left in this module.
+    """
+
+    framed = _unwrap_tool_call(value)
+    if framed is not value:
+        logger.warning(
+            "model reply was wrapped in a generic tool-call serialization; the "
+            "envelope inside it was decoded"
+        )
+    if not isinstance(framed, Mapping):
+        raise DecisionParseError("decision must be a JSON object")
+    batch = framed.get("action_batch")
+    nested_actions = batch.get("actions") if isinstance(batch, Mapping) else batch
+    top_actions = framed.get("actions")
+    if isinstance(top_actions, list) and isinstance(nested_actions, list):
+        # Two action arrays in one reply is the SAME ambiguity as two batches in
+        # one payload -- which one did the model mean? -- and it is a question
+        # about MEANING, not about framing, so it is not tolerated. Taking the
+        # outer array could drop an action the model meant, and taking the inner
+        # one could execute a decision the model superseded.
+        raise DecisionParseError(
+            "model reply carries a second action batch; send exactly one action batch"
+        )
+    actions = top_actions if isinstance(top_actions, list) else nested_actions
+    if not isinstance(actions, list) or not actions:
+        if batch is not None:
+            raise DecisionParseError(_BATCH_SHAPE_ACCEPTED)
+        raise DecisionParseError("decision must carry a non-empty actions array")
+    note = _public_note(framed, batch)
+    _report_ignored_keys(framed, batch)
+    return actions, note
+
+
+def decode_public_reply(payload: str) -> dict[str, Any]:
+    """The canonical envelope of a reply payload, whatever its framing.
+
+    The string entry point, for callers holding the model's own bytes. The reply
+    may be a bare action array, an ``action_batch`` wrapper, the full envelope,
+    any of those inside one generic tool-call serialization, followed by text.
+
+    Returns ``{"actions": [...], "public_observations": str}`` so no caller has
+    to know which accepted spelling the model used. Duplicate JSON keys are
+    still refused, and so is a second batch for the same observation: one reply
+    is one decision.
+    """
+
+    value, _trailing = _decode_leading_json(payload)
+    actions, note = normalise_public_reply(value)
+    return {"actions": actions, "public_observations": note or ""}
 
 
 def rejected_reply_evidence(reply: str | None, redactions: RedactionSet | None) -> str:
@@ -606,13 +846,21 @@ _ALL_ACTION_MODELS = get_args(get_args(ComputerAction)[0])
 
 
 def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str, Any]:
-    """The envelope's JSON Schema, shared by the contract and the reply channel.
+    """The reply contract's JSON Schema, shared by the contract and the channel.
 
     One definition with two readers. It is published in the evidence bundle's
     reply contract (below) AND handed to the harness's structured reply channel
     as that function's parameters, so the tool the model may call and the prose
     envelope it may write are provably the same shape rather than two hand-kept
     copies that drift apart.
+
+    ONE shape, and the simplest one the decoder accepts: a required ``actions``
+    array with an optional sibling note. The ``action_batch`` wrapper, a
+    ``reply_version`` and trailing text are all still ACCEPTED -- the decoder is
+    deliberately more permissive than the offer, because a reply is judged on
+    its actions and framing it differently is not a decision about the task. The
+    offer stays the crisp shape so a model that follows it cannot produce a
+    reply we then have to normalise.
 
     ``action_surface`` filters the admitted action kinds to the ones the
     NEGOTIATED surface actually accepts. Passing it is what keeps the offered
@@ -632,33 +880,25 @@ def public_reply_schema(action_surface: ActionSurface | None = None) -> dict[str
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": sorted(_ENVELOPE_KEYS),
+        "required": ["actions"],
         "properties": {
-            "reply_version": {"const": REPLY_VERSION},
-            "action_batch": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["actions"],
-                "properties": {
-                    "actions": {
-                        "type": "array",
-                        # ``anyOf`` over INLINED member schemas, not a ``$ref``
-                        # into ``$defs`` with a ``oneOf``/``discriminator``.
-                        #
-                        # This schema is handed to a provider as a function's
-                        # parameters, and Gemini's ``FunctionDeclaration``
-                        # accepts only a narrow OpenAPI 3.0 subset: ``$ref``,
-                        # ``$defs``, ``oneOf`` and ``discriminator`` are all
-                        # rejected with 400 INVALID_ARGUMENT, which would fail
-                        # EVERY request of a Gemini-routed episode rather than
-                        # degrading. ``tools/builtin.py`` carries the same
-                        # warning for the same reason. The discriminated union
-                        # is therefore flattened here: ``anyOf`` over concrete
-                        # member schemas is the same admitted set, expressed in
-                        # a shape every provider accepts.
-                        "items": {"anyOf": [_inlined_action_schema(m) for m in models]},
-                    }
-                },
+            "actions": {
+                "type": "array",
+                # ``anyOf`` over INLINED member schemas, not a ``$ref``
+                # into ``$defs`` with a ``oneOf``/``discriminator``.
+                #
+                # This schema is handed to a provider as a function's
+                # parameters, and Gemini's ``FunctionDeclaration``
+                # accepts only a narrow OpenAPI 3.0 subset: ``$ref``,
+                # ``$defs``, ``oneOf`` and ``discriminator`` are all
+                # rejected with 400 INVALID_ARGUMENT, which would fail
+                # EVERY request of a Gemini-routed episode rather than
+                # degrading. ``tools/builtin.py`` carries the same
+                # warning for the same reason. The discriminated union
+                # is therefore flattened here: ``anyOf`` over concrete
+                # member schemas is the same admitted set, expressed in
+                # a shape every provider accepts.
+                "items": {"anyOf": [_inlined_action_schema(m) for m in models]},
             },
             "public_observations": {"type": "string", "maxLength": MAX_PUBLIC_OBSERVATIONS_CHARS},
         },
@@ -712,15 +952,28 @@ def public_reply_contract() -> dict[str, Any]:
     The action array schema is borrowed, not copied: its vocabulary and bounds
     remain owned by ActionBatch. Negotiated execution restrictions are declared
     by the existing action_surface metadata/tool digest and still gate parsing.
+
+    The framing and binding entries describe what the DECODER accepts, which is
+    deliberately wider than the schema it publishes: a reader of a bundle should
+    be able to tell, without reading this module, why a reply with extra keys or
+    a stale ``observation_id`` was accepted rather than refused.
     """
     schema = public_reply_schema()
     contract = {
         "schema": schema,
-        "legacy_plain_action_batch": True,
-        "envelope_framing": "single-json-object-no-duplicate-keys-no-trailing-text",
+        "accepted_framings": (
+            "one leading JSON object, and any trailing text after it; duplicate keys and a "
+            "second action batch for the same observation are refused"
+        ),
+        "accepted_shapes": (
+            '{"actions": [...]}, or the same array under one "action_batch" wrapper, or '
+            "either of those inside one generic tool-call serialization; keys the reply "
+            'contract does not use, including a "reply_version", are ignored'
+        ),
         "binding": (
-            "action observation_ids validated against current observation "
-            "and negotiated action_surface"
+            "every action is bound to the current observation and its frames by the "
+            "harness before validation, so an observation_id or frame_id in the reply "
+            "selects nothing; the negotiated action_surface still gates every action"
         ),
         "public_observations": (
             "concise new observed facts/progress only; no deliberation or credentials"
