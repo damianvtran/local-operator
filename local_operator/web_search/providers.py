@@ -23,7 +23,6 @@ import httpx
 
 from local_operator.credentials import CredentialManager
 from local_operator.web_search.cost import estimate_search_cost
-from local_operator.web_search.pages import PAGE_CONTEXTS
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     ProviderStatus,
@@ -33,6 +32,7 @@ from local_operator.web_search.models import (
     SearchUsage,
     WebSearchSettings,
 )
+from local_operator.web_search.pages import PAGE_CONTEXTS
 
 ProviderSearch = Callable[
     [httpx.AsyncClient, CredentialManager, WebSearchSettings, str, int],
@@ -558,9 +558,7 @@ def _deepseek_answer(blocks: list[Any]) -> str | None:
     return answer or None
 
 
-def parse_deepseek_search(
-    payload: object, limit: int
-) -> tuple[list[SearchSource], str | None]:
+def parse_deepseek_search(payload: object, limit: int) -> tuple[list[SearchSource], str | None]:
     """Normalize one Anthropic-format Messages response into sources + answer.
 
     Dedupes by URL because a `max_uses > 1` request can surface the same page
@@ -870,9 +868,7 @@ async def _search_deepseek(
 ) -> SearchResponse:
     key = await _resolve_deepseek_key(credentials)
     if not key:
-        raise RuntimeError(
-            "DeepSeek search needs an API key; run `local-operator login deepseek`"
-        )
+        raise RuntimeError("DeepSeek search needs an API key; run `local-operator login deepseek`")
 
     # The balance gate is a CACHED verdict, never a probe on this call's path.
     # Measured, the probe costs 300-580 ms -- 7-13% of a ~4.5 s search -- and it
@@ -1026,9 +1022,7 @@ def _apply_deepseek_evidence(
                 }
             )
         )
-    scored.sort(
-        key=lambda item: item.relevance if item.relevance is not None else -1, reverse=True
-    )
+    scored.sort(key=lambda item: item.relevance if item.relevance is not None else -1, reverse=True)
     return [*scored, *unscored]
 
 

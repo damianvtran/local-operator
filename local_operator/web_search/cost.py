@@ -75,7 +75,9 @@ PROVIDER_USD_PER_SEARCH: dict[str, float | None] = {
 #: so an operator can tell a list price from a measurement.
 PROVIDER_PRICE_NOTES: dict[str, str] = {
     "duckduckgo": "credential-free; costs no money",
-    "tavily": "$0.008 per credit (1 per basic search); keyless mode is free within its monthly tier",
+    "tavily": (
+        "$0.008 per credit (1 per basic search); keyless mode is free within its monthly tier"
+    ),
     "deepseek": "one model turn billed as tokens at deepseek-flash list price",
     "perplexity": "anonymous mode is free; Sonar bills tokens plus a per-request fee",
     "brave": "$4 per 1,000 queries, subscription",

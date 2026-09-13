@@ -299,24 +299,26 @@ def _deepseek_payload(
             {
                 "type": "web_search_tool_result",
                 "tool_use_id": "srv_1",
-                "content": items
-                if items is not None
-                else [
-                    {
-                        "type": "web_search_result",
-                        "url": "https://example.com/a",
-                        "title": "A",
-                        # DeepSeek always returns this opaque field; the evidence
-                        # pass depends on replaying it untouched.
-                        "encrypted_content": "opaque-page-content",
-                    },
-                    {
-                        "type": "web_search_result",
-                        "url": "https://example.com/b",
-                        "title": "B",
-                        "encrypted_content": "opaque-page-content-b",
-                    },
-                ],
+                "content": (
+                    items
+                    if items is not None
+                    else [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/a",
+                            "title": "A",
+                            # DeepSeek always returns this opaque field; the evidence
+                            # pass depends on replaying it untouched.
+                            "encrypted_content": "opaque-page-content",
+                        },
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/b",
+                            "title": "B",
+                            "encrypted_content": "opaque-page-content-b",
+                        },
+                    ]
+                ),
             },
             {"type": "text", "text": answer, "citations": citations},
         ],
@@ -338,11 +340,20 @@ def test_deepseek_normalizer_maps_sources_joins_citations_and_carries_answer() -
                 # Same URL twice: a `max_uses > 1` request can surface one page
                 # from more than one server-side search.
                 {"type": "web_search_result", "url": "https://example.com/a", "title": "A again"},
-                {"type": "web_search_result", "url": "https://example.com/b", "title": "B",
-                 "page_age": "2026-08-05"},
+                {
+                    "type": "web_search_result",
+                    "url": "https://example.com/b",
+                    "title": "B",
+                    "page_age": "2026-08-05",
+                },
             ],
-            citations=[{"type": "web_search_result_location", "url": "https://example.com/a",
-                        "cited_text": "Cited excerpt"}],
+            citations=[
+                {
+                    "type": "web_search_result_location",
+                    "url": "https://example.com/a",
+                    "cited_text": "Cited excerpt",
+                }
+            ],
         ),
         5,
     )
@@ -414,9 +425,7 @@ async def test_deepseek_transport_uses_server_tool_and_primes_balance_off_path(
     assert requests[0].url.path == "/anthropic/v1/messages"
     assert primes == ["sk-test-not-real"]
     body = json.loads(requests[0].content)
-    assert body["tools"] == [
-        {"type": "web_search_20250305", "name": "web_search", "max_uses": 1}
-    ]
+    assert body["tools"] == [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}]
     assert body["max_tokens"] == 1_024
     assert body["messages"][0]["content"][0]["text"] == (
         "Perform a web search for the query: latest python"
@@ -481,9 +490,7 @@ async def test_deepseek_transport_skips_on_a_cached_low_balance_verdict(tmp_path
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RuntimeError, match="balance is below"):
-            await PROVIDERS["deepseek"].search(
-                client, credentials, WebSearchSettings(), "query", 5
-            )
+            await PROVIDERS["deepseek"].search(client, credentials, WebSearchSettings(), "query", 5)
 
     module.reset_deepseek_balance_cache_for_tests()
 
@@ -505,9 +512,7 @@ async def test_deepseek_transport_requires_a_key(tmp_path, monkeypatch) -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RuntimeError, match="login deepseek"):
-            await PROVIDERS["deepseek"].search(
-                client, credentials, WebSearchSettings(), "query", 5
-            )
+            await PROVIDERS["deepseek"].search(client, credentials, WebSearchSettings(), "query", 5)
 
 
 # ---------------------------------------------------------------------------
@@ -523,10 +528,11 @@ def test_deepseek_evidence_parser_skips_unparseable_lines() -> None:
     from local_operator.web_search.providers import parse_deepseek_evidence
 
     rows = parse_deepseek_evidence(
-        '```json\n'
-        '{"url": "https://example.com/a", "relevance": 92, "summary": "About A", "quote": "Verbatim A"}\n'
+        "```json\n"
+        '{"url": "https://example.com/a", "relevance": 92, "summary": "About A",'
+        ' "quote": "Verbatim A"}\n'
         '{"url": "https://example.com/b", "relevance": 88, "quote": "Verbatim B"}\n'
-        'not json at all\n'
+        "not json at all\n"
         '{"url": "https://example.com/a", "relevance": 10}\n'
     )
 
