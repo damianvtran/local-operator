@@ -1769,10 +1769,16 @@ def _sidebar_connect_attempts() -> int:
 #: sidebar's lease branches land on that window because both build a VIEWER
 #: facade — `saved_preview` is one by construction and the speculative branch
 #: asks for the same contract with `viewer=True` — which is what lets a click
-#: heal a row the prewarm lease created. Before that flag, only the CLICK path
-#: (`_can_go_cold=True`) went cold at `COLD_FALLBACK_S`; the PREWARM/`connect`
-#: path (`_can_go_cold=False`) waited out a 90 s second bound and was
-#: un-bindable by construction once it did.
+#: heal a row the prewarm lease created. The PERMANENT cold shape on the
+#: pre-change tree was the one where NO recovery loop runs at all, because then
+#: nothing ever set the flag: a deliberate stop (`_on_disconnected`'s stop
+#: branch returns before `_recovering` is set) or a stop/no-record the loop
+#: declines to chase left `_ensure_bound`'s first guard to refuse every round
+#: for good, which is the latch the operator hit. The owner-DEATH arm was
+#: already released COLD AND REBINDABLE at this same bound — `_give_up_recovery`
+#: sets the flag before going cold — so it is not what the prewarm branch needed
+#: fixing for, and the 90 s second bound that used to sit in that path is gone
+#: from this tree entirely.
 #:
 #: The CLICK path is what this budget is for, and measurement matches the
 #: derivation: `_recovering` cleared at t=8.3 s against a `COLD_FALLBACK_S` of
@@ -6144,9 +6150,13 @@ class OperatorApp(App[None]):
         wrong. Announcing `retiring` reaches `_on_runtime_refreshed`, which
         re-engages eagerly and unconditionally — an exit→spawn→idle→exit
         treadmill strictly worse than the leak it fixes. A bare EOF used to be
-        worse still: a sidebar source was built with the legacy attach contract,
-        so it could not go cold, and owner-death recovery redialled forever
-        against a takeover that raises by construction. Both lease branches now
+        worse still on the arms where no recovery loop runs: a sidebar source was
+        built with the legacy attach contract, so when its owner STOPPED (or its
+        record went away with nothing to chase) there was no loop to release it,
+        nothing set the flag, and `_ensure_bound`'s first guard made that cold
+        state permanent — the latch the operator hit. The owner-DEATH arm was
+        already released cold and rebindable at `COLD_FALLBACK_S`, so it was
+        never the endless-redial case. Both lease branches now
         build a VIEWER facade (the speculative branch asks for it with
         `viewer=True`), so a parked source released at `COLD_FALLBACK_S` goes
         cold and STOPS redialling — that hazard is gone, and it is not an
