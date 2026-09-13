@@ -7859,10 +7859,17 @@ class Session:
         without the lock the SECOND notice lands FIRST (review round 1, R1).
 
         **The append does not advance ``retention.session_activity()``.** An
-        incident is bookkeeping ABOUT a session, never work done IN it: it is
-        journalled at BOOT, before the user has typed anything, so letting it
-        restamp the transcript tells the ``/resume`` picker the session was
-        just worked in. Measured before the fix
+        incident is bookkeeping ABOUT a session, never work done IN it. It is
+        journalled at boot, or in the wake of a turn that failed or was cut off
+        — never as work a turn carried. Every non-boot caller is that shape:
+        :meth:`_on_mcp_incident` fires from the MCP breaker at any point in a
+        session, the pending-incident flush in :meth:`_run_turn` reports a
+        provider failure during a turn, and :meth:`_journal_cut_off_once`
+        narrates a cut-off. A turn that DID carry work has already advanced the
+        clock through its own persisted rows, so an incident landing after it
+        can only restamp the transcript with a lie — telling the ``/resume``
+        picker the session was just worked in when nothing was. Measured before
+        the fix
         (``FINDING-resume-clock.md``), a boot with two expired MCP OAuth
         grants moved session ``965426f4d60d``'s displayed age from its real
         8.14 h to 3.06 h — a 5.1 h lie — and 19 of 509 rows in that store

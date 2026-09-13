@@ -506,10 +506,10 @@ def test_the_index_still_invalidates_after_an_mtime_restore(tmp_path: Path):
     ``Transcript._write_entries`` puts the pre-append mtime back after
     journalling a ``session_incident``, so that row cannot restamp the
     ``/resume`` activity clock. The signature here is ``[st_size, st_mtime,
-    title_mtime]``, and the SIZE still moves on every append — which is what
-    keeps a restored mtime from serving a stale digest. Proven rather than
-    asserted in a comment: the restore is simulated exactly as the writer
-    performs it.
+    title_mtime]``, and the restore leaves only ONE of those three terms able
+    to carry invalidation: the SIZE, which still moves on every append. The
+    digest assertions below are therefore the teeth — a signature that stopped
+    reading size would serve the stale digest and fail them.
     """
     import os
 
@@ -521,8 +521,10 @@ def test_the_index_still_invalidates_after_an_mtime_restore(tmp_path: Path):
     transcript = session / "transcript.jsonl"
     preserved = transcript.stat().st_mtime
     _write(session, ("user", "the opening subject"), ("assistant", "a bookkeeping era"))
+    # The writer's restore, simulated at the syscall it makes. Deliberately not
+    # asserted on: reading back the stamp this line just set would restate the
+    # fixture rather than the product.
     os.utime(transcript, (preserved, preserved))
-    assert transcript.stat().st_mtime == preserved
 
     second = build_index(tmp_path, ["mtimer01"])
     assert search_digests(second, "bookkeeping era") == {"mtimer01"}
