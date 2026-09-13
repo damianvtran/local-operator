@@ -207,6 +207,23 @@ _TRANSPORT_DETAIL_TEXT: dict[str, str] = {
     "closed": "the connection to {host} closed",
 }
 
+#: Detail token -> the line for a transport failure with NO host to name (a
+#: stdio child whose stream pumps died during the handshake). The CAUSE leads
+#: and the classifier's internal token never appears, because this row is
+#: clamped hard: ``failed: local — `` is already 16 cells of a 24-cell card, so
+#: the old trailing parenthetical was the first thing every clamp ate —
+#: measured on the single-failure line at 58/44/24 cells: ``… the transport
+#: failed before the server an…`` / ``… the transport failed before…`` /
+#: ``… the tra…``, i.e. the one informative word (``closed``) was the part
+#: always lost (agent review R1-3).
+_HOSTLESS_DETAIL_TEXT: dict[str, str] = {
+    "unreachable": "transport failed before the server answered",
+    "timeout": "transport timed out before the server answered",
+    "dns": "transport could not resolve the server",
+    "tls": "the TLS handshake failed before the server answered",
+    "closed": "transport closed before the server answered",
+}
+
 #: Exception class name (matched anywhere in the MRO, see
 #: :func:`_transport_failure`) -> detail token. Matched by NAME rather than by
 #: ``isinstance`` for two reasons: this module imports neither httpx nor anyio
@@ -271,6 +288,51 @@ _DNS_TEXT_MARKERS = (
 #: SDK and fails if they move.
 _TRANSPORT_RPC_DETAIL: dict[int, str] = {-32000: "closed", -32001: "timeout"}
 
+#: The dispatcher's OWN wording for those codes, as (prefix, suffix) bounds:
+#: ``CONNECTION_CLOSED`` is raised with the literal ``"Connection closed"``
+#: and ``REQUEST_TIMEOUT`` interpolates the method name the caller asked for
+#: (``Request 'initialize' timed out``). Matched as bounds rather than by
+#: equality because the method is the caller's, not ours.
+#:
+#: WHY the code alone is not enough: both numbers sit in JSON-RPC's
+#: implementation-defined SERVER range, and the SDK raises the SAME
+#: ``MCPError`` class for a peer's own error response
+#: (``mcp/shared/jsonrpc_dispatcher.py`` re-raises ``ErrorData`` verbatim). A
+#: server answering ``-32000`` with "Internal error" therefore used to render
+#: as "the connection to <host> closed" AND be counted against the user's
+#: network — the mirror of the defect this change fixes, with several such
+#: servers making the toast claim ``failed (network)`` over a perfectly good
+#: link (agent review R1-1). Reading the pair together keeps the code match for
+#: the client's own contract and refuses the peer's reuse of the number.
+_TRANSPORT_RPC_MESSAGE: dict[int, tuple[str, str]] = {
+    -32000: ("Connection closed", "Connection closed"),
+    -32001: ("Request '", "' timed out"),
+}
+
+
+def _dispatcher_transport_detail(candidate: BaseException) -> str | None:
+    """The transport detail for the CLIENT dispatcher's own error, or ``None``.
+
+    Both halves are required — see :data:`_TRANSPORT_RPC_MESSAGE`. The shape
+    test reads ``message``, which is the SDK's own property over the error
+    payload, so a peer's ``ErrorData`` carrying that exact sentence is still an
+    indistinguishable-from-ours case rather than a silent mislabel.
+    """
+    code = getattr(candidate, "code", None)
+    if not isinstance(code, int) or isinstance(code, bool):
+        return None
+    detail = _TRANSPORT_RPC_DETAIL.get(code)
+    if detail is None:
+        return None
+    bounds = _TRANSPORT_RPC_MESSAGE[code]
+    message = getattr(candidate, "message", None)
+    if not isinstance(message, str):
+        return None
+    prefix, suffix = bounds
+    if not (message.startswith(prefix) and message.endswith(suffix)):
+        return None
+    return detail
+
 
 def _host_of(url: str | None) -> str | None:
     """The host a user would recognise for ``url``, or ``None``.
@@ -293,20 +355,19 @@ def _transport_detail(exc: BaseException) -> str | None:
     * an anyio/``ExceptionGroup`` around the real failure, unwrapped to its
       leaves — the streamable-HTTP transport runs inside a task group, so this
       is the SHAPE a transport failure most often arrives in;
-    * an ``MCPError`` whose code is one of the client dispatcher's transport
-      codes (:data:`_TRANSPORT_RPC_DETAIL`), which is how a request that died
-      on a live-but-breaking transport surfaces ("Connection closed",
+    * an ``MCPError`` carrying one of the client dispatcher's transport codes
+      (:data:`_TRANSPORT_RPC_DETAIL`) IN the dispatcher's own wording
+      (:data:`_TRANSPORT_RPC_MESSAGE`), which is how a request that died on a
+      live-but-breaking transport surfaces ("Connection closed",
       "Request 'initialize' timed out");
     * anything in :data:`_TRANSPORT_EXC_DETAIL` by MRO name, with the cause
       chain consulted to split a wrapped DNS failure out of a plain
       ``ConnectError``.
     """
     for candidate in _exception_leaves(exc):
-        code = getattr(candidate, "code", None)
-        if isinstance(code, int) and not isinstance(code, bool):
-            detail = _TRANSPORT_RPC_DETAIL.get(code)
-            if detail is not None:
-                return detail
+        detail = _dispatcher_transport_detail(candidate)
+        if detail is not None:
+            return detail
         for klass in type(candidate).__mro__:
             detail = _TRANSPORT_EXC_DETAIL.get(klass.__name__)
             if detail is None:
@@ -336,11 +397,24 @@ def _exception_leaves(exc: BaseException) -> list[BaseException]:
 
 
 def _chain_holds_dns(exc: BaseException) -> bool:
-    """Whether a DNS failure appears in ``exc``'s cause chain.
+    """Whether a DNS failure appears in ``exc``'s CAUSE chain.
 
     Class name first (:data:`_DNS_EXC_NAMES`), then the message
     (:data:`_DNS_TEXT_MARKERS`) — see that constant for why one signal is not
     enough.
+
+    ``__cause__`` only, deliberately: ``__context__`` is the IMPLICIT link
+    (whatever was being handled when this exception was raised), not the
+    exception that caused this one, so walking it lets an unrelated earlier
+    resolver error in the same task relabel an ``unreachable`` as ``dns`` — and
+    both are network failures, so only the phrase would be wrong (agent review
+    R1-6). Nothing is lost by dropping it, measured: httpx's real resolver
+    failure nests ``ConnectError('[Errno 8] nodename nor servname provided, or
+    not known')`` → ``ConnectError(gaierror(…))`` → ``gaierror(…)``, where the
+    ``gaierror`` leaf is reached through ``__context__`` — but the OUTERMOST
+    ``ConnectError``'s own sentence already carries the resolver text, which is
+    the signal :data:`_DNS_TEXT_MARKERS` exists for. So the class-name and
+    message probes both still fire on the first link of the chain.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -352,7 +426,7 @@ def _chain_holds_dns(exc: BaseException) -> bool:
             return True
         if any(klass.__name__ in _DNS_EXC_NAMES for klass in type(current).__mro__):
             return True
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return False
 
 
@@ -413,7 +487,7 @@ def _transport_failure_text(exc: BaseException, url: str | None = None) -> str |
         # No host to name (a stdio child), so this is NOT called a network
         # failure: the user's connection is not implicated, and saying so would
         # send them to diagnose a link that is fine.
-        return f"the transport failed before the server answered ({detail})"
+        return _HOSTLESS_DETAIL_TEXT.get(detail, _HOSTLESS_DETAIL_TEXT["unreachable"])
     phrase = _TRANSPORT_DETAIL_TEXT.get(detail, _TRANSPORT_DETAIL_TEXT["unreachable"])
     return NETWORK_FAILURE_MARKER + phrase.format(host=host)
 
@@ -487,9 +561,13 @@ class McpTransportError(McpConnectionError):
       instead of quoting the SDK, so a fleet-wide outage reads as one
       connectivity problem rather than as nine unrelated MCP faults.
 
-    Deliberately a SUBCLASS of :class:`McpConnectionError`: the deferred execute
-    path already catches that type to turn "cannot be reached" into a tool
-    result, and a transport failure is precisely that answer.
+    Deliberately a SUBCLASS of :class:`McpConnectionError`, because a transport
+    failure IS a connection failure and callers that reason about
+    "connected or not" should not have to learn a second type. It is not
+    caught by name anywhere under ``local_operator/``: the deferred execute
+    path catches ``Exception`` (and re-reads the rendered text through the
+    auth/transport classifiers), so nothing depends on the subclass lineage
+    today — the reason to keep it is the semantic one, not a catch site.
     """
 
     def __init__(self, url: str | None, detail: str) -> None:
@@ -1286,11 +1364,28 @@ class _AuthChallengeWatcher:
     - **A redirect hop is not a verdict.** It is the client being sent
       elsewhere, and the request it triggers carries the challenge that
       matters.
+
+    :attr:`saw_challenge` is the one piece of state that does NOT follow the
+    last-request rule, and the reason it exists is the concession that rule
+    costs. Clearing on ``begin`` is what keeps a dead retry honest, but it also
+    throws away a challenge the peer really did answer: an SDK whose initialize
+    POST gets a 401 and then gives up on a retry that never produces a response
+    leaves the connect with NO verdict, and a reachable-but-refusing server gets
+    reported as a network failure — the user is sent to diagnose a link that
+    works instead of running ``/mcp login|reauth`` (QA round 1, Q1-1). So the
+    observation is recorded a second time in a slot ``begin`` never clears, and
+    only the transport-failure path reads it (``_challenge_error``'s
+    ``prefer_observed``): for every other shape the last-request verdict is the
+    right one and F5 stands.
     """
 
     def __init__(self, server_url: str) -> None:
         self.server_url = server_url
         self.status_code: int | None = None
+        #: The challenge seen at ANY point during this attempt, unlike
+        #: :attr:`status_code`. One attempt, one watcher, so this never has to
+        #: be reset.
+        self.saw_challenge: int | None = None
 
     async def begin(self, request: Any) -> None:
         """Invalidate the previous verdict as a new endpoint request starts.
@@ -1344,6 +1439,8 @@ class _AuthChallengeWatcher:
             if 300 <= status < 400:
                 return
             self.status_code = status if status in (401, 403) else None
+            if self.status_code is not None:
+                self.saw_challenge = self.status_code
         except Exception:  # noqa: BLE001 — an observer must never break a connect
             logger.debug("auth challenge observation failed", exc_info=True)
 
@@ -2214,17 +2311,44 @@ class McpManager:
                     raise auth_exc from candidate
             if isinstance(exc, asyncio.CancelledError):
                 # A bare CancelledError that reaches THIS line is anyio's own
-                # internal delivery, not a teardown, and it is the shape a
-                # dead NETWORK arrives in. Everything that could cancel this
-                # task from outside has already been answered: a genuine task
-                # cancellation (dispose/reload/esc) returned from
-                # ``externally_cancelled`` above, and ``disconnect_all`` — the
-                # only other thing that cancels a connect — sets
-                # ``self._disposed``, checked here. What is left is anyio
-                # cancelling the awaiting task because a task-group sibling
-                # died, and the streamable-HTTP transport's own reader or
-                # writer dying is what a refused connection, a DNS failure and
-                # a TLS error ALL look like from this vantage point.
+                # internal delivery — a task-group sibling died — and that is
+                # the shape a dead NETWORK arrives in: the streamable-HTTP
+                # transport's own reader or writer dying is what a refused
+                # connection, a DNS failure and a TLS error ALL look like from
+                # this vantage point.
+                #
+                # A bare cancellation is NOT by itself proof of a transport
+                # death, and this arm converts it anyway, because the
+                # alternative is the silent server it exists to fix. What is
+                # ruled out first is cancellation from OUTSIDE: any task
+                # cancellation returns from ``externally_cancelled`` above
+                # (that is where ``reload()``, ``disconnect_server()`` and an
+                # esc/dispose all land — they cancel a connect without setting
+                # ``self._disposed``, which is why this is not narrowed to
+                # ``disconnect_all``, the one canceller that DOES set it and is
+                # additionally checked here).
+                #
+                # Two in-tree cases then reach this line as a bare, unarmed
+                # cancellation with the wire intact, and they are accepted
+                # rather than excepted (agent review R1-4):
+                #
+                # * a refresh refusal whose REFRESH_CONTENTION record a
+                #   concurrent connect for the same URL already consumed, so
+                #   ``REFRESH_CONTENTION.pop(url)`` above yields None and no
+                #   reason code is re-voiced — the single-use ledger
+                #   ``test_the_contention_record_is_single_use`` codifies;
+                # * an abandoned interactive login whose ``_oauth_flows[url]``
+                #   entry another connect for the same URL superseded, so
+                #   ``ABANDONED_GRANTS.pop`` misses and the "login was
+                #   cancelled" receipt is never raised.
+                #
+                # Both need two connects to one server at the same time, and
+                # both then settle as ``network: cannot reach <host>`` where
+                # the base stayed silent — a wrong LAYER word, not a lost
+                # failure. Narrowing the arm to fire only with sibling
+                # evidence would buy the correct word back and pay for it with
+                # the silent wedge this change exists to remove, so the
+                # precondition is recorded here rather than tightened.
                 #
                 # Re-raised unchanged it read as a teardown to _finish_pending,
                 # which drops CancelledError on purpose, so the server stayed in
@@ -2272,7 +2396,16 @@ class McpManager:
             # TLS error keeps reporting as the network problem it is \u2014
             # mislabelling an outage as "run /mcp login" would be worse than
             # the opaque message this replaces.
-            challenge = await self._challenge_error(cfg, challenge_watcher)
+            challenge = await self._challenge_error(
+                cfg,
+                challenge_watcher,
+                # A transport failure is the one shape where a LATENT challenge
+                # outranks the last-request verdict: the peer answered a 401 on
+                # this attempt, so the server is up and refusing us even when
+                # the SDK's retry died before a second response arrived (Q1-1).
+                # Every other failure keeps the conservative reading.
+                prefer_observed=isinstance(exc, McpTransportError),
+            )
             if challenge is not None:
                 raise challenge from exc
             stderr_log.report_failure(f"failed to connect: {exc}")
@@ -2470,6 +2603,8 @@ class McpManager:
         self,
         cfg: MCPServerConfig,
         watcher: "_AuthChallengeWatcher | None",
+        *,
+        prefer_observed: bool = False,
     ) -> McpAuthChallengeError | None:
         """Turn an OBSERVED 401/403 into an actionable error, or ``None``.
 
@@ -2478,6 +2613,16 @@ class McpManager:
         message. That conservatism is the point: routing a network outage into
         "run /mcp login" would be a worse error than the opaque one.
 
+        ``prefer_observed`` widens the evidence to *any* challenge this connect
+        attempt saw (:attr:`_AuthChallengeWatcher.saw_challenge`), and the
+        transport-failure arm is the only caller that passes it. WHERE that
+        matters: the peer answered a 401 and the transport then gave up on a
+        retry that produced no second response, so the last-request verdict is
+        ``None`` while the server is demonstrably up and refusing us. Reading
+        the challenge there is the honest classification and it is the one the
+        PR's contract promises; the default stays last-request-only because for
+        a failure the peer never answered, the transport label is right (F5).
+
         On a real challenge this runs metadata discovery once to learn whether
         an OAuth authorization server actually exists. Discovery is only paid
         on a connect that has ALREADY failed, so the happy path and the
@@ -2485,7 +2630,12 @@ class McpManager:
         answer is recorded in the challenge ledger, which is what lets the NEXT
         connect and ``/mcp login`` treat this server as auth-capable.
         """
-        if watcher is None or watcher.status_code is None:
+        if watcher is None:
+            return None
+        status = watcher.status_code
+        if status is None and prefer_observed:
+            status = watcher.saw_challenge
+        if status is None:
             return None
         url = watcher.server_url
         from local_operator.mcp.auth import (
@@ -2502,7 +2652,7 @@ class McpManager:
         record_oauth_challenge(url, oauth_available=oauth_available)
         return McpAuthChallengeError(
             url,
-            status_code=watcher.status_code,
+            status_code=status,
             oauth_available=oauth_available,
             has_stored_grant=server_has_stored_grant(url, self._effective_auth_store()),
         )
@@ -3025,7 +3175,13 @@ class McpManager:
         # in the frontend projection, which no status check filters. The
         # after-gate success arm pops it for exactly this reason; every other
         # heal (reload, revalidation, a call-site retry) needs it too.
-        self._startup_failures.pop(conn.name, None)
+        #
+        # Through the HELPER, not ``_startup_failures.pop`` directly: the
+        # network subset is a subset of the failures "by construction", and a
+        # bare pop leaves a healed server's name in ``_startup_network`` —
+        # falsifying that invariant for every reader that trusts it (agent
+        # review R1-2, reproduced: failures ``{}`` while network ``{'remote'}``).
+        self._clear_startup_failure(conn.name)
         self._log_first_connect_security(conn)
         self._register_tools(conn.name, conn.tools)
         self._fire_recovery(conn.name)
