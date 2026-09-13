@@ -29,7 +29,12 @@ export function ModelSheet({
 	pid: string;
 	projection: SessionProjection;
 }) {
-	const [models, setModels] = useState<ModelEntry[]>([]);
+	/* `null` means NOT RESOLVED YET, which is a different fact from "resolved
+	   and empty" and has to be told apart from it — see the render ladder below.
+	   Spelled as a nullable list rather than a separate boolean because
+	   `past-sessions.tsx` already states "still loading" that way; a second
+	   spelling of one idea beside an established one is the defect. */
+	const [models, setModels] = useState<ModelEntry[] | null>(null);
 	const [filter, setFilter] = useState("");
 	const [error, setError] = useState("");
 
@@ -42,6 +47,10 @@ export function ModelSheet({
 		   unrepresentative list), arrived at by another route. */
 		setFilter("");
 		setError("");
+		/* Back to unresolved on every open, because this sheet REFETCHES per open:
+		   keeping the previous list would paint a stale catalogue as though it were
+		   the answer to the request now in flight. */
+		setModels(null);
 		getModels()
 			.then((r) => {
 				setModels(r.models);
@@ -60,7 +69,10 @@ export function ModelSheet({
 	/* Order-PRESERVING: `Array.filter` keeps the server's ranking, so the best
 	   route for a query still leads. The predicate itself lives in
 	   `lib/model-filter` because `#/new` needs the identical one. */
-	const filtered = useMemo(() => filterModels(models, filter), [models, filter]);
+	const filtered = useMemo(
+		() => filterModels(models ?? [], filter),
+		[models, filter],
+	);
 
 	const choose = async (m: ModelEntry) => {
 		try {
@@ -87,10 +99,33 @@ export function ModelSheet({
 					autoCorrect="off"
 					className="mb-1 min-h-9 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
+				{/* ONE exclusive ladder: error → loading → empty-filtered, and the rows
+				    below it. The precedence runs that way round because each rung is a
+				    claim about a DIFFERENT fact, and the later rungs are only true once
+				    the earlier ones are false.
+
+				    `error` first: a fetch that failed says nothing about the user's
+				    query, so "no matching models — try a provider…" under a 502 is a
+				    false statement that also blames the user for an expired token.
+				    These two used to render TOGETHER — the daemon's real message with
+				    the contradictory filter advice directly beneath it — so the error
+				    branch has to REPLACE the empty state, not join it.
+
+				    `loading` before empty: `models` is unresolved until the response
+				    lands, and an unresolved list is not an empty one. Painting the
+				    no-match verdict during the in-flight window told a user with an
+				    EMPTY filter field to change their filter — advice for a query they
+				    never typed, on every open, since this sheet refetches per open.
+
+				    Reversing any of this re-creates a lie, which is why the order is
+				    stated here rather than left to the reader of three sibling
+				    conditionals. */}
 				{error ? (
 					<p className="px-3 py-1 text-body-sm text-danger">
 						{error}
 					</p>
+				) : models === null ? (
+					<p className="px-3 py-2 text-body-sm text-ink-dim">loading…</p>
 				) : null}
 				{filtered.map((m) => {
 					const current = m.selector === projection.model_selector;
@@ -128,11 +163,14 @@ export function ModelSheet({
 						</button>
 					);
 				})}
-				{filtered.length === 0 ? (
+				{!error && models !== null && filtered.length === 0 ? (
 					/* Name the recovery rather than stating a verdict: with the
 					   provider headers gone there is no visible inventory left to
 					   scan as a fallback, so "no matching models" alone leaves
-					   guessing at another query as the only way out. */
+					   guessing at another query as the only way out. Reachable ONLY
+					   once the catalogue resolved and the fetch succeeded, so it is
+					   the one state where the filter really is what excluded
+					   everything. */
 					<p className="px-3 py-2 text-body-sm text-ink-dim">
 						no matching models — try a provider (anthropic, xai) or a
 						model name (opus, glm)

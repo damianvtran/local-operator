@@ -418,3 +418,114 @@ def test_an_unopenable_store_serves_the_cached_catalogue_not_a_502(monkeypatch):
     # the question that just failed to resolve.
     assert calls == []
     assert "unable to open database file" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("accept_encoding", "compressed"),
+    [
+        # Asking for it.
+        ("gzip", True),
+        ("gzip;q=1.0", True),
+        ("gzip, deflate, br", True),
+        ("GZIP", True),
+        ("deflate, gzip;q=0.5", True),
+        # REFUSING it. RFC 9110 §12.5.3 gives qvalue 0 the meaning "not
+        # acceptable", and a substring test cannot tell this from consent — it
+        # served a gzip body to a client that had explicitly declined one, which
+        # a non-decoding client (``urllib``) meets as a UnicodeDecodeError on the
+        # gzip magic bytes rather than as JSON.
+        ("gzip;q=0", False),
+        ("gzip;q=0.0", False),
+        ("gzip;q=0, deflate", False),
+        ("deflate, gzip;q=0", False),
+        # Never compressed before this fix and deliberately still not: treating
+        # the wildcard as consent would newly compress for clients this daemon
+        # has always answered in the clear.
+        ("*", False),
+        ("*;q=0, identity", False),
+        ("identity", False),
+        ("deflate", False),
+        ("br", False),
+        ("", False),
+    ],
+)
+def test_gzip_honours_the_accept_encoding_qvalue(monkeypatch, accept_encoding, compressed):
+    """``Accept-Encoding`` is parsed, not substring-matched."""
+    with contextlib.closing(AuthStore()) as store:
+        store.upsert_credential("radient", {"type": "oauth", "access": "fixture-access"})
+
+    def models(_transport, request):
+        return httpx.Response(
+            200,
+            json={"data": [{"id": f"vendor/model-{n}", "name": f"Model {n}"} for n in range(200)]},
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", models)
+    with TestClient(build_app(MobileDaemon(password="pw", dial_registrants=False))) as client:
+        client.post("/login", data={"password": "pw"})
+        response = client.get("/api/models", headers={"Accept-Encoding": accept_encoding})
+
+    assert response.status_code == 200
+    assert (response.headers.get("content-encoding") == "gzip") is compressed
+    # The document is the same either way; only its transfer encoding differs.
+    assert len(response.json()["models"]) == 200
+    # Every representation carries it, not just the compressed one — a cache
+    # keys on the headers of the variant it STORED, so announcing it only on the
+    # gzip leg leaves the identity response looking like the single valid answer
+    # for this URL.
+    assert response.headers["vary"] == "Accept-Encoding"
+
+
+def test_a_refused_gzip_body_is_readable_without_a_decoder():
+    """QA's exact repro: a client that does not auto-decode must get text.
+
+    ``httpx`` and ``curl`` transparently decompress, which is what let this
+    survive review; ``urllib`` does not, so it is the honest reader here.
+    """
+    import gzip as gzip_module
+
+    from local_operator.mobile.daemon import _accepts_gzip
+
+    # The decision function, at the level the bug lived at.
+    assert _accepts_gzip("gzip;q=0") is False
+    assert _accepts_gzip("gzip") is True
+
+    # And the consequence it used to have, made concrete: a UTF-8 decode of a
+    # gzip stream fails on the magic bytes at position 1.
+    packed = gzip_module.compress(b'{"models": []}')
+    with pytest.raises(UnicodeDecodeError):
+        packed.decode("utf-8")
+
+
+def test_gzip_leaves_a_head_request_and_an_incompressible_body_alone():
+    """Two ways compressing is wrong even when the client asked for it.
+
+    HEAD: Starlette strips the body after the handler returns, so compressing
+    would advertise the COMPRESSED length for a body the client never receives.
+    Incompressible: gzip's header makes an already-packed payload bigger, and
+    spending CPU to enlarge a response is never right — JSON never reaches this,
+    but the helper must not depend on its only caller's payload shape.
+    """
+    import os
+
+    from starlette.responses import Response
+
+    from local_operator.mobile.daemon import _GZIP_MIN_BYTES, _maybe_gzip
+
+    class _Request:
+        def __init__(self, method="GET"):
+            self.method = method
+            self.headers = {"accept-encoding": "gzip"}
+
+    body = os.urandom(_GZIP_MIN_BYTES + 100)
+
+    head = Response(content=body)
+    assert _maybe_gzip(_Request("HEAD"), head) is head
+    assert "content-encoding" not in head.headers
+    assert head.headers["vary"] == "Accept-Encoding"
+
+    incompressible = Response(content=body)
+    original = len(incompressible.body)
+    _maybe_gzip(_Request(), incompressible)
+    assert "content-encoding" not in incompressible.headers
+    assert len(incompressible.body) == original

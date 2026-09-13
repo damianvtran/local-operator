@@ -2806,6 +2806,46 @@ def _provider_display_name(provider_id: str) -> str:
 _GZIP_MIN_BYTES = 1024
 
 
+def _accepts_gzip(accept_encoding: str) -> bool:
+    """Whether ``Accept-Encoding`` asks for gzip, per RFC 9110 §12.5.3.
+
+    A substring test cannot tell ASKING FOR gzip from REFUSING it: ``gzip;q=0``
+    is the spec's way of saying "not acceptable", and reading it as consent
+    served a compressed body to a client that had explicitly declined one. That
+    is not only a spec violation — a client which does not auto-decode (``urllib``
+    does not) gets a ``UnicodeDecodeError`` on the gzip magic bytes rather than
+    JSON.
+
+    Deliberately requires gzip to be named EXPLICITLY: a lone ``*`` is left
+    un-compressed exactly as before. RFC 9110 would permit treating the wildcard
+    as consent, but that would newly compress for clients this daemon has always
+    answered in the clear, which is a behaviour change this fix has no reason to
+    make. ``identity``, ``deflate``, ``br`` and an absent header keep answering
+    uncompressed for the same reason.
+    """
+    for part in accept_encoding.split(","):
+        token, _, params = part.strip().partition(";")
+        token = token.strip().lower()
+        # ``x-gzip`` is the historical spelling of the same coding.
+        if token not in {"gzip", "x-gzip"}:
+            continue
+        quality = 1.0
+        for param in params.split(";"):
+            key, _, value = param.partition("=")
+            if key.strip().lower() != "q":
+                continue
+            try:
+                quality = float(value.strip())
+            except ValueError:
+                # An unparseable qvalue is not consent to ignore it; the entry
+                # is malformed, so fall back to "not acceptable" rather than
+                # compressing on a guess.
+                quality = 0.0
+        if quality > 0:
+            return True
+    return False
+
+
 def _maybe_gzip(request: Any, response: Any) -> Any:
     """Gzip ``response`` in place when the client accepts it and it is worth it.
 
@@ -2822,18 +2862,31 @@ def _maybe_gzip(request: Any, response: Any) -> Any:
     compresses to ~20 KB, and the phone is typically on a mobile link through a
     tunnel, where that difference is seconds of an empty sheet.
     """
-    accept = request.headers.get("accept-encoding", "")
-    if "gzip" not in accept.lower():
+    # BEFORE any early return: a cache keys on the headers of the representation
+    # it stored, so announcing this only on the compressed leg leaves the
+    # identity response — the variant an intermediary is most likely to keep —
+    # looking like the single valid answer for this URL, to be replayed to
+    # clients that did ask for gzip and to clients that did not alike.
+    response.headers["vary"] = "Accept-Encoding"
+    if not _accepts_gzip(request.headers.get("accept-encoding", "")):
+        return response
+    # Starlette strips a HEAD response's body after the handler returns, so
+    # compressing here would advertise the compressed LENGTH for a body the
+    # client never receives.
+    if getattr(request, "method", "GET").upper() == "HEAD":
         return response
     body = getattr(response, "body", b"")
     if not body or len(body) < _GZIP_MIN_BYTES:
         return response
-    response.body = gzip.compress(body, compresslevel=6)
+    packed = gzip.compress(body, compresslevel=6)
+    if len(packed) >= len(body):
+        # Already-compressed or incompressible payloads grow by the gzip header.
+        # JSON never reaches this, but the guard keeps the helper honest for any
+        # future route: spending CPU to make a response BIGGER is never right.
+        return response
+    response.body = packed
     response.headers["content-encoding"] = "gzip"
-    response.headers["content-length"] = str(len(response.body))
-    # Caches and proxies keyed only on the URL would otherwise hand a gzipped
-    # body to a client that never asked for one.
-    response.headers["vary"] = "Accept-Encoding"
+    response.headers["content-length"] = str(len(packed))
     return response
 
 
