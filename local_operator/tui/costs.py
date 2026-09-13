@@ -209,6 +209,8 @@ class SearchSpendRow:
     #: must not be labelled as one of them.
     kind: str = "search"
     reads: int = 0
+    #: Unpriced reads, so a note can attach the tally to the kind it belongs to.
+    unpriced_reads: int = 0
     #: Searches whose provider publishes no rate. Counted, never rendered as
     #: $0: unknown and free are different facts (see ``format_cost``).
     unpriced_searches: int = 0
@@ -275,6 +277,8 @@ class SearchSpendSnapshot:
     unpriced_searches: int = 0
     #: Page reads, counted apart from searches (see ``SearchSpendRow.kind``).
     reads: int = 0
+    #: Unpriced reads (see ``SearchSpendRow.unpriced_reads``).
+    unpriced_reads: int = 0
     rows: tuple[SearchSpendRow, ...] = ()
 
     @classmethod
@@ -297,6 +301,7 @@ class SearchSpendSnapshot:
                 searches=int(getattr(entry, "searches", 0) or 0),
                 kind=str(getattr(entry, "kind", "search") or "search"),
                 reads=int(getattr(entry, "reads", 0) or 0),
+                unpriced_reads=int(getattr(entry, "unpriced_reads", 0) or 0),
                 usd=float(getattr(entry, "usd", 0.0) or 0.0),
                 unpriced_searches=int(getattr(entry, "unpriced_searches", 0) or 0),
             )
@@ -307,6 +312,7 @@ class SearchSpendSnapshot:
             usd=float(getattr(totals, "usd", 0.0) or 0.0),
             unpriced_searches=int(getattr(totals, "unpriced_searches", 0) or 0),
             reads=int(getattr(totals, "reads", 0) or 0),
+            unpriced_reads=int(getattr(totals, "unpriced_reads", 0) or 0),
             rows=tuple(sorted(rows, key=lambda row: (-row.usd, -row.count, row.provider))),
         )
 

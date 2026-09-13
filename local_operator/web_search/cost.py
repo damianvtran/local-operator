@@ -196,9 +196,14 @@ class ProviderSearchSpend:
     provider: str
     searches: int = 0
     usd: float = 0.0
-    #: Searches whose price is not known. Counted separately so a total that
-    #: covers only some of the work says so instead of reading as complete.
+    #: Unpriced OPERATIONS, searches and reads alike: the field counts both
+    #: kinds because the money is what it exists to qualify, and the name is a
+    #: reminder of which kind is the common one rather than a filter. Read
+    #: ``unpriced_reads`` beside it to split them.
     unpriced_searches: int = 0
+    #: Unpriced READ operations, so a note can attach the tally to the kind it
+    #: belongs to instead of pairing a search count with a read's missing price.
+    unpriced_reads: int = 0
     bases: set[str] = field(default_factory=set)
     #: ``search`` or ``read``. A page read is not a search -- it runs no query
     #: and bills no provider search -- and it is recorded under its own provider
@@ -215,6 +220,8 @@ class ProviderSearchSpend:
             self.searches += 1
         if usd is None:
             self.unpriced_searches += 1
+            if kind == "read":
+                self.unpriced_reads += 1
         else:
             self.usd += usd
         if basis:
@@ -234,6 +241,7 @@ class ProviderSearchSpend:
             "count": self.count,
             "usd": round(self.usd, 6),
             "unpriced_searches": self.unpriced_searches,
+            "unpriced_reads": self.unpriced_reads,
             "basis": "; ".join(sorted(self.bases)),
         }
 
@@ -249,6 +257,9 @@ class SearchSpendTotals:
     #: not queries: the money belongs in the total, the count does not belong in
     #: the search count.
     reads: int = 0
+    #: Unpriced reads, so the total's note can name the kind the missing price
+    #: belongs to (see ``ProviderSearchSpend.unpriced_searches``).
+    unpriced_reads: int = 0
     by_provider: dict[str, ProviderSearchSpend] = field(default_factory=dict)
 
     @property
@@ -314,6 +325,8 @@ class SearchSpendLedger:
                     totals.searches += 1
                 if usd is None:
                     totals.unpriced_searches += 1
+                    if kind == "read":
+                        totals.unpriced_reads += 1
                 else:
                     totals.usd += usd
                 entry.add(usd, basis, kind=kind)
@@ -331,6 +344,7 @@ class SearchSpendLedger:
                 merged.reads += totals.reads
                 merged.usd += totals.usd
                 merged.unpriced_searches += totals.unpriced_searches
+                merged.unpriced_reads += totals.unpriced_reads
                 for provider, entry in totals.by_provider.items():
                     target = merged.by_provider.setdefault(
                         provider, ProviderSearchSpend(provider=provider, kind=entry.kind)
@@ -339,6 +353,7 @@ class SearchSpendLedger:
                     target.reads += entry.reads
                     target.usd += entry.usd
                     target.unpriced_searches += entry.unpriced_searches
+                    target.unpriced_reads += entry.unpriced_reads
                     target.bases |= entry.bases
             return merged
 

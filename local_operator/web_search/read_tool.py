@@ -87,6 +87,11 @@ MODEL_SOURCES_MAX_CHARS = 600
 #: were silent, instead of presenting a hedge as a finding.
 NOT_IN_PAGES = "NOT IN PAGES"
 
+#: The search-spend ledger key a read is recorded under. Named once: the writer,
+#: the tool-result details and the resume path all have to agree on it, and the
+#: round-2 review caught them disagreeing.
+READ_LEDGER_PROVIDER = "deepseek:read"
+
 #: The reading instruction. Two constraints carry the whole feature's honesty:
 #: answer only from the pages above (no priors), and refuse in a detectable way.
 #: The source list is requested as a trailing machine-readable line so provenance
@@ -354,7 +359,7 @@ async def execute_web_read(
             # module's rule that unknown and free are different facts.
             SEARCH_SPEND.record(
                 str(getattr(context, "session_id", "") or ""),
-                "deepseek:read",
+                READ_LEDGER_PROVIDER,
                 None,
                 kind="read",
             )
@@ -386,7 +391,7 @@ async def execute_web_read(
     # one that matters. Without it the read is booked as a search -- the row
     # renders "1 search" and the session's search count is inflated by reads,
     # which is the opposite of why the key carries a ``:read`` suffix at all.
-    entry = SEARCH_SPEND.record(session_id, "deepseek:read", cost, searches=1, kind="read")
+    entry = SEARCH_SPEND.record(session_id, READ_LEDGER_PROVIDER, cost, searches=1, kind="read")
     session_totals = SEARCH_SPEND.session(session_id)
 
     refused = answer.strip().upper().startswith(NOT_IN_PAGES)
@@ -421,6 +426,10 @@ async def execute_web_read(
         "refused": refused,
         "cited": cited,
         "read_cost": {
+            # The LEDGER KEY, stated by the writer that chose it: a resume that
+            # re-derives it from a ``provider`` field this result does not carry
+            # labelled the restored row ``:read`` rather than ``deepseek:read``.
+            "ledger_provider": READ_LEDGER_PROVIDER,
             "usd": cost.usd,
             "basis": cost.basis,
             "session_usd": round(session_totals.usd, 6),

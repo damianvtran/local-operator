@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import AbortSignal, TextContent, ToolContext
 from local_operator.web_search import read_tool
 from local_operator.web_search.cost import SEARCH_SPEND
 from local_operator.web_search.models import (
@@ -142,7 +142,12 @@ class _StubClient:
         self.response = response
         self.requests: list[dict[str, Any]] = []
 
-    async def post(self, url: str, headers: dict | None = None, json: dict | None = None):
+    async def post(
+        self,
+        url: str,
+        headers: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ):
         self.requests.append({"url": url, "headers": headers or {}, "json": json or {}})
         return self.response
 
@@ -156,6 +161,32 @@ class _StubClientFactory:
 
     async def __aexit__(self, *exc) -> None:
         return None
+
+
+def _text(result: Any) -> str:
+    """The first TEXT block of a tool result, asserted.
+
+    ``ToolResult.content`` is a union that includes image blocks (the screenshot
+    tools use it), so ``content[0].text`` is not always valid; every call in this
+    module is a text answer, and the assert says so to the type checker.
+    """
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def _details(result: Any) -> dict[str, Any]:
+    """A tool result's details mapping, asserted non-None."""
+    details = result.details
+    assert isinstance(details, dict)
+    return details
+
+
+def _read_cost(result: Any) -> dict[str, Any]:
+    """The nested ``read_cost`` mapping the read tool reports."""
+    cost = _details(result)["read_cost"]
+    assert isinstance(cost, dict)
+    return cost
 
 
 def _patch_client(monkeypatch, stub: _StubClient) -> None:
@@ -183,7 +214,7 @@ async def test_read_refuses_actionably_when_no_pages_were_captured(monkeypatch) 
     )
 
     assert result.is_error is True
-    text = result.content[0].text
+    text = _text(result)
     assert "web_fetch" in text
     assert "DeepSeek" in text
 
@@ -214,10 +245,10 @@ async def test_read_replays_blocks_verbatim_and_reports_cited_pages(monkeypatch)
     messages = body["messages"]
     assert messages[0]["content"][0]["text"] == "Perform a web search for the query: q"
     assert messages[1]["content"] == BLOCKS
-    assert "SOURCES:" not in result.content[0].text
-    assert "Pages used: https://example.com/a" in result.content[0].text
-    assert result.details["refused"] is False
-    assert result.details["cited"] == ["https://example.com/a"]
+    assert "SOURCES:" not in _text(result)
+    assert "Pages used: https://example.com/a" in _text(result)
+    assert _details(result)["refused"] is False
+    assert _details(result)["cited"] == ["https://example.com/a"]
 
 
 @pytest.mark.asyncio
@@ -240,9 +271,9 @@ async def test_read_detects_the_refusal_marker_and_says_so(monkeypatch) -> None:
     )
 
     assert result.is_error is False
-    assert result.details["refused"] is True
+    assert _details(result)["refused"] is True
     # The user-visible text must not read like a finding.
-    assert "do not answer this question" in result.content[0].text
+    assert "do not answer this question" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -264,8 +295,8 @@ async def test_read_filters_invented_sources(monkeypatch) -> None:
 
     result = await read_tool.execute_web_read("call-4", {"question": "q"}, None, None, _context())
 
-    assert result.details["cited"] == ["https://example.com/a"]
-    assert "Ignored source(s)" in result.content[0].text
+    assert _details(result)["cited"] == ["https://example.com/a"]
+    assert "Ignored source(s)" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -291,8 +322,8 @@ async def test_read_records_spend_under_its_own_provider_key(monkeypatch) -> Non
     assert totals.reads == 1
     assert totals.by_provider["deepseek:read"].kind == "read"
     assert totals.usd > 0
-    assert result.details["read_cost"]["usd"] == pytest.approx(totals.usd, abs=1e-6)
-    assert result.details["read_cost"]["session_searches"] == 0
+    assert _read_cost(result)["usd"] == pytest.approx(totals.usd, abs=1e-6)
+    assert _read_cost(result)["session_searches"] == 0
 
 
 @pytest.mark.asyncio
@@ -311,7 +342,7 @@ async def test_read_reports_an_expired_context_as_a_refusal(monkeypatch) -> None
     result = await read_tool.execute_web_read("call-6", {"question": "q"}, None, None, _context())
 
     assert result.is_error is True
-    assert "web_fetch" in result.content[0].text
+    assert "web_fetch" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -427,8 +458,12 @@ async def test_the_tool_dispatches_in_the_harness_order(monkeypatch) -> None:
     )
     assert tool is not None
 
-    # Exactly the loop's positional call shape.
-    result = await tool.execute("call-9", {"question": "q"}, None, None, _context("s1"))
+    # Exactly the loop's positional call shape, with a REAL signal: the defect
+    # only showed with one, because the swapped order fed the signal in as the
+    # context.
+    result = await tool.execute(
+        "call-9", {"question": "q"}, AbortSignal(), lambda _update: None, _context("s1")
+    )
 
     assert result.is_error is False
-    assert "Answer." in result.content[0].text
+    assert "Answer." in _text(result)

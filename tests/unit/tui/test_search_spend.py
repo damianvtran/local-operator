@@ -14,6 +14,7 @@ the next test's band total.
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +23,8 @@ from local_operator.harness.types import Usage
 from local_operator.session.frontend_state import CostKnowledge, FrontendSessionState
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.events import TurnEnded
+from local_operator.tui.widgets.analytics_panel import AnalyticsScreen
+from local_operator.tui.widgets.session_panel import SessionScreen
 from local_operator.web_search.cost import SEARCH_SPEND
 from local_operator.web_search.models import SearchCost
 from tests.unit.analytics.test_store import _snap
@@ -62,13 +65,18 @@ def flowed(text: str) -> str:
 
 
 class _ResumedSession(FakeSession):
-    """A session whose transcript carried the rows a real one would return."""
+    """A session whose transcript carried the rows a real one would return.
 
-    def __init__(self, rows) -> None:
+    ``rows`` defaults to ``None`` so the subclass stays assignable wherever a
+    ``FakeSession`` is expected: a required extra argument is a Liskov violation,
+    which pyright (rightly) reports at every use site.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         super().__init__()
-        self._rows = rows
+        self._rows = rows or []
 
-    def restored_search_spend(self):
+    def restored_search_spend(self) -> list[dict[str, Any]]:
         return self._rows
 
 
@@ -85,7 +93,7 @@ async def test_band_total_folds_in_search_spend() -> None:
     a band that never folded anything in.
     """
     session = _Session("anthropic/opus")
-    app = OperatorApp(_async_factory(session))
+    app = OperatorApp(_async_factory(cast(Any, session)))
     async with app.run_test(size=(100, 28)) as pilot:
         await _settle_boot(pilot, app, session)
         with _resolving():
@@ -122,7 +130,7 @@ async def test_the_band_marks_a_figure_that_an_unpriced_search_makes_a_floor() -
     price``: one figure, two spellings, and the band's was the dishonest one.
     """
     session = _Session("anthropic/opus")
-    app = OperatorApp(_async_factory(session))
+    app = OperatorApp(_async_factory(cast(Any, session)))
     async with app.run_test(size=(100, 28)) as pilot:
         await _settle_boot(pilot, app, session)
         with _resolving():
@@ -159,7 +167,7 @@ async def test_the_canonical_band_marks_a_search_only_figure_as_partial() -> Non
     the more expensive lie.
     """
     session = _Session("anthropic/opus")
-    app = OperatorApp(_async_factory(session))
+    app = OperatorApp(_async_factory(cast(Any, session)))
     async with app.run_test(size=(100, 28)) as pilot:
         await _settle_boot(pilot, app, session)
         _record()
@@ -183,7 +191,7 @@ async def test_frontend_snapshot_band_folds_in_search_spend() -> None:
     would leave every real session's band short while the tests above passed.
     """
     session = _Session("anthropic/opus")
-    app = OperatorApp(_async_factory(session))
+    app = OperatorApp(_async_factory(cast(Any, session)))
     async with app.run_test(size=(100, 28)) as pilot:
         await _settle_boot(pilot, app, session)
         _record()
@@ -208,7 +216,7 @@ async def test_a_turn_that_priced_nothing_still_shows_its_search_spend() -> None
     than hold the previous turn's number -- or nothing.
     """
     session = _Session("test/mock")
-    app = OperatorApp(_async_factory(session))
+    app = OperatorApp(_async_factory(cast(Any, session)))
     async with app.run_test(size=(100, 28)) as pilot:
         await _settle_boot(pilot, app, session)
         assert _band_cost(app) == ""
@@ -240,7 +248,7 @@ async def test_session_panel_prints_search_spend_and_each_provider(tmp_path, mon
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Search spend" in text
     assert "Total spend" in text and "$0.013+" in text
@@ -267,7 +275,7 @@ async def test_session_panel_omits_the_section_when_nothing_was_searched(
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Search spend" not in text
 
@@ -293,7 +301,7 @@ async def test_analytics_prints_process_search_spend_and_session_share(
         await _submit(pilot, app, "/analytics /usage")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = "\n".join(line.plain for line in app.screen._report_lines())
+        text = _panel_lines(app)
 
     assert "Search spend" in text
     assert "process-wide" in text
@@ -312,14 +320,14 @@ def test_recovered_search_spend_is_seeded_once_and_never_doubled() -> None:
     ``/reload`` adopts a session this process has already watched, so a replay
     that did not check first would double every recovered search.
     """
-    rows = (
+    rows: list[dict[str, Any]] = [
         {"provider": "deepseek", "usd": 0.0031, "basis": "token estimate"},
         {"provider": "tavily", "usd": None, "basis": ""},
         {"provider": "tavily", "usd": 0.0080, "basis": "tavily credits"},
-    )
+    ]
     session = _ResumedSession(rows)
-    app = OperatorApp(_async_factory(session))
-    app._session = session
+    app = OperatorApp(_async_factory(cast(Any, session)))
+    app._session = session  # type: ignore[assignment] -- the app's facade slot is a protocol
 
     app._restore_search_spend(session)
     totals = SEARCH_SPEND.session("sess")
@@ -334,8 +342,8 @@ def test_recovered_search_spend_is_seeded_once_and_never_doubled() -> None:
 
 def test_a_host_without_a_transcript_seeds_nothing() -> None:
     """The reduced/attached hosts have no ``restored_search_spend``; say so quietly."""
-    app = OperatorApp(_async_factory(FakeSession()))
-    app._session = FakeSession()
+    app = OperatorApp(_async_factory(cast(Any, FakeSession())))
+    app._session = FakeSession()  # type: ignore[assignment] -- see above
     app._restore_search_spend(app._session)
     assert SEARCH_SPEND.session("sess").searches == 0
 
@@ -366,7 +374,7 @@ async def test_a_read_row_is_labelled_as_a_read(tmp_path, monkeypatch) -> None:
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     # The total names the read apart from the searches...
     assert "1 search · 1 read" in text or "1 search · 1 unpriced" in text
@@ -397,7 +405,7 @@ async def test_the_search_block_carries_the_cost_legend(tmp_path, monkeypatch) -
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "$—" in text
     assert "+ lower bound" in text and "$— no published price" in text
@@ -425,7 +433,7 @@ async def test_a_narrow_frame_keeps_the_search_count(tmp_path, monkeypatch) -> N
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Search spend" in text
     # The count survives, even where the row had to give up its qualifier.
@@ -491,8 +499,31 @@ async def test_a_read_only_conversation_still_gets_its_section(tmp_path, monkeyp
         await _submit(pilot, app, "/session")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        text = app.screen._report_text().plain
+        text = _panel_text(app)
 
     assert "Search spend" in text
     assert "1 read" in text
     assert "0 searches" not in text
+
+
+def _panel_lines(app: OperatorApp) -> str:
+    """The ANALYTICS screen's rendered body lines, with the screen narrowed.
+
+    ``_report_lines`` is the analytics screen's; the diagnostics screen renders
+    through ``_report_text`` (see ``_panel_text``).
+    """
+    screen = app.screen
+    assert isinstance(screen, AnalyticsScreen)
+    return "\n".join(line.plain for line in screen._report_lines())
+
+
+def _panel_text(app: OperatorApp) -> str:
+    """The diagnostics screen's rendered body text, with the screen narrowed.
+
+    ``app.screen`` is ``Screen[object]`` to the type checker, and the report
+    methods live on the diagnostics screen; this is the same
+    ``assert isinstance`` narrowing ``test_session_panel`` uses, in one place.
+    """
+    screen = app.screen
+    assert isinstance(screen, SessionScreen)
+    return screen._report_text().plain

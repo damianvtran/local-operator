@@ -1259,7 +1259,13 @@ class Transcript:
                 rows.append(
                     {
                         **cost,
-                        "provider": (
+                        # The writer's own ledger key wins where it states one:
+                        # ``web_read`` carries no ``provider`` field, so deriving
+                        # ``<provider>:read`` labelled every restored read
+                        # ``:read`` -- one kind of spend split across two rows on
+                        # resume, against the live path's ``deepseek:read``.
+                        "provider": str(cost.get("ledger_provider") or "")
+                        or (
                             str(details.get("provider") or "")
                             if kind == "search"
                             else f"{str(details.get('provider') or '')}:read"

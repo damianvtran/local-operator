@@ -387,12 +387,15 @@ def search_spend_section(
         alone would misstate what the dollar figure covers.
         """
         if not snapshot.searches:
-            return search_notes(snapshot.reads, snapshot.unpriced_searches, kind="read")
-        base = search_notes(snapshot.searches, snapshot.unpriced_searches)
+            return search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")
+        base = search_notes(snapshot.searches, snapshot.unpriced_searches - snapshot.unpriced_reads)
         if not snapshot.reads:
             return base
-        read_word = "read" if snapshot.reads == 1 else "reads"
-        return tuple(f"{note} · {snapshot.reads} {read_word}" for note in base)
+        # The read half carries its OWN unpriced tally: pairing a search's count
+        # with a read's missing price put "no published price" on a search that
+        # has one, next to a row below saying the opposite about the read.
+        read_note = search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")[0]
+        return tuple(f"{note} · {read_note}" for note in base)
 
     lines.append(section_header("Search spend", meta))
     row("Total spend", snapshot, total_notes())
