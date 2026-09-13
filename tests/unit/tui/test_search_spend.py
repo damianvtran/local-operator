@@ -527,3 +527,62 @@ def _panel_text(app: OperatorApp) -> str:
     screen = app.screen
     assert isinstance(screen, SessionScreen)
     return screen._report_text().plain
+
+
+@pytest.mark.asyncio
+async def test_the_legend_is_printed_once_per_screen(tmp_path, monkeypatch) -> None:
+    """One footnote, one print, however many vocabularies carry a mark.
+
+    The same string explains the model rows' `+`/`$—` and the search block's, so
+    a frame with an unpriced model call AND an unpriced search engine could show
+    it twice with nothing telling the reader the two are the same legend.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "future-engine", SearchCost(usd=None, basis=""))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_lines(app)
+
+    # The legend LINE, exactly once -- the phrase itself also appears on the
+    # unpriced total's note and its provider row, which is not the legend.
+    assert text.count("+ lower bound (some calls unpriced)") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_session_still_shows_its_share(tmp_path, monkeypatch) -> None:
+    """The share row is about this session's spend, which a read has.
+
+    The guard was ``session.searches``, so the one row that says how much of the
+    process total belongs to the conversation you are looking at disappeared for
+    a read-only conversation -- while its money was in the total above.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record(
+        "sess",
+        "deepseek:read",
+        SearchCost(usd=0.0020, basis="token estimate", priced_from_usage=True),
+        kind="read",
+    )
+    SEARCH_SPEND.record("other", "brave", SearchCost(usd=0.0080, basis="rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_lines(app)
+
+    assert "This session" in text
+    assert "1 read" in text
