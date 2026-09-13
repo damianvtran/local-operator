@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import hashlib
 import json
@@ -11,6 +12,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -789,8 +791,14 @@ def _stored(connection: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     return value
 
 
-def _pinned_service(tmp_path, monkeypatch, connection, console_port):
-    """Config and stubs for a service whose /connect serves `console_port`."""
+def _service_fixture(tmp_path, monkeypatch, connection, console_port):
+    """Config, stubs, and the mock cloud for a service serving `console_port`.
+
+    Returns `(service, served, api)`: `served` is the connection the stubbed
+    /connect hands back (so a test knows the port the real listener binds) and
+    `api` is the stub whose `request` a test may re-point at a failing control
+    plane.
+    """
     from local_operator.tunnels import service
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
@@ -808,7 +816,12 @@ def _pinned_service(tmp_path, monkeypatch, connection, console_port):
     monkeypatch.setattr(service, "RadientTunnels", lambda *args: api)
     monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
     monkeypatch.setattr(service, "load_password", lambda: "private-local-password")
-    return service
+    return service, served, api
+
+
+def _pinned_service(tmp_path, monkeypatch, connection, console_port):
+    """Config and stubs for a service whose /connect serves `console_port`."""
+    return _service_fixture(tmp_path, monkeypatch, connection, console_port)[0]
 
 
 def test_harness_port_change_in_the_console_alone_cannot_repoint_the_tunnel(connection):
@@ -1087,3 +1100,234 @@ def test_duplicate_key_identifier_in_the_pinned_jwks_is_rejected(connection, sig
     config.validate_connection(connection)
     with pytest.raises(ValueError, match="Duplicate key identifier"):
         OriginVerifier(connection["origin_auth"], Mock())
+
+
+@pytest.mark.asyncio
+async def test_the_relay_names_a_lost_network_instead_of_one_flat_refusal(connection, signing_key):
+    """The response a phone gets must name the cause, not only the state.
+
+    Field report: a computer moved onto a network that could not reach the
+    control plane, the 30-second lease lapsed, and every request answered the
+    same flat "tunnel authorization unavailable" that a revoked tunnel or a
+    lapsed plan produces. Nothing said "this computer has no network", so the
+    only remedy was to guess — and the guess on offer was to re-enroll a tunnel
+    that was healthy. So the network cause and the withdrawn cause are asserted
+    separately, and each is asserted not to read as the other.
+    """
+    from local_operator.tunnels import service
+
+    origin = AsyncMock()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as client:
+            gateway.note_authorization_failure(
+                *service.describe_authorization_failure(httpx.ConnectError("unreachable"))
+            )
+            gateway.authorized_until = 0
+            refused = await client.get("/api/sessions", headers={PROOF_HEADER: proof(signing_key)})
+            assert refused.status_code == 503
+            body = refused.json()
+            # The machine-readable error is unchanged: this names the cause, it
+            # does not replace a field anything already keys on.
+            assert body["error"] == "tunnel authorization unavailable"
+            assert body["reason"] == "control_plane_unreachable"
+            assert "network" in body["detail"]
+
+        # `lop tunnel status` reads this payload, so the reason must be on it
+        # and not only on the phone's response.
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()),
+            base_url=f"http://127.0.0.1:{connection['gateway_port']}",
+        ) as probe:
+            health = (await probe.get("/_lop_tunnel/health")).json()
+        assert health["ok"] is False
+        assert health["reason"] == "control_plane_unreachable"
+
+        # A reason describes the lease in force, so a successful renewal clears
+        # it rather than leaving a stale cause on a working tunnel.
+        gateway.authorize()
+        assert gateway.unavailable_body()["reason"] == "authorization_lease_pending"
+
+        # A withdrawn authorization must never read as a network fault: that
+        # misdirection is the defect.
+        gateway.revoked = True
+        withdrawn = gateway.unavailable_body()
+        assert withdrawn["reason"] == "tunnel_not_authorized"
+        assert "network" not in withdrawn["detail"]
+    origin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_supervisor_reports_a_lost_network_on_both_status_surfaces(
+    tmp_path, monkeypatch, connection, signing_key
+):
+    """What the poller *does* with a failure, through the real supervisor.
+
+    Classifying in a helper proves nothing on its own: poll() is the only place
+    the control plane's failure is visible, and /_lop_tunnel/health is exactly
+    what `lop tunnel status` prints. This runs the real listener, the real
+    gateway and the real renewal loop against a control plane that answers
+    /connect and then goes away — the field report's sequence — and reads both
+    surfaces the operator and the phone actually have.
+    """
+    service, served, api = _service_fixture(tmp_path, monkeypatch, connection, 4098)
+    monkeypatch.setattr(service, "POLL_SECONDS", 0.02)
+    # The 30-second lease cliff is not what is under test; shorten it so the
+    # refusal is observed rather than slept through.
+    monkeypatch.setattr("local_operator.tunnels.gateway.AUTHORIZATION_LEASE_SECONDS", 0.05)
+
+    async def control_plane(method, path, **kwargs):
+        if method == "POST":
+            return served
+        raise httpx.ConnectError("network is unreachable")
+
+    api.request.side_effect = control_plane
+
+    class Connector:
+        """cloudflared stays up, so the edge still reaches this gateway."""
+
+        returncode = None
+
+        def __init__(self):
+            self._gone = asyncio.Event()
+
+        async def wait(self):
+            # Runs until the supervisor withdraws the connector, like the real
+            # long-lived child; returning early would end run() at once.
+            await self._gone.wait()
+
+        def terminate(self):
+            self.returncode = 0
+            self._gone.set()
+
+        def kill(self):
+            self.terminate()
+
+    monkeypatch.setattr(
+        service.asyncio, "create_subprocess_exec", AsyncMock(return_value=Connector())
+    )
+    task = asyncio.create_task(service.run())
+    async with httpx.AsyncClient(trust_env=False) as client:
+        health: dict[str, Any] = {}
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            reply = await client.get(
+                f"http://127.0.0.1:{served['gateway_port']}/_lop_tunnel/health"
+            )
+            health = reply.json()
+            if health.get("reason"):
+                break
+        assert health.get("ok") is False, health
+        assert health["reason"] == "control_plane_unreachable", health
+        assert "network" in health["detail"]
+
+        # Reached over the real listener the way the edge reaches it: loopback
+        # TCP, public Host. The gateway refuses before proof verification, which
+        # is the point — the phone never gets as far as its harness.
+        refused = await client.get(
+            f"http://127.0.0.1:{served['gateway_port']}/api/sessions",
+            headers={"host": HOST, PROOF_HEADER: proof(signing_key)},
+        )
+        assert refused.status_code == 503
+        assert refused.json()["reason"] == "control_plane_unreachable"
+
+    # End it the way an operator's `lop tunnel stop` does, so the supervisor is
+    # not left running inside the test session.
+    stopped = config.load()
+    stopped["stopped"] = True
+    config.save(stopped)
+    assert await asyncio.wait_for(task, timeout=15) == 0
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_prints_the_reason_the_relay_is_refusing(
+    tmp_path, monkeypatch, connection
+):
+    """The operator's terminal gets the same cause the phone does.
+
+    A bare state ("stopped") names no remedy, and the remedies differ per
+    cause: the network case needs no local command at all, so printing nothing
+    is what sends an operator to re-enroll a healthy tunnel.
+    """
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    api = AsyncMock()
+    api.request.return_value = connection["tunnel"]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    detail = (
+        "This computer cannot reach Radient to renew the relay authorization. "
+        "Check this computer's network connection; the tunnel reauthorizes by "
+        "itself once the control plane is reachable again."
+    )
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): ...
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "connected": True,
+                    "reason": "control_plane_unreachable",
+                    "detail": detail,
+                },
+            )
+
+    monkeypatch.setattr(
+        cli, "httpx", SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    )
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert "Local connector: stopped" in receipt
+    assert detail in receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,expected,absent",
+    [
+        (
+            httpx.ConnectError("network is unreachable"),
+            "this computer cannot reach Radient",
+            "check /login radient",
+        ),
+        (
+            ValueError("The tunnel's Radient login expired; log in again."),
+            "check /login radient",
+            "this computer cannot reach Radient",
+        ),
+    ],
+)
+async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
+    tmp_path, monkeypatch, connection, failure, expected, absent
+):
+    """One shared line sent both causes to /login radient.
+
+    They are different jobs for the operator — one is a plugged-in cable, the
+    other is an interactive login — and the cloud read is unavailable for both,
+    so the status command is the only place that can tell them apart.
+    """
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    api = AsyncMock()
+    api.request.side_effect = failure
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert expected in receipt
+    assert absent not in receipt
