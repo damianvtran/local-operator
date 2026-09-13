@@ -986,6 +986,32 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Whether a move would block on an in-flight turn."""
         ...
 
+    async def warm_runtime(self) -> None:
+        """Engage a runtime speculatively, for a caller nobody is waiting on.
+
+        Declared for the same reason as :meth:`bind_runtime` beside it: the
+        desktop bridge reaches it through ``bridge.remote`` on the /warm route,
+        so a rename on the facade must be a type error rather than a silently
+        missing capability on the hottest new path in the desktop app.
+
+        Never raises, and is NOT interchangeable with :meth:`bind_runtime`: it
+        takes the background bind envelope and is silent on failure, because a
+        warm-up the user did not ask for must never become an error they have
+        to read.
+        """
+        ...
+
+    @property
+    def engage_in_flight(self) -> bool:
+        """Whether an engage is running that another caller would have to join.
+
+        A HINT, not a guarantee — it samples a lock at one instant. Declared
+        because the desktop bridge reads it to decide whether a speculative
+        warm needs starting at all; correctness under a missed sample belongs
+        to the bind lock, not to this predicate.
+        """
+        ...
+
     # --- job trajectories --------------------------------------------------
     async def load_job_trajectory(self, job_id: str) -> bool:
         """Stream a subagent's transcript into this viewer; False if absent."""

@@ -1123,9 +1123,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # no such seam and must not grow one; a later figure that counts it as
     # declared-for-both would mean the in-process session had grown a transport
     # failure it cannot have.
-    assert len(viewer_only) == 48, (
+    #
+    # 48 → 50 is the same direction again: the desktop warm op adds
+    # ``warm_runtime`` and ``engage_in_flight``, both viewer-only for the same
+    # kind of reason — a runtime has no viewer to warm speculatively and no
+    # bind lock to sample — and both are read by the desktop bridge through
+    # ``bridge.remote``. Growth is not the decay this pin guards against (the
+    # aggregate below is a FLOOR), but the figure is exact on purpose, so it
+    # is edited deliberately rather than relaxed.
+    assert len(viewer_only) == 50, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 48, and the aggregate floor is set at 40 against that number. A "
+        "says 50, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
