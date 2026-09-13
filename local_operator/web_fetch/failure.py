@@ -550,12 +550,21 @@ def describe(
 def _with_attempts(text: str, attempts: int, profiles: Sequence[str]) -> str:
     """Append the attempt count and the identities used, when there was more
     than one. A single attempt says nothing — the count only carries
-    information once it is not 1."""
+    information once it is not 1.
+
+    The identity list is printed only when it CHANGED (design review round 2,
+    D10, applied here and in :func:`attempt_summary` so the two surfaces say one
+    thing): ``(2 attempts: default)`` names no change, so it is the bare
+    ``(2 attempts)``. The parenthetical exists to show the browser-shaped
+    escalation, and when there was none it is a word with no information in it.
+    """
     if attempts <= 1:
         return text
-    names = ", ".join(_profile_label(p) for p in _collapsed(profiles)) if profiles else ""
-    suffix = f" ({attempts} attempts: {names})" if names else f" ({attempts} attempts)"
-    return text + suffix
+    collapsed = _collapsed(profiles) if profiles else []
+    if len(collapsed) > 1:
+        names = ", ".join(_profile_label(p) for p in collapsed)
+        return f"{text} ({attempts} attempts: {names})"
+    return f"{text} ({attempts} attempts)"
 
 
 def _profile_label(profile: str) -> str:
@@ -579,10 +588,16 @@ def _collapsed(profiles: Sequence[str]) -> list[str]:
 
 def attempt_summary(attempts: int, profiles: Sequence[str]) -> str:
     """``2 attempts (default, browser-profile)`` for the header's meta line, or
-    ``""`` when a single attempt makes the count uninformative."""
+    ``""`` when a single attempt makes the count uninformative.
+
+    The parenthetical is dropped when the retries never changed identity (D10):
+    ``2 attempts (default)`` is a count with a stray word attached, where the
+    sequence exists to make the escalation legible as one.
+    """
     if attempts <= 1:
         return ""
-    if profiles:
-        names = ", ".join(_profile_label(p) for p in _collapsed(profiles))
+    collapsed = _collapsed(profiles) if profiles else []
+    if len(collapsed) > 1:
+        names = ", ".join(_profile_label(p) for p in collapsed)
         return f"{attempts} attempts ({names})"
     return f"{attempts} attempts"

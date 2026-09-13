@@ -219,10 +219,16 @@ def _header_line(result_like: dict[str, Any]) -> str:
     # §3.4: a Retry-After too long to sleep on is REPORTED, not obeyed — and
     # reporting it only in ``details`` reaches nothing, because the agent reads
     # this text. ``describe`` would say the same thing, but it is only reached
-    # for a class with no response at all; a 429 HAS a response, so its lead is
-    # built here and this is where the number has to land.
+    # for a class with no response at all; a 429 or a 503 HAS a response, so its
+    # lead is built here and this is where the number has to land.
+    #
+    # Gated on the VALUE, not on ``failure_kind == "ratelimit"`` (R2-2): §3.4
+    # covers 429 AND 503, and only those two classes populate ``retry_after_s``
+    # (``failure.classify_response`` parses the header for both; a client-class
+    # 4xx never carries the key). The old gate silently dropped a 503's interval
+    # — ``details`` had it, the text the agent reads did not.
     retry_after = result_like.get("retry_after_s")
-    if result_like.get("failure_kind") == "ratelimit" and isinstance(retry_after, (int, float)):
+    if isinstance(retry_after, (int, float)):
         # AFTER the parenthetical, so the card's header strip still recognises the
         # header block it removes (lead + meta + note) and leaves this sentence
         # where a reader looks for it: in the body, as the reason the call stopped.

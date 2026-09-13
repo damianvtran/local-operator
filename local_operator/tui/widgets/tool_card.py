@@ -834,10 +834,34 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
             rows.append(f"⚠ HTTP {status} {reason} — error/block page, not page content.")
     rows.append(fetched)
 
+    # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
+    # 800 lines · 51.8 KB``. The escalation that WON is the case a reader most
+    # needs to see — it is the reason a slow fetch succeeded — and it was exactly
+    # the case that looked character-for-character like an ordinary one, because
+    # the meta line carrying the count model-side is stripped from the card. It
+    # rides this row rather than a new one: §5.4's "no new card row" decision
+    # stands, and this row has the room that ``Fetched:`` does not.
+    #
+    # It is placed directly after the method, BEFORE the line/byte counts. D7
+    # caught the original order appending it last, which made the fact §3.6
+    # promises visible the FIRST thing clipped at the standard 80 columns:
+    # ``… · 800 lines · 51.8 KB · 2 attempts (default, brow…``. Leading with the
+    # identity means only a byte count can ever be dropped, and the escalation
+    # survives every width the card is read at.
+    #
+    # Bound to locals so the narrowing holds for the type checker and the call
+    # reads as one decision rather than three inline guards.
+    attempts_n = details.get("attempts")
+    profiles_n = details.get("profiles")
+    summary = attempt_summary(
+        attempts_n if isinstance(attempts_n, int) else 1,
+        profiles_n if isinstance(profiles_n, list) else (),
+    )
     render_bits = " · ".join(
         part
         for part in (
             method,
+            summary,
             f"{lines_n} lines" if isinstance(lines_n, int) else "",
             # D2: humanise (KB/MB) so the structured row agrees with the binary
             # notice body two lines below, which already prints e.g. "2.4 MB".
@@ -851,24 +875,6 @@ def _fetch_result_output(details: dict[str, Any] | None) -> list[str]:
         if part
     )
     if render_bits:
-        # D1: ``Rendered: markdownify · 3 lines · 2 attempts (default,
-        # browser-profile)``. The escalation that WON is the case a reader most
-        # needs to see — it is the reason a slow fetch succeeded — and it was
-        # exactly the case that looked character-for-character like an ordinary
-        # one, because the meta line carrying the count model-side is stripped
-        # from the card. Appended to this row rather than given its own: §5.4's
-        # "no new card row" decision stands, and this row has the room that
-        # ``Fetched:`` does not.
-        # Bound to locals so the narrowing holds for the type checker and the
-        # call reads as one decision rather than three inline guards.
-        attempts_n = details.get("attempts")
-        profiles_n = details.get("profiles")
-        summary = attempt_summary(
-            attempts_n if isinstance(attempts_n, int) else 1,
-            profiles_n if isinstance(profiles_n, list) else (),
-        )
-        if summary:
-            render_bits += f" · {summary}"
         rows.append(f"Rendered: {render_bits}")
     if details.get("low_quality"):
         rows.append("sparse/JS-gated — try `browser` for the full page.")
@@ -908,6 +914,30 @@ _FETCH_HEADER_META_RE = re.compile(r"^\S.* · .*cache ")
 #: the error response. Stripped from the card body alongside the lead/meta lines
 #: (the structured error row already carries the "not page content" message).
 _FETCH_HEADER_NOTE_RE = re.compile(r"^\(The body below is the error response")
+
+
+#: The attempt summary clause on a painted fetch row, exactly as
+#: :func:`local_operator.web_fetch.failure.attempt_summary` writes it —
+#: ``· 2 attempts (default, browser-profile)``, or ``· 2 attempts`` when the
+#: retries never changed identity. Matched by VALUE rather than position, so the
+#: painter can lift it to ``signal`` (D9) without caring where D7 placed it in
+#: the row, and a future reorder cannot silently drop the escalation back into
+#: the metadata ink.
+_ATTEMPT_CLAUSE_RE = re.compile(r" · \d+ attempts?(?: \([^)]*\))?")
+
+
+def _split_attempt_clause(line: str) -> tuple[str, str, str]:
+    """Split a painted fetch row into ``(before, clause, after)`` around its
+    attempt summary.
+
+    ``clause`` is empty for a card that made one attempt — no summary is painted,
+    which is the common case — and for a terminal failure, whose count rides its
+    promoted lead instead of a ``Rendered:`` row.
+    """
+    match = _ATTEMPT_CLAUSE_RE.search(line)
+    if match is None:
+        return line, "", ""
+    return line[: match.start()], match.group(0), line[match.end() :]
 
 
 def _humanize_bytes(count: int) -> str:
@@ -1952,16 +1982,30 @@ class ToolCard(ExpandableActionBlock):
                 # lead becomes a structured row, the body keeps the rest), and it
                 # adds no wording: the sentence is the tool's own.
                 terminal = isinstance(fetch_details.get("failure_kind"), str)
-                if terminal and "render_method" not in fetch_details and body:
+                # A failure with NO response — a stall or a transport throw —
+                # carries neither ``render_method`` nor ``final_url``, so this is
+                # the exact test for "the body below is OUR diagnosis, not the
+                # origin's bytes" (``service.py`` only builds an explanation when
+                # no response arrived). It is deliberately NOT ``terminal``
+                # alone: that is true for every classified non-2xx too, and a
+                # 404/500/429's body is the ORIGIN's own response, kept verbatim
+                # on purpose — re-flowing it would change what the card claims
+                # the origin sent (design review round 2, D6, which caught this
+                # flag re-wrapping a 404/500 body round 1 had proved
+                # byte-identical).
+                terminal_no_response = terminal and "render_method" not in fetch_details
+                if terminal_no_response and body:
                     if not fetch_header[0].startswith("⚠ "):
                         fetch_header = [f"⚠ {body[0]}"] + fetch_header
                         body = body[1:]
                     while body and not body[0].strip():
                         body.pop(0)
                 # D3: only a body that is OUR prose may be re-wrapped at paint
-                # time — the replaced challenge statement, or a terminal
+                # time — the replaced challenge statement, or a no-response
                 # failure's diagnosis. Origin content is painted as it arrived.
-                self._fetch_statement = fetch_details.get("failure_kind") == "blocked" or terminal
+                self._fetch_statement = (
+                    fetch_details.get("failure_kind") == "blocked" or terminal_no_response
+                )
                 fetch_output = fetch_header + [""] + body
         # Remembered so the body painter and the rest-visibility rule can select
         # the fetch presentation without re-inspecting details every repaint.
@@ -2438,7 +2482,13 @@ class ToolCard(ExpandableActionBlock):
         - **The danger row is recognised structurally in the header region**, so a
           failure with no HTTP status (a stall, a transport error) can lead with
           its own classified sentence without a page line further down that
-          happens to open with ⚠ being promoted to danger ink.
+          happens to open with ⚠ being promoted to danger ink. A header ⚠ row
+          that is a SENTENCE — the classified ``⚠ HTTP …`` one and the promoted
+          lead — reflows to the measure rather than clipping mid-sentence (D8):
+          a headline is not a fixed-width ledger cell.
+        - **The attempt summary is ``signal``, not the row's ``dim``** (D9). It
+          is the actionable escalation, not metadata about the page, so it obeys
+          the same one rule D4 set for ``Next step:``.
         """
         signal = bindings.style("tool.fetch.signal")
         muted = bindings.style("tool.fetch.snippet")
@@ -2458,14 +2508,22 @@ class ToolCard(ExpandableActionBlock):
             stripped = line.strip()
             is_header = index < header_end
             # Wrapping is allowed for OUR prose only: the statement body, and the
-            # promoted terminal-failure lead. A ``⚠ HTTP …`` row is a fixed-shape
-            # status line and clips like every other structured row; the promoted
-            # lead is a sentence that carries the attempt count, and clipping it
-            # would hide the count the body no longer repeats (D5).
+            # promoted terminal-failure lead. Other structured rows clip like
+            # every other fixed-width row; the promoted lead is a sentence that
+            # carries the attempt count, and clipping it would hide the count the
+            # body no longer repeats (D5).
             wrap = not is_header
             if stripped.startswith("⚠ HTTP"):
-                # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1).
+                # See `bindings.BY_ELEMENT["tool.fetch.error"].note` (F1). D8: this
+                # classified row IS the card's headline now, so it reflows like the
+                # promoted lead below rather than clipping mid-sentence. The
+                # 58-cell generic row it replaced fitted whole at 70 columns; the
+                # 74-cell classified one does not. ``wrap = wrap or is_header``
+                # keeps the old clip for an origin body line that merely opens with
+                # ``⚠ HTTP`` (a body is never reflowed — ``_fetch_statement``
+                # already gates that) while letting the header row wrap.
                 ink = danger
+                wrap = wrap or is_header
             elif is_header and stripped.startswith("⚠ "):
                 ink = danger
                 wrap = True
@@ -2474,7 +2532,8 @@ class ToolCard(ExpandableActionBlock):
                 self._append_fetched_row(row, line, line_width, indent, dim, signal)
                 continue
             elif stripped.startswith("Rendered:"):
-                ink = dim
+                self._append_rendered_row(row, line, line_width, indent, dim, signal)
+                continue
             elif stripped.startswith("Next step:"):
                 ink = signal
             elif stripped.startswith("Origin reference:"):
@@ -2543,6 +2602,38 @@ class ToolCard(ExpandableActionBlock):
             if not painted:
                 break
             ink = signal if token.startswith(("http://", "https://")) else dim
+            row.append(painted, style=ink)
+            remaining -= cell_len(painted)
+
+    def _append_rendered_row(
+        self,
+        row: Text,
+        line: str,
+        line_width: int,
+        indent: str,
+        dim: Style,
+        signal: Style,
+    ) -> None:
+        """Paint the ``Rendered:`` row with its attempt summary in ``signal`` (D9).
+
+        The row's method/line/byte fields are metadata about the page and stay
+        ``dim``. The attempt summary is not that: it is the actionable escalation
+        — "we changed identity and that is why this succeeded" — and D1 exists to
+        make that findable, so it wears ``signal`` (4.32:1 light / 6.52:1 dark)
+        rather than the row's pre-existing ``dim`` (3.32:1 light, below the body
+        floor). One rule with D4: the sentence a reader may act on is ``signal``,
+        the metadata recedes. Match is by value (``_split_attempt_clause``), so
+        the clause is found wherever D7 places it in the row.
+        """
+        row.append("\n" + indent, style=dim)
+        head, clause, tail = _split_attempt_clause(line)
+        remaining = line_width
+        for chunk, ink in ((head, dim), (clause, signal), (tail, dim)):
+            if not chunk or remaining <= 0:
+                continue
+            painted = truncate_cells(chunk, remaining)
+            if not painted:
+                continue
             row.append(painted, style=ink)
             remaining -= cell_len(painted)
 

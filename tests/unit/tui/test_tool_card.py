@@ -625,7 +625,8 @@ def test_a_blocked_card_names_the_vendor_and_the_attempt_count() -> None:
     assert "2 attempts (default, browser-profile)" in content
     # DN2: no byte count for a replaced body — it describes the discarded page.
     assert "382 B" not in content
-    assert "text · 4 lines" in content
+    # D7: the summary leads the counts, so the clip zone can only take a count.
+    assert "text · 2 attempts (default, browser-profile) · 4 lines" in content
 
     # D4: the actionable sentence is the anchor, the opaque reference recedes,
     # and the prose itself is NOT dim (3.32:1 on the light error-tinted panel).
@@ -701,6 +702,248 @@ def test_a_terminal_failure_card_is_the_same_visual_family() -> None:
     # width instead of stopping at a constant 76 cells.
     wide = card._build_content(150).plain.splitlines()
     assert any(explanation in row for row in wide)
+
+
+def test_the_reflow_permission_belongs_to_our_prose_only() -> None:
+    """Design review round 2, D6 — the cause, asserted head-on.
+
+    The permission was keyed on ``isinstance(failure_kind, str)``, which is true
+    for EVERY classified non-2xx, so a 404/500's ORIGIN body — the bytes
+    ``service.py`` keeps verbatim on purpose — began being re-wrapped where
+    round 1 had proved the frame byte-identical. A body may only be reflowed when
+    it is OUR prose: the replaced challenge statement, or a failure that got no
+    response at all. The predicate is exactly the promotion test beside it.
+    """
+
+    def permission(details: dict[str, Any]) -> bool:
+        card = ToolCard("t", "web_fetch", {"url": "https://walled.example/x"})
+        card.mark_done("body", details)
+        return card._fetch_statement
+
+    def shape(**overrides: Any) -> dict[str, Any]:
+        # ``_fetch_result_output`` needs a URL to build any header row at all, so
+        # every fixture carries one — the flag is only ever set on a card whose
+        # fetch branch ran.
+        base: dict[str, Any] = {
+            "url": "https://walled.example/x",
+            "final_url": "https://walled.example/x",
+            "cache": "miss",
+        }
+        base.update(overrides)
+        return base
+
+    # The origin's own response, whatever its class: never reflowed.
+    for kind, status in (("client", 404), ("server", 500), ("ratelimit", 429)):
+        assert (
+            permission(
+                shape(
+                    status=status,
+                    failure_kind=kind,
+                    render_method="markdownify",
+                    http_error=True,
+                )
+            )
+            is False
+        ), kind
+    # Our prose: the replaced challenge body and a no-response diagnosis.
+    assert permission(shape(failure_kind="blocked", render_method="text")) is True
+    assert permission(shape(failure_kind="stall")) is True
+
+
+def test_a_404_body_is_painted_exactly_as_it_arrived() -> None:
+    """D6, on the pixels: the wrap permission cannot touch the 404 body.
+
+    Asserted as a DIFF against the same card with the permission forced off, so
+    this test fails on any future change that lets the flag reach an origin body
+    — not just on the specific re-wrap the designer caught.
+    """
+    preview = (
+        "⚠ HTTP 404 Not Found — this is an error/block page, not page content.\n"
+        "markdownify · text/html · cache miss\n\n"
+        "| /guide/old-page | /guide/new-page | the 3.0 tree; the redirect table keeps 90 days |\n"
+        "    GET /guide/old-page -> 301 https://docs.example.com/guide/new-page\n"
+    )
+    details = {
+        "url": "https://docs.example.com/x",
+        "final_url": "https://docs.example.com/x",
+        "status": 404,
+        "content_type": "text/html",
+        "render_method": "markdownify",
+        "cache": "miss",
+        "bytes": 512,
+        "lines": 2,
+        "ok": False,
+        "http_error": True,
+        "failure_kind": "client",
+    }
+    card = ToolCard("t", "web_fetch", {"url": details["url"]})
+    card.mark_done(preview, details)
+    card.toggle_expanded()
+    shipped = card._build_content(60).plain
+    rows = shipped.splitlines()
+
+    # One row per origin line, clipped like every other fixed-width row: the
+    # route line keeps its indent and the table stays ONE row (the re-wrap split
+    # it into three, one of them a bare ``|``).
+    assert sum(1 for row in rows if row.strip().startswith("|")) == 1
+    route = [row for row in rows if row.strip().startswith("GET /guide/old-page")]
+    assert len(route) == 1
+    # ONE row: the URL the re-wrap pushed onto a second row is still on the
+    # route's own row, and the indent is intact in front of it.
+    assert "-> 301" in route[0] and "https://docs" in route[0]
+    assert route[0].startswith("      GET /guide/old-page")
+
+    # And the flag is what gates it: forcing it ON is the D6 defect, so the
+    # shipped frame is provably the un-reflowed one rather than a coincidence of
+    # the fixture.
+    card._fetch_statement = True
+    assert card._build_content(60).plain != shipped
+    card._fetch_statement = False
+    assert card._build_content(60).plain == shipped
+
+
+def test_the_escalation_survives_the_narrow_rendered_row() -> None:
+    """Design review round 2, D7 — the live medium.com numbers at 80 columns.
+
+    The summary was appended last, so a large escalated page clipped it first:
+    ``Rendered: markdownify · 800 lines · 51.8 KB · 2 attempts (default,
+    brow…``. The identity change is the fact D1 exists for, so it leads the row
+    after the method and only a count can be dropped.
+    """
+    card = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    card.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss · "
+        "2 attempts (default, browser-profile)\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 53067,
+            "lines": 800,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    card.toggle_expanded()
+    row = next(
+        line.strip()
+        for line in card._build_content(80).plain.splitlines()
+        if line.strip().startswith("Rendered:")
+    )
+    assert "2 attempts (default, browser-profile)" in row
+    # Order: the summary is not the trailing field, so the clip can only eat a
+    # count. At the standard width the byte count is the field that goes.
+    assert row.index("2 attempts") < len(row)
+    assert "Rendered: markdownify · 2 attempts (default, browser-profile) · 800 lines" in row
+
+
+def test_the_classified_danger_row_wraps_at_seventy_columns() -> None:
+    """Design review round 2, D8.
+
+    ``⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content.``
+    is 74 cells against the 58-cell generic row it replaced, so at 70 columns it
+    used to clip mid-sentence where the old row fitted whole. A card headline is
+    a sentence, not a fixed-width ledger cell, so it reflows like the promoted
+    terminal lead.
+    """
+    url = "https://www.shoppersdrugmart.ca/?lang=en&query=power+bar"
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_done(
+        f"⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content. {url}\n"
+        "text · text/html · cache miss · 2 attempts (default, browser-profile)\n\n"
+        "The origin's bot protection refused this request.\n"
+        "Next step: use the `browser` tool on this URL.\n",
+        {
+            "url": url,
+            "final_url": url,
+            "status": 403,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "lines": 2,
+            "ok": False,
+            "http_error": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "failure_kind": "blocked",
+            "block_vendor": "akamai",
+            "suggested_tool": "browser",
+        },
+    )
+    card.toggle_expanded()
+    rows = [row.strip() for row in card._build_content(70).plain.splitlines()]
+    start = next(i for i, row in enumerate(rows) if row.startswith("⚠ HTTP 403"))
+    # The headline is a sentence, so it takes the next row: the whole clause is
+    # painted and nothing is elided, where the clipped row ended
+    # ``…blocked by Akamai bot protection, not page…``.
+    danger = rows[start : start + 2]
+    assert danger[0].startswith("⚠ HTTP 403 Forbidden — blocked by Akamai")
+    assert "bot protection, not page content." in " ".join(danger)
+    assert all("…" not in row for row in danger)
+
+
+def test_the_attempt_summary_wears_signal_ink() -> None:
+    """Design review round 2, D9, reconciled with D4's one rule.
+
+    The row's metadata stays ``dim``; the attempt summary is the actionable
+    escalation — the reason this fetch succeeded — and the panel's ``dim``
+    measures 3.32:1 on the light error tint, below the body floor. One rule: the
+    sentence a reader may act on is ``signal``, the metadata recedes.
+    """
+    card = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    card.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 1024,
+            "lines": 3,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    card.toggle_expanded()
+    built = card._build_content(100)
+    assert _triplet(_style_at(built, "· 2 attempts").color) == _triplet(
+        Style(color=theme_mod.semantic_color("signal")).color
+    )
+    assert _triplet(_style_at(built, "Rendered: markdownify").color) == _triplet(
+        Style(color=theme_mod.semantic_color("dim")).color
+    )
+
+
+def test_a_same_identity_retry_prints_only_the_count() -> None:
+    """Design review round 2, D10 on the card: ``2 attempts (default)`` → ``2 attempts``."""
+    card = ToolCard("t", "web_fetch", {"url": "https://flaky.example/x"})
+    card.mark_done(
+        "[200] https://flaky.example/x\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://flaky.example/x",
+            "final_url": "https://flaky.example/x",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 96,
+            "lines": 1,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "default"],
+        },
+    )
+    card.toggle_expanded()
+    content = card._build_content(100).plain
+    assert "2 attempts" in content
+    assert "(default)" not in content
 
 
 def test_web_fetch_low_quality_note_surfaced_once() -> None:
