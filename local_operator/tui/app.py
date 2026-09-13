@@ -16358,13 +16358,16 @@ class OperatorApp(App[None]):
           whatever it found. Read off the bound facade, which is where the bind
           lock publishes a foreground caller's arrival, and read AFTER the
           identity gate so it is this binding's counter.
-        * once per binding per attempt cycle, keyed on the binding's own id
-          (``_start_engage_reported_for``). A failed engage clears
-          ``_warm_engage_started``, so any keystroke re-engages; without the key a
-          session that cannot start would grow a notice per keystroke. An
-          explicit attempt (a prompt, a command — ``_claim_start_engage_notice``)
-          clears the key instead of relying on a swap route, so a second failure
-          after the user has done what the notice asked is not silent.
+        * once per binding per attempt cycle, keyed on the binding TOKEN
+          (``_start_engage_reported_for`` — ``(epoch, session_id)``, minted by
+          :meth:`_bind_viewer`, the same token the identity gate above reads, so
+          the two can never disagree about which binding they mean). A failed
+          engage clears ``_warm_engage_started``, so any keystroke re-engages;
+          without the key a session that cannot start would grow a notice per
+          keystroke. An explicit attempt (a prompt, a command —
+          ``_claim_start_engage_notice``) clears the key instead of relying on a
+          swap route, so a second failure after the user has done what the
+          notice asked is not silent.
 
         The two ceilings this can surface are different FACTS, so they get
         different sentences: "no record appeared at all" and "a record exists but

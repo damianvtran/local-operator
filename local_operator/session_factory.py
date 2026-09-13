@@ -2510,7 +2510,20 @@ def attach_mcp_dispose(session: Session, manager: McpManager) -> None:
     session.add_dispose_hook(manager.disconnect_all)
     session.mcp_manager = manager
     if hasattr(session, "_frontend_state_store"):
-        session.refresh_frontend_state()
+        # GUARDED like its sibling in ``_fire_mcp_sink``, and for a sharper
+        # reason than symmetry: this runs from the same task that swallows
+        # exceptions (``_wire_mcp_background`` logs "background MCP wiring
+        # failed" and carries on), and it sits BETWEEN ``disconnect_all``'
+        # registration above and the two sink installs below. An unguarded raise
+        # here therefore skips the incident and recovery sinks ENTIRELY — no
+        # death notice and no healing notice, on every host, including the ones
+        # this composition root exists to serve — while the only trace is one
+        # warning about wiring (review round 1, MINOR-1 / QA Q1). The push is a
+        # UI/store concern and must not be able to disarm the manager's sinks.
+        try:
+            session.refresh_frontend_state()
+        except Exception:  # noqa: BLE001 — a store push must not disarm the sinks
+            logger.warning("MCP outcome refresh of the frontend store failed", exc_info=True)
     # Breaker incidents become session incidents: the model learns a server's
     # tools are gone instead of hammering them (MCP-07's observable half).
     manager.on_incident = session._on_mcp_incident
