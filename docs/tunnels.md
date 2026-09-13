@@ -128,6 +128,36 @@ retries every 10 seconds and reconnects once
 eligible. `lop tunnel billing` reports the amount due and current quote. A
 stopped or suspended tunnel does not stop work already running locally.
 
+## When the relay refuses a request
+
+Once the 30-second authorization lease lapses the gateway answers `503` with a
+body whose `detail` names the cause, so a lost network is not mistaken for a
+withdrawn authorization. `detail` leads the body, then the machine-readable
+`reason`, then the long-standing `error` value: a phone renders this JSON in its
+browser with no viewer to fold it, so the sentence has to be the first thing
+read.
+
+- `control_plane_unreachable` — "This computer could not reach Radient to renew
+the relay authorization (its network may be down, or Radient may be
+unreachable). It reauthorizes by itself once the control plane answers again —
+check this computer's network connection if it does not clear." No local command
+is needed; the connector retries every 10 seconds.
+- `authorization_refused` — Radient answered and refused the check, so the login
+may have expired or this tunnel's billing may be inactive. Both are fixed at
+<https://console.radienthq.com/dashboard/tunnels>.
+- `tunnel_not_authorized` — the tunnel is revoked, suspended, disabled, stopped
+on this computer, or its configuration changed.
+- `authorization_lease_pending` — the lease has not been renewed yet, which
+normally clears by itself within a few seconds.
+
+`lop tunnel status` prints the same cause beside the connector state, worded for
+a terminal: it names the commands a phone cannot run (`/login radient`, `lop
+tunnel install`), which the relay's own sentence leaves out, and links the
+console wherever the console is the remedy. The states it reports are
+`connected`, `connecting`, `not serving` (the gateway answered and is refusing,
+with cloudflared possibly still attached to the edge), and `stopped` — with the
+line saying so when nothing answered on the gateway port at all.
+
 ## Trust boundaries and transport
 
 The path is browser → Radient authentication Worker → Cloudflare Tunnel →

@@ -1017,6 +1017,21 @@ class AuthStore:
             self._release_refresh_lease(row.id)
             return merged
 
+    def _refreshable_row(self, credential_id: int) -> StoredCredential | None:
+        """The row a refresh may act on, or ``None`` when there is no such row.
+
+        Shared by both refresh entry points so their precondition cannot drift: a
+        row that is gone, disabled, or not an OAuth credential is not a refresh
+        failure in either of them, and only the raising variant can then tell a
+        failed refresh from a missing row.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or row.disabled_cause is not None:
+            return None
+        if row.credential_type != "oauth":
+            return None
+        return row
+
     async def ensure_oauth_fresh(self, credential_id: int) -> dict[str, Any] | None:
         """Usable OAuth data for ONE specific credential, refreshed if stale.
 
@@ -1027,15 +1042,30 @@ class AuthStore:
         row is gone, disabled, not an OAuth credential, or its refresh fails:
         the caller keeps whatever verdict the row already carried. Raises
         nothing; a probe is a read, not a routing decision."""
-        row = self.get_credential(credential_id)
-        if row is None or row.disabled_cause is not None:
-            return None
-        if row.credential_type != "oauth":
+        row = self._refreshable_row(credential_id)
+        if row is None:
             return None
         try:
             return await self._ensure_oauth_fresh(row)
         except AuthStoreError:
             return None
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int) -> dict[str, Any] | None:
+        """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
+
+        The probe above collapses every unusable state into ``None``, which is
+        right for a caller that only needs a verdict and wrong for one that must
+        tell an operator WHERE to look: a token endpoint that could not be
+        reached and a grant the IdP rejected arrive as the same ``None``, and
+        they need different remedies. ``None`` still means the row is gone,
+        disabled, or not an OAuth credential; a refresh that failed raises
+        :class:`AuthStoreError` with the underlying transport or IdP error
+        chained on ``__cause__``, so a caller can classify on it.
+        """
+        row = self._refreshable_row(credential_id)
+        if row is None:
+            return None
+        return await self._ensure_oauth_fresh(row)
 
     # -- selection: stickiness + round-robin -------------------------------------
 
