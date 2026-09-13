@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.logger import (
+    _CHATTY_WIRE_CLIENTS,
     CLI_LOG_FORMAT,
     DEFAULT_LOG_FORMAT,
     LOG_BACKUP_COUNT,
@@ -31,6 +32,7 @@ from local_operator.logger import (
     _restore_fd_stderr,
     configure_cli_logging,
     configure_console_logging,
+    configure_file_logging,
     current_log_file,
     file_logging,
 )
@@ -535,3 +537,62 @@ def test_file_logging_leaves_fd2_alone_when_no_log_file(
         assert _fd_identity(2) == before
 
     assert _fd_identity(2) == before
+
+
+def test_configure_file_logging_bounds_the_file_and_quiets_the_wire_clients(
+    log_home: Path,
+) -> None:
+    """A child with no terminal must log to a BOUNDED file, without the wire noise.
+
+    Field report: the relay's log grew to 420 MB on the operator's machine, in
+    which 6,928,291 records were one line per HTTP request from the wire clients
+    and 44,681 were records anyone wanted. The cause was the runtime child's
+    ``logging.basicConfig(level=INFO, filename=...)``: the root level handed to
+    the libraries, and an unbounded ``FileHandler`` nothing rotated. The child
+    writes to the DAEMON's log on purpose — ``lop mobile logs`` covers both — so
+    the bound has to be applied to that path, not to this package's own console
+    log, which is why the helper takes one.
+    """
+    target = log_home.parent / "mobile.log"
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    saved_client_levels = {name: logging.getLogger(name).level for name in _CHATTY_WIRE_CLIENTS}
+    try:
+        installed = configure_file_logging(path=target, level=logging.INFO)
+        assert installed == target
+        assert len(root.handlers) == 1
+        handler = root.handlers[0]
+        # Bounded — the property the unbounded handler it replaces lacked, and
+        # the one that decides whether a chatty child costs 10 MiB or the disk.
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        assert handler.maxBytes == LOG_MAX_BYTES
+        assert handler.backupCount == LOG_BACKUP_COUNT
+        assert Path(handler.baseFilename) == target
+        # Our own records survive at the level the caller asked for...
+        assert root.level == logging.INFO
+        logging.getLogger("local_operator.test.file_logging").info("kept")
+        assert "kept" in target.read_text(encoding="utf-8")
+        # ...and a per-request client does not, at ANY caller level.
+        for name in _CHATTY_WIRE_CLIENTS:
+            assert logging.getLogger(name).level >= logging.WARNING, name
+    finally:
+        for handler in list(root.handlers):
+            handler.close()
+            root.removeHandler(handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        for name, level in saved_client_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def test_the_wire_client_list_names_both_httpx_distributions() -> None:
+    """`httpx` and `httpx2` are two distributions of one library, both shipped.
+
+    The MCP client imports `httpx2`, whose logger is named after that
+    distribution, so a list that pinned only `httpx` left the actual emitter of
+    6.9M request records at the root level. Pinning one and not the other is
+    exactly the kind of near-miss this asserts against.
+    """
+    assert "httpx" in _CHATTY_WIRE_CLIENTS
+    assert "httpx2" in _CHATTY_WIRE_CLIENTS

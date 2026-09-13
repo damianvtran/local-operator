@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 
+from local_operator.logger import configure_console_logging
 from local_operator.mobile.auth import load_password
 from local_operator.mobile.daemon import DEFAULT_PORT, MobileDaemon, build_app
 
@@ -20,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 async def amain(port: int = DEFAULT_PORT) -> int:
+    # The daemon's stderr IS its log file: the LaunchAgent this repo installs
+    # points StandardOutPath and StandardErrorPath at log_dir()/mobile.log. So
+    # this process has to own that stream, because unconfigured it inherits
+    # whatever a dependency's `basicConfig` installed — the MCP client's is
+    # `level=INFO` — and one record per HTTP request is what filled the relay
+    # log to 420 MB with nothing rotating it.
+    configure_console_logging()
     password = load_password()
     if not password:
         # First-run is an operator action, not a silent default: the daemon
