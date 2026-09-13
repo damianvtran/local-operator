@@ -309,6 +309,40 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # the strobe it hid from this suite was exactly the one users were seeing.
 
 
+@pytest.fixture(autouse=True)
+def restore_upstream_xterm_parser() -> Iterator[None]:
+    """Hand the upstream parser class back after every test in this directory.
+
+    ``local_operator.tui.run_tui`` installs ``terminal_modes``' pixel-mouse gate
+    onto the CLASS ``XTermParser.parse_mouse_code``, and that patch is
+    process-global by design — the driver builds its parser when the app starts,
+    after the boot code has run, so there is no instance to patch instead. The
+    suite shares a process, and more than one test here awaits the REAL
+    ``run_tui`` (``test_app_pilot.py::test_run_tui_forwards_provider_controller``
+    and ``test_logger_silence.py``), so without this every test that happened to
+    land in that worker afterwards would run with the divisor forced off:
+    ``test_pixel_mouse_latch.py`` asserts the COLLAPSED behaviour the gate
+    exists to prevent, and the gate's own tests require a clean class to start
+    from (they assert the install actually installed something).
+
+    Teardown only, deliberately. An uninstall at setup time would race the
+    ``gated`` fixture in ``test_pixel_mouse_gate.py``, which installs the gate
+    FOR its test: depending on fixture order that would either be harmless or
+    would strip the fixture's own patch. A leaked gate therefore survives at
+    most the test that installed it, and every test starts clean — which is the
+    property the sibling tests rely on.
+
+    Nothing is asserted here: this is a restore, and a test that wants to prove
+    the parser is clean asserts it itself (``gated`` does).
+
+    No-op on an already-clean class, so an ordinary test pays a dict lookup.
+    """
+    from local_operator.tui.terminal_modes import uninstall_pixel_mouse_gate
+
+    yield
+    uninstall_pixel_mouse_gate()
+
+
 class StyledTranscriptApp(App[None]):
     """A transcript under the REAL sheet and the real brand variables.
 
