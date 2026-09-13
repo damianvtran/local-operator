@@ -2102,7 +2102,11 @@ def browser_command(args: argparse.Namespace) -> int:
             if not pairing.get("identities"):
                 print("no browser extension is paired. Run 'lop browser pair' to pair one.")
                 return 0
-            _print_identities(pairing, result.get("health"))
+            live_health = result.get("health")
+            # /health is a plain dict when the daemon answered and None when it
+            # did not; the printer takes the second case as "unknown", which is
+            # what a file-only listing must say rather than inventing a driver.
+            _print_identities(pairing, live_health if isinstance(live_health, dict) else None)
             pending = pairing.get("pending") or []
             for item in pending:
                 label = str(item.get("label", "")) or _short_extension_id(
@@ -2116,8 +2120,7 @@ def browser_command(args: argparse.Namespace) -> int:
             target = _resolve_pairing_target(args.revoke, identities)
             if target is None:
                 print(
-                    f"\033[1;31mno single authorised extension matches "
-                    f"'{args.revoke}'.\033[0m"
+                    f"\033[1;31mno single authorised extension matches " f"'{args.revoke}'.\033[0m"
                 )
                 for entry in identities:
                     print(
@@ -2130,13 +2133,19 @@ def browser_command(args: argparse.Namespace) -> int:
             # File-level, exactly like --reset: the daemon's revocation watcher
             # then severs THIS identity's live socket within a few seconds and
             # leaves every other identity's authority untouched.
-            revoke_identity(target["extension_id"])
+            # Keyword, not positional: this shares the daemon's
+            # ``revoke_identity(root, extension_id)`` order, so a positional id
+            # would be read as the CONFIG ROOT — revoking nothing at the real
+            # root and writing a stray file named after the id.
+            # root=None is the default config root, as every other CLI pairing
+            # call uses; the id is passed BY KEYWORD because the daemon's order is
+            # ``(root, extension_id)`` and a positional id would be read as the
+            # root — revoking nothing and writing a stray file named after the id.
+            revoke_identity(None, extension_id=target["extension_id"])
             label = str(target.get("label", "")) or _short_extension_id(
                 str(target.get("extension_id", ""))
             )
-            print(
-                f"revoked {label}; any live connection for it is dropped within a few seconds."
-            )
+            print(f"revoked {label}; any live connection for it is dropped within a few seconds.")
             return 0
         if args.reset:
             # File unlink here; the running daemon's revocation watcher (and
@@ -2191,10 +2200,7 @@ def browser_command(args: argparse.Namespace) -> int:
             for extension_id in result.get("authorized_extension_ids") or []:
                 print(f"  {_short_extension_id(str(extension_id))}")
             return 1
-        print(
-            "now driving: "
-            f"{_short_extension_id(str(result.get('driver_extension_id', '')))}"
-        )
+        print("now driving: " f"{_short_extension_id(str(result.get('driver_extension_id', '')))}")
         return 0
     if command in ("start", "stop", "restart"):
         result = browser_install.service_action(command)
@@ -2250,8 +2256,7 @@ def browser_command(args: argparse.Namespace) -> int:
             print(f"\033[1;33mnote:\033[0m {warning}")
         return 0 if result.get("ok") else 1
     print(
-        "usage: lop browser "
-        "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
+        "usage: lop browser " "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
     )
     return 1
 

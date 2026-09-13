@@ -37,11 +37,7 @@ from local_operator.browser_bridge.daemon import (
     revoke_all,
     revoke_identity,
 )
-from local_operator.browser_bridge.protocol import (
-    PROTO_VERSION,
-    ErrorCode,
-    Request,
-)
+from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode, Request
 
 #: The store build's id in the design note, and a path-derived unpacked one.
 STORE_ID = "omibaecbjdhgbbcedbnnnmjpmopfheof"
@@ -125,9 +121,7 @@ class _FakePeer:
         return [frame for frame in self.sent if frame.get("event") == "hello_ack"]
 
     def roles(self) -> list[str]:
-        return [
-            str(frame.get("role")) for frame in self.sent if frame.get("event") == "role"
-        ]
+        return [str(frame.get("role")) for frame in self.sent if frame.get("event") == "role"]
 
 
 def _hello_frame(token: str, *, version: str = "0.1.13") -> dict[str, Any]:
@@ -146,13 +140,15 @@ def _connect(service: BridgeService, peer: _FakePeer, token: str, **extra: Any):
     return asyncio.create_task(service.extension(peer))  # type: ignore[arg-type]
 
 
-async def _settles(predicate: Callable[[], bool], seconds: float = 2.0) -> bool:
+async def _settles(predicate: Callable[[], object], seconds: float = 2.0) -> bool:
+    """Wait until ``predicate`` is truthy. Typed loosely on purpose: callers pass
+    expressions like ``unpacked.acks() and ...``, and only truthiness is read."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if predicate():
             return True
         await asyncio.sleep(0.005)
-    return predicate()
+    return bool(predicate())
 
 
 async def _shutdown(*tasks: asyncio.Task[Any]) -> None:
@@ -377,9 +373,7 @@ async def test_u7_a_standby_receives_no_commands_and_the_driver_serves_them(
     assert unpacked.acks()[0]["role"] == "standby"
 
     dispatch = asyncio.create_task(
-        service._dispatch_serialized(
-            Request(id="r-1", method="read", params={"tab": "bridge:1:n"})
-        )
+        service._dispatch_serialized(Request(id="r-1", method="read", params={"tab": "bridge:1:n"}))
     )
     assert await _settles(lambda: bool(store.requests())), "the driver was not asked"
     assert store.requests() == [{"id": "r-1", "method": "read", "params": {"tab": "bridge:1:n"}}]
@@ -433,6 +427,41 @@ async def test_u9_the_same_identity_reconnects_as_driver_not_standby(tmp_path: P
     assert unpacked.roles() == [], "the standby was disturbed by a same-identity reconnect"
     assert unpacked.acks()[0]["role"] == "standby"
     await _shutdown(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_u8b_an_unpaired_standby_is_not_promoted(tmp_path: Path) -> None:
+    """The wheel only goes to a link that can actually serve a command.
+
+    Measured on the real rig before this guard: the driver died, the only
+    survivor was a second install that had connected but not yet paired, and it
+    was promoted — after which every session read `not_paired` for as long as it
+    held the wheel, i.e. the daemon chose a link it knew could serve nothing.
+    """
+    _schema_two(tmp_path)
+    service = BridgeService(root=tmp_path)
+    store = _FakePeer(STORE_ID)
+    stranger = _FakePeer(THIRD_ID)
+    store_task = _connect(service, store, STORE_TOKEN)
+    # THIRD_ID is not in the allow-list, so this dial presents no token and is
+    # admitted to pair: unpaired, and a standby while the store build drives.
+    stranger_task = _connect(service, stranger, "")
+    assert await _settles(lambda: stranger.acks() and stranger.acks()[0]["role"] == "standby")
+    assert stranger.acks()[0]["paired"] is False
+
+    store.push(None)  # the driver's socket ends
+
+    assert await _settles(lambda: service.link.extension_id == "")
+    assert stranger.roles() == [], "an unpaired standby was handed the wheel"
+    assert service.link.websocket is None
+
+    # And when it PAIRS, it takes the idle wheel at that moment rather than
+    # sitting paired while every session is told no browser is attached.
+    code = pairing_status(tmp_path)["pending_code"]
+    stranger.push({"event": "pair", "code": code})
+    assert await _settles(lambda: service.link.extension_id == THIRD_ID), service.links
+    assert stranger.roles() == ["driver"]
+    await _shutdown(store_task, stranger_task)
 
 
 # --- U10: the pending code is per identity -----------------------------------
@@ -720,3 +749,91 @@ def test_revoking_an_unknown_identity_leaves_the_others_alone(tmp_path: Path) ->
     revoke_identity(tmp_path, THIRD_ID)
     assert {entry["extension_id"] for entry in _identities(tmp_path)} == {STORE_ID, UNPACKED_ID}
     assert ErrorCode.NOT_PAIRED.value == "not_paired"
+
+
+# --- U17-U19: `lop browser drive` (design §8.2) ------------------------------
+
+
+def test_u17_drive_moves_the_wheel_and_demotes_the_incumbent(tmp_path: Path) -> None:
+    """The escape hatch from the incumbency rule, exercised over its real route.
+
+    Without it, the install already driving keeps the wheel and the other cannot
+    take it — so the operator's only lever is quitting a browser. The demotion
+    travels as a `role` frame rather than a socket close: the demoted install is
+    running this same build, and the frame is what tells it to release its
+    surfaces without losing its pairing.
+    """
+    _schema_two(tmp_path)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        key = app.state.bridge.state.session_key
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{STORE_ID}"}
+        ) as store:
+            store.send_json(_hello_frame(STORE_TOKEN))
+            assert store.receive_json()["role"] == "driver"
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{UNPACKED_ID}"}
+            ) as unpacked:
+                unpacked.send_json(_hello_frame(UNPACKED_TOKEN))
+                assert unpacked.receive_json()["role"] == "standby"
+
+                pinned = client.post(
+                    "/driver", headers={"X-Bridge-Key": key}, json={"target": UNPACKED_ID[:12]}
+                )
+                assert pinned.status_code == 200, pinned.text
+                assert pinned.json()["driver_extension_id"] == UNPACKED_ID
+
+                # The incumbent is told; the replacement is told. Both frames
+                # matter: the demoted install must know to hand back its tabs.
+                assert unpacked.receive_json() == {"event": "role", "role": "driver"}
+                assert store.receive_json() == {"event": "role", "role": "standby"}
+                health = client.get("/health").json()
+                assert health["driver_extension_id"] == UNPACKED_ID
+                assert health["standby_extension_ids"] == [STORE_ID]
+
+                # Idempotent: driving the driver again is a no-op, not a churn.
+                again = client.post(
+                    "/driver", headers={"X-Bridge-Key": key}, json={"target": UNPACKED_ID}
+                )
+                assert again.status_code == 200 and again.json()["ok"] is True
+
+
+def test_u18_drive_refuses_an_unknown_target_and_an_unpaired_one(tmp_path: Path) -> None:
+    _schema_two(tmp_path)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        key = app.state.bridge.state.session_key
+        unknown = client.post("/driver", headers={"X-Bridge-Key": key}, json={"target": "deadbeef"})
+        assert unknown.status_code == 404
+        assert unknown.json()["error"] == "unknown_extension"
+        # Names what IS paired, so "no connected extension matches" is actionable.
+        assert unknown.json()["authorized_extension_ids"] == sorted([STORE_ID, UNPACKED_ID])
+
+        # An unpaired, attached install is refused: handing it the wheel would
+        # answer `not_paired` to every session for as long as it drove.
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
+        ) as stranger:
+            stranger.send_json(_hello_frame(""))
+            assert stranger.receive_json()["paired"] is False
+            refused = client.post(
+                "/driver", headers={"X-Bridge-Key": key}, json={"target": THIRD_ID}
+            )
+            assert refused.status_code == 409
+            assert refused.json()["error"] == "not_paired"
+
+
+def test_u19_drive_requires_the_session_key(tmp_path: Path) -> None:
+    """Same authority as /rpc, and the same reason: choosing which install drives
+    the user's real browser is not something any local process may ask for."""
+    _schema_two(tmp_path)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        assert client.post("/driver", json={"target": STORE_ID}).status_code == 401
+        assert (
+            client.post(
+                "/driver", headers={"X-Bridge-Key": "nope"}, json={"target": STORE_ID}
+            ).status_code
+            == 401
+        )
