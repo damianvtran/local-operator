@@ -1,0 +1,105 @@
+"""Capture /session and /analytics carrying web-search spend.
+
+Usage: python scripts/search_spend_shot.py OUTDIR [WxH]
+
+The fixture is the existing session-report one (reused, not re-invented): a real
+ledger shape on a real app, so the frames differ from the pre-change ones only by
+the search-spend surfaces under test. Search spend is seeded through the same
+process-wide ledger the ``web_search`` tool writes, with one priced provider, one
+free provider, one read (a distinguishable provider key), and one provider whose
+price is unknown -- the four states the section has to spell differently.
+
+Run this on the branch for the AFTER frames and run the sibling scripts
+(``session_report_shot.py populated``, ``analytics_label_shot.py``) in a base
+worktree for the BEFORE frames; the base does not have this surface at all.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+for _key in tuple(os.environ):
+    if _key.startswith("CMUX_"):
+        os.environ.pop(_key)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import asyncio  # noqa: E402
+
+import scripts.probe_isolation  # noqa: E402, F401
+from local_operator.web_search.cost import SEARCH_SPEND  # noqa: E402
+from local_operator.web_search.models import SearchCost  # noqa: E402
+from scripts.session_report_shot import (  # noqa: E402
+    DiagnosticSession,
+    seed_populated,
+)
+from scripts.visual_capture import save_capture  # noqa: E402
+from local_operator.tui.app import OperatorApp  # noqa: E402
+from tests.unit.tui.test_app_pilot import _factory  # noqa: E402
+from tests.unit.tui.test_slash_echo import _submit  # noqa: E402
+
+
+def seed_search_spend(session_id: str) -> None:
+    """Search spend in the four shapes the section must render differently."""
+    SEARCH_SPEND.reset()
+    # Priced per search (a keyed paid engine).
+    SEARCH_SPEND.record(session_id, "brave", SearchCost(usd=0.004, basis="published per-search rate"))
+    SEARCH_SPEND.record(session_id, "brave", SearchCost(usd=0.004, basis="published per-search rate"))
+    # Token-priced, an estimate, the expensive one.
+    SEARCH_SPEND.record(
+        session_id,
+        "deepseek",
+        SearchCost(usd=0.0049, basis="tokens at list price (estimate), peak", priced_from_usage=True),
+    )
+    # Free, and known to be free.
+    SEARCH_SPEND.record(session_id, "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    # A read from captured pages: its own provider key, so reads do not inflate
+    # the search count.
+    SEARCH_SPEND.record(
+        session_id,
+        "deepseek:read",
+        SearchCost(usd=0.002, basis="tokens at list price (estimate), off-peak", priced_from_usage=True),
+    )
+    # Unknown price: must not read as $0.00.
+    SEARCH_SPEND.record(session_id, "future-engine", SearchCost(usd=None, basis="no published rate"))
+
+
+async def main() -> None:
+    out = Path(sys.argv[1]).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    size_arg = sys.argv[2] if len(sys.argv) > 2 else "120x40"
+    cols, rows = size_arg.split("x")
+    size = (int(cols), int(rows))
+
+    session = DiagnosticSession()
+    session.set_conversation_name("Search spend surfaces")
+    seed_populated(session.session_id)
+    seed_search_spend(session.session_id)
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await pilot.pause()
+        save_capture(app, str(out / "session-with-search-spend.svg"))
+        # The search-spend block sits below the ledger sections on this screen, so
+        # the frame that proves it renders is the SCROLLED one: a top-of-page
+        # shot of a scrollable body is evidence about the fold, not the block.
+        for _ in range(80):
+            await pilot.press("down")
+        await pilot.pause()
+        save_capture(app, str(out / "session-search-spend-scrolled.svg"))
+        await pilot.press("escape")
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await pilot.pause()
+        save_capture(app, str(out / "analytics-with-search-spend.svg"))
+    print(
+        f"wrote {out}/session-with-search-spend.svg, "
+        "session-search-spend-scrolled.svg and analytics-with-search-spend.svg"
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
