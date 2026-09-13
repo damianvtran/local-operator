@@ -458,6 +458,62 @@ def combined_spend(
     )
 
 
+def search_spend_is_floor(search: "SearchSpendSnapshot | None") -> bool:
+    """Whether a search figure is a lower bound (some of it unpriced).
+
+    Asked by the status band, which shows the combined figure and needs only this
+    flag. Deliberately NOT ``combined_spend(0.0, ...).is_floor``: that call hands
+    the combiner a model half the band does not have, so the combiner's
+    model-unknown branch was unreachable at that call site while the code read as
+    though it handled the case (round-1 review MINOR-2).
+    """
+    return bool(search is not None and search.cost_is_partial)
+
+
+def cost_label(has_search: bool) -> str:
+    """The ``Est. cost`` row's label, carrying the search scope when there is one.
+
+    Design review D1 (blocker): the search half was named only in the NOTE, and
+    the note is cropped above ``_NOTE_MIN`` and shed below it -- so at 80 columns
+    the row painted ``≈ list price × tokens · incl`` and at 60 it painted nothing,
+    leaving a combined figure that looked model-only. The panel's own rule is that
+    a distinction the reader must not lose belongs in the LABEL, which is never
+    shed; the notes carry only the refinement. The label column is 22 cells and
+    this is 18.
+    """
+    return "Est. cost · search" if has_search else "Est. cost"
+
+
+def cost_note_rungs(spend: SpendSummary, *, search_component: str = "") -> tuple[str, ...]:
+    """The note ladder for a combined ``Est. cost`` figure, widest first.
+
+    Shared by ``/session`` and ``/analytics`` for the reason this module exists:
+    one figure, one vocabulary. Two situations the ladder has to spell:
+
+    * a model half that could NOT be priced beside real search money -- the
+      figure is entirely retrieval, so a token-priced note would describe half a
+      figure that is not in it (round-1 review MINOR-3);
+    * a figure that includes search, where the note must keep naming the search
+      component at widths that crop. A single wide string rendered
+      ``≈ list price × tokens · incl`` at 80 columns, destroying the one fact the
+      row was added to state (round-1 review MAJOR-2).
+    """
+    if spend.is_unknown:
+        return ("no published price",)
+    if spend.model_usd is None:
+        # D2 (major): with no model price there is nothing the tokens multiplied,
+        # and nothing for ``incl.`` to fold the search money INTO -- the search
+        # half IS the figure. ``incl.`` here was a claim about a half that is not
+        # in it, so the wording says what the figure is instead.
+        return (
+            "search only · model unpriced",
+            "search only",
+        )
+    if search_component:
+        return (f"≈ list price × tokens · {search_component}", search_component)
+    return ("≈ list price × tokens",)
+
+
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
     """What one subagent job has spent so far, or ``None`` when unpriceable.
 

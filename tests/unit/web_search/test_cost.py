@@ -127,3 +127,33 @@ def test_module_ledger_is_shared_state_with_a_reset_for_tests() -> None:
     assert SEARCH_SPEND.session("shared").searches == 1
     SEARCH_SPEND.reset()
     assert SEARCH_SPEND.session("shared").searches == 0
+
+
+# -- keyed Sonar is billed, and must never be priced as the free tier -------
+
+
+def test_a_keyed_sonar_request_is_priced_and_never_free() -> None:
+    """MAJOR-1: the anonymous tier is free; keyed traffic must not land there.
+
+    The keyed response reported no ``usage``, so ``estimate_search_cost`` fell
+    through to the anonymous branch and booked a billed Sonar call at $0.0000.
+    """
+    from local_operator.web_search.models import SearchUsage
+
+    priced = estimate_search_cost(
+        "perplexity", SearchUsage(input_tokens=14_500, output_tokens=776, keyless=False)
+    )
+    assert priced.usd is not None and priced.usd > 0.005
+    # The request fee is $5/1,000 plus $1/1M tokens: both halves are in there.
+    assert priced.usd == pytest.approx(0.005 + 15_276 * 1e-6, abs=1e-9)
+    assert priced.priced_from_usage is True
+
+    # The API answered without a usage block: the fee is real, the tokens are
+    # unknown rather than zero, so the row is a FLOOR and not a confident total.
+    floored = estimate_search_cost("perplexity", SearchUsage(keyless=False))
+    assert floored.usd == pytest.approx(0.005)
+    assert floored.priced_from_usage is False
+
+    # The free tier is the ANONYMOUS one, and it is still free.
+    anonymous = estimate_search_cost("perplexity", None)
+    assert anonymous.usd == 0.0
