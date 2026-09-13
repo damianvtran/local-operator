@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import re
 import sqlite3
+import sys
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.session.attention import AttentionStore, conversation_identity
+from local_operator.session.transcript import Transcript
 
 
 def _provisional_anchor(token: str) -> str:
@@ -195,8 +203,17 @@ async def test_crash_and_fork_journal_identity(tmp_path: Path) -> None:
         Message(role="assistant", content=[TextContent(text="durable result")])
     )
     bootstrap_transcript(owner, store)
-    assert store.state("session/owner")["kind"] == "interrupted"
-    assert store.state("session/owner")["unseen"]
+    # An in-flight run whose owner is GONE and whose record left no evidence is
+    # an ERROR naming the uncertainty, not an interruption: the taxonomy's
+    # default flipped because a cut-off we cannot explain is not a stop. This
+    # assertion read ``interrupted`` before the cut-off work, and the cause
+    # assertion read ``runtime-killed`` before a later round made the
+    # no-evidence branch stop naming a mechanism it cannot observe.
+    crashed = store.state("session/owner")
+    assert crashed["kind"] == "error"
+    assert crashed["cause"] == ""
+    assert "the cause could not be determined" in crashed["reason"]
+    assert crashed["unseen"]
     store.acknowledge("session/owner", token)
     bootstrap_transcript(owner, store)
     assert not store.state("session/owner")["unseen"]
@@ -672,3 +689,545 @@ def test_a_mismatched_provisional_anchor_cannot_supersede(tmp_path: Path) -> Non
     store.publish("session/a", token, "message-real", "complete")
     assert store.state("session/a")["kind"] == "complete"
     assert store.state("session/a")["anchor_id"] == "message-real"
+
+
+def test_the_desktop_is_just_another_claimant_with_no_special_path(tmp_path: Path) -> None:
+    """A desktop claim and a TUI claim for one completion produce ONE winner.
+
+    The desktop app reaches this primitive through `DesktopSessions.
+    claim_notification`, which passes `backend="desktop"`. The `backend` column
+    is diagnostics only — no decision may read it, because a claim that
+    consulted anything beyond the monotonic sequence would stop being
+    clock-free and two observers with disagreeing clocks would both deliver —
+    so the important property is that naming a new backend buys no privilege
+    whatsoever.
+
+    That matters because the two surfaces are genuinely concurrent in the real
+    configuration this feature ships into: with the desktop window unfocused, a
+    session's `live_state` is `idle`, which makes BOTH a TUI observer and the
+    desktop eligible for the same completion. Exactly one banner is the
+    contract; which one wins is deliberately unspecified.
+    """
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "result", "complete")
+
+    # Separate stores, as two separate PROCESSES would hold: no shared
+    # connection, no shared cache, only the file.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = list(
+            pool.map(
+                lambda backend: AttentionStore(path).claim_delivery("session/a", token, backend),
+                ("desktop", "cmux"),
+            )
+        )
+    assert claims.count(True) == 1, "two surfaces both announced one completion"
+
+    # Whoever lost stays locked out, in either order, and a late third surface
+    # inherits the watermark rather than re-firing.
+    assert AttentionStore(path).claim_delivery("session/a", token, "desktop") is False
+    assert AttentionStore(path).claim_delivery("session/a", token, "detached") is False
+
+    # And the claim did not touch the READ watermark on any of those paths:
+    # the sidebar's mark belongs to a human opening the conversation.
+    assert store.state("session/a")["unseen"] is True
+
+    # A NEWER completion is a fresh arbitration, so a delivered conversation is
+    # not permanently silenced on either surface.
+    newer = str(uuid.uuid4())
+    store.publish("session/a", newer, "result-2", "complete")
+    assert AttentionStore(path).claim_delivery("session/a", newer, "desktop") is True
+    assert AttentionStore(path).claim_delivery("session/a", newer, "cmux") is False
+
+
+# -- the cut-off taxonomy's restore path (design §3.4/§8.1 tests 2-6) ---------
+
+
+def _record_json(session_id: str, pid: int) -> dict[str, Any]:
+    """One discovery record naming ``session_id``, in the shape the runtime writes."""
+    return {
+        "pid": pid,
+        "kind": "daemon",
+        "session_id": session_id,
+        "conversation_name": session_id,
+        "cwd": "/tmp",
+        "model_label": "test/mock",
+        "control_port": 1,
+        "control_key": "k",
+        "version": "1.2.3",
+        "source_ref": "abcdef0",
+    }
+
+
+def _seed_started(root: Path, session_id: str) -> str:
+    """An ``attention_started`` with no outcome, as a killed runtime leaves it."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    token = str(uuid.uuid4())
+    transcript = Transcript(directory)
+    asyncio.run(
+        transcript.append_custom(
+            "attention_started", {"conversation_id": f"session/{session_id}", "token": token}
+        )
+    )
+    return token
+
+
+def _write_record(root: Path, session_id: str, pid: int) -> None:
+    run = root / "run" / "mobile"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / f"{pid}.json").write_text(json.dumps(_record_json(session_id, pid)), encoding="utf-8")
+
+
+def test_an_orphaned_run_without_evidence_is_an_error_with_a_named_uncertainty(
+    tmp_path: Path,
+) -> None:
+    """Design test 1: no live owner, no record, no stop marker.
+
+    The kind is still ``error`` — a cut-off nobody can explain is not a stop —
+    but the CAUSE is left empty and the sentence is the honest one. It used to
+    report ``runtime-killed`` with ``(the cause could not be determined)``
+    appended, which every surface that trims a parenthetical (the sidebar's
+    ``_error_label``) turned into a positive claim about a mechanism nobody
+    observed (design/UX review round 1, D3/U3).
+    """
+    from local_operator.incidents import CUT_OFF_UNKNOWN
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "orphan1"
+    token = _seed_started(tmp_path, session_id)
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, reason, returned = result
+    assert (kind, cause, returned) == ("error", "", token)
+    assert reason == CUT_OFF_UNKNOWN
+    state = store.state(f"session/{session_id}")
+    assert state["kind"] == "error"
+    assert state["cause"] == ""
+    assert state["reason"] == CUT_OFF_UNKNOWN
+    assert state["unseen"] is True
+    # The sentence and the token must agree with each other, since the inverse
+    # (`cause_from_reason`) is what the live surfaces use to name a cause.
+    from local_operator.incidents import cause_from_reason
+
+    assert cause_from_reason(reason) == ""
+
+
+def test_a_live_owner_stops_the_import_from_publishing_anything(tmp_path: Path) -> None:
+    """Design test 2 — the false-alarm guard, and the load-bearing part of this PR.
+
+    A daemon sweep (or a resume) that runs mid-turn must publish NOTHING: a
+    provisional ``error`` written for a healthy run would be believed by every
+    surface and hidden by the busy-suppression, which is the worst combination.
+    A FOREIGN live pid is the case; our own must NOT count, or a successor
+    runtime could never classify its predecessor's orphaned run.
+    """
+    import subprocess
+    import sys
+
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "live1"
+    _seed_started(tmp_path, session_id)
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _write_record(tmp_path, session_id, foreign.pid)
+        store = AttentionStore(tmp_path / "attention.db")
+        result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+        assert result is None
+        assert store.state(f"session/{session_id}")["kind"] is None
+    finally:
+        foreign.kill()
+        foreign.wait(timeout=10)
+
+
+def test_our_own_record_does_not_block_the_classification(tmp_path: Path) -> None:
+    """A successor publishes its own record BEFORE it builds its Session."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "successor1"
+    _seed_started(tmp_path, session_id)
+    _write_record(tmp_path, session_id, os.getpid())
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None, "a runtime must be able to classify its predecessor's run"
+
+
+def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
+    """Design test 3: the record's build, pid and start time ride the detail."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    session_id = "dead1"
+    _seed_started(tmp_path, session_id)
+    dead_pid = 2**22 + 7
+    _write_record(tmp_path, session_id, dead_pid)
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, reason, _token = result
+    assert (kind, cause) == ("error", "runtime-killed")
+    assert f"pid {dead_pid}" in reason
+    assert "1.2.3@abcdef0" in reason
+
+
+def test_the_started_at_is_one_token_so_a_wrap_cannot_split_it() -> None:
+    """Design round 3, D7: the date and the time are ONE value, not two.
+
+    Measured on the real `NoticeBlock` at 60 columns (56 content cells): with a
+    PLAIN space the wrap landed between the date and the time —
+    `… started 2026-09-12` / `05:15:53)`, a 9-cell orphan line under a timestamp
+    the reader then has to reassemble. The non-breaking space carries the value
+    whole, and the row count is 4/3/2/2 at 60/80/100/120 either way.
+
+    The record is a stub because this is a RENDERING rule about one field: the
+    two classification tests above own which facts reach the reason, and the
+    sweep of real `NoticeBlock` renders is in the round-3 evidence.
+    """
+    from local_operator.session.attention import _record_detail
+
+    class _Record:
+        version = "0.54.15"
+        source_ref = ""
+        pid = 97342
+        started_at = time.mktime(time.strptime("2026-09-12 05:15:53", "%Y-%m-%d %H:%M:%S"))
+
+    detail = _record_detail(_Record())
+    assert "pid 97342" in detail, detail
+    assert "started 2026-09-12\u00a005:15:53" in detail, detail
+    # The exact boundary the wrap split on: no PLAIN space may separate a date
+    # from a time anywhere in the detail.
+    assert not re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", detail), detail
+
+
+def test_a_reaped_death_is_classified_from_the_record_the_scan_deleted(
+    tmp_path: Path,
+) -> None:
+    """MINOR-1: the daemon's own sweep deletes the evidence it then classifies.
+
+    ``registry.scan`` UNLINKS a stale record as it reports it, so the mobile
+    daemon's discovery loop — whose classification re-reads the run directory —
+    found nothing and landed every discovered death on the no-evidence arm: "the
+    cause could not be determined" for the one shape where the daemon had just
+    proved the pid dead. Passing the record the caller is already holding is the
+    fix, and the CONTROL below is what that bug looked like (same death, same
+    moment, record not handed in).
+
+    The live-owner gate is deliberately not under test here: it runs before the
+    classification and is pinned by the tests above.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.runtime import registry
+    from local_operator.session.transcript import Transcript
+
+    fixed_id, control_id = "reaped1", "reaped2"
+    _seed_started(tmp_path, fixed_id)
+    _seed_started(tmp_path, control_id)
+    dead_pid = 2**22 + 11
+    _write_record(tmp_path, fixed_id, dead_pid)
+    _write_record(tmp_path, control_id, dead_pid + 1)
+
+    scanned = registry.scan(tmp_path)
+    by_session = {record.session_id: record for record, _state in scanned}
+    assert {state for _record, state in scanned} == {"stale"}
+    for pid in (dead_pid, dead_pid + 1):
+        assert not (
+            tmp_path / "run" / "mobile" / f"{pid}.json"
+        ).exists(), "the premise: the scan is what deletes the record"
+
+    fixed = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / fixed_id),
+        AttentionStore(tmp_path / "fixed.db"),
+        reaped_owner=by_session[fixed_id],
+    )
+    assert fixed is not None
+    assert (fixed[0], fixed[1]) == ("error", "runtime-killed"), fixed
+    assert f"pid {dead_pid}" in fixed[2], fixed[2]
+
+    # CONTROL, and it is the bug rather than a second property: with the record
+    # gone and nothing handed in, the same death reads as unexplained.
+    before = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / control_id),
+        AttentionStore(tmp_path / "before.db"),
+    )
+    assert before is not None
+    assert (before[0], before[1]) == ("error", ""), before
+
+
+@pytest.mark.asyncio
+async def test_a_witnessed_deliberate_stop_is_written_as_an_interruption(
+    tmp_path: Path,
+) -> None:
+    """NIT-2: the witnessed writer consults the taxonomy's deliberate half.
+
+    It wrote ``error`` for whatever cause the viewer passed while the daemon's
+    frame fill and the narration guard both route through
+    ``is_deliberate_cause``. Nothing in production reached it — every current
+    caller passes ``owner-lost`` or a cut-off sentence — so this is the
+    asymmetry being closed rather than a live defect, and the pair below pins
+    BOTH halves: an involuntary cause stays an error, a deliberate one becomes
+    the interruption its own vocabulary names.
+    """
+    import subprocess
+
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for index, (cause, expected) in enumerate(
+            (("owner-lost", "error"), ("user-stop", "interrupted"))
+        ):
+            session_id = f"witness{index}"
+            transcript = Transcript(tmp_path / "sessions" / session_id)
+            token = str(uuid.uuid4())
+            await transcript.append_custom(
+                "attention_started", {"conversation_id": f"session/{session_id}", "token": token}
+            )
+            run = tmp_path / RUN_DIRNAME
+            run.mkdir(parents=True, exist_ok=True)
+            (run / f"{owner.pid}.json").write_text(
+                json.dumps(
+                    SessionRecord(
+                        pid=owner.pid,
+                        kind="tui",
+                        session_id=session_id,
+                        conversation_name=session_id,
+                        cwd=str(transcript.directory),
+                        model_label="m",
+                        control_port=1,
+                        control_key="k",
+                        protocol=5,
+                        capabilities=["tui_state_v1"],
+                    ).to_json()
+                ),
+                encoding="utf-8",
+            )
+            store = AttentionStore(tmp_path / f"witness{index}.db")
+            published = bootstrap_transcript(
+                transcript,
+                store,
+                witnessed_cut_off=(cause, render_cut_off_reason(cause)),
+            )
+            assert published is not None
+            assert published[0] == expected, published
+            assert store.state(f"session/{session_id}")["kind"] == expected
+            # ...and the live owner still supersedes it, whichever kind it was.
+            await transcript.append_message(
+                Message(role="assistant", content=[TextContent(text="done")])
+            )
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)
+
+
+def test_a_recorded_stop_marker_keeps_an_interruption(tmp_path: Path) -> None:
+    """Design test 4: positive evidence of a deliberate act, honoured after death."""
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+    from local_operator.wakes.store import write_entry
+
+    session_id = "stopped1"
+    _seed_started(tmp_path, session_id)
+    schedule = {"id": "w1", "message": "later", "next_due_at": 1, "created_at": 1}
+    write_entry(
+        tmp_path,
+        session_id,
+        cwd=str(tmp_path),
+        schedules=[schedule],
+        preserve={"stopped_at": 12345},
+    )
+    store = AttentionStore(tmp_path / "attention.db")
+    result = bootstrap_transcript(Transcript(tmp_path / "sessions" / session_id), store)
+    assert result is not None
+    kind, cause, reason, _token = result
+    assert (kind, cause) == ("interrupted", "user-stop")
+    assert "stopped by the user" in reason
+    assert store.state(f"session/{session_id}")["kind"] == "interrupted"
+
+
+def test_a_provisional_error_is_still_superseded_by_the_real_completion(
+    tmp_path: Path,
+) -> None:
+    """Design test 5: the anchor, not the kind, is the replaceable signal.
+
+    Requiring ``stored_kind == "interrupted"`` here would brick exactly the
+    session the store's own docstring describes: the provisional record is now
+    published as an ``error``, and the same token's real ``complete`` must still
+    heal it.
+    """
+    store = AttentionStore(tmp_path / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, _provisional_anchor(token), "error", reason="boom")
+    assert store.state("session/a")["kind"] == "error"
+    store.publish("session/a", token, "the-real-entry", "complete")
+    state = store.state("session/a")
+    assert state["kind"] == "complete"
+    assert state["anchor_id"] == "the-real-entry"
+
+
+def test_reason_and_cause_round_trip_and_an_old_database_migrates(
+    tmp_path: Path,
+) -> None:
+    """Design test 6: the additive columns, plus the pre-change schema."""
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish(
+        "session/a",
+        token,
+        "anchor",
+        "error",
+        reason="the runtime went away",
+        cause="runtime-killed",
+    )
+    state = store.state("session/a")
+    assert state["reason"] == "the runtime went away"
+    assert state["cause"] == "runtime-killed"
+    assert store.state_many(["session/a"])["session/a"]["reason"] == "the runtime went away"
+
+    # An OLD database: the pre-taxonomy schema, with a row already in it.
+    old = tmp_path / "old.db"
+    with sqlite3.connect(old) as conn:
+        conn.execute(
+            "CREATE TABLE completions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, anchor TEXT NOT NULL, "
+            "kind TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE receipts (conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
+        )
+        old_token = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+            ("session/old", old_token, "anchor", "interrupted"),
+        )
+    migrated = AttentionStore(old)
+    old_state = migrated.state("session/old")
+    assert old_state["kind"] == "interrupted"
+    assert old_state["reason"] == ""
+    assert old_state["cause"] == ""
+    # A READ did not migrate it: the read-only path must never alter a schema.
+    with sqlite3.connect(old) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+    assert "reason" not in columns
+    # A WRITE migrates it, additively, and the new fields then round-trip.
+    new_token = str(uuid.uuid4())
+    migrated.publish("session/old", new_token, "anchor2", "error", reason="r", cause="c")
+    assert migrated.state("session/old")["cause"] == "c"
+    with sqlite3.connect(old) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+    assert {"reason", "cause"} <= columns
+
+
+@pytest.mark.asyncio
+async def test_a_witnessed_cut_off_reaches_the_row_the_daemon_cannot_classify(
+    tmp_path: Path,
+) -> None:
+    """MINOR-2: the live-but-silent give-up must land the row the terminal names.
+
+    The classifier's in-flight arm publishes nothing while a record on disk
+    points at a pid that is still alive (or unverifiable) — it cannot tell a dead
+    owner behind a RECYCLED pid from a healthy run. So a viewer that ended the
+    turn with a named ``owner-lost`` verdict in the terminal left the sidebar row
+    reading ``Working``/``Recent``, un-errored, while its own screen said the
+    run was cut off.
+
+    ``witnessed_cut_off`` is the one caller allowed past that guard, and this
+    test pins the two properties that make it safe: the record it writes is
+    PROVISIONAL (so the live owner's real outcome replaces it rather than
+    competing with it), and a bootstrap WITHOUT it still publishes nothing.
+    """
+    import subprocess
+
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.incidents import render_cut_off_reason
+    from local_operator.session.attention import (
+        bootstrap_transcript,
+        provisional_anchor,
+    )
+    from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+    from local_operator.session.transcript import Transcript
+
+    store = AttentionStore(tmp_path / "attention.db")
+    transcript = Transcript(tmp_path / "sessions" / "witnessed")
+    token = str(uuid.uuid4())
+    await transcript.append_custom(
+        "attention_started", {"conversation_id": "session/witnessed", "token": token}
+    )
+    # A record pointing at a LIVE pid that is not this process: the shape a
+    # recycled pid produces, and the one the classifier must refuse to judge.
+    owner = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        run = tmp_path / RUN_DIRNAME
+        run.mkdir(parents=True, exist_ok=True)
+        (run / f"{owner.pid}.json").write_text(
+            json.dumps(
+                SessionRecord(
+                    pid=owner.pid,
+                    kind="tui",
+                    session_id="witnessed",
+                    conversation_name="witnessed",
+                    cwd=str(transcript.directory),
+                    model_label="m",
+                    control_port=1,
+                    control_key="k",
+                    protocol=5,
+                    capabilities=["tui_state_v1"],
+                ).to_json()
+            ),
+            encoding="utf-8",
+        )
+
+        # Without the witness: nothing, exactly as before.
+        assert bootstrap_transcript(transcript, store) is None
+        assert store.state("session/witnessed")["completion_token"] is None
+
+        # With it: the viewer's own verdict, written provisionally.
+        reason = render_cut_off_reason("owner-lost")
+        published = bootstrap_transcript(
+            transcript, store, witnessed_cut_off=("owner-lost", reason)
+        )
+        assert published == ("error", "owner-lost", reason, token)
+        state = store.state("session/witnessed")
+        assert state["kind"] == "error", state
+        assert state["cause"] == "owner-lost", state
+        assert state["reason"] == reason, state
+        assert state["anchor_id"] == provisional_anchor(token), state
+        assert state["unseen"] is True, state
+
+        # ...and the live owner's REAL outcome supersedes it rather than being
+        # refused: same token, real anchor, the turn it actually had.
+        result = Message(role="assistant", content=[TextContent(text="done")])
+        await transcript.append_message(result)
+        store.publish(
+            "session/witnessed",
+            token,
+            str(result.id),
+            "complete",
+            reason="",
+        )
+        healed = store.state("session/witnessed")
+        assert healed["kind"] == "complete", healed
+        assert healed["anchor_id"] == str(result.id), healed
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)

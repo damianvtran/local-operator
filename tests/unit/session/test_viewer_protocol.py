@@ -228,7 +228,7 @@ _INFO_SESSION_EXPRS = frozenset({"session"})
 #: MEMBERS (and 363 of 414 ``file:line`` SITES, deduped per member and line), so
 #: any single global floor loose enough to survive ordinary churn there cannot
 #: notice a smaller host going dark at all. Measured, not guessed: dropping the
-#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 47 and dropping
+#: desktop utils host costs 3 VIEWER-ONLY MEMBERS out of 48 and dropping
 #: ``info/collect.py`` costs 0, so both slid under a global ``>= 40`` — the exact
 #: slack review round 2 (MINOR-1) raised, reproduced one floor higher. A count
 #: stated beside each path fires on the host that actually decayed and names it.
@@ -303,6 +303,11 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "has_pending_fork",
         "journal_credential_change",
         "measure_preloaded_context",
+        # A viewer never owns a session to dispose, so it has no deliberate
+        # stop to record: a viewer's `/stop` goes over the socket, where the
+        # OWNER records the verdict. `_stop_local_session` returns before
+        # this is reached for a viewer at all, and the read is getattr-probed.
+        "note_deliberate_stop",
         "preflight_usage",
         "refresh_frontend_usage",
         "routing_settings",
@@ -973,7 +978,7 @@ def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:
     # 113 distinct public MEMBERS, so a number that survives ordinary churn
     # there is necessarily far above every other host's entire contribution.
     # Measured on this head — dropping the desktop utils host costs 3
-    # viewer-only members of 47, dropping ``info/collect.py`` costs 0 — so both
+    # viewer-only members of 48, dropping ``info/collect.py`` costs 0 — so both
     # single-point decays slid under a global ``>= 40`` exactly as they slid
     # under the ``>= 20`` that review round 2 (MINOR-1) rejected. Raising one
     # number would only move the blind spot. Each host is now asserted against
@@ -1110,9 +1115,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # ``pending_display_tool_ids`` and ``executing_display_tool_ids`` moved
     # onto ``SessionProtocol`` and both left the viewer-only population by
     # becoming declared for both shapes.
-    assert len(viewer_only) == 47, (
+    #
+    # 47 → 48 is an ADDITION, and the first move in this list in that direction.
+    # ``set_steer_failure`` is a viewer-only member by construction: only a
+    # viewer sends a steer across a socket, so only a viewer can have one fail
+    # without a sender to report it (QA round 2, Q-1). An `owner` `Session` has
+    # no such seam and must not grow one; a later figure that counts it as
+    # declared-for-both would mean the in-process session had grown a transport
+    # failure it cannot have.
+    assert len(viewer_only) == 48, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 47, and the aggregate floor is set at 40 against that number. A "
+        "says 48, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
@@ -1361,6 +1374,30 @@ def test_the_static_conformance_anchor_still_exists() -> None:
     )
 
 
+def test_both_session_shapes_answer_the_live_clock_accessors() -> None:
+    """The two clock anchors are declared on the protocol and answered by BOTH.
+
+    A per-call start epoch plus the working line's phase zero are what let a
+    front end that attaches mid-turn date the work in flight, and both session
+    shapes have to answer them: the local owner is the producer of those
+    instants, and an attached viewer folds them off the same events. Declared
+    on the protocol so pyright checks the SIGNATURES at
+    ``_static_conformance_is_checked_by_pyright``; what is asserted here is the
+    runtime half that isinstance cannot see — that neither shape raises on a
+    store it has not built yet.
+
+    The unsynchronized answers are the point rather than a technicality:
+    ``{}`` and ``("", None)`` both reduce to "withhold the clock", which is
+    what every consumer does with a missing entry. A facade that raised here
+    instead would take down a repaint, and one that defaulted to its own
+    arrival instant would print an age nobody measured.
+    """
+    for klass in (Session, AttachedSession):
+        shape = klass.__new__(klass)
+        assert shape.live_tool_start_epochs() == {}, klass.__name__
+        assert shape.activity_phase_clock() == ("", None), klass.__name__
+
+
 def test_every_registered_session_binding_still_matches_the_source() -> None:
     """Each (host, binding) pair in ``_SCANNED`` must derive at least one member.
 
@@ -1381,7 +1418,7 @@ def test_every_registered_session_binding_still_matches_the_source() -> None:
 
     The count is pinned as well as the contribution, because the two decays are
     different and only one of them is a rename. DELETING ``source.session``
-    outright costs 2 of 47 viewer-only members — under any floor, per-host or
+    outright costs 2 of 48 viewer-only members — under any floor, per-host or
     aggregate, and invisible to the zero-sites check because a removed entry is
     not an entry that derives nothing. It was the last planted violation this
     guard did not catch. A registered binding is a coverage claim, so removing

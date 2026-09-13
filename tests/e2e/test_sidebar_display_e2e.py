@@ -123,7 +123,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
             await server.start_in_process()
             servers[sid] = server
 
-        def find(_directory, sid):
+        def find(_directory, sid, **_probe):
             server = servers.get(sid)
             return (server._record, server._record.pid) if server else (None, None)
 

@@ -22,6 +22,7 @@ import {
 } from "./access-queue";
 import { grantExactOriginLocked, grantSiteLocked } from "./access-grants";
 import { broadGrantFor } from "./origin-policy";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getLocal, getSession, withSessionMutation, type SessionState } from "./state";
 
 export interface QueueSnapshot {
@@ -66,9 +67,18 @@ export function nextAccessExpiry(snapshot: QueueSnapshot): number | undefined {
 
 export async function armNextExpiry(snapshot: QueueSnapshot): Promise<void> {
   const when = nextAccessExpiry(snapshot);
+  // `chrome.alarms.clear` is the one storage-class await on this lane that does
+  // not go through state.ts, so it needs the same bound as everything else the
+  // queue sweep awaits: the sweep runs inside the approval-store mutation lane,
+  // and an unbounded await there parks every later approval for every session.
   if (when === undefined) {
-    await chrome.alarms.clear(ACCESS_EXPIRY_ALARM);
+    await deadline(
+      chrome.alarms.clear(ACCESS_EXPIRY_ALARM),
+      CHROME_API_DEADLINE_MS,
+      "chrome.alarms.clear(access expiry)",
+    );
   } else {
+    // create() is synchronous (void), not a promise to await.
     chrome.alarms.create(ACCESS_EXPIRY_ALARM, { when });
   }
 }
@@ -145,25 +155,39 @@ async function normalizedLocked(now: number): Promise<QueueSnapshot> {
     }
   }
   queue.sort((a, b) => a.sequence - b.sequence);
-  await chrome.storage.session.set({
-    accessQueueVersion: ACCESS_QUEUE_VERSION,
-    accessQueue: queue,
-    accessResults: cleanResults(results, now),
-    onceGrants,
-  });
-  if (needsMigration) await chrome.storage.session.remove(["accessRequest", "pendingOrigin"]);
+  await deadline(
+    chrome.storage.session.set({
+      accessQueueVersion: ACCESS_QUEUE_VERSION,
+      accessQueue: queue,
+      accessResults: cleanResults(results, now),
+      onceGrants,
+    }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.set(access queue)",
+  );
+  if (needsMigration) {
+    await deadline(
+      chrome.storage.session.remove(["accessRequest", "pendingOrigin"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.remove(legacy access records)",
+    );
+  }
   const snapshot = { queue, results: cleanResults(results, now), onceGrants };
   await armNextExpiry(snapshot);
   return snapshot;
 }
 
 async function persistLocked(snapshot: QueueSnapshot): Promise<void> {
-  await chrome.storage.session.set({
-    accessQueueVersion: ACCESS_QUEUE_VERSION,
-    accessQueue: snapshot.queue,
-    accessResults: snapshot.results,
-    onceGrants: snapshot.onceGrants,
-  });
+  await deadline(
+    chrome.storage.session.set({
+      accessQueueVersion: ACCESS_QUEUE_VERSION,
+      accessQueue: snapshot.queue,
+      accessResults: snapshot.results,
+      onceGrants: snapshot.onceGrants,
+    }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.session.set(access queue)",
+  );
   await armNextExpiry(snapshot);
 }
 

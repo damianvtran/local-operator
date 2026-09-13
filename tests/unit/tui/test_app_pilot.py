@@ -982,6 +982,11 @@ async def test_repaired_config_boots_into_an_escapable_state(
     seed = ConfigManager(tmp_path)
     seed.set_config_value("hosting", "anthropicxyq")
     seed.set_config_value("model_name", "claude-sonnet-4-5")
+    # A stored effort this recovery does NOT touch but which rides into the boot
+    # it is about to start, clamped to whatever the chosen model takes (U5). The
+    # receipt names it, because a default is host + model + effort and this is
+    # the one receipt a first-run user sets one through.
+    seed.set_config_value("model_effort", "xhigh")
 
     # The repair the app performs on a successful `/login`, through the real
     # planner rather than a hand-written config: the point is that this exact
@@ -1049,7 +1054,8 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         # THE SUBSTANCE: the state must be escapable. A setup state you cannot
         # leave is the same bug wearing a different colour.
-        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": None)
+        receipts: list[str] = []
+        app._cmd_model("deepseek/deepseek-chat", lambda body, kind="info": receipts.append(body))
         for _ in range(200):
             await pilot.pause()
             if app._session is not None:
@@ -1058,6 +1064,10 @@ async def test_repaired_config_boots_into_an_escapable_state(
 
         assert app._session is session, "the recovery command must BUILD the session"
         assert app._setup_state is False
+        # U5: the stored effort is named beside the pair it will govern. It is
+        # not rewritten here and it IS what the new boot runs on, so a receipt
+        # that stopped at host + model described two thirds of the default.
+        assert any("model_effort xhigh" in body for body in receipts), receipts
 
     # The escape persisted the pair, so the next launch does not return here.
     recovered = ConfigManager(tmp_path)
@@ -1833,13 +1843,19 @@ async def test_a_failed_remote_cancel_never_prints_a_confirmed_success() -> None
 
 @pytest.mark.asyncio
 async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
-    """Queued canonical updates repaint once, from the newest complete state."""
+    """Coalesce the snapshot COPY too, not only the eventual repaint."""
     from local_operator.session.frontend_state import FrontendSessionState
 
     class StatefulSession(FakeSession):
         def __init__(self) -> None:
             super().__init__()
-            self.frontend_state = FrontendSessionState(session_id="sess", epoch="owner")
+            self._state = FrontendSessionState(session_id="sess", epoch="owner")
+            self.reads = 0
+
+        @property
+        def frontend_state(self) -> FrontendSessionState:
+            self.reads += 1
+            return self._state.model_copy()
 
     session = StatefulSession()
     app = OperatorApp(lambda: _factory(session))
@@ -1858,19 +1874,18 @@ async def test_frontend_update_burst_coalesces_to_latest_snapshot() -> None:
         app.call_later = schedule
         app._apply_frontend_state = apply
 
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "first"}
-        )
+        session.reads = 0
+        session._state = session._state.model_copy(update={"conversation_title": "first"})
         app._on_frontend_update(object())
-        session.frontend_state = session.frontend_state.model_copy(
-            update={"conversation_title": "latest"}
-        )
+        session._state = session._state.model_copy(update={"conversation_title": "latest"})
         app._on_frontend_update(object())
 
+        assert session.reads == 0
         assert len(scheduled) == 1
         callback, args = scheduled[0]
         callback(*args)
         assert [state.conversation_title for state in applied] == ["latest"]
+        assert session.reads == 1
 
 
 @pytest.mark.asyncio
@@ -6142,6 +6157,11 @@ class FakeMcpManager:
         #: Servers still connecting past the startup gate — the state a slow
         #: HTTP MCP server is in on every launch.
         self._connecting: set[str] = set()
+        #: Installed by the app's MCP wiring (``_wire_mcp_status``), exactly as
+        #: the real manager receives it. Declared so a test can drive an
+        #: after-boot grant expiry through the sink the app installed, rather
+        #: than waiting for a real grant to lapse.
+        self.on_auth_required: Any = None
 
     def get_all_server_names(self) -> list[str]:
         return sorted(self._configured)
@@ -8868,8 +8888,11 @@ async def test_model_default_confirms_both_keys_and_the_file_it_wrote(
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     assert written["hosting"] == "anthropic", written
     assert written["model_name"] == "claude-opus-5", written
-    # What it wrote, under the names the config file uses…
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    # What it wrote, named the way the app names a model everywhere else (the
+    # joined label) with the third key under its registry name (design D3: at
+    # 120 columns a row holds 110 cells, so the pair is joined rather than
+    # spelled as the two config keys).
+    assert _unwrapped("anthropic/claude-opus-5, model_effort") in _unwrapped(text), text
     # …and where, so the user can go and read or undo it.
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
@@ -8922,7 +8945,7 @@ async def test_model_default_alone_saves_the_model_the_session_is_on(
     # the persist path's own `set_model` is a no-op re-selection.
     assert label_after == "anthropic/claude-opus-5", label_after
     # Same receipt vocabulary as the explicit spelling — one outcome, one wording.
-    assert _unwrapped("hosting anthropic, model_name claude-opus-5") in _unwrapped(text), text
+    assert _unwrapped("anthropic/claude-opus-5, model_effort auto") in _unwrapped(text), text
     assert str(tmp_path / "config.yml") in _unwrapped(text), text
 
 
@@ -9138,7 +9161,7 @@ async def test_model_default_alone_is_write_only(
         await pilot.pause()
     written = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
     # The bare form WROTE (its receipt names the pair) without the access note…
-    assert _unwrapped("hosting openrouter, model_name deepseek/deepseek-chat") in bare_receipt
+    assert _unwrapped("openrouter/deepseek/deepseek-chat, model_effort auto") in bare_receipt
     assert _unwrapped("openrouter logged in") not in bare_receipt, bare_receipt
     # …and the explicit form with a different model took the switch tail once.
     assert session.set_model_calls == [("anthropic/claude-opus-5", True)], session.set_model_calls
@@ -9215,11 +9238,18 @@ async def test_model_default_alone_prints_one_row_not_a_relaunch_echo(
             await pilot.pause()
             await pilot.pause()
             notices = [block.text() or "" for block in app.query(NoticeBlock)]
-        receipts = [n for n in notices if "boot default saved" in n]
+        # `startswith`, not a substring (review round 3, MINOR-2): three
+        # FAILURE notices contain `default:` — `could not save default:`,
+        # `model switched, but could not save default:` and `could not read the
+        # saved default:` — so the substring form would also have passed had the
+        # success receipt been replaced by a save failure, which is the one
+        # substitution this assertion exists to catch. The sibling budget test in
+        # `test_effort.py` uses the same shape against the same receipt.
+        receipts = [n for n in notices if n.startswith("default: ")]
         assert len(receipts) == 1, notices
         assert not [n for n in notices if "config.yml changed" in n], notices
         # The receipt is the LAST row: nothing followed it.
-        assert "boot default saved" in notices[-1], notices
+        assert notices[-1].startswith("default: "), notices
     finally:
         _reset_for_tests()
 
@@ -9866,7 +9896,7 @@ async def test_switch_after_recovery_gave_up_retries_the_bind_and_says_so() -> N
     """A give-up facade is REPAIRED by `/model`, not merely described by it.
 
     The state ``AttachedSession._recover_runtime`` reaches at
-    ``RECOVERY_GIVE_UP_S`` is cold with a callable ``_ensure_bound``, which is
+    ``COLD_FALLBACK_S`` is cold with a callable ``_ensure_bound``, which is
     exactly what ``_needs_runtime_first`` diverts into ``_bind_then_dispatch``.
     So the cold ladder in ``_activate_resolved_model`` is never consulted from
     this state, and the sentence the user reads comes from the bind attempt's
@@ -10125,7 +10155,7 @@ async def test_model_default_on_a_cold_viewer_still_saves(
         app._run_slash_command("/model default anthropic/claude-fable-5-1")
         await pilot.pause()
         text = _unwrapped(_transcript_text(app))
-    assert _unwrapped("boot default saved to") in text, text
+    assert _unwrapped("default:") in text, text
     assert _unwrapped("no runtime is running") not in text, text
     assert "model_name: claude-fable-5-1" in (tmp_path / "config.yml").read_text()
 
@@ -10174,7 +10204,7 @@ async def test_model_default_mid_turn_also_says_when_it_applies(
     assert _unwrapped(MODEL_SWITCH_MID_TURN_NOTICE) in text, text
     # Still the persistence receipt, not the session one: this asserts the row
     # was ADDED to that branch rather than the branch being changed.
-    assert _unwrapped("used by new sessions") in text, text
+    assert _unwrapped("(new sessions)") in text, text
 
 
 @pytest.mark.asyncio
@@ -12491,3 +12521,93 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
         # The projection's own placeholder still counts when no manager exists.
         assert band_for(("github", "failed")).failed is True
         assert band_for(("github", "connected")).failed is False
+
+
+@pytest.mark.asyncio
+async def test_the_durable_notice_carries_one_dash_and_no_orphaned_pointer() -> None:
+    """D5: the notice must not append its pointer to a line that IS a command.
+
+    The auth requirement leads with ``/mcp reauth notion — …``, so the
+    template's unconditional ``— /mcp for details`` gave the composed sentence
+    TWO em-dashes (against the house one-dash rule) and pushed it to 107 cells,
+    where the wrap orphaned the pointer onto a row of its own. The pointer is
+    for diagnostic text ("command not found: …"); when the text is already the
+    command, the reader has the answer.
+
+    Asserted at BOTH widths because that is what D9 pinned: at 100 columns the
+    notice is one row, and at 44 it wraps carrying the whole command — the bare
+    form is four cells shorter, which is the difference between the name being
+    handed over whole and being cut mid-word.
+    """
+    failure = "/mcp reauth notion — refresh unconfirmed"
+    diagnostic = "command not found: slack-mcp"
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion", "slack"], [])
+        startup = McpStartupOutcome(
+            configured=("notion", "slack"),
+            failures={"notion": failure, "slack": diagnostic},
+        )
+        session = McpSession(manager=manager, startup=startup)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            app.query_one(Toast).dismiss_toast()
+            await pilot.pause()
+            rows = _transcript_text(app).split("\n")
+            at = next((index for index, row in enumerate(rows) if "MCP notion failed" in row), None)
+            assert at is not None, "the failure must survive the toast"
+            # The notice carries the transcript's spine indent and outcome glyph,
+            # so the assertion is on the sentence itself; at 44 columns the row
+            # wraps, so the block is re-joined with normalised whitespace rather
+            # than asserted row by row (the wrap's missing hanging indent is
+            # D6's separate, deferred property).
+            block = [rows[at]]
+            for row in rows[at + 1 :]:
+                if not row.strip() or ("MCP " in row and "failed:" in row):
+                    break
+                block.append(row)
+            joined = " ".join(part.strip() for part in block if part.strip())
+            assert joined == f"✗ MCP notion failed: {failure}", joined
+            assert joined.count("—") == 1, joined
+            assert "/mcp for details" not in joined
+
+            # A DIAGNOSTIC failure still gets the pointer: the rule is about a
+            # line that already names /mcp, not about suppressing the signpost.
+            # Read across the wrap, since the diagnostic row wraps too at 44.
+            diagnostic_block = " ".join(
+                row.strip()
+                for row in rows[rows.index(next(r for r in rows if "MCP slack failed" in r)) :]
+                if row.strip()
+            )
+            assert diagnostic in diagnostic_block, diagnostic_block
+            assert "/mcp for details" in diagnostic_block, diagnostic_block
+
+
+@pytest.mark.asyncio
+async def test_the_mid_session_auth_toast_leads_with_the_command() -> None:
+    """D8: the card must not put the server name in front of the command.
+
+    ``on_auth_required`` fires when a grant expires after boot. Its message
+    already names the server (the auth line does so inside its command), so the
+    old ``{ICON} MCP {name} {message}`` prefix rendered ``notion`` first — ahead
+    of the command the user has to run — and left ``notion /mcp reauth`` with no
+    separator between them. The message now leads the card unchanged, and D9's
+    bare command keeps it on one row at 100 columns.
+    """
+    from local_operator.tui.widgets.status_line import ICON_MCP
+
+    for width in (100, 44):
+        manager = FakeMcpManager(["notion"], ["notion"])
+        session = McpSession(manager=manager)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(width, 24)) as pilot:
+            for _ in range(6):
+                await pilot.pause()
+            manager.on_auth_required("notion", "/mcp reauth notion — refresh unconfirmed")
+            for _ in range(4):
+                await pilot.pause()
+            toast = app.query_one(Toast)
+            assert toast.display is True
+            assert toast.message == f"{ICON_MCP} MCP /mcp reauth notion — refresh unconfirmed"
+            assert "notion /mcp" not in toast.message, "the name must not precede the command"
