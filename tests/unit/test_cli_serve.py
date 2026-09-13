@@ -99,10 +99,20 @@ def test_an_occupied_port_is_refused_with_the_address_named(
     uvicorn's own path logs ``[Errno 48] Address already in use`` and exits
     non-zero; the address is what makes it actionable, and the exit code is the
     same so a supervisor sees no difference.
+
+    The holder is a LISTENER, on a plain socket with no ``SO_REUSEADDR``, and it
+    stays open across the whole call. That is not incidental — it is the only
+    shape that is portable. On BSD/macOS ``SO_REUSEADDR`` lets a second socket
+    bind an address a first NON-LISTENING socket holds, so a holder that merely
+    bound would have let this test pass on a developer's Mac while proving
+    nothing; on Linux it is the same quirk in the other direction. A live
+    listener is refused by a second bind on both, whatever ``SO_REUSEADDR``
+    says (only ``SO_REUSEPORT`` would defeat it), which is also how a real
+    daemon holds its port — so this exercises the actual collision.
     """
     holder = socket.socket()
-    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
     port = holder.getsockname()[1]
     try:
         assert serve_command("127.0.0.1", port, False) == 1
