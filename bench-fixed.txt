@@ -1,0 +1,6 @@
+seeded 900 rows in 16.75s
+A. scroll pass, lane unchanged: 0 rows rebuilt
+B. lane change to 79: 900 rebuilds, 1489.1 ms end to end (sidebar + reflow + settle)
+C. funnel pass alone: 900 rebuilds, 0.9 ms
+D. funnel pass, all rows stale: 900 rebuilds, 239.8 ms
+authored widths: [79] lane 79

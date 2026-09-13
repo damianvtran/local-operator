@@ -1,0 +1,38 @@
+  [reflow]        size=130 shown=15 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=40 resized=0
+  [reflow]        size=130 shown=1 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=1
+  [reflow]        size=130 shown=0 resized=0
+--- seeded 40 rows at 130x36: lane=126 rows=40 authored_widths={126: 40}
+    full_map_invalidated=False visible_map=None layout_widgets=0
+    TORN (authored != laid out): 0 []
+== 1. sidebar OPEN: the lane narrows
+  [reflow]        size=130 shown=1 resized=49
+  [reflow]        size=130 shown=0 resized=0
+--- sidebar open: lane=79 rows=40 authored_widths={79: 40}
+    full_map_invalidated=False visible_map=None layout_widgets=0
+    TORN (authored != laid out): 0 []
+== 2. a wheel frame at that lane (captures the visible-only arrangement)
+  [reflow_VISIBLE] size=130 exposed=31
+  [reflow_VISIBLE] size=130 exposed=0
+--- after the scroll frame: lane=79 rows=40 authored_widths={79: 40}
+    full_map_invalidated=True visible_map=set layout_widgets=0
+    TORN (authored != laid out): 0 []
+== 3. sidebar CLOSED with the scroll pass still pending
+   layout_widgets={} (empty: the Layout message is queued)
+  [reflow_VISIBLE] size=130 exposed=0
+   the visible-only pass above resized only newly exposed widgets
+   lazy full arrangement read: `_full_map` now holds the NEW lane
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=0
+  [reflow]        size=130 shown=0 resized=0
+--- after the corrective full reflow: lane=126 rows=40 authored_widths={126: 40}
+    full_map_invalidated=False visible_map=None layout_widgets=0
+    TORN (authored != laid out): 0 []
+
+RESULT: 0 torn rows -> PASS

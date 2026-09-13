@@ -1,0 +1,4 @@
+seeded 900 rows in 8.33s
+A. scroll pass, lane unchanged: 0 rows rebuilt
+B. lane change to 79: 0 rebuilds, 1327.6 ms end to end (sidebar + reflow + settle)
+authored widths: [126] lane 79

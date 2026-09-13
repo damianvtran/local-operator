@@ -1,0 +1,17 @@
+bringing up nodes...
+bringing up nodes...
+
+....                                                                     [100%]
+=============================== warnings summary ===============================
+local_operator/types.py:426
+local_operator/types.py:426
+  /Users/damian/workspace/repos/lo-rightedge/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator(
+
+local_operator/types.py:446
+local_operator/types.py:446
+  /Users/damian/workspace/repos/lo-rightedge/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator("end_time_utc")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+4 passed, 4 warnings in 10.06s

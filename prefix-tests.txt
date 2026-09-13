@@ -1,0 +1,204 @@
+bringing up nodes...
+bringing up nodes...
+
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________________ test_a_lane_that_did_not_move_repaints_no_row _________________
+[gw0] darwin -- Python 3.12.13 /Users/damian/workspace/repos/lo-rightedge/.venv/bin/python
+
+    @pytest.mark.asyncio
+    async def test_a_lane_that_did_not_move_repaints_no_row() -> None:
+        """The funnel is keyed on the MEASUREMENT, so it must cost nothing when it holds.
+    
+        A scroll frame is a layout pass like any other and every append moves this
+        container's extent, so a funnel that repainted unconditionally would be an
+        O(rows) rebuild per frame on a long ledger. The lane is compared as an
+        equality for exactly that reason.
+        """
+        app = _app()
+        async with app.run_test(size=FRAME) as pilot:
+            await pilot.pause()
+            view = app.query_one(TranscriptView)
+            await _seed_ledger(pilot, view)
+    
+            calls = 0
+            original = ToolCard.refresh_row
+    
+            def counting(self: ToolCard, width: int | None = None) -> None:
+                nonlocal calls
+                calls += 1
+                original(self, width)
+    
+            ToolCard.refresh_row = counting  # type: ignore[method-assign]
+            try:
+                # A layout pass with the lane where it already was, then a settle with
+                # nothing changed at all: neither may touch a row.
+                await _scroll_frame(app, pilot)
+                await _settle(pilot)
+                assert calls == 0, "a lane that did not move repainted the ledger"
+    
+                # And the case the funnel is FOR, to prove the instrument counts at all.
+                await pilot.press("ctrl+b")
+                await _settle(pilot)
+>               assert calls > 0, "the funnel ignored a lane that did move"
+E               AssertionError: the funnel ignored a lane that did move
+E               assert 0 > 0
+
+tests/unit/tui/test_ledger_lane_refit.py:272: AssertionError
+__________ test_closing_the_sidebar_behind_a_scroll_refits_every_row ___________
+[gw1] darwin -- Python 3.12.13 /Users/damian/workspace/repos/lo-rightedge/.venv/bin/python
+
+    @pytest.mark.asyncio
+    async def test_closing_the_sidebar_behind_a_scroll_refits_every_row() -> None:
+        """The operator's frame: the lane grows and the rows keep the width they had."""
+        app = _app()
+        async with app.run_test(size=FRAME) as pilot:
+            await pilot.pause()
+            view = app.query_one(TranscriptView)
+            await _seed_ledger(pilot, view)
+    
+            await pilot.press("ctrl+b")  # sidebar open: the lane narrows
+            await _settle(pilot)
+            narrowed = view.scrollable_content_region.width
+            assert {getattr(b, "_built_width", None) for b in _ledger(view)} == {narrowed}
+            await _scroll_frame(app, pilot)
+    
+            await _toggle_sidebar_behind_a_scroll(app, pilot)
+            assert view.scrollable_content_region.width > narrowed, "the sidebar did not close"
+>           _assert_every_row_fits_its_own_lane(app, view)
+
+tests/unit/tui/test_ledger_lane_refit.py:219: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+app = OperatorApp(title='Local Operator', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'})
+view = TranscriptView(id='transcript')
+
+    def _assert_every_row_fits_its_own_lane(app: OperatorApp, view: TranscriptView) -> None:
+        """The settled frame: no row may paint a line narrower than the lane it is in."""
+        lane = view.scrollable_content_region.width
+        rows = _ledger(view)
+        assert rows, "no ledger rows were mounted"
+        # The funnel's rule is the whole ledger, on screen or not: a row scrolled out
+        # of view is already correct when the reader reveals it.
+>       assert {getattr(b, "_built_width", None) for b in rows} == {lane}, (
+            "some ledger row is still authored at an older lane width"
+        )
+E       AssertionError: some ledger row is still authored at an older lane width
+E       assert {79} == {126}
+E         
+E         Extra items in the left set:
+E         79
+E         Extra items in the right set:
+E         126
+E         
+E         Full diff:
+E           {
+E         -     126,
+E         +     79,
+E           }
+
+tests/unit/tui/test_ledger_lane_refit.py:177: AssertionError
+_____________ test_a_published_lane_outranks_the_cards_own_ladder ______________
+[gw0] darwin -- Python 3.12.13 /Users/damian/workspace/repos/lo-rightedge/.venv/bin/python
+
+    def test_a_published_lane_outranks_the_cards_own_ladder() -> None:
+        """Threading: the container's number is used verbatim, and `None` changes nothing.
+    
+        A row built DETACHED has no map, no container and no parent to answer with,
+        so without the threaded lane it falls to ``FALLBACK_WIDTH`` (80) — which is
+        the second wrong width, not a harmless default.
+        """
+        card = ToolCard("t1", "bash", {"command": "echo hi-" + "x" * 20})
+>       assert card.fit_width(64) == 64
+               ^^^^^^^^^^^^^^
+E       AttributeError: 'ToolCard' object has no attribute 'fit_width'. Did you mean: 'fold_width'?
+
+tests/unit/tui/test_ledger_lane_refit.py:285: AttributeError
+__________ test_opening_the_sidebar_behind_a_scroll_refits_every_row ___________
+[gw1] darwin -- Python 3.12.13 /Users/damian/workspace/repos/lo-rightedge/.venv/bin/python
+
+    @pytest.mark.asyncio
+    async def test_opening_the_sidebar_behind_a_scroll_refits_every_row() -> None:
+        """The mirror: a lane that shrinks leaves rows overflowing it, not stopping short."""
+        app = _app()
+        async with app.run_test(size=FRAME) as pilot:
+            await pilot.pause()
+            view = app.query_one(TranscriptView)
+            await _seed_ledger(pilot, view)
+            widened = view.scrollable_content_region.width
+            await _scroll_frame(app, pilot)
+    
+            await _toggle_sidebar_behind_a_scroll(app, pilot)
+            assert view.scrollable_content_region.width < widened, "the sidebar did not open"
+>           _assert_every_row_fits_its_own_lane(app, view)
+
+tests/unit/tui/test_ledger_lane_refit.py:235: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+app = OperatorApp(title='Local Operator', classes={'-dark-mode'}, pseudo_classes={'focus', 'dark'})
+view = TranscriptView(id='transcript')
+
+    def _assert_every_row_fits_its_own_lane(app: OperatorApp, view: TranscriptView) -> None:
+        """The settled frame: no row may paint a line narrower than the lane it is in."""
+        lane = view.scrollable_content_region.width
+        rows = _ledger(view)
+        assert rows, "no ledger rows were mounted"
+        # The funnel's rule is the whole ledger, on screen or not: a row scrolled out
+        # of view is already correct when the reader reveals it.
+>       assert {getattr(b, "_built_width", None) for b in rows} == {lane}, (
+            "some ledger row is still authored at an older lane width"
+        )
+E       AssertionError: some ledger row is still authored at an older lane width
+E       assert {79, 126} == {79}
+E         
+E         Extra items in the left set:
+E         126
+E         
+E         Full diff:
+E           {
+E               79,
+E         +     126,
+E           }
+
+tests/unit/tui/test_ledger_lane_refit.py:177: AssertionError
+=============================== warnings summary ===============================
+local_operator/types.py:426
+local_operator/types.py:426
+  /Users/damian/workspace/repos/lo-rightedge/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator(
+
+local_operator/types.py:446
+local_operator/types.py:446
+  /Users/damian/workspace/repos/lo-rightedge/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    @validator("end_time_utc")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/tui/test_ledger_lane_refit.py::test_a_lane_that_did_not_move_repaints_no_row - AssertionError: the funnel ignored a lane that did move
+assert 0 > 0
+FAILED tests/unit/tui/test_ledger_lane_refit.py::test_closing_the_sidebar_behind_a_scroll_refits_every_row - AssertionError: some ledger row is still authored at an older lane width
+assert {79} == {126}
+  
+  Extra items in the left set:
+  79
+  Extra items in the right set:
+  126
+  
+  Full diff:
+    {
+  -     126,
+  +     79,
+    }
+FAILED tests/unit/tui/test_ledger_lane_refit.py::test_a_published_lane_outranks_the_cards_own_ladder - AttributeError: 'ToolCard' object has no attribute 'fit_width'. Did you mean: 'fold_width'?
+FAILED tests/unit/tui/test_ledger_lane_refit.py::test_opening_the_sidebar_behind_a_scroll_refits_every_row - AssertionError: some ledger row is still authored at an older lane width
+assert {79, 126} == {79}
+  
+  Extra items in the left set:
+  126
+  
+  Full diff:
+    {
+        79,
+  +     126,
+    }
+4 failed, 4 warnings in 31.25s
