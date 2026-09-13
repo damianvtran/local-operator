@@ -18,13 +18,18 @@ proves the user-visible claim on a real terminal:
   writer, so a co-tenant's dirty mode is closed within one interaction instead of
   at the next boot.
 
-``THE PTY TEST IS THE ONE THAT MATTERS`` (``test_dirty_mode_mid_session_does_not...``).
-Everything above it asserts our own contract; that one drives the REAL driver,
-the REAL ``XTermParser`` and a REAL Textual app on a pty, dirties the mode
-mid-process the way a co-tenant does, and asserts on what the app's pointer
-actually became. It carries its own control arm — the same harness, same run,
-gate not installed — so a green result is evidence about the gate rather than
-about the harness. Measurements on this machine (textual 8.2.8, macOS):
+``THE PTY TESTS ARE THE ONES THAT MATTER``
+(``test_a_dirty_mode_mid_session_does_not_move_the_pointer`` and
+``test_a_compliant_vt_reports_cells_once_we_clear_1016``).
+Everything above them asserts our own contract; those drive the REAL driver,
+the REAL ``XTermParser`` and a REAL Textual app on a pty, dirty the mode
+mid-process the way a co-tenant does, and assert on what the app's pointer
+actually became. The first carries its own control arm — the same harness, same
+run, gate not installed — so a green result is evidence about the gate rather
+than about the harness; the second carries the arms of the two terminal classes
+the fix has to serve (a VT that honours mode 1016, told cells by our reset, and
+the pre-fix wire that never told it). Measurements on this machine (textual
+8.2.8, macOS):
 
     gate OFF: [[40, 44, 40, 44], [7, 1, 7, 1]]   <- (60, 24) collapsed to (7, 1)
     gate ON : [[40, 44, 40, 44], [60, 24, 60, 24]]
@@ -60,7 +65,6 @@ from textual._xterm_parser import XTermParser
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.terminal_modes import (
-    DISABLE_IN_BAND_RESIZE,
     InBandResizeReclaimer,
     guard_pixel_mouse_latch,
     install_pixel_mouse_gate,
@@ -89,6 +93,13 @@ IN_BAND_REPORT = "\x1b[48;44;133;704;1064t"
 
 #: Where the divisor puts the second pointer once it has latched (measured).
 COLLAPSED_SECOND_POSITION = (7, 1)
+
+#: The re-clean's wire bytes, as literal text: ``?2048l`` (the mode the report
+#: reveals) then ``?1016l`` (the pixel-mouse mode a co-tenant sets with it), one
+#: write. Literal rather than imported so the assertion is about the wire and so
+#: this file still imports against a build that predates the 1016 half — which
+#: is how the pre-fix failure is demonstrated.
+RESET_PAIR = "\x1b[?2048l\x1b[?1016l"
 
 #: Where the pointer actually is.
 TRUE_FIRST_POSITION = (40, 44)
@@ -284,7 +295,7 @@ def test_the_reclaimer_writes_the_reset_through_its_sink() -> None:
     reclaimer = InBandResizeReclaimer(writes.append)
 
     assert reclaimer.reclaim() is True
-    assert writes == [DISABLE_IN_BAND_RESIZE] == ["\x1b[?2048l"]
+    assert writes == [RESET_PAIR] == ["\x1b[?2048l\x1b[?1016l"]
 
 
 def test_the_reclaimer_honours_the_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,7 +312,7 @@ def test_the_reclaimer_honours_the_kill_switch(monkeypatch: pytest.MonkeyPatch) 
     assert reclaimer.reclaim() is True
     monkeypatch.setenv("LOCAL_OPERATOR_NO_MODE_RESET", "1")
     assert reclaimer.reclaim() is False
-    assert writes == [DISABLE_IN_BAND_RESIZE]
+    assert writes == [RESET_PAIR]
 
 
 def test_a_dead_writer_cannot_turn_a_resize_into_an_exception() -> None:
@@ -358,11 +369,11 @@ async def test_the_app_re_closes_the_mode_on_resize_and_on_focus(
 
         app.post_message(events.Resize(app.size, app.size))
         await pilot.pause()
-        assert writes.count(DISABLE_IN_BAND_RESIZE) == 1
+        assert writes.count(RESET_PAIR) == 1
 
         app.post_message(events.AppFocus())
         await pilot.pause()
-        assert writes.count(DISABLE_IN_BAND_RESIZE) == 2
+        assert writes.count(RESET_PAIR) == 2
 
 
 @pytest.mark.asyncio
@@ -438,7 +449,7 @@ async def test_the_mid_session_reset_honours_the_kill_switch(
 
         app.post_message(events.Resize(app.size, app.size))
         await pilot.pause()
-        assert writes.count(DISABLE_IN_BAND_RESIZE) == 0
+        assert writes.count(RESET_PAIR) == 0
 
 
 # -- the pty end-to-end: the real driver, a real app, a real pointer ----------
@@ -465,9 +476,22 @@ async def test_the_mid_session_reset_honours_the_kill_switch(
 #: and the boot reset is deliberately absent: a pty implements no terminal modes
 #: and answers no queries, so there is nothing for it to reset.
 _POINTER_PROBE = """
-import json, os
+import json, os, sys
 
 from local_operator.tui.terminal_modes import guard_pixel_mouse_latch
+
+# Boot-time reset, only for the arm that needs a wire for a compliant VT to
+# observe (ARML_RESET unset keeps the other arms byte-identical to before).
+# `pair` is what the fixed head's reset writes; `2048-only` is the PRE-FIX
+# build's wire bytes, written literally because a build without the ?1016l half
+# cannot be asked to produce them.
+if os.environ.get("ARML_RESET") == "pair":
+    from local_operator.tui.terminal_modes import reset_in_band_resize
+
+    reset_in_band_resize()
+elif os.environ.get("ARML_RESET") == "2048-only":
+    sys.stderr.write("\\x1b[?2048l")
+    sys.stderr.flush()
 
 guard_pixel_mouse_latch()
 if os.environ["ARML_GATE"] == "1":
@@ -496,6 +520,24 @@ class Probe(App):
 Probe().run()
 """
 
+#: Two physical cells in the two scales a VT can report them in. Cell (5, 2) is
+#: the reviewer's own example on review round 1; the wire is 1-based, so it is
+#: (6, 3) as cells and (41, 33) as pixels (a measured 8x16 cell). Both cells are
+#: in the top two rows ON PURPOSE: read as pixels they land at y 32 and 16 in a
+#: 45-row screen, so the misread shows up as a WRONG POSITION on both moves —
+#: one row lower and Textual swallows the event past the screen edge
+#: (screen.py:1929-1931), and an arm whose second move vanished would be
+#: measuring the swallow rather than the misread.
+_VT_MOVES = {
+    "cells": ("\x1b[<35;6;3M", "\x1b[<35;8;2M"),
+    "pixels": ("\x1b[<35;41;33M", "\x1b[<35;57;17M"),
+}
+
+#: What the app records for those two cells when the VT reports them correctly,
+#: and what it records when PIXEL numbers are read as cells (the pre-fix arm).
+_VT_CELLS = [[5, 2, 5, 2], [7, 1, 7, 1]]
+_VT_PIXELS_READ_AS_CELLS = [[40, 32, 40, 32], [56, 16, 56, 16]]
+
 #: An app that wires the reclaimer the way the product does — built at mount,
 #: fired from `on_resize` — with a spy between it and the driver so the test can
 #: compare what we COUNTED with what actually reached the pty.
@@ -507,7 +549,12 @@ from local_operator.tui.terminal_modes import InBandResizeReclaimer
 from textual.app import App
 
 OUT = os.environ["ARML_LOG"]
-RESET = "\\x1b[?2048l"
+# The pair the re-clean hands the writer, pinned as literal bytes rather than
+# imported: this is the wire contract, and the test above compares what the
+# child counted here against what the pty received. Both modes, because a
+# co-tenant sets 1016 with 2048 (linux_driver.py:480-482) and it is 1016 that
+# decides whether the numbers the terminal sends are cells.
+RESET = "\\x1b[?2048l\\x1b[?1016l"
 
 
 class Probe(App):
@@ -716,17 +763,106 @@ def test_a_dirty_mode_mid_session_does_not_move_the_pointer(tmp_path: Path) -> N
     ], f"the pointer did not survive the dirty mode with the gate installed: {gated}"
 
 
+def _compliant_vt_positions(tmp_path: Path, *, reset: str) -> tuple[str, list[Any]]:
+    """One arm of the compliant-VT model: the scale the VT used, and what the app saw.
+
+    THE PARENT IS THE MODEL OF THE VT, and it behaves like one that honours
+    Textual's mode 1016: it reads the CHILD's own wire output and switches to
+    reporting coordinates in CELLS once it has seen our ``CSI ?1016l``. That is
+    the mechanism under test rather than an account of it — with the 1016 half
+    on the wire the VT switches, and on a build that never sends it the VT keeps
+    reporting pixels, which is the arm review round 1 (MAJOR-1) measured against
+    this harness with its own scratch probe.
+
+    ``reset`` selects what the child puts on the wire at boot: ``"pair"`` is
+    what the fixed head's ``reset_in_band_resize()`` writes, ``"2048-only"`` is
+    the PRE-FIX build's bytes. The scale the VT then chose is returned next to
+    the child's log, so the test can assert the arm took the path it claims to
+    rather than inferring it from the coordinates.
+    """
+    child = _PtyChild(
+        _POINTER_PROBE,
+        {"ARML_GATE": "1", "ARML_RESET": reset, "ARML_TAG": f"vt-{reset}"},
+        tmp_path,
+    )
+    try:
+        child.wait_for_output()
+        child.drain(0.7)
+        # The VT's own decision, taken from our wire exactly as a terminal takes
+        # it — and taken BEFORE any mouse byte is sent, or the arm would be
+        # measuring the wrong scale.
+        scale = "cells" if b"\x1b[?1016l" in child.output() else "pixels"
+        first, second = _VT_MOVES[scale]
+
+        child.send(first)
+        child.wait_for_lines(1)
+
+        child.send(IN_BAND_REPORT)  # the co-tenant's dirty mode, mid-process
+        child.drain(0.4)
+
+        child.send(second)
+        return scale, child.wait_for_lines(2)
+    finally:
+        child.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
+def test_a_compliant_vt_reports_cells_once_we_clear_1016(tmp_path: Path) -> None:
+    """The VT class the divisor-only gate inverted, and the reset pair that serves it.
+
+    Why this arm exists: clearing Textual's divisor is only correct where the
+    coordinates really are cells. A VT that honours mode 1016 sends genuine
+    PIXELS, so pre-fix Textual's division was CORRECT there and a gate that only
+    cleared the divisor read pixel numbers as cells — cell (5, 2) arriving as the
+    wire's (41, 33) and being read as (40, 32), with anything past the screen
+    edge swallowed outright (review round 1, MAJOR-1). The fix asserts
+    ``?1016l`` beside ``?2048l``, so that VT is told to report cells instead.
+
+    Both arms run in ONE test, as the sibling pty test does: the control is the
+    same harness, process shape, gate and timings with the PRE-FIX build's wire
+    bytes (``?2048l`` and nothing else), and it must reproduce the misread. The
+    child is not told which scale to use — the parent decides it from what the
+    child actually put on the wire — so the fixed arm's expectation is what
+    fails on a build that lacks the 1016 half, which is the pre-fix measurement
+    recorded on the PR.
+
+    Measured here (textual 8.2.8, macOS, 45x160 pty, 8x16 cell):
+        reset pair (fixed head): VT switches to cells -> [[5, 2, 5, 2], [7, 1, 7, 1]]
+        ?2048l only (pre-fix)  : VT stays in pixels -> pixel numbers read as cells
+                                 -> [[40, 32, 40, 32], [56, 16, 56, 16]]
+    """
+    fixed_scale, fixed = _compliant_vt_positions(tmp_path, reset="pair")
+    prefix_scale, prefix = _compliant_vt_positions(tmp_path, reset="2048-only")
+
+    assert (
+        fixed_scale == "cells"
+    ), "the fixed arm's VT never saw a ?1016l, so the pair is not on the wire at boot"
+    assert fixed == _VT_CELLS, f"a compliant VT's cells were not read as cells: {fixed}"
+
+    assert prefix_scale == "pixels", "the control arm's VT switched without a reset to observe"
+    assert (
+        prefix == _VT_PIXELS_READ_AS_CELLS
+    ), f"the pre-fix arm did not reproduce the misread this fix removes: {prefix}"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_a_resize_re_closes_the_mode_through_the_real_driver(tmp_path: Path) -> None:
-    """One 8-byte write per delivered Resize, and it reaches the wire.
+    """One 16-byte write per delivered Resize, and it reaches the wire.
 
     This is the `B` half's real-path evidence and the measurement behind the
     "does not coalesce" decision in ``terminal_modes``: every SIGWINCH-derived
-    Resize produces exactly one ``?2048l`` through the driver, so the rate bound
+    Resize produces exactly one re-clean through the driver, so the rate bound
     is the terminal's SIGWINCH rate and not something larger. The comparison of
     the child's own count with the bytes the pty received is what proves the
     write went through the driver's serialised writer rather than into a queue
     that dropped it.
+
+    The read of the delivery list POLLS (review round 1, MINOR-2): reading
+    ``child.lines()`` once after three fixed drains made this test fail 1 of 7
+    back-to-back runs with ``assert []`` on a loaded host — the child had
+    painted and been resized but had not logged yet — where its sibling polls
+    and is stable. The number of deliveries is still deliberately not pinned at
+    three (see below); only the wait for at least two is.
     """
     child = _PtyChild(_RECLAIM_PROBE, {"ARML_TAG": "reclaim"}, tmp_path)
     try:
@@ -746,13 +882,17 @@ def test_a_resize_re_closes_the_mode_through_the_real_driver(tmp_path: Path) -> 
         # coalesced by the OS before the child ever sees a signal, so asserting
         # against that would make this test about the kernel rather than about
         # the re-clean. At least two of the three land even so.
-        delivered = child.lines()[len(baseline) :]
+        # POLL rather than read once: a loaded host can deliver the resize and
+        # paint the frame before the child's own log write lands.
+        delivered = child.wait_for_lines(len(baseline) + 2)[len(baseline) :]
         assert delivered, f"no resize reached the child after the booting ones: {baseline}"
         assert len(delivered) >= 2, f"only one delivery of three resizes: {delivered}"
         counts = [start] + delivered
         assert all(
             after - before == 1 for before, after in zip(counts, counts[1:])
         ), "more than one re-close per delivered Resize: " + repr(delivered)
-        assert child.output().count(DISABLE_IN_BAND_RESIZE.encode()) >= counts[-1]
+        # The pair, contiguously: this is what proves the ?1016l half reached the
+        # wire on the same write as ?2048l rather than being counted and dropped.
+        assert child.output().count(RESET_PAIR.encode()) >= counts[-1]
     finally:
         child.close()
