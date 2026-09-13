@@ -1131,9 +1131,24 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # ``bridge.remote``. Growth is not the decay this pin guards against (the
     # aggregate below is a FLOOR), but the figure is exact on purpose, so it
     # is edited deliberately rather than relaxed.
-    assert len(viewer_only) == 50, (
+    #
+    # 50 → 51 is the same direction once more. ``can_ever_bind`` asks whether a
+    # facade could EVER dial, which is a question only a facade needs to answer:
+    # the sidebar's connect spends a wall-clock budget re-dialling one, and the
+    # arm that can never dial must be told apart from the one that is on its way
+    # back. An owner ``Session`` binds by running the loop in this process, so
+    # it has no un-bindable state to report and must not grow a predicate for
+    # one.
+    #
+    # 51 → 52 is the same direction again, and for the sibling question:
+    # ``session_was_stopped`` tells a host that never saw the disconnect whether
+    # the owner was STOPPED (a durable marker, plus this viewer's own stop) —
+    # which is what decides whether re-dialling a clicked row is worth anything.
+    # An owner ``Session`` is the thing that ends, so there is no record to read
+    # back about itself and no un-bindable state to classify.
+    assert len(viewer_only) == 52, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 50, and the aggregate floor is set at 40 against that number. A "
+        "says 52, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

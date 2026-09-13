@@ -185,6 +185,30 @@ class SessionInteraction:
     command_frame_pending: bool = False
     connection_task: asyncio.Task[None] | None = field(default=None, repr=False)
     connection_error: str = ""
+    #: True when no owner is coming back for this source, so the affordance the
+    #: ordinary latch offers ("Select again to retry") would be a promise the app
+    #: cannot keep, and the band says what is actually true instead: the
+    #: stopped-session sentence, whose own next step (`/resume <id>`) is runnable
+    #: from the state it names.
+    #:
+    #: THREE WRITERS, and they prove that same thing two ways (review MINOR-2,
+    #: round 2 — the first sentence here used to name only the predicate, which
+    #: stopped being exhaustive when the other two landed):
+    #:   * the connect's cold-and-un-bindable arm, where the viewer answered
+    #:     `can_ever_bind` False — un-diallable by construction;
+    #:   * a failed round whose `session_was_stopped()` answered from the durable
+    #:     stop record, an arm reached BECAUSE the predicate answered True;
+    #:   * `_publish_stopped_session_verdict`, for a click on the current stopped
+    #:     row, with no connect at all.
+    #: So the verdict means "no owner is coming back — proven by the predicate, or
+    #: by the stop record".
+    #:
+    #: A VERDICT, not a probe: it is set by the arm that decided it, because the
+    #: sentence a user reads must not be re-derived from a facade that may have
+    #: healed between the verdict and the paint (that is the stale-verdict flash
+    #: UX round 1's U3 found one surface over). Written wherever
+    #: `connection_error` is written and cleared wherever it is cleared.
+    can_never_bind: bool = False
     #: Consecutive failed connect attempts for this source, counted so
     #: `_connect_sidebar_source` can retry a transient owner loss instead of
     #: latching it, and still surrender to the user once the budget is spent.

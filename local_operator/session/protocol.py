@@ -560,7 +560,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 109 public members and a POSITIVE
+    than stylistic. This protocol carries 111 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -571,8 +571,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``test_viewer_protocol.py`` pins; the two answer different questions and
     must not be reconciled. It read 84 for some time while the protocol grew
     past it (106 before the warm members were added, 108 with them, 109 once
-    ``restored_search_spend`` joined ``restored_usage``), so recompute
-    it rather than adjusting it by the size of your own change.
+    ``restored_search_spend`` joined ``restored_usage``, 111 once
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract),
+    so recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -658,6 +659,51 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this viewer could EVER succeed.
+
+        Its own question, and not a refinement of :attr:`is_cold`. A facade is
+        cold for many reasons that all clear on their own — a socket blip, an
+        owner loss the recovery loop is already chasing, a never-bound row that
+        has not been asked to dial yet, a live owner whose display history is
+        mid-refresh — and every one of those binds or syncs. This asks the one
+        thing a caller cannot wait out: whether the viewer is closed to dialling
+        BY CONSTRUCTION, with nothing reachable on the other end.
+
+        It is therefore NOT the negation of the guard at the top of
+        ``AttachedSession._ensure_bound``, which returns in states this answers
+        True for (a mid-refresh client, a facade with a recovery loop running).
+        False is that guard with no live owner behind it:
+
+        * the LEGACY attach contract (``_can_go_cold`` false, what ``connect``
+          builds unless a caller asks for the viewer contract) once its owner is
+          gone. That facade never dials, and what normally releases it is its
+          own recovery loop (``_give_up_recovery`` sets the flag before going
+          cold). A DELIBERATE stop is both the arm where no loop ever runs —
+          ``_on_disconnected`` returns before starting one, and
+          ``_recover_runtime`` returns instead of giving up when its own wake
+          marker says the session was stopped — and the arm where nothing sets
+          the flag, so the state is permanent;
+        * a DISPOSED facade, which refuses every path.
+
+        ``_recovering`` must answer True, and the distinction is load-bearing:
+        the flag means "a recovery loop is running", and every exit of that loop
+        either attaches this facade or releases it rebindable, so the state is
+        transient by construction. A caller that treated it as final would tell
+        the user that a session on its way back is gone.
+
+        **Why this is DECLARED rather than probed.** The caller that needs it
+        uses the answer to choose a sentence the user reads, which is exactly
+        where a ``getattr(session, "_can_go_cold", None)`` duck-probe belongs:
+        that is how the original sidebar defect shipped — a private read nothing
+        type-checks, and a rename on the facade could not break it loudly. The
+        name answers the question the caller has, not the flag it reads, so a
+        future second reason to be un-bindable does not put a second name in
+        every host.
+        """
+        ...
+
+    @property
     def runtime_pid(self) -> int | None:
         """Pid of the runtime this viewer is attached to.
 
@@ -704,6 +750,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         The desktop host calls this on a cold viewer so that serving a history
         read never promotes a reader into an executor: losing the runtime must
         not move execution into the HTTP worker.
+        """
+        ...
+
+    async def session_was_stopped(self) -> bool:
+        """Whether this session ended DELIBERATELY rather than dying.
+
+        A host that watched the disconnect can classify it from the wire, but a
+        host that did not — the sidebar re-dials a row clicked later — has only
+        this: the durable ``stopped_at`` marker the stop path stamps, plus this
+        viewer's own ``request_stop``. The question it answers is the one that
+        decides whether re-dialling is worth anything, so the answer must live
+        here rather than be re-probed by each front end.
+
+        FALSE IS "NOT PROVEN STOPPED", not "proven alive", and the difference
+        matters to a caller composing a verdict: the marker is written by
+        ``control._mark_wakes_dormant``, which writes NOTHING for a session with
+        no wake schedules (an absent index file is the store's own "no wakes"),
+        and it is cleared when the session is next opened. A wake-less stop
+        therefore leaves no trace here at all.
         """
         ...
 

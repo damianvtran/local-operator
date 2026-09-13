@@ -1827,6 +1827,38 @@ def _sidebar_connect_attempts() -> int:
 #: AND rebindable, and the first attempt after a release dials it.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
+#: The sentence for a session that was STOPPED, in the app's own receipt shape:
+#: what happened, then the way back, with the id NAMED (UX U3, round 1). The id
+#: is load-bearing rather than decorative — the band also carries the session's
+#: title, and a user with several conversations cannot tell which one ``it`` is
+#: from a sentence that names none of them.
+#:
+#: Rendered by `OperatorApp._stopped_session_notice`, which is the one place the
+#: id is spliced in and the one sentence both surfaces that carry the verdict use
+#: (the band, and the composer's refusal row via `_unavailable_notice`). It is
+#: the same statement `_stop_local_session`'s receipt, `_paint_watched_stop_notice`
+#: and `_no_session_notice` make — those spell it lowercase inside a transcript
+#: line, this one sentence-cased because every band segment starts a clause, and
+#: that difference is the register's, not a second claim.
+#:
+#: THE VERDICT IT REPORTS IS NOT A CONNECT FAILURE. Reaching it means the app has
+#: established that no owner is coming back for this session, so the affordance
+#: the ordinary latch offers ("Select again to retry") would promise a reselect
+#: that reuses the very facade that cannot bind it, and a message is REFUSED
+#: rather than served — "your message was not sent", because the facade cannot
+#: dial. Two arms establish it, and both are in `_connect_sidebar_source`: a
+#: facade that can never bind (a deliberate stop on the legacy attach contract,
+#: or a disposed viewer), and a session whose durable stop marker says the owner
+#: was stopped by someone (`session_was_stopped`).
+#:
+#: A DISPOSED facade shares the first arm and is latent — every `dispose()`
+#: reachable from a sidebar source retires the source first or is app shutdown —
+#: so the sentence names the stop.
+#:
+#: ONE STRING FOR BOTH SURFACES, because two spellings of one state are how the
+#: band and the row end up disagreeing on the same screen.
+STOPPED_SESSION_NOTICE = "This session was stopped; /resume {session_id} reopens it"
+
 
 def _resume_connect_limits() -> tuple[float, float]:
     """`/resume`'s redial budget: (wall-clock cap, outer bound stated to the user).
@@ -6962,7 +6994,7 @@ class OperatorApp(App[None]):
             return
         status = ""
         connecting = False
-        if source.display_only:
+        if source.display_only or source.can_never_bind:
             saved = (
                 "Saved excerpt"
                 if getattr(source.session, "saved_preview_partial", False)
@@ -6978,11 +7010,24 @@ class OperatorApp(App[None]):
             # `_start_sidebar_connection`.) "Select again" also drops the coined
             # verb "Reselect" for the action the user actually performs. Two
             # characters shorter than what it replaces, so it is not a fit risk.
-            status = (
-                f"{saved} · Reconnect failed · Select again to retry"
-                if source.connection_error
-                else f"{saved} · Connecting…"
-            )
+            #
+            # UNLESS A RESELECT CANNOT WORK, which is a different verdict and
+            # gets the app's stopped-session sentence instead: the reselect
+            # reuses this very facade, so offering it is the same lie the
+            # original defect told, and every round of the budget it would earn
+            # is a round that cannot dial. See `STOPPED_SESSION_NOTICE`.
+            if not source.connection_error:
+                status = f"{saved} · Connecting…"
+            elif source.can_never_bind:
+                # A verdict with no retry behind it, and it may be about a source
+                # that is NOT a saved view: a live session whose owner was stopped
+                # and whose row the user just clicked (UX U5, round 1). "Saved"
+                # would then describe a viewport the app is not showing, so the
+                # sentence stands alone there. See `STOPPED_SESSION_NOTICE`.
+                verdict = self._stopped_session_notice(source)
+                status = f"{saved} · {verdict}" if source.display_only else verdict
+            else:
+                status = f"{saved} · Reconnect failed · Select again to retry"
         if self._status is not None:
             self._status.update(connection=status)
             # The glyph is what tells the user the app is working rather than
@@ -7022,6 +7067,11 @@ class OperatorApp(App[None]):
         if source.connection_task is not None and not source.connection_task.done():
             return
         source.connection_error = ""
+        # Cleared with the error text it qualifies, never independently: a stale
+        # verdict here would keep the band saying "this session was stopped" over
+        # a source whose next verdict is an ordinary retryable one (U3's class of
+        # stale verdict, one surface over).
+        source.can_never_bind = False
         if not continues_retry:
             # THE BUDGET BELONGS TO AN ATTEMPT THE USER ASKED FOR. A source that
             # was navigated away from mid-retry keeps its spent counter — the
@@ -7129,6 +7179,13 @@ class OperatorApp(App[None]):
         prepared = None
         retry = False
         cancelled = False
+        #: Why THIS round's failure cannot be waited out, as the latch names it
+        #: ("" while the failure is still transient). Two arms set it: a facade
+        #: that can never dial, and a session whose durable stop record says no
+        #: owner is coming back. Both mean the same thing to the user — there is
+        #: nothing left to reconnect to — and both end the connect in ONE report
+        #: rather than in a budget spent re-dialling an owner that is gone.
+        terminal_reason = ""
         loop = asyncio.get_running_loop()
         # THIS ATTEMPT ROUND's own clock, not the sequence's. The retry is
         # re-armed as a NEW task each round, so that is the only span a round can
@@ -7175,6 +7232,26 @@ class OperatorApp(App[None]):
                 # The message is the sentence the sync-failure path already
                 # uses, so the two ways a connect can fail read identically to
                 # the user and no new copy is introduced.
+                #
+                # TWO OPPOSITE STATES LEAVE THIS SESSION COLD, and only one of
+                # them heals, so the app must not spend the same budget on both.
+                # A facade that is `_recovering` is on its way back and answers
+                # `can_ever_bind` True — it is mid-recovery, its loop releases it
+                # rebindable, and the rounds spent waiting for it are the budget's
+                # whole purpose (see `SIDEBAR_CONNECT_ATTEMPTS`). So does a LIVE
+                # session whose display history is mid-refresh: `is_cold` is true
+                # there through its third disjunct alone, with the socket up, and
+                # the window ends on its own — reading it as the permanent state
+                # would tell the user a live session was stopped and drop the
+                # round that heals it (review MAJOR-1, round 1). A facade that
+                # cannot EVER bind is the opposite: no round can dial it, so the
+                # remaining rounds would be pure backoff over no-ops, ending on a
+                # verdict that offers the user a reselection which reuses this
+                # very facade. It gets one report instead, in the latch's own
+                # register — a DELIBERATE stop on the legacy attach contract is
+                # the reachable shape (see `STOPPED_SESSION_NOTICE`).
+                if not session.can_ever_bind:
+                    terminal_reason = "the viewer can never bind this session"
                 raise OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
             await session.ensure_display_current()
             if source.retired or not self._is_current(source):
@@ -7321,13 +7398,51 @@ class OperatorApp(App[None]):
             # budget running out. See `SIDEBAR_CONNECT_ATTEMPTS` for why the
             # budget is derived from `COLD_FALLBACK_S` and not written down.
             #
+            # `terminal_reason` IS THE ONE EXCEPTION TO "EVERYTHING HERE IS
+            # TRANSIENT", and it is not a narrowing of the retry but the
+            # absence of anything to retry: the rounds would dial nothing (or a
+            # dead owner's stale record), and the verdict that follows them
+            # promises a reselection that reuses this same facade. One report,
+            # in the latch's register, is the whole honest answer.
+            #
+            # A STOPPED SESSION IS THE OTHER WAY A ROUND IS UNRETRYABLE, and it
+            # is asked here rather than at the bind because the shape that
+            # reaches the user most often never returns from the bind at all: a
+            # row clicked long after its owner was stopped fails the DIAL
+            # (`Connect call failed`), which lands in this arm — eight rounds and
+            # 16 s later, ending on "Select again to retry", an affordance the
+            # reviewer followed for another 15 s to the same verdict (UX U2,
+            # round 1). `session_was_stopped` is the durable marker the facade
+            # already reads for this exact question, so it costs one marker read
+            # per FAILED round (never on the happy path) and stops being asked
+            # once it answers yes.
+            #
+            # WHAT THIS CANNOT SEE, stated because the residue is real rather
+            # than hypothetical: a session with NO wake schedules leaves no
+            # marker at all. `control._mark_wakes_dormant` returns without
+            # writing when the index entry is absent (that absence is the
+            # store's own "no wakes"), and `wake_store.write_entry` REMOVES the
+            # entry for an empty schedule list — so there is no shape in which
+            # the store could carry the marker for a wake-less session, and
+            # stamping it would mean changing that contract rather than adding a
+            # call. For that shape the app cannot tell a stop from a death, so
+            # the budget still runs and the exhausted-retry copy still stands.
+            # Recorded as a follow-up on the PR rather than smuggled in here.
+            if not terminal_reason:
+                # Re-read and re-narrow rather than reusing the `try` local: this
+                # arm also catches failures raised BEFORE the bind, and the
+                # marker read has to be on the declared viewer surface.
+                failing = source.session
+                if _is_viewer(failing) and await failing.session_was_stopped():
+                    terminal_reason = "the session was stopped"
             # Not retried when this source is no longer on screen: the backoff
             # keeps the connection task alive for ~10 s, and a task counts as
             # `retained_for_local_work`, so retrying a source the user has
             # navigated away from would strand an evicted hidden viewer for the
             # whole budget instead of releasing it.
             if (
-                source.connect_attempts <= SIDEBAR_CONNECT_ATTEMPTS
+                not terminal_reason
+                and source.connect_attempts <= SIDEBAR_CONNECT_ATTEMPTS
                 and not source.retired
                 and self._is_current(source)
             ):
@@ -7367,6 +7482,8 @@ class OperatorApp(App[None]):
                 # the source leaving the screen) is a property of THIS arm's
                 # condition, not of the error.
                 why = []
+                if terminal_reason:
+                    why.append(terminal_reason)
                 if source.connect_attempts > SIDEBAR_CONNECT_ATTEMPTS:
                     why.append("retry budget exhausted")
                 if source.retired:
@@ -7381,6 +7498,11 @@ class OperatorApp(App[None]):
                     ),
                 )
                 source.connection_error = str(error) or "Connection unavailable"
+                # THE VERDICT RIDES WITH THE ERROR TEXT, so the band and the
+                # composer's refusal row can tell a promise the app cannot keep
+                # from one it can without re-asking a facade that may have
+                # healed since. Cleared with the error, never independently.
+                source.can_never_bind = bool(terminal_reason)
                 # Surrendered, so the counter goes back to zero: the status now
                 # reads "Select again to retry", and that affordance has to mean
                 # a FULL budget, not one last single-shot attempt. Nothing
@@ -7417,6 +7539,25 @@ class OperatorApp(App[None]):
             if self._interaction.display_only:
                 self._start_sidebar_connection(self._interaction)
                 self._show_sidebar_connection(self._interaction)
+            elif self._publish_stopped_session_verdict(self._interaction, message.session_id):
+                # A STOPPED SESSION HAS NO CONNECT TO RUN, so the click used to be
+                # silently inert (UX U5, round 1): `display_only` is false here
+                # (the session was live and lost its owner), so no connect starts
+                # and the band said nothing about the click the app's own copy
+                # teaches the user to make. The verdict is published instead, in
+                # the register a clicked stopped ROW reaches (the band, and the
+                # composer's refusal row), so one click means one answer
+                # whichever stopped session it lands on.
+                #
+                # ONLY the app's own record of the stop is consulted, not
+                # `session_was_stopped`: `_stopped_session_id` is set by the very
+                # handler that painted this session's stop notice
+                # (`_on_watched_session_stopped`) and cleared by a session
+                # transition, so it is exact HERE and synchronous, where the
+                # marker read is neither. A stopped row clicked from ANOTHER
+                # session takes the connect path, which is where the durable
+                # marker belongs.
+                pass
             if self._sidebar_navigation.requested_id:
                 self._sidebar_navigation.cancel()
             # Selecting the attached session is a no-op navigation, so nothing
@@ -7428,6 +7569,34 @@ class OperatorApp(App[None]):
             self._editor().focus()
             return
         self._select_sidebar_session(message.session_id)
+
+    def _publish_stopped_session_verdict(self, source: SessionInteraction, session_id: str) -> bool:
+        """Publish the stopped-session verdict for a row the app is ALREADY on.
+
+        Returns whether it published, so a caller can fall through to whatever it
+        does for an ordinary no-op navigation. The two facts this requires are
+        both the app's own: the id it recorded when the stop was announced
+        (``_stopped_session_id`` — the same handler that painted the notice), and
+        a source whose session is actually cold. Requiring BOTH is what keeps a
+        stale id from painting a verdict over a session that has since been
+        re-opened: a re-opened session is not cold.
+
+        Deliberately does NOT touch ``display_only``: that flag is the saved-view
+        semantics the composer gate reads, and this arm's session is not a saved
+        view — it is the current session with no owner, where the composer is
+        open and `/resume` is runnable. The verdict is what the band and the
+        refusal row read; see `can_never_bind`.
+        """
+        if self._stopped_session_id != session_id:
+            return False
+        session = source.session
+        if not _is_viewer(session) or not session.is_cold:
+            return False
+        source.connection_error = "the session was stopped"
+        source.can_never_bind = True
+        self._show_sidebar_connection(source)
+        self._restate_composer_refusal()
+        return True
 
     def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None]:
         """Start a sidebar navigation to ``session_id`` — the ONE way to switch.
@@ -12591,7 +12760,45 @@ class OperatorApp(App[None]):
                 if editor.argument_command in ("team", "teams", "agent", "agents"):
                     self._fill_name_argument_list(editor, editor.argument_command)
 
-    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings"})
+    #: Commands a SAVED view can still run, i.e. the ones that need no owner.
+    #:
+    #: ``/resume`` IS ONE OF THEM, and the omission was a defect rather than a
+    #: safety property (UX U1, round 1). Every arm that recommends it — the
+    #: stopped-session verdict this file gained, the cross-process stop notice,
+    #: the prompt refusal — is a state where this gate is shut, because
+    #: ``display_only`` is exactly what those arms mean; so the app told the user
+    #: to run the one command it then refused, and the only working route out was
+    #: F9 into another session first. The command resolves its target from disk
+    #: and records (``_resume_session``), spawns or attaches a fresh runtime, and
+    #: answers honestly when the launcher has no resume factory — nothing in it
+    #: needs the view on screen to be connected.
+    #:
+    #: WHICH ARMS THIS SET LANDS IN, named rather than inferred (review MINOR-a,
+    #: round 2, extended in round 3 to cover the arm that matters most). The
+    #: refusals that need an owner are checked BEFORE this set is consulted
+    #: (``_session_transition_pending``, ``_model_activation_pending``, shell
+    #: mode, an open aside). ``_source_commands_ready`` asks a different question
+    #: — can the SOURCE serve a request — and ALL FOUR of its false arms
+    #: (``display_only``, a pending command frame, a navigation in flight, a
+    #: retired source) admit every entry here. ``display_only`` is the one that
+    #: matters in practice and the reason this paragraph exists: it IS the state
+    #: every verdict arm above is in, so without the entry the app would name a
+    #: command it refuses.
+    #:
+    #: The other three are measured at the GATE, not on a keystroke, and the
+    #: difference is stated rather than blurred: on the real ``select()`` path a
+    #: navigation in flight arms ``_session_transition_pending`` first, so an
+    #: actual Enter is refused before the allowlist is read. The gate admits
+    #: ``/resume`` in all four arms (``_source_commands_ready()`` measured False
+    #: in each); the keystroke admits it only where the four pre-checks in
+    #: ``composer_submission_blocked`` are clear.
+    #:
+    #: ``/resume`` is the only entry that starts a session transition, and the
+    #: transition is why the exemption is safe rather than merely tolerated:
+    #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
+    #: in flight resolves to the session the user asked for, and a command frame
+    #: is ended by the transition instead of raced with it.
+    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings", "/resume"})
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
         """One authority boundary for Enter, shortcuts and async continuations.
@@ -12621,10 +12828,39 @@ class OperatorApp(App[None]):
             # Same three-state guidance as the composer's refusal: a slash
             # command typed mid-retry raises the identical "wait or act?"
             # question and must not answer it with less than the exhausted case.
-            self._notice(
-                f"Commands unavailable until connected.{self._unavailable_hint()}", "warning"
-            )
+            self._notice(self._unavailable_notice("Commands"), "warning")
         return False
+
+    def _stopped_session_notice(self, source: SessionInteraction) -> str:
+        """The stopped-session sentence for ``source``, id named when known.
+
+        The one place the id is spliced into `STOPPED_SESSION_NOTICE`, so the
+        band and the composer's refusal row cannot name different sessions.
+        """
+        session = source.session
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not session_id:
+            # No id to name: the sentence drops the way back rather than point at
+            # an empty target. Unreachable for a sidebar source (the lease
+            # refuses a session it cannot identify), kept because a sentence that
+            # would read "/resume  reopens it" is worse than a shorter one.
+            return "This session was stopped."
+        return STOPPED_SESSION_NOTICE.format(session_id=session_id)
+
+    def _unavailable_notice(self, what: str) -> str:
+        """The whole refusal for a source that cannot serve the request.
+
+        ``what`` is ``"Send"`` or ``"Commands"``, for the arms where a
+        connection is still coming. ONE PLACE, because the prefix is NOT true on
+        every arm: "…until connected" promises a connection, and on the arm
+        whose own verdict says the session was stopped none is coming (UX U4,
+        round 1) — that arm answers with the verdict and no prefix at all, so
+        the row cannot contradict itself in a single sentence.
+        """
+        source = self._interaction
+        if source.connection_error and source.can_never_bind:
+            return self._stopped_session_notice(source)
+        return f"{what} unavailable until connected.{self._unavailable_hint()}"
 
     def _unavailable_hint(self) -> str:
         """The "wait or act?" half of an unavailable-while-disconnected notice.
@@ -12642,6 +12878,22 @@ class OperatorApp(App[None]):
         retry is in flight is not what the user should do); nothing had replaced
         it. Now the retry window says the app is working and no action is owed,
         which is the answer, and a spent budget keeps the actionable advice.
+
+        THE VERDICT THAT HAS NO RESELECT is not one of these states at all — a
+        connect that established no owner is coming back answers with the
+        stopped-session sentence instead, and with NO "unavailable until
+        connected" prefix — so that arm is handled one level up, in
+        `_unavailable_notice`. What is left here is the "wait or act?" question
+        for a source that is still being worked on or has genuinely given up.
+
+        SO A VERDICT-CARRYING SOURCE GETS "" FROM HERE (QA Q5, round 2). No
+        surface renders it — the sole caller returns on the same two fields, one
+        line earlier — but a direct read of the helper is how a later reader or
+        agent would take this for the row's text, and the reselect branch below
+        would answer it with an action the verdict exists to withhold. That
+        branch stays: it is the ordinary exhausted-latch answer and it is live on
+        every arm that latched without a verdict. Only the value for a source the
+        app has already decided about is silence.
 
         THE FOURTH STATE IS A `/resume` REDIAL, and it is the one the source's
         own fields cannot describe. That redial runs over a session that is
@@ -12674,6 +12926,13 @@ class OperatorApp(App[None]):
                 f" Reconnecting to session {self._resume_retry_target} — "
                 "switching session stops the wait."
             )
+        if source.can_never_bind:
+            # Asked AFTER the redial (UX U3's precedence: a redial in flight owns
+            # the advice) and BEFORE the latched error, which is the field pair
+            # that would otherwise produce the reselect sentence. See the
+            # docstring: unreachable through the row, pinned so a direct read
+            # cannot contradict it.
+            return ""
         if source.connection_error:
             return " Select this session again to retry."
         if source.connect_attempts:
@@ -12706,7 +12965,7 @@ class OperatorApp(App[None]):
             or self._interaction.command_frame_pending
             or (self._session_transition_pending and self._resume_retry_target)
         ):
-            text = f"Send unavailable until connected.{self._unavailable_hint()}"
+            text = self._unavailable_notice("Send")
             held = self._composer_refusal_notice
             if held is not None and held.is_attached:
                 # ONE ROW PER STATE, not one row per Enter. Appending a durable
@@ -12755,12 +13014,12 @@ class OperatorApp(App[None]):
         The latch is the third end of the state the row describes (UX U1,
         round 3), beside the redial's exits and a completed connect. It is the
         arm that resolves the connect as a verdict for the user — the band
-        reads "Reconnect failed · Select again to retry" and `connect_attempts`
-        goes back to zero — so a row still saying "Reconnecting … it will keep
-        trying for a few more seconds" above it made the app contradict itself
-        at the exact moment the original defect was on screen. The old bug
-        report is about that moment, which is why the contradiction matters
-        more than the row's grade.
+        reads "Reconnect failed · Select again to retry", or the stopped-session
+        sentence when no reselection can work — so a row still saying
+        "Reconnecting … it will keep trying for a few more seconds" above it made
+        the app contradict itself at the exact moment the original defect was on
+        screen. The old bug report is about that moment, which is why the
+        contradiction matters more than the row's grade.
 
         Restated rather than retired, and through the row's own writer so the
         two spellings cannot drift: the NEXT Enter already refreshes the row
@@ -38798,7 +39057,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 109
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 111
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
