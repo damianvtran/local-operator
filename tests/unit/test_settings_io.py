@@ -42,6 +42,7 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+    from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -107,6 +108,10 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
+        # The reader's own fallback, which is also what every unrecognised
+        # shape resolves to — so the page cannot advertise a default the
+        # delegating model's tier picker disagrees with.
+        "subagents.model_choice": DEFAULT_MODEL_CHOICE,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
         "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_
@@ -1448,3 +1453,121 @@ class TestTheModelRowsHelpBudget:
         # carries an em dash and a middot, so a character count is not a cell
         # count (review round 3, NIT-1). It measures the same today.
         assert cell_len(f"{setting.help} · default: —") <= 71, setting.help
+
+
+class TestTheSubagentModelChoiceRow:
+    """``subagents.model_choice``'s default, and the caller it must NOT gate.
+
+    Two obligations of the same key. The first is the registry's ordinary one,
+    already covered by ``_consumer_defaults`` and asserted here by name so a
+    reader of the ROW can find the pairing: the page's default and the reader's
+    fallback are the same member. The second is the boundary the key must not
+    cross — it stops a delegating MODEL spending on another model, so a caller
+    that cannot be shown to be a model is the operator and may name a tier.
+    """
+
+    def test_the_row_ships_the_readers_own_fallback(self) -> None:
+        from local_operator.harness.subagent import (
+            DEFAULT_MODEL_CHOICE,
+            MODEL_CHOICE_OPERATOR,
+        )
+
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert setting.default == DEFAULT_MODEL_CHOICE == MODEL_CHOICE_OPERATOR
+
+    def test_an_operator_side_pin_is_accepted_without_a_validation_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``/v1/desktop/profiles`` and the operator's own surfaces build
+        ``AgentParams`` directly, with no advertised schema behind them.
+
+        An absent context cannot be evidence of a model, so the pin is allowed —
+        the same direction the vanished-tier branch takes, and the reason a role
+        pinned to a tier keeps working under the shipped default. The tier has to
+        be CONFIGURED for the call to be valid at all: the policy gate is what
+        this asserts, and the ``model_choice`` key deliberately does not touch
+        ``effort_tier_rejection``'s ordinary "no such tier" refusal.
+        """
+        from local_operator.tools.agent_tool import AgentParams
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        (config_dir / "config.yml").write_text(
+            "values:\n  subagents:\n    models:\n      hi: anthropic/claude-opus-5\n"
+        )
+
+        params = AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        )
+        assert params.effort == "hi"
+
+    def test_the_model_choice_row_states_the_decision_and_fits_its_choices(self) -> None:
+        """U1 and D1's halves, pinned as facts rather than as wording.
+
+        U1: the help described the CAPABILITY ("Lets a delegating model swap a
+        child onto a configured model tier"), so at the shipped default it read
+        backwards — the resting state of the row claimed the picker was open.
+        It now says what the row DECIDES, which is true at either value, and
+        names the operator's own route to a pin (a role's profile), because the
+        model-side pin is refused on purpose.
+
+        D1: both choice descriptions are sized to the EXPANDED row — the only
+        place they render — and the bounds below are measured on a RENDERED
+        FRAME at 100 columns: 26 cells for the default's row (its ``(default)``
+        marker and the expansion's own marker cost the rest) and 40 for the
+        other. The pair this replaced measured 93 and 120 painted cells, so
+        "role pins still apply" and "different, costlier model" — the two
+        consequences the row exists to state — were clipped at every width the
+        page is measured at. Bounds, not the strings: this copy is sized against
+        a column, and the next person may find better words for the same cells.
+        """
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert "swap a child" not in setting.help
+        assert "pins" in setting.help and "profile" in setting.help
+        by_value = {choice.value: choice for choice in setting.choices}
+        assert cell_len(by_value["operator"].description) <= 26
+        assert cell_len(by_value["model"].description) <= 40
+        assert "inherits" in by_value["operator"].description
+        assert "costlier model" in by_value["model"].description
+
+    @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
+    def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
+        """The two facts the incident proved these rows were missing.
+
+        A deliberate tier pin read as harmless: nothing said a child on it RUNS,
+        and is billed, at that model's rates, and nothing pointed at the row that
+        decides who may pick one. Both are pinned here because the sentence is
+        one string — a later edit that trims either half for width drops the
+        fact, not a word.
+        """
+        setting = settings_io.resolve_key(f"subagents.models.{tier}")
+        assert setting is not None
+        assert "Bills at that model's rates" in setting.help
+        # "empty inherits" rather than "empty keeps the parent's": the shorter
+        # verb is the one the rest of this change uses ("inherits this session's
+        # model"), and it buys the 8 cells that let the KEY PATH stay on the line
+        # at 100 columns — the frame the evidence is captured on.
+        assert "empty inherits" in setting.help
+        # Names the row instead of its position: registry order is
+        # max_running, model_choice, lo, med, hi, so "row above" points `med` at
+        # `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
+        assert "See subagents.model_choice" in setting.help
+        # ...and they FIT beside the row's own key path at 100 columns, which is
+        # the width the /settings evidence frames are captured at. The detail
+        # line sheds the WHOLE help once it and the key no longer fit
+        # (``settings_view``'s shed ladder), so an edit that buys words here
+        # loses the billing fact in exactly the state the row is read in.
+        #
+        # 72 is the frame-derived budget, not a round number: the row is 94
+        # cells, `subagents.models.hi` is 19 and the separator 3, leaving 72 for
+        # the help — and 73 is precisely the width the review caught shedding
+        # the key path (95 cells against 94), so a bound of 74 would admit the
+        # string this assertion exists to prevent.
+        assert cell_len(setting.help) <= 72, setting.help
