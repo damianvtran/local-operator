@@ -5849,6 +5849,91 @@ class OperatorApp(App[None]):
             and bool(getattr(source.session, "is_cold", False))
         )
 
+    def _reassert_sidebar_anchor(self, source: SessionInteraction) -> None:
+        """Re-place a refused frame's reader on the saved anchor it asked for.
+
+        A RELAYOUT ALONE DOES NOT CONVERGE WHEN THE ANCHOR IS THE REFUSAL, and
+        this is the half that makes it. The recovery branch re-dirtied the
+        screen and hoped the next frame satisfied the gate; when the gate is
+        refusing because the anchor row is not in the painted map, the next
+        frame is refused the same way, so ONE refused frame became a
+        self-sustaining loop that only `_await_sidebar_frame`'s timer ended.
+
+        Measured on `tests/e2e/test_sidebar_display_e2e.py`'s `wrapped` case
+        (saved anchor over wrapped rows, 120x36, refusals forced at the first
+        gate check so the trigger is deterministic rather than load-dependent):
+        240 recoveries / 246 refusals over 15.8 s, every refusal after the first
+        `anchor-not-painted` (`anchor at content row 0`, viewport at
+        `scroll_y == max_scroll_y` — the reader at the tail, the anchor above
+        it), ending in `SurfaceNotReady`. The one re-anchor the code had -
+        `restore_revealed_anchor`, scheduled by the commit through
+        `call_after_refresh` - had already run BEFORE the first real refusal,
+        measured against the pre-reveal layout, where it was a no-op; nothing
+        restored the position afterwards. Note also that Textual 8.2.8's
+        `Screen._on_idle` returns early while the screen is dirty (screen.py),
+        so a recovery that re-dirties every frame cannot be relied on to let a
+        queued after-refresh callback run: the healing has to be synchronous,
+        inside the hook that already decided the frame was refused.
+
+        SAFE FOR A HEALTHY SWITCH, BUT BECAUSE OF THE GUARD RATHER THAN ANY
+        IDENTITY OF THE TWO OPERATIONS. `restore_navigation_anchor`
+        re-establishes the saved offset; that equals the current scroll only when
+        the anchor already sits at it, so it is NOT idempotent in general (do not
+        reach for it as a no-op elsewhere on that reading). What keeps it free
+        here is that the guard below refuses to call it unless the anchor is
+        mounted, displayed and genuinely off screen. It scrolls
+        PROGRAMMATICALLY, so it is never mistaken for reader input, and it only
+        runs while a frame is armed — i.e. before the switch re-enables input.
+
+        The guard is deliberately a LIVE-geometry question — is the reader on
+        the anchor right now? — and not the gate's own question, which is
+        whether the anchor is in THIS frame's painted map. The two disagree in
+        the transient that needs no help: a frame painted before the anchor row
+        is mounted has `mounted=False`/zero region, and no scroll can place a
+        block that has no geometry yet, so that frame keeps the plain relayout
+        the recovery branch has always bought. Returning there is how a healthy
+        switch keeps its single recovery instead of paying a scroll per frame.
+
+        ``display`` IS FILTERED FOR THE SAME REASON THE REST OF THIS FILE FILTERS
+        ON IT (`_capture_sidebar_scroll`): a mounted block with `display: none`
+        is absent from the compositor's layout, so `Widget.region` is
+        `NULL_REGION` and `NULL_REGION.overlaps(...)` is False — i.e. "no
+        geometry" would read as "off screen" and the restore would be called
+        with a zero-height target, drifting the reader on a block that is not
+        painted at all.
+
+        The id+part match here is STRICTER than the id-only fallback
+        `restore_navigation_anchor` documents internally, and that asymmetry is
+        deliberate rather than an inconsistency: this guard decides whether to
+        act, so it must not act on a block that is not the anchor it was asked
+        for, while the delegate may still resolve the anchor it is handed. A
+        strict match here therefore cannot make the delegate miss.
+        """
+        if source.draft.following_tail or not source.draft.scroll_anchor_id:
+            return
+        view = self._transcript_view()
+        anchor = next(
+            (
+                block
+                for block in view.blocks()
+                if block.navigation_anchor_id == source.draft.scroll_anchor_id
+                and block.navigation_anchor_part == source.draft.scroll_anchor_part
+            ),
+            None,
+        )
+        if (
+            anchor is None
+            or not anchor.is_mounted
+            or not anchor.display
+            or anchor.region.overlaps(view.content_region)
+        ):
+            return
+        view.restore_navigation_anchor(
+            source.draft.scroll_anchor_id,
+            source.draft.scroll_anchor_part,
+            source.draft.scroll_offset,
+        )
+
     def _await_sidebar_frame(
         self, source: SessionInteraction, generation: int
     ) -> asyncio.Future[None]:
@@ -6004,7 +6089,18 @@ class OperatorApp(App[None]):
             # written for is real and the cost of an unnecessary recovery is
             # one frame, while the cost of no recovery is a wedged switch.
             # `test_switch_gate_is_never_refused` asserts it stays dead.
+            #
+            # RE-ASSERT THE READER'S POSITION ON THIS FRAME, before buying the
+            # relayout. One refusal reason this branch exists to clear -
+            # the saved anchor missing from the painted map - is not a layout
+            # accident that a repaint fixes: it is the anchor having been left
+            # behind by the tail pin, and a fresh frame paints the identical
+            # mismatch. See `_reassert_sidebar_anchor` for the measurement that
+            # made one refused frame a 15 s spin, and why the position has to
+            # be restored here rather than through another after-refresh
+            # callback the refusal loop would starve.
             self._sidebar_gate_recoveries += 1
+            self._reassert_sidebar_anchor(source)
             self.screen.refresh(layout=True)
 
     def _sidebar_navigation_pending(self, session_id: str) -> None:

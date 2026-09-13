@@ -34,6 +34,34 @@ from tests.e2e.harness import (
 )
 from tests.unit.tui.test_app_pilot import _renderable_plain, _set_editor_line
 
+#: Backstop for every wait in this file, and it must OUTLAST the work's own bound.
+#:
+#: Both halves of this test already carry a verdict of their own:
+#:
+#: * ``select()`` returns the navigation task, whose commit awaits the frame gate
+#:   armed in ``OperatorApp._await_sidebar_frame`` — a 15 s timer, after which the
+#:   app FAILS the switch with its own ``SurfaceNotReady``;
+#: * the connection task settles within the sidebar's retry budget (~13 s, the
+#:   number #883's e2e backstop is sized above).
+#:
+#: A test clock shorter than either cannot read the verdict the app was about to
+#: report. At 10 s it cancelled the navigation mid-gate and raised a bare
+#: ``TimeoutError``, which is how a wedged switch and a merely slow one became
+#: the same failure: ``[False-False-True-True-False]`` did exactly that on a CI
+#: macos runner (about 1 run in 20) while every other parametrisation passed, and
+#: the switch it was waiting on had stopped converging (see
+#: ``app._reassert_sidebar_anchor``). One bound for the whole file rather than one
+#: per call site, because every wait here awaits one of those two pieces of app
+#: work — a second number would only invite the same defect back at whichever
+#: site was left behind.
+#:
+#: Sized like the sibling sidebar backstops (#883's ``_SETTLE_BACKSTOP_S``, 60 s).
+#: It is a BACKSTOP, not a budget: every wait ends the moment its work does, and
+#: the assertions after it — never this number — decide whether the switch or the
+#: connection was healthy. The failure cost of the larger bound is CI minutes on
+#: an already-failing run, never a masked one.
+_SETTLE_BACKSTOP_S = 60.0
+
 
 def visible_text(app: OperatorApp) -> str:
     return "\n".join(
@@ -157,8 +185,8 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                         "waiting", SessionDraft(following_tail=False, scroll_anchor_id=anchor_id)
                     )
                 task = app._sidebar_navigation.select("waiting")
-                await asyncio.wait_for(task, 10)
-                await asyncio.wait_for(entered.wait(), 10)
+                await asyncio.wait_for(task, _SETTLE_BACKSTOP_S)
+                await asyncio.wait_for(entered.wait(), _SETTLE_BACKSTOP_S)
                 source = app._interaction
                 assert not released.is_set()
                 assert isinstance(app._session, AttachedSession)
@@ -194,16 +222,22 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 connection = source.connection_task
                 # A slow source does not serialize the next local selection.
                 if switch_away:
-                    await asyncio.wait_for(app._sidebar_navigation.select("neighbour"), 10)
+                    await asyncio.wait_for(
+                        app._sidebar_navigation.select("neighbour"), _SETTLE_BACKSTOP_S
+                    )
                     assert "neighbour saved answer" in visible_text(app)
                     assert source.draft.text == "Keep this unsent draft"
-                    await asyncio.wait_for(app._sidebar_navigation.select("waiting"), 10)
+                    await asyncio.wait_for(
+                        app._sidebar_navigation.select("waiting"), _SETTLE_BACKSTOP_S
+                    )
                     assert app._transcript_view() is saved_view
                     assert source.connection_task is connection
                     assert app._status.render_text(120).plain == saved_name
                     assert not released.is_set()
                     assert initial_content in visible_text(app)
-                    await asyncio.wait_for(app._sidebar_navigation.select("neighbour"), 10)
+                    await asyncio.wait_for(
+                        app._sidebar_navigation.select("neighbour"), _SETTLE_BACKSTOP_S
+                    )
                 if fail_sync:
                     assert source.connection_task is not None
                     # DRAINED TO EXHAUSTION, not awaited once. A failed connect
@@ -220,7 +254,7 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                         task = source.connection_task
                         if task is None:
                             break
-                        await asyncio.wait_for(asyncio.shield(task), 10)
+                        await asyncio.wait_for(asyncio.shield(task), _SETTLE_BACKSTOP_S)
                         await pilot.pause()
                         if source.connection_error or source.connection_task is task:
                             break
@@ -239,16 +273,20 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 else:
                     released.set()
                 assert source.connection_task is not None
-                await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
+                await asyncio.wait_for(asyncio.shield(source.connection_task), _SETTLE_BACKSTOP_S)
                 if switch_away:
                     assert isinstance(app._session, AttachedSession)
                     assert app._session.session_id == "neighbour"
                     assert "waiting saved answer" not in visible_text(app)
                     # Returning uses its own canonical state and controller.
-                    await asyncio.wait_for(app._sidebar_navigation.select("waiting"), 10)
+                    await asyncio.wait_for(
+                        app._sidebar_navigation.select("waiting"), _SETTLE_BACKSTOP_S
+                    )
                     await pilot.pause()
                     if source.connection_task is not None:
-                        await asyncio.wait_for(asyncio.shield(source.connection_task), 10)
+                        await asyncio.wait_for(
+                            asyncio.shield(source.connection_task), _SETTLE_BACKSTOP_S
+                        )
                 if local_modes:
                     assert app._aside_is_open()
                     assert editor.placeholder == ASIDE_PLACEHOLDER
@@ -271,7 +309,9 @@ async def test_saved_view_switches_while_authenticated_owner_sync_is_held(
                 if local_modes:
                     missing = config / "sessions" / "deleted-target"
                     assert not missing.exists()
-                    await asyncio.wait_for(app._sidebar_navigation.select("deleted-target"), 10)
+                    await asyncio.wait_for(
+                        app._sidebar_navigation.select("deleted-target"), _SETTLE_BACKSTOP_S
+                    )
                     assert app._interaction is source
                     assert editor.text == "Keep this unsent draft"
                     assert "waiting saved answer" in visible_text(app)
