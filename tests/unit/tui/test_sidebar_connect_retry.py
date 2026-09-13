@@ -712,7 +712,19 @@ async def test_a_cold_frame_buys_no_relayout(monkeypatch):
     "reached the gate" and ``_sidebar_gate_recoveries`` "bought a full-screen
     relayout chasing it". A cold frame that waits can only ever produce the
     second — the gate refuses on ``is_cold`` before it can pass — so the fix's
-    signature is one consultation and ZERO recoveries, against 1,820 before it.
+    signature is ZERO recoveries, against 1,820 before it.
+
+    THE CONSULTATION COUNT DROPPED FROM ONE TO ZERO (the geometry-settled
+    arming below), and that is a deliberate, smaller-cost arm rather than a
+    weakened assertion: the readiness frame is armed only once the incoming
+    geometry has settled
+    (`_arm_sidebar_frame_when_settled`), so a frame painted while the dock is
+    still reflowing is not asked about at all — and a cold owner refuses it
+    through the hook's cold branch, which never needed the gate's verdict
+    (``_sidebar_gate_surface_ready``'s own first check is ``is_cold``). What
+    this test is FOR is the second counter, which is unchanged at zero: no
+    full-screen relayout is bought for a verdict the app already holds. Pinning
+    a consultation that is now avoided would pin the cost, not the property.
 
     Counts, not rates: a busy machine changes how long the frames take, not how
     many the gate refuses.
@@ -721,7 +733,7 @@ async def test_a_cold_frame_buys_no_relayout(monkeypatch):
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         source = await _current_source(app, pilot, session)
-        _cold_frame_rig(app, source, session, monkeypatch)
+        outcomes = _cold_frame_rig(app, source, session, monkeypatch)
         _instant_backoff(monkeypatch, attempts=3)
         reached_before = app._sidebar_gate_reached
         recoveries_before = app._sidebar_gate_recoveries
@@ -729,12 +741,82 @@ async def test_a_cold_frame_buys_no_relayout(monkeypatch):
         app._start_sidebar_connection(source)
         await _drain_with_paints(app, pilot, source)
 
+        # The frame really was refused, and by the cold branch rather than by
+        # the timer: without this the two zero deltas below would also hold for
+        # a frame that was never armed at all.
+        assert outcomes, "no frame was ever armed"
+        assert isinstance(outcomes[0], OwnerWentCold), (
+            f"the cold frame settled as {outcomes[0]!r}: the wait, not the cold check, "
+            "decided it"
+        )
         assert (
-            app._sidebar_gate_reached - reached_before == 1
-        ), "the gate was consulted for a frame that was already refused"
+            app._sidebar_gate_reached - reached_before == 0
+        ), "a frame that was already refused was put to the gate anyway"
         assert (
             app._sidebar_gate_recoveries - recoveries_before == 0
         ), "a relayout was bought for a verdict the gate had already reached"
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_geometry_never_settles_is_armed_anyway(monkeypatch):
+    """THE SETTLE WINDOW IS BOUNDED: a geometry that never settles cannot stall.
+
+    `_arm_sidebar_frame_when_settled` holds the arm back while the incoming
+    geometry is still moving, and that is only safe because the wait is a COUNT
+    of refresh hops rather than a condition on the geometry. The pathological
+    case is driven here directly, by a geometry probe that returns a different
+    sample on every call -- so "has it stopped moving?" can never be answered
+    yes -- and the two facts that make the bound real are asserted: the frame is
+    ARMED anyway, and the readiness future still settles.
+
+    Why this is the blocker-shaped question rather than a nicety: the switch
+    holds its input boundary until that future settles, so an arm that waited on
+    a condition the geometry never satisfies would hang every switch behind the
+    gate's 15 s timer. A deferred arm that can stall is worse than the refusals
+    it removes.
+    """
+    session = RecoveringRemote("never-settles", heals_after=1)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        samples: list[tuple[float, ...]] = []
+
+        def never_settles(_self: OperatorApp) -> tuple[float, ...]:
+            sample = (float(len(samples)), float(len(samples)))
+            samples.append(sample)
+            return sample
+
+        monkeypatch.setattr(OperatorApp, "_sidebar_frame_geometry", never_settles)
+        armed: list[int] = []
+        real_arm = OperatorApp._arm_sidebar_frame
+
+        def arm(_self: OperatorApp, src: SessionInteraction, fut: Any, gen: int) -> None:
+            armed.append(len(samples))
+            real_arm(_self, src, fut, gen)
+
+        monkeypatch.setattr(OperatorApp, "_arm_sidebar_frame", arm)
+        _instant_backoff(monkeypatch, attempts=1)
+
+        def commit(*_args: Any, **_kwargs: Any) -> Any:
+            return app._await_sidebar_frame(source, app._sidebar_navigation.generation)
+
+        monkeypatch.setattr(app, "_commit_sidebar_session", commit)
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always((source, object())))
+
+        app._start_sidebar_connection(source)
+        await _drain_with_paints(app, pilot, source)
+
+        assert armed, (
+            "the frame was never armed: a geometry that never settles stalled the switch "
+            f"behind {len(samples)} samples"
+        )
+        assert len(samples) <= app_module.SIDEBAR_ARM_SETTLE_HOPS + 2, (
+            f"the arm waited on {len(samples)} samples, past the "
+            f"{app_module.SIDEBAR_ARM_SETTLE_HOPS}-hop "
+            "bound; the wait is no longer bounded"
+        )
+        assert app._sidebar_gate_reached >= 1, "the armed frame was never put to the gate"
+        assert source.can_never_bind is False, "an armed frame was refused on a healthy source"
 
 
 @pytest.mark.asyncio

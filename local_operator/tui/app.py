@@ -1827,6 +1827,25 @@ def _sidebar_connect_attempts() -> int:
 #: AND rebindable, and the first attempt after a release dials it.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
+#: How many refresh hops `_await_sidebar_frame` may spend waiting for the
+#: incoming geometry to stop moving before it arms the readiness frame anyway.
+#:
+#: A COUNT, NOT A TIMEOUT, for the same reason every other bound in this file is
+#: (AGENTS.md, "Wait on the event, never on the clock"): the quantity being waited
+#: on is a sequence of layout passes -- block mounting and gap settlement author
+#: their real heights over deferred refresh hops -- so a loaded box extends the
+#: wall time of those hops but never their number.
+#:
+#: TWO IS THE MEASURED NEED, and four is the ceiling. On the smoothness rig
+#: (100x30, staggered drafts, six switches) an immediate arm refused 6 of 6
+#: (one forced full-screen relayout each), one hop refused 3, and two hops
+#: refused 0. The extra headroom exists because a switch that mounts a page
+#: settles one hop deeper than one that does not, and because the alternative to
+#: a bounding constant here is a wedge: a geometry that genuinely oscillates
+#: would otherwise never let the frame be armed, and the readiness gate's 15 s
+#: timer would be the thing that ended the switch.
+SIDEBAR_ARM_SETTLE_HOPS = 4
+
 #: The sentence for a session that was STOPPED, in the app's own receipt shape:
 #: what happened, then the way back, with the id NAMED (UX U3, round 1). The id
 #: is load-bearing rather than decorative — the band also carries the session's
@@ -4192,6 +4211,15 @@ class OperatorApp(App[None]):
         self._sidebar_ready_frame: tuple[SessionInteraction, int, asyncio.Future[None]] | None = (
             None
         )
+        #: Whether the frame in `_sidebar_ready_frame` has had its geometry
+        #: settled AND been armed yet (see `_arm_sidebar_frame_when_settled`).
+        #: The readiness GATE is only consulted once this is True, so a frame
+        #: painted while the incoming dock/transcript is still converging is not
+        #: refused-and-relaid-out: it is simply not asked about yet. It is set
+        #: beside the pending tuple rather than inside it because the tuple is
+        #: read by teardown paths (`_abandon_sidebar_frame`) that must keep
+        #: working whether or not the geometry ever settled.
+        self._sidebar_frame_armed = False
         #: How many times the readiness gate refused a post-commit frame and
         #: `post_display_hook` had to buy another relayout. A healthy switch
         #: leaves this at zero — the arming refresh in `_await_sidebar_frame`
@@ -4204,6 +4232,15 @@ class OperatorApp(App[None]):
         #: being satisfiable by a rig that never armed the gate at all — a zero
         #: that means "never asked" reads identically to one that means "never
         #: refused", and only one of them is the property worth asserting.
+        #:
+        #: COUNTED ONLY WHERE THE GATE IS ACTUALLY ASKED, which since the
+        #: geometry-settled arming (`_arm_sidebar_frame_when_settled`) means only
+        #: once the frame has been armed. A pump painted while the incoming dock
+        #: is still reflowing is deliberately not put to the gate, so it is not
+        #: counted here either — counting it would make this counter measure
+        #: paints rather than consultations, and the pair
+        #: (`reached > 0`, `recoveries == 0`) is how a healthy switch is
+        #: distinguished from an unarmed one.
         self._sidebar_gate_reached = 0
         self._sidebar_frame_pending = False
         self._sidebar_focus_restore: ReferenceType[Widget] | None = None
@@ -5810,6 +5847,7 @@ class OperatorApp(App[None]):
         if pending is None:
             return False
         self._sidebar_ready_frame = None
+        self._sidebar_frame_armed = False
         future = pending[2]
         if future.done():
             return False
@@ -5844,7 +5882,6 @@ class OperatorApp(App[None]):
         self, source: SessionInteraction, generation: int
     ) -> asyncio.Future[None]:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._sidebar_ready_frame = (source, generation, future)
 
         def expired() -> None:
             if not future.done():
@@ -5862,31 +5899,165 @@ class OperatorApp(App[None]):
 
         timer = self.set_timer(15, expired)
         future.add_done_callback(lambda _future: timer.stop())
-        # The first target frame must cover its transcript, draft and gates,
-        # not merely a sidebar/status fragment sharing the new geometry map.
-        #
-        # `refresh(layout=True)` alone asks for a LAYOUT; it does not ask for a
-        # FULL paint, and the compositor is free to satisfy the resulting
-        # render with a partial `ChopsUpdate` over whatever regions the reflow
-        # dirtied. Only a `LayoutUpdate` records `_sidebar_displayed_frame`
-        # (see `_display`), so the gate could NEVER pass on the first
-        # post-commit paint and every switch paid a forced second full-screen
-        # relayout from `post_display_hook`'s recovery branch below — measured
-        # on 21/21 switches, p50 15-71 ms and up to 215 ms at p90.
-        #
-        # Marking the whole screen region dirty is what makes the arming
-        # refresh PRODUCE the evidence rather than merely hope for it:
-        # `render_update` takes `render_full_update()` whenever the screen
-        # region is in `_dirty_regions`, so the very next paint is a
-        # `LayoutUpdate` carrying the complete compositor map. This does NOT
-        # weaken the gate — it still waits for a real painted map covering the
-        # target surfaces, exactly as the comment in
-        # `_sidebar_gate_surface_ready` requires. It only makes that map arrive
-        # on the frame the switch already pays for.
+        # THE PENDING TUPLE IS INSTALLED IMMEDIATELY, BEFORE THE GEOMETRY SETTLES,
+        # and both halves of that are load-bearing. `_abandon_sidebar_frame`
+        # (the bind->commit belt, and `post_display_hook`'s cold branch) settles
+        # THIS future, and it can only do that if it can find it -- an owner
+        # lost between the bind check and the commit has to be refused at once
+        # rather than sitting out the 15 s timer. What waits for the geometry is
+        # the ARMING (`_arm_sidebar_frame_when_settled`), which is what governs
+        # whether the gate is consulted.
+        self._sidebar_ready_frame = (source, generation, future)
+        self._sidebar_frame_armed = False
+        self._arm_sidebar_frame_when_settled(source, future, generation, SIDEBAR_ARM_SETTLE_HOPS)
+        return future
+
+    def _arm_sidebar_frame_when_settled(
+        self,
+        source: SessionInteraction,
+        future: asyncio.Future[None],
+        generation: int,
+        hops: int,
+    ) -> None:
+        """Arm the readiness frame once the incoming geometry has stopped moving.
+
+        WHY THE ARM IS CHAINED RATHER THAN IMMEDIATE. The gate reads the FIRST
+        painted frame after the arm, and the commit ends while the incoming
+        geometry is still converging: the composer has just been handed the
+        incoming draft, so the dock's height (and therefore the transcript's
+        container height, its `max_scroll_y` and the follow-tail view's last
+        block) settles over the deferred refresh hops that block mounting and
+        gap settlement already chain. Arming into the middle of that sequence
+        means the first frame IS a clipped tail, `_sidebar_gate_surface_ready`
+        refuses it (correctly -- `TAIL_BLOCK_BELOW_CONTENT`, the view already at
+        `scroll_y == max_scroll_y`), and `post_display_hook`'s recovery branch
+        buys a FORCED FULL-SCREEN relayout plus render for every refusal.
+
+        Measured on the smoothness rig (100x30, six switches with staggered
+        drafts): an immediate arm refused 6 of 6 switches, one forced
+        full-screen relayout each; arming one refresh hop later refused 3, and
+        two hops refused 0. The same shape is what the bench harness reports on
+        a 134-turn transcript at 120x36 as "6 of 8 uncached switches refused
+        three times each". So the fix is not to accept a clipped frame -- it is
+        to ask the question after the geometry it asks about has landed.
+
+        WHAT DECIDES "LANDED" is STABILITY OF THE GEOMETRY, never the verdict
+        the gate would give: this method never evaluates
+        `_sidebar_gate_surface_ready` and cannot, so there is no second copy of
+        its rule here to drift. It samples the geometry the gate WILL be asked
+        about (container, virtual extent, scroll position, block count, the
+        tail's bottom row, the composer's height) on every refresh hop and arms
+        when a sample agrees with the one before it AND the geometry has been
+        seen to move at least once. Both halves are needed: "it has stopped
+        moving" is only observable in contrast, and the first sample pair after
+        a commit is always equal because the dock's reflow is the first thing the
+        next layout does. Deferring the arm is not a weakening: the gate still
+        judges the frame it gets, and a frame that is genuinely clipped is still
+        refused.
+
+        BOUNDED, because "keep waiting for stable geometry" is a wedge if the
+        geometry genuinely oscillates: after `SIDEBAR_ARM_SETTLE_HOPS` hops
+        the frame is armed regardless, which is exactly today's behaviour. The
+        bound is a small number rather than a timer for the same reason the rest
+        of this file prefers counts over clocks (AGENTS.md, "Wait on the event,
+        never on the clock"), and it is a count of REFRESH HOPS, so a loaded box
+        cannot spend it on wall time.
+        """
+        signature = self._sidebar_frame_geometry()
+
+        #: Whether the geometry has been seen to MOVE since the commit, which is
+        #: what makes "stopped moving" meaningful (see the docstring).
+        moved = False
+
+        def hop(previous: tuple[float, ...] | None, remaining: int) -> None:
+            nonlocal moved
+            current = self._sidebar_frame_geometry()
+            if previous is not None and current != previous:
+                moved = True
+            if moved and (current == previous or remaining <= 0):
+                self._arm_sidebar_frame(source, future, generation)
+                return
+            self.call_after_refresh(partial(hop, current, remaining - 1))
+
+        hop(signature, hops)
+
+    def _sidebar_frame_geometry(self) -> tuple[float, ...]:
+        """The incoming geometry the gate will be asked about, as one tuple.
+
+        A stability probe, not a verdict: it is compared with itself one
+        refresh hop later and nothing here decides whether a frame is ready.
+
+        It reads the CURRENT transcript view, which is the incoming one because
+        `_commit_sidebar_session` has already adopted it by the time the hops
+        run. A switch superseded while the hops are in flight is fenced by the
+        generation check in `_arm_sidebar_frame`, so measuring a newer view here
+        cannot arm the wrong frame -- it can only make this switch's own arm
+        wait longer, against its bound.
+
+        The query is wrapped rather than read defensively member by member: a
+        mid-swap frame can find no editor, no view, or a block with no region
+        yet, and a stability probe that raised inside a synchronous commit would
+        take the switch down with it.
+        """
+        try:
+            view = self._transcript_view()
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 - a mid-swap query can find nothing
+            return ()
+        blocks = view.blocks()
+        tail = next((block for block in reversed(blocks) if block.display), None)
+        tail_region = getattr(tail, "region", None)
+        return (
+            float(view.container_size.height),
+            float(view.virtual_size.height),
+            float(view.scroll_y),
+            float(view.max_scroll_y),
+            float(len(blocks)),
+            float(-1 if tail_region is None else tail_region.bottom),
+            float(editor.outer_size.height),
+        )
+
+    def _arm_sidebar_frame(
+        self, source: SessionInteraction, future: asyncio.Future[None], generation: int
+    ) -> None:
+        """Make the next paint the full-map frame the readiness gate reads.
+
+        The first target frame must cover its transcript, draft and gates, not
+        merely a sidebar/status fragment sharing the new geometry map.
+
+        `refresh(layout=True)` alone asks for a LAYOUT; it does not ask for a
+        FULL paint, and the compositor is free to satisfy the resulting render
+        with a partial `ChopsUpdate` over whatever regions the reflow dirtied.
+        Only a `LayoutUpdate` records `_sidebar_displayed_frame` (see
+        `_display`), so the gate could NEVER pass on the first post-commit paint
+        and every switch paid a forced second full-screen relayout from
+        `post_display_hook`'s recovery branch -- measured on 21/21 switches, p50
+        15-71 ms and up to 215 ms at p90.
+
+        Marking the whole screen region dirty is what makes the arming refresh
+        PRODUCE the evidence rather than merely hope for it: `render_update`
+        takes `render_full_update()` whenever the screen region is in
+        `_dirty_regions`, so the very next paint is a `LayoutUpdate` carrying
+        the complete compositor map. This does NOT weaken the gate -- it still
+        waits for a real painted map covering the target surfaces, exactly as
+        the comment in `_sidebar_gate_surface_ready` requires. It only makes
+        that map arrive on a frame the switch pays for anyway, and (see
+        `_arm_sidebar_frame_when_settled`) one whose geometry has landed.
+
+        A future that has already settled is not re-armed: the frame it was
+        waiting for arrived (or the 15 s timer expired) while the settle hops
+        were still running, and arming after that would leave
+        `_sidebar_ready_frame` pointing at a settled future, which is the one
+        state `post_display_hook` and `_display` both assume cannot exist.
+        """
+        if future.done():
+            return
+        if generation != self._sidebar_navigation.generation:
+            return
+        self._sidebar_frame_armed = True
         compositor = self.screen._compositor
         compositor._dirty_regions.add(compositor.size.region)
         self.screen.refresh(layout=True)
-        return future
 
     def _display(self, screen: "Screen[Any]", renderable: Any) -> None:
         from textual._compositor import LayoutUpdate
@@ -5921,18 +6092,27 @@ class OperatorApp(App[None]):
         if pending is None:
             return
         source, generation, future = pending
-        if not future.done():
+        if not future.done() and self._sidebar_frame_armed:
             # Counted before the verdict, so "reached the gate" and "passed the
-            # gate" stay separable facts (see the attribute's own note).
+            # gate" stay separable facts (see the attribute's own note) -- and
+            # counted only where the gate is actually ASKED: a frame painted
+            # while the incoming geometry is still converging is not consulted
+            # at all (see `_arm_sidebar_frame_when_settled`), because asking it
+            # can only produce a refusal whose recovery relayout is the work
+            # this waits the hops out to avoid.
             self._sidebar_gate_reached += 1
         if future.done():
             self._sidebar_ready_frame = None
-        elif generation == self._sidebar_navigation.generation and self._sidebar_gate_surface_ready(
-            source
+            self._sidebar_frame_armed = False
+        elif (
+            self._sidebar_frame_armed
+            and generation == self._sidebar_navigation.generation
+            and self._sidebar_gate_surface_ready(source)
         ):
             # This is the real display path, not a timer or a cosmetic selection
             # update. Only now are the target frame and its input surface ready.
             self._sidebar_ready_frame = None
+            self._sidebar_frame_armed = False
             future.set_result(None)
         elif (
             generation == self._sidebar_navigation.generation
@@ -5975,7 +6155,8 @@ class OperatorApp(App[None]):
 
             self._abandon_sidebar_frame(OwnerWentCold(UNREACHABLE_OWNER_MESSAGE))
         elif (
-            generation == self._sidebar_navigation.generation
+            self._sidebar_frame_armed
+            and generation == self._sidebar_navigation.generation
             and self._is_current(source)
             and getattr(source.session, "display_history_current", True)
         ):
@@ -9876,6 +10057,15 @@ class OperatorApp(App[None]):
                 # this, and it is why the `finally` below only starts a fill
                 # when no page was mounted here.
                 self._mount_older_resume_page(on_settled=self._start_resume_fill)
+                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED, in the one place
+                # that has always done it: a block mounted here authors its real
+                # height during a layout pass, and the frames painted before
+                # that would show it mid-flight. It is deliberately NOT run on
+                # every commit -- measured on the bench's warm cells, an extra
+                # synchronous pass costs ~20 ms of commit time for a geometry
+                # that the arming below (`_arm_sidebar_frame_when_settled`)
+                # settles anyway before the gate is asked about it.
+                self._settle_sidebar_geometry_before_gate()
                 # ONLY NOW is the deferred fill genuinely chained. Setting this
                 # BEFORE the mount meant a raising mount was swallowed by the
                 # `except` with `chained` already True, so the `finally` skipped
@@ -9885,53 +10075,6 @@ class OperatorApp(App[None]):
                 # paging lease before re-raising, so the deferred fill that then
                 # starts runs against clean state.
                 chained = True
-                # SETTLE THE GEOMETRY THIS PAGE JUST CHANGED before the view is
-                # handed to the readiness gate. A mounted block authors its real
-                # height during a layout pass, so without this the view is
-                # revealed with its tail block not yet in the compositor's
-                # painted map -- which the gate reads as NOT READY and pays a
-                # recovery relayout for. Measured: 12 TAIL_BLOCK refusals across
-                # 4 cold switches without this call, 0 with it. Synchronous, for
-                # the same reason as above: this commit may not await.
-                #
-                # THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout`
-                # ends in `_compositor_refresh()`, which calls `App._display`
-                # straight away -- so this settle PAINTED a frame of its own,
-                # mid-commit, and that frame is a half-arranged one: the
-                # transcript has already been revealed and tail-scrolled, while
-                # the composer still occupies the OUTGOING draft's rows (dock 7
-                # / editor 3 against the incoming draft's final 5 / 1). Content
-                # drawn against a box that is about to shrink lands outside the
-                # viewport, so the frame showed an EMPTY conversation -- design
-                # round 1, D1, reproduced at `blocks_mounted=46,
-                # blocks_in_view=0, scroll_y=84=max` immediately before a
-                # settled `82`. On a warm switch that was the FIRST painted
-                # frame, i.e. the fastest switch opened on a blank screen, and
-                # at 80x24 the whole screen blanked. It also produced the
-                # `84 -> 82` scroll excursion (D4) and showed the incoming
-                # draft inside the outgoing-sized box (D2).
-                #
-                # Suppressing just the paint keeps every reason this call is
-                # here -- the mounted page still authors its height, the gate
-                # still gets a complete painted map from the NEXT real frame --
-                # while the user never sees the intermediate arrangement.
-                # Measured across warm/cold/draft2 at 120x36 and 80x24: blank
-                # frames 1-3 -> 0 in every arm, painted frames 12 -> 9 (cold)
-                # and 11 -> 8 (draft2), the scroll excursion collapses to a
-                # single settled position, and gate refusals stay 0.
-                #
-                # `_compositor_refresh` rather than `App.batch_update()`: the
-                # batch defers this paint to a `call_later`, which still paints
-                # the same stale arrangement one turn later (measured: blanks
-                # unchanged at `[0]`). The frame must not exist at all, not
-                # arrive late.
-                screen = self.screen
-                paint = screen._compositor_refresh
-                screen._compositor_refresh = _suppress_intermediate_paint
-                try:
-                    screen._refresh_layout()
-                finally:
-                    screen._compositor_refresh = paint
         except Exception:
             # See the docstring: a projection failure must degrade to the
             # deferred fill, never propagate into the invalidation retry.
@@ -9948,6 +10091,105 @@ class OperatorApp(App[None]):
             # normal case after this pre-fill.
             if not chained:
                 self._start_resume_fill()
+
+    def _settle_sidebar_geometry_before_gate(self) -> None:
+        """Settle the incoming dock/transcript geometry, then let the gate see it.
+
+        THE GATE REFUSES A FRAME THIS COMMIT CAN STILL BE HOLDING. A follow-tail
+        view is checked for its last block's bottom row against the transcript's
+        content box, and `_sidebar_gate_surface_ready` refuses when that row sits
+        BELOW the box -- correctly: that frame is painting a clipped tail. The
+        switch reaches exactly that state on most uncached switches, and the
+        geometry that moves is the DOCK, not the page: the composer is
+        `height: auto`, so `editor.load_text` hands the incoming draft to a
+        composer still sized for the outgoing one, and `_show_sidebar_connection`
+        then changes the band's own row. Each of those reflows the transcript's
+        container by a row, and a follow-tail view whose container shrank after
+        it scrolled keeps `scroll_y == max_scroll_y` while its last block now
+        ends one row below the content box. `_await_sidebar_frame` arms the very
+        next paint, so the first frame the gate reads is that stale one; it
+        refuses, `post_display_hook` buys a full-screen relayout, and the same
+        passes repeat until the geometry converges.
+
+        WHY IT SITS AT THE ARMING POINT AND NOT INSIDE THE PRE-FILL. It ran on
+        the mount branch of `_prefill_resume_before_reveal`, which is before
+        `_show_sidebar_connection` -- and that call is one of the geometry
+        movers. Measured on this rig (100x30, three 40-turn targets with
+        staggered drafts): settling inside the pre-fill left the container at 21
+        rows and the refusal frame at 20, with the tail's bottom one row past the
+        content box, every switch. The settle has to be the last word on the
+        geometry, so it is called immediately before `_await_sidebar_frame` in
+        `_commit_sidebar_session` -- after the draft load, after the band, after
+        the anchor restore has been scheduled.
+
+        THE MEASUREMENT, so a future reader can tell whether this still earns
+        its pass. Reproduced with the real prepare/commit pair at 100x30 (6
+        switches, staggered drafts: 6 refusals, one per switch, before this
+        change) and with the bench harness at 120x36 (134- and 7-turn
+        transcripts: 6 of 8 uncached switches refused THREE times each). Every
+        refusal is `TAIL_BLOCK_BELOW_CONTENT` with the view already at `scroll_y
+        == max_scroll_y` and `tail_bottom == content_bottom + 1`. Warm switches
+        refused 0 of 8. Each refusal costs a full relayout plus a full render
+        (the cold cell's 5 layouts / 5 displays against the warm cell's 2 / 2).
+
+        FIX THE GEOMETRY, NEVER THE GATE. Nothing here relaxes
+        `_sidebar_gate_surface_ready`, and nothing may: the refusal is a true
+        statement about a frame that is clipping content. If a future change
+        finds a switch still refusing after this, the frame really is wrong and
+        the geometry is what has to be settled -- a looser gate would paint the
+        clipped tail instead of re-laying it out.
+
+        THE LAYOUT IS WANTED HERE; THE PAINT IS NOT. `_refresh_layout` ends in
+        `_compositor_refresh()`, which calls `App._display` straight away -- so
+        this settle PAINTED a frame of its own, mid-commit, and that frame is a
+        half-arranged one: the transcript has already been revealed and
+        tail-scrolled, while the composer still occupies the OUTGOING draft's
+        rows (dock 7 / editor 3 against the incoming draft's final 5 / 1).
+        Content drawn against a box that is about to shrink lands outside the
+        viewport, so the frame showed an EMPTY conversation -- design round 1,
+        D1, reproduced at `blocks_mounted=46, blocks_in_view=0, scroll_y=84=max`
+        immediately before a settled `82`. On a warm switch that was the FIRST
+        painted frame, i.e. the fastest switch opened on a blank screen, and at
+        80x24 the whole screen blanked. It also produced the `84 -> 82` scroll
+        excursion (D4) and showed the incoming draft inside the outgoing-sized
+        box (D2). Suppressing just the paint keeps every reason this call is
+        here -- the mounted page still authors its height, the dock still
+        reflows, the gate still gets a complete painted map from the NEXT real
+        frame -- while the user never sees the intermediate arrangement.
+        Measured across warm/cold/draft2 at 120x36 and 80x24: blank frames 1-3
+        -> 0 in every arm, painted frames 12 -> 9 (cold) and 11 -> 8 (draft2),
+        and the scroll excursion collapses to a single settled position.
+
+        `_compositor_refresh` rather than `App.batch_update()`: the batch defers
+        this paint to a `call_later`, which still paints the same stale
+        arrangement one turn later (measured: blanks unchanged at `[0]`). The
+        frame must not exist at all, not arrive late.
+
+        SYNCHRONOUS, on purpose: `session_navigation` documents that there is no
+        await between the final identity check and the commit, and a layout pass
+        is not a reason to introduce one.
+        """
+        screen = self.screen
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            # ONE PASS, and it is deliberately not a loop to a fixed point. A
+            # docked widget that changes height reflows over SEVERAL passes in
+            # Textual -- the pass that sees the new editor height arranges the
+            # transcript against the old container height, and the clamp to the
+            # new `max_scroll_y` lands a pass later -- so no number of
+            # SYNCHRONOUS passes can converge the geometry here (measured: two
+            # passes inside this call left every refusal in place). Converging it
+            # is the job of `_arm_sidebar_frame_when_settled`, which is bounded
+            # in refresh hops rather than in synchronous passes. What this pass
+            # is for is narrower and still necessary: a block mounted in the
+            # pre-fill (or a dock that has just taken the incoming draft)
+            # authors its real height HERE, inside the commit, so the frames the
+            # switch paints on the way are not laid out against a geometry that
+            # has already been superseded.
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
 
     def _start_resume_fill(self, *, target: float | None = None) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
