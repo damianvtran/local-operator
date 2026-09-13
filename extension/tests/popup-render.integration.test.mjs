@@ -2247,7 +2247,7 @@ test("the update advisory fills the Connected card's reserved slot, and only whe
     protocol_version: 1,
     pending_origin: undefined,
     extension_version: "0.1.10",
-    extension_expected_version: "0.1.13",
+    extension_expected_version: "0.1.14",
     extension_update_available: true,
   };
   globalThis.fetch = async () => ({ ok: true, json: async () => health });
@@ -2268,12 +2268,12 @@ test("the update advisory fills the Connected card's reserved slot, and only whe
     // pass only if it happened to match.
     assert.equal(
       slot.textContent,
-      "Browser extension 0.1.10 < 0.1.13 — update it in Chrome when a newer version is offered; nothing is blocked.",
+      "Browser extension 0.1.10 < 0.1.14 — update it in Chrome when a newer version is offered; nothing is blocked.",
     );
     assert.doesNotMatch(slot.textContent, /requir|must/i, "an older extension is never a requirement");
 
     // Up to date: the slot empties and the reservation alone remains.
-    health.extension_version = "0.1.13";
+    health.extension_version = "0.1.14";
     health.extension_update_available = false;
     await chrome.storage.session.set({ connState: "connected" });
     await tick(20);

@@ -177,7 +177,7 @@ def test_forget_link_state_drops_the_peer_identity(tmp_path: Path) -> None:
     [
         ("0.1.10", EXPECTED_EXTENSION_VERSION),  # the live-store case
         ("0.1.9", "0.1.10"),  # and the numeric, not lexical, comparison
-        ("0.1", "0.1.13"),  # a prefix is older, not unparseable
+        ("0.1", EXPECTED_EXTENSION_VERSION),  # a prefix is older, not unparseable
     ],
 )
 def test_known_older_versions_are_older(have: str, want: str) -> None:
@@ -188,7 +188,7 @@ def test_known_older_versions_are_older(have: str, want: str) -> None:
     ("have", "want"),
     [
         (EXPECTED_EXTENSION_VERSION, EXPECTED_EXTENSION_VERSION),  # equal is not older
-        ("0.1.14", EXPECTED_EXTENSION_VERSION),  # ahead is not behind
+        ("0.1.15", EXPECTED_EXTENSION_VERSION),  # ahead is not behind
         ("", EXPECTED_EXTENSION_VERSION),  # nothing reported: unknown
         ("0.1.10-beta", EXPECTED_EXTENSION_VERSION),  # not a dotted numeric version
         ("Chrome/153", EXPECTED_EXTENSION_VERSION),

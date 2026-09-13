@@ -70,7 +70,7 @@ def proto_supported(
 #: being older, and nothing is forced by it. Its one use is the update advisory
 #: below, which says a newer version exists without claiming the build is
 #: unusable — the store decides when a newer version is actually offered.
-EXPECTED_EXTENSION_VERSION = "0.1.13"
+EXPECTED_EXTENSION_VERSION = "0.1.14"
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with

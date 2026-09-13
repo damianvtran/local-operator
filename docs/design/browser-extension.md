@@ -229,7 +229,7 @@ plus:
 ```python
 PROTO_VERSION = 1            # the newest proto this daemon speaks
 MIN_SUPPORTED_PROTO = 1      # the oldest it will still drive — a WINDOW, not equality
-EXPECTED_EXTENSION_VERSION = "0.1.13"   # advisory only; pinned to extension/manifest.json by a test
+EXPECTED_EXTENSION_VERSION = "0.1.14"   # advisory only; pinned to extension/manifest.json by a test
 OWNERSHIP_MIN_EXTENSION_VERSION = "0.1.9"  # the first TREE carrying owner_* (PR #798, `ee146fb73`)
 class ErrorCode(StrEnum): ...
 ```
