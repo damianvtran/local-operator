@@ -178,11 +178,13 @@ def test_the_negotiation_mirror_agrees_with_textuals_own_gate(
     parser rather than through a table that restates the expression, because a
     restatement cannot disagree with itself (review round 1, MINOR-1). The
     iTerm rows are the ones that matter: a Textual release that drops the
-    ``not IS_ITERM`` clause, or adds a second route to ``_enable_mouse_pixels``
-    (one call site today, ``linux_driver.py:482``), would leave our copy
-    silently wrong in the direction this fix exists to prevent — installing the
-    gate, and clearing 1016, while ``?1016h`` is on the wire because we were the
-    ones who asked for it.
+    ``not IS_ITERM`` clause reddens them here, because those tokens come from the
+    real branch. A second route to ``_enable_mouse_pixels`` (one call site today,
+    ``linux_driver.py:482``, pinned by inspection) would NOT be caught here — it
+    would enable pixel mouse without producing a mode-report token for this
+    comparison — and it would leave our copy silently wrong in the direction this
+    fix exists to prevent: installing the gate, and clearing 1016, while
+    ``?1016h`` is on the wire because we were the ones who asked for it.
     """
     monkeypatch.setattr(constants, "SMOOTH_SCROLL", smooth_scroll)
     monkeypatch.setattr("textual._xterm_parser.IS_ITERM", is_iterm)

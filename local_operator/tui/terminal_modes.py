@@ -93,9 +93,16 @@ once upstream gates the latch on the mode actually having been requested — the
 issue's own mitigation candidate 3, i.e. ``mouse_pixels`` set only where
 ``SMOOTH_SCROLL`` is on. The tripwire that a Textual bump shipping that fix
 trips is ``test_pixel_mouse_latch.py::
-test_in_band_report_latches_pixel_mouse_coordinates``: it asserts an UNGATED
-parser still leaves ``mouse_pixels`` True after a report, so a release that gates
-the latch fails it rather than passing silently.
+test_env_guard_alone_does_not_stop_a_delivered_report``: it pins
+``SMOOTH_SCROLL=False`` and asserts an UNGATED parser still leaves
+``mouse_pixels`` True after a report, so a release that gates the latch on that
+constant fails it rather than passing silently. The same-shaped
+``test_in_band_report_latches_pixel_mouse_coordinates`` is deliberately NOT the
+tripwire: it does not pin ``SMOOTH_SCROLL``, which defaults to ``1`` and is
+allow-listed as ambient in ``tests/unit/test_ambient_env_isolation.py``, so a
+``SMOOTH_SCROLL``-gated upstream latch would still set ``mouse_pixels`` and leave
+that test green — a tripwire that cannot fire in the default environment is not
+one.
 
 THE MID-SESSION RE-CLEAN. :class:`InBandResizeReclaimer` re-asserts both resets
 (``CSI ?2048l`` and ``CSI ?1016l``) through the app's driver writer on ``Resize``
@@ -182,6 +189,25 @@ to the one our code assumes:
 - **1016 only** — pixel-scale mouse with no reports, so nothing latches the
   divisor and pixels are read as cells: a misread that predates this fix and
   that the same ``?1016l`` fixes.
+
+A WINDOW WE CANNOT CLOSE FROM OUR SIDE. The 2048+1016 arm is fixed from the
+moment our reset is processed, and not before. A co-tenant that sets ``?1016h``
+mid-session — Textual's own re-enable branch writes it beside ``?2048h``, so
+both land together — puts pixel coordinates on the wire, and until the
+``Resize`` that reveals that state reaches
+:meth:`InBandResizeReclaimer.reclaim` the gate is clearing a divisor those events
+never had: they are read as the pixel numbers they are. The window is bounded
+(one round trip, plus whatever input the terminal had already encoded ahead of
+it) and self-healing — the same delivered ``Resize`` that exposes the mode runs
+the re-clean, after which the terminal reports cells again. Measured end to end
+by QA on a real pty (PR #1068): a co-tenant's mid-session ``?1016h`` made cell
+(9, 3) read as (76, 56), and the next ``Resize`` restored (9, 3). It is not
+closable from here because the write is neither ours nor observable: the mode is
+VT state set by another process, we have no channel to read it back — the same
+reason this reset is written unconditionally rather than negotiated — and a
+co-tenant's mode change need not move our geometry, so no event of ours is
+guaranteed to fire on it. The only signal is the delivered resize the co-tenant's
+own report produces, and the events it carried are the ones described above.
 
 A ``TEXTUAL_SMOOTH_SCROLL=1`` user keeps upstream behaviour untouched: nothing is
 installed for them (the gate and the re-clean both key on the negotiation being
