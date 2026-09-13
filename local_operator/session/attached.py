@@ -79,7 +79,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
-from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -103,6 +103,8 @@ from local_operator.session.protocol import (
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
 from local_operator.session.transcript import (
+    ATTACHMENT_KEY,
+    ATTACHMENT_MISSING,
     Transcript,
     read_replay_suffix,
     replay_entries,
@@ -464,6 +466,84 @@ _MESSAGE_PHASE: dict[type, int] = {
 }
 
 
+def _inline_attachment_references(value: Any, store: AttachmentStore) -> tuple[Any, int]:
+    """Copy ``value`` with every attachment reference inlined, or ``value`` itself.
+
+    Same copy-on-write contract as the wire encoder's mirror on the runtime side
+    (``server._reference_image_payloads``): an untouched frame is returned
+    unchanged, so the common path — a frame with no reference in it, which is
+    every frame from an owner running an older build — costs the traversal and
+    no allocation.
+    """
+    if isinstance(value, dict):
+        digest = value.get(ATTACHMENT_KEY)
+        # The discriminant is checked for the same reason the writer checks it
+        # (see ``server._reference_image_payloads``): the walk covers the whole
+        # frame, and a tool's free-form payload admits a key by that name that
+        # is not an image. Every reference either pass writes carries
+        # ``mime_type``, so this refuses nothing a writer produced.
+        if isinstance(digest, str) and (
+            value.get("type") == "image" or isinstance(value.get("mime_type"), str)
+        ):
+            resolved = store.get(digest)
+            block = {key: item for key, item in value.items() if key != ATTACHMENT_KEY}
+            # ``type`` is set rather than carried: the reference replaces an
+            # image block, and the block may have been encoded with
+            # ``exclude_defaults``, which drops ``type`` because it IS the
+            # model's default. Without it the union in ``Message.content``
+            # cannot pick ``ImageContent``. Setting it is lossless — this only
+            # ever rewrites a block that stands in for an image.
+            block["type"] = "image"
+            if resolved is None:
+                # An unresolvable digest is ORDINARY (interrupted write, a
+                # hand-pruned store) and must not raise: the block degrades to
+                # an empty payload, which pydantic parses as an image with no
+                # bytes and the TUI paints as its "no longer in the transcript"
+                # receipt. Raising here would cost the whole attach over one
+                # image.
+                logger.warning("live frame references missing attachment %s", digest)
+                block["data"] = ATTACHMENT_MISSING
+                return block, 1
+            block["data"], block["mime_type"] = resolved
+            return block, 1
+        moved = 0
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            fresh, count = _inline_attachment_references(item, store)
+            moved += count
+            copied[key] = fresh
+        return (copied, moved) if moved else (value, 0)
+    if isinstance(value, list):
+        moved = 0
+        items: list[Any] = []
+        for item in value:
+            fresh, count = _inline_attachment_references(item, store)
+            moved += count
+            items.append(fresh)
+        return (items, moved) if moved else (value, 0)
+    return value, 0
+
+
+def resolve_frame_attachments(data: dict[str, Any], store: AttachmentStore) -> dict[str, Any]:
+    """Inline the media a wire frame references, BEFORE it is parsed.
+
+    WHY THIS IS A SEPARATE PASS AND NOT A PARSER HOOK. ``ATTACHMENT_KEY`` is
+    deliberately not a pydantic field of ``ImageContent``, so a model built
+    straight from an unresolved frame parses as an image with an EMPTY payload:
+    pydantic drops the unknown key, nothing raises, and the bytes are gone with
+    no error anywhere. Resolution therefore has to happen on the raw dict, ahead
+    of validation — and doing it here, inside the wire callback, is also what
+    keeps the desktop bridge's ``model_dump`` downstream of it on the exact
+    inline-base64 shape an out-of-repo renderer already consumes.
+
+    An owner that never externalizes (any build before the live fit pass) sends
+    no ``attachment`` key at all, and this returns ``data`` itself — identity,
+    not a copy — so the older-owner path pays one traversal and nothing else.
+    """
+    resolved, moved = _inline_attachment_references(data, store)
+    return resolved if moved else data
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -742,6 +822,11 @@ class AttachedSession:
         # TUI semantics come exclusively from the canonical v5 state stream.
         self._frontend_future: asyncio.Future[FrontendSync] | None = None
         self._frontend_store: FrontendStateStore | None = None
+        #: Store for media that the owner externalized on the live wire, built
+        #: on first use (:meth:`_attachment_store`). ``None`` until a frame
+        #: actually references an attachment, so a viewer that never sees one
+        #: never resolves the path.
+        self._wire_attachments: AttachmentStore | None = None
         self.jobs = SnapshotJobs()
         self.wake_scheduler = SnapshotWakeScheduler()
         self.mcp_manager = SnapshotMcpManager()
@@ -3912,7 +3997,16 @@ class AttachedSession:
             future.set_result(FrontendSync.model_validate(data))
 
     def _on_frontend_update(self, data: dict[str, Any]) -> None:
-        update = FrontendUpdate.model_validate(data)
+        # The same resolution, for the same reason, on the other frame grade: a
+        # canonical delta carries payload-bearing shapes too (``live_events`` and
+        # a job's trajectory appends both hold tool results), and the runtime's
+        # fit pass is op-agnostic, so a reference can ride here. Without this the
+        # raw ``attachment`` key would flow on into the frontend store AND into
+        # the desktop bridge's published payload, which is the one consumer that
+        # cannot be fixed later.
+        update = FrontendUpdate.model_validate(
+            resolve_frame_attachments(data, self._attachment_store())
+        )
         cut = self._frontend_refresh_cut
         if cut is not None and update.epoch == cut[0] and update.sequence <= cut[1]:
             # The old subscription can deliver this captured prefix after the
@@ -4065,8 +4159,28 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — a UI hook must never break the transport
             logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
 
+    def _attachment_store(self) -> AttachmentStore:
+        """The attachment store that OWNED this session's journal, resolved once.
+
+        ``store_for_transcript_dir`` rather than ``AttachmentStore()``: the
+        reader's own ``config_dir()`` is the same directory in every shipped
+        caller today, and deriving the store from the session path is what makes
+        that a consequence rather than a coincidence — the exact unstated
+        coincidence that let a second, wrong root live beside the write path
+        before (#694, where every reference resolved to ``None``).
+        """
+        store = self._wire_attachments
+        if store is None:
+            store = store_for_transcript_dir(self._config_dir / "sessions" / self._session_id)
+            self._wire_attachments = store
+        return store
+
     def _on_wire_event(self, data: dict[str, Any]) -> None:
-        event = deserialize_event(data)
+        # Resolution runs FIRST, on the raw dict and ahead of validation: an
+        # unresolved reference parses (the key is deliberately not a field) into
+        # an image with an empty payload, silently. See
+        # ``resolve_frame_attachments``.
+        event = deserialize_event(resolve_frame_attachments(data, self._attachment_store()))
         # Command completion is an owner lifecycle fact, not a painting event.
         # A canonical display refresh may buffer/dedupe UI replay, but it must
         # never hide the requested turn's terminal outcome from its scheduler.
