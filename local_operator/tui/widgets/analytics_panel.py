@@ -142,7 +142,7 @@ def format_percent(fraction: float | None) -> str:
 
 
 def format_cost(aggregate: "_CostLike") -> str:
-    """A dollar figure for one scope: ``$12.34`` / ``$1.2k`` / ``$0.0042`` / ``$—``.
+    """A dollar figure for one scope: ``$12.34`` / ``$0.0042`` / ``<$0.0001`` / ``$—``.
 
     Reads three states off the aggregate, because "how much did this cost" has
     three honest answers and collapsing them lies:

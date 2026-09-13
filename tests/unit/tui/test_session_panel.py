@@ -2088,11 +2088,29 @@ def test_exact_figure_and_reconciliation_are_readable_on_demand():
     difference rather than one standing in for the other.
     """
     report = _tree_report()
-    exact = replace(runtime(), spend_micro=31_276_032, spend_knowledge="exact")
+    exact = replace(runtime(), spend_micro=32_000_123, spend_knowledge="exact")
     text = build_session_report(report, exact, width=120).plain
+    # The record's own integer, to the micro-dollar, with the unit stated.
+    assert "$32.000123" in text and "32,000,123 μ$" in text
+    # The ledger's own sum, printed the SAME way, so the two are comparable and
+    # neither is the other's rounding.
     assert "$31.276032" in text
-    assert "31,276,032 μ$" in text
-    assert "record $31.276032" in text
+
+    # D2: BOTH rows are grid rows, so their money sits in the value column the
+    # rest of the screen uses. The first version drew the reconciliation with
+    # ``body.note``, landing its money two columns left of every other value.
+    record_row = next(line for line in text.split("\n") if "Record total" in line)
+    ledger_row = next(line for line in text.split("\n") if "Ledger total" in line)
+    assert record_row.index("$32.000123") == ledger_row.index("$31.276032")
+
+    # D3: the printed Δ is the exact difference of the two printed figures.
+    delta = 32_000_123 - 31_276_032
+    assert f"{delta / 1_000_000:+.6f}" in text, text
+    assert float("+0.724091") == delta / 1_000_000
+
+    # D2: ONE name per sum -- the scope ("all calls") rides the note, not a
+    # second label for the same money.
+    assert "Ledger (all calls)" not in text
 
     # No record (a pre-ledger session): no exact row, and nothing claiming a
     # micro-precision the session cannot speak for.

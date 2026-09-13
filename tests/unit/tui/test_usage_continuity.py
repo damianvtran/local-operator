@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -64,13 +65,21 @@ def _spec() -> ModelSpec:
     return ModelSpec(provider="anthropic", model_id="sonnet", context_window=1_000_000)
 
 
-def _assistant(*, output: int, context: int) -> Message:
-    """One settled assistant turn carrying the provider's own usage."""
+def _assistant(*, output: int, context: int, identity: tuple[str, str] | None = None) -> Message:
+    """One settled assistant turn carrying the provider's own usage.
+
+    ``identity`` names the serving provider/model ON THE USAGE ROW, which is what
+    a rebuild needs to price the row at all: 97.5% of the real store's usage rows
+    carry it, and the 2.5% that do not are a different case with a different
+    honest answer (see the floor test below).
+    """
     return Message(
         role="assistant",
         content=[TextContent(text="answer")],
         stop_reason="stop",
         usage=Usage(
+            provider=identity[0] if identity else None,
+            model_id=identity[1] if identity else None,
             input_tokens=20,
             output_tokens=output,
             cache_read_tokens=max(context - 20, 0),
@@ -727,3 +736,79 @@ async def test_every_writer_of_the_cost_cell_keeps_the_floor_mark(tmp_path: Path
             assert settled.startswith(RESTORED_COST_PREFIX), settled
             # And it did move: the mark is not standing in for a frozen figure.
             assert settled != restored
+
+
+@pytest.mark.asyncio
+async def test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design D1a: the frame the design round could not capture.
+
+    A pre-ledger conversation whose rows CARRY serving identity (97.5% of the
+    real store's rows do) and which has no ``session_spend.v1`` record: the band
+    opens on the newest reading, marked as a lower bound — today's behaviour,
+    unchanged — and the one-time rebuild then replaces it with the accumulated
+    figure. That move is the operator's complaint, fixed, on the surface they
+    read it from.
+
+    The identity is the whole difference between this test and the floor test
+    beside it: without it the rebuild cannot price a row, correctly refuses to
+    publish, and the mark and the floor figure stay.
+    """
+    from local_operator.session import session as session_module
+    from local_operator.session.spend import price_rows
+
+    session = await _session_over(
+        tmp_path / "sess",
+        [
+            Message.user("q1"),
+            _assistant(output=1_000, context=200_000, identity=("anthropic", "sonnet")),
+            Message.user("q2"),
+            _assistant(output=1_000, context=200_000, identity=("anthropic", "sonnet")),
+        ],
+    )
+    assert session.restored_spend() is None, "a pre-ledger session has no record"
+
+    async def factory() -> Session:
+        return session
+
+    # The pair of frames is captured from ONE run by holding the rebuild inside
+    # its worker until the floor has been read. Without the gate the rebuild
+    # lands before the first assertion (two rows price in microseconds) and the
+    # frame the design round asked for is never on screen — a test that races
+    # the thing it is about. The gate is released by the test, so the wait is on
+    # an event rather than on a budget.
+    release = threading.Event()
+    gated = threading.Event()
+
+    def gated_price(rows: list[dict[str, Any]]) -> list[tuple[int, bool]]:
+        gated.set()
+        release.wait(20)
+        return price_rows(rows)
+
+    monkeypatch.setattr(session_module, "price_rows", gated_price)
+
+    app = OperatorApp(factory)
+    with _resolving():
+        async with app.run_test(size=(150, 18)) as pilot:
+            await _settled(app, pilot)
+            assert gated.wait(10), "the rebuild never reached its pricer"
+            assert app._status is not None
+            before = app._status._cost
+            release.set()
+            # Wait on the PUBLICATION (the rebuild marks itself rebuilt), with a
+            # deadline only so a genuine hang fails the run instead of blocking.
+            async with asyncio.timeout(30):
+                while not session.spend.rebuilt:
+                    await pilot.pause()
+                    await asyncio.sleep(0.01)
+            await pilot.pause()
+            after = app._status._cost
+    print(f"BEFORE (newest reading, floor): {before!r}   AFTER (accumulated): {after!r}")
+
+    # Two identical $2.10 turns: the band opens on one of them, marked.
+    assert before == "\u2265$2.10", before
+    # ...and ends on the accumulated figure, unmarked because every row priced.
+    assert after == "$4.20", after
+    assert session.spend.micro == 4_200_000
+    assert session.spend.floor is False

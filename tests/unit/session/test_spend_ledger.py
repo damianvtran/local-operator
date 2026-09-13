@@ -993,6 +993,19 @@ def test_a_reconstruction_below_the_seed_is_refused(
         assert session.spend is before
         assert session._spend_recorded is False, "a smaller figure must not be persisted"
         assert session.restored_spend() is None
+        # DESIGN D1b: when the history genuinely cannot be priced, the figure
+        # stays a lower bound and THE MARK MUST STAY. Asserted on the state the
+        # band paints from, so a later "fix" that turns this into a bare exact
+        # figure fails here rather than in the field.
+        assert session.spend.knowledge() is CostKnowledge.FLOOR
+        store = session._frontend_state_store
+        store.refresh_from_session(session)
+        assert store.state.cost_knowledge is CostKnowledge.FLOOR
+        assert store.state.cumulative_parent_cost == pytest.approx(2.1)
+        # The refused reconstruction is not observable on the session -- that is
+        # what "refused" means -- so the seed's own counts stand: it holds one
+        # priced call and no unpriced ones.
+        assert session.spend.calls == 1 and session.spend.unpriced_calls == 0
 
     asyncio.run(main())
 
@@ -1104,3 +1117,45 @@ def test_a_cheaper_re_price_does_not_log_a_backwards_warning(
         assert [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     asyncio.run(main())
+
+
+def test_the_session_screen_shows_both_money_rows_from_a_real_session(tmp_path: Path) -> None:
+    """Design D1c: the evidence for ``/session``'s new rows must come off a
+    REAL session, not a hand-built diagnostics object.
+
+    The design round found `/session` frames identical before and after the
+    change, because the session double used to build them exposed no
+    ``restored_spend``, so both rows were omitted and the surface this PR adds
+    was never rendered. This drives the production seam
+    (``SessionDiagnostics.capture``) over a session that HAS a record, and
+    asserts both rows are on the screen — the record's exact figure and the
+    ledger's, with the Δ between them.
+    """
+    from local_operator.analytics.model import SessionReport, UsageAggregate
+    from local_operator.tui.widgets.session_panel import (
+        SessionDiagnostics,
+        build_session_report,
+    )
+
+    session = make_session(tmp_path)
+    session.accrue_spend(3_500_750, {"provider": "openrouter", "model_id": "x"})
+
+    async def persist() -> None:
+        await session._write_spend_record()
+
+    asyncio.run(persist())
+    assert session.restored_spend() is not None
+
+    diagnostics = SessionDiagnostics.capture(session)
+    assert diagnostics.spend_micro == 3_500_750
+    report = SessionReport(
+        session.session_id,
+        aggregate=UsageAggregate(calls=4, ok_calls=4, cost_micro=3_000_000, cost_known_calls=4),
+    )
+    text = build_session_report(report, diagnostics, width=120).plain
+    # The exact spelling drops trailing zeros ($3.50075), and the Δ keeps a
+    # fixed width so the column does not jitter: 3.50075 - 3.00 = +0.500750.
+    assert "$3.50075" in text, text
+    assert "3,500,750 μ$" in text
+    assert "$3.00" in text
+    assert "+0.500750" in text
