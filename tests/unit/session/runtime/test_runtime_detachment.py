@@ -38,7 +38,8 @@ WHY THE CELLS ARE SHAPED THIS WAY.
   test, whose comment records this exact failure ("the child took SIGTERM before
   installing the handler, died with rc=-15"). So this test waits for the child's
   own ``SIGUSR1`` task dump (``LOP_RUNTIME_DEBUG_STACKS=1``, an existing opt-in
-  hook installed in the same block) before it sends anything.
+  hook armed later in ``amain`` than the SIGHUP handler) before it sends
+  anything.
   ``SIGUSR1``'s default disposition is fatal too, so the PROBE is made harmless
   at the source rather than in the product: this process sets ``SIGUSR1`` to
   ``SIG_IGN`` before spawning, and CPython's ``subprocess`` restores only
@@ -123,8 +124,9 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, config_dir: Path) -> None:
     # unviewed runtime would exit on its own and every "is it still alive"
     # assertion below would be measuring the reaper instead of the signal.
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "600")
-    # The arming gate: this installs the SIGUSR1 task dump in the same block as
-    # the SIGHUP handler (see the module docstring).
+    # The arming gate: this installs the SIGUSR1 task dump, which `amain` arms
+    # after the SIGHUP handler (see the module docstring), so observing it is
+    # proof the disposition under test is installed too.
     monkeypatch.setenv("LOP_RUNTIME_DEBUG_STACKS", "1")
     # Defence in depth for the WORKSPACE families the loop above already
     # removed: nothing in this module may address a real pane.
@@ -258,10 +260,11 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
             os.getpgid(pid) == pid
         ), f"runtime {pid} is not its own group leader: pgid={os.getpgid(pid)}"
 
-        # READINESS, by the child's own hand. The SIGUSR1 dump is installed in
-        # the same block as the SIGHUP handler, so seeing it is proof that the
-        # block ran. Sent in a bounded loop because a probe that arrives before
-        # arming is discarded by the inherited SIG_IGN rather than queued.
+        # READINESS, by the child's own hand. The SIGUSR1 dump is armed later in
+        # ``amain`` than the SIGHUP handler, so seeing it is proof that the
+        # disposition under test is installed. Sent in a bounded loop because a
+        # probe that arrives before arming is discarded by the inherited SIG_IGN
+        # rather than queued.
         deadline = time.monotonic() + _WAIT_S
         while "state: streaming=" not in _log_text(config_dir):
             assert child.poll() is None, (

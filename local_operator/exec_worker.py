@@ -130,14 +130,18 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
     the same hard-exit shape SIGTERM handling exists to prevent.
 
     SIGTERM remains the one signal that ends this run (``_install_sigterm_handler``);
-    a HUP only produces a bounded, one-shot log line.
+    a HUP only produces a bounded, one-shot log line, which is why ``main()``
+    configures console logging: the job log IS this process's stderr, and a
+    survival nobody can find in the record is the attribution gap this PR exists
+    to close (review round 1, MINOR-1).
     """
-    logged = [False]
+    hup_logged = False
 
     def handler() -> None:
-        if logged[0]:
+        nonlocal hup_logged
+        if hup_logged:
             return
-        logged[0] = True
+        hup_logged = True
         logging.getLogger(__name__).info(
             "exec worker: ignoring SIGHUP (pid %d); this worker is detached from interfaces",
             os.getpid(),
@@ -152,11 +156,20 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         return
     try:
         loop.add_signal_handler(sighup, handler)
-    except (NotImplementedError, RuntimeError):
-        # A platform whose loop cannot take signal callbacks: SIG_IGN is the
-        # disposition this handler means to install, so fall back to it rather
-        # than letting a HUP kill the run.
+        return
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+    # THE FALLBACK CANNOT BE ALLOWED TO RAISE, and it is the branch that plants
+    # an INHERITABLE ignore: ``signal.signal`` works only on the main thread
+    # (``ValueError`` otherwise, which is how a loop that refused for that reason
+    # would then kill the run this function protects), and a SIG_IGN survives
+    # ``exec`` — CPython's ``restore_signals`` resets only SIGPIPE/SIGXFZ/SIGXFSZ
+    # — so anything spawned after it would inherit an ignored HUP. Nothing
+    # reaches here on the shipped path (the loop takes the callback).
+    try:
         signal.signal(sighup, signal.SIG_IGN)
+    except (ValueError, OSError, RuntimeError):
+        logging.getLogger(__name__).warning("could not install the SIGHUP ignore", exc_info=True)
 
 
 def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionProtocol]:
@@ -277,8 +290,26 @@ def main() -> int:
     When the spawner passed ``--job-id`` (CL-09), the worker appends the
     terminal ledger record (``finished_at`` + ``exit_code``) before exiting —
     best effort; ledger bookkeeping must never change the exit code.
+
+    The SIGHUP ignore is armed on the first lines of ``async_main`` — as early
+    as the loop allows, so it covers the turn and everything the turn builds. The
+    residual window is this function's argv/preflight work and the loop
+    bootstrap, and it is deliberately not closed with a process-wide
+    ``SIG_IGN`` set here: this entry point is callable in-process (the suite
+    calls it), and a disposition set there would outlive the call in the
+    caller's process with nothing to restore it. ``_install_sighup_ignore`` says
+    the same about the runtime's entry.
     """
     parsed = build_parser().parse_args()
+    # THE JOB LOG IS THIS PROCESS'S STDERR, so console logging is what makes the
+    # worker's diagnostics reach the record a person reads — including the
+    # one-shot SIGHUP survival line, which was silently discarded before this
+    # because the root logger's default level is WARNING and nothing configured a
+    # handler (review round 1, MINOR-1). Mirrors ``cli.main``'s own call; the
+    # spawner already redirects this stderr into the job log (``exec_mode``).
+    from local_operator.logger import configure_cli_logging
+
+    configure_cli_logging()
     try:
         code = run(parsed)
     except Exception as exc:  # noqa: BLE001 — a log file is the only surface
