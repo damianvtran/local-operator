@@ -256,8 +256,11 @@ async def test_session_panel_prints_search_spend_and_each_provider(tmp_path, mon
     assert " ├ tavily" in text and " └ deepseek" in text
     assert "$0.0080+" in text and "2 searches · 1 unpriced" in text
     assert "$0.0051" in text
-    # The split, in prose: the band's headline covers both, this screen does not.
-    assert "added to the model estimate" in flowed(text)
+    # The footnote follows the HEADLINE rather than contradicting it. It used to
+    # say this screen kept the two halves apart; the moment ``Est. cost`` above
+    # started including the search money, that sentence described the opposite of
+    # what the row showed -- a note explaining a figure it disagrees with.
+    assert "includes this money and names it" in flowed(text)
 
 
 @pytest.mark.asyncio

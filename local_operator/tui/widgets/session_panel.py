@@ -884,9 +884,13 @@ def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
             body.width,
             meta="this session · live",
             note=(
+                # Rewritten with the combined headline: the old note told the reader
+                # this screen kept the two apart, which stopped being true the moment
+                # ``Est. cost`` above started including the search half. A note that
+                # contradicts the row it explains is worse than no note.
                 "Read from the live search ledger, plus any rows recovered from this "
-                "conversation's transcript on resume. The status band's figure shows it "
-                "added to the model estimate; this screen keeps the two apart."
+                "conversation's transcript on resume. The Est. cost row above includes "
+                "this money and names it; the status band shows the same combined figure."
             ),
         )
     )
