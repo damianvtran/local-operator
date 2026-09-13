@@ -49,7 +49,7 @@ from rich.text import Text
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
-from local_operator.tui.widgets.transcript import TranscriptView
+from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 #: Frame the tests run at. Wide enough that the docked sidebar is a real lane
@@ -59,6 +59,15 @@ FRAME = (130, 36)
 
 #: Taller than the frame, so there are rows above the viewport to scroll to.
 LEDGER_ROWS = 40
+
+#: The word the prose assertions locate their rows by. Inside EVERY wrapped row
+#: of :data:`PROMPT`, so a painted-line search finds all of them (or, when the
+#: block is stale, all FOUR of the narrow build instead of the one wide one).
+PROSE_MARKER = "ZLOTY"
+
+#: A prompt that is one row in a 126-cell lane and four in a 79-cell one — the
+#: same shape the design and QA streams measured on a wrapping `UserBlock`.
+PROMPT = " ".join([f"{PROSE_MARKER} alpha beta gamma delta epsilon"] * 8)
 
 
 def _app() -> OperatorApp:
@@ -297,3 +306,180 @@ def test_a_published_lane_outranks_the_cards_own_ladder() -> None:
     assert isinstance(applied, Text)
     assert applied.plain == card._build_row(64).plain
     assert applied.plain != card._build_row(80).plain
+
+
+def _painted_lines(app: OperatorApp) -> list[str]:
+    """Every painted strip's text, in frame order."""
+    return [strip.text for strip in app.screen._compositor.render_strips()]
+
+
+def _painted_prose_rows(app: OperatorApp, block: UserBlock, expected: list[str]) -> list[str]:
+    """The block's painted rows, in its own column, clipped to the authored length.
+
+    Sliced at ``block.region.x`` because the transcript's own padding is not
+    part of what the block authored, and CLIPPED to ``expected``'s own length so
+    the scrollbar thumb painted beside one row is not read as that row's ink.
+    The comparison is against the block's FRESH build, so what this asserts is
+    "these cells carry the characters this block authors at this lane", which is
+    exactly what a stale fold breaks. A row count that does not match returns
+    the raw lines, so the caller's equality fails with a readable diff.
+    """
+    painted = [line for line in _painted_lines(app) if PROSE_MARKER in line]
+    if len(painted) != len(expected):
+        return painted
+    pad = block.region.x
+    return [line[pad : pad + len(exp)].rstrip() for line, exp in zip(painted, expected)]
+
+
+def _fresh_prose_rows(block: UserBlock) -> list[str]:
+    """The rows the block authors at the lane it is now in (a fresh fold)."""
+    rendered = block._build()
+    assert isinstance(rendered, Text)
+    return [line.rstrip() for line in rendered.plain.splitlines() if PROSE_MARKER in line]
+
+
+@pytest.mark.asyncio
+async def test_a_wrapping_prompt_behind_the_scroll_window_refits_to_the_lane() -> None:
+    """The missed ``Resize`` is not ledger-specific: the prose next to it tears too.
+
+    Three review streams hit this in the same frame — the ledger rows repaired
+    and the prompt directly under them still wrapped for the old lane, ~50 cells
+    short of the tool rows it sits between. The fix walks every block that
+    authors its rows at a width (:meth:`TranscriptView._refit_authored_blocks`),
+    so the operator's sequence has to leave the prompt at the lane it is in.
+    """
+    app = _app()
+    async with app.run_test(size=FRAME) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        await _seed_ledger(pilot, view)
+        prompt = UserBlock(PROMPT)
+        view.append_block(prompt)
+        # A few rows of ledger after it, so the prompt is ON SCREEN both before
+        # and after the wheel notch — the reader's position in the operator's
+        # own frame is the foot of the transcript, and prose below the viewport
+        # would be re-fitted by being EXPOSED rather than by this walk, which is
+        # a different code path and would prove nothing here.
+        for extra in range(6):
+            tail_card = _card(LEDGER_ROWS + extra)
+            view.append_block(tail_card)
+            tail_card.mark_done("done")
+        await _settle(pilot)
+        view.scroll_end(animate=False)
+        await _settle(pilot)
+        wide_rows = _fresh_prose_rows(prompt)
+        assert (
+            _painted_prose_rows(app, prompt, wide_rows) == wide_rows
+        ), "the prompt is not on the painted frame at rest, so this test proves nothing"
+
+        # The pending-scroll window, armed at the foot of the transcript.
+        await _scroll_frame(app, pilot)
+        assert _painted_prose_rows(
+            app, prompt, wide_rows
+        ), "the prompt left the frame with the scroll"
+
+        await pilot.press("ctrl+b")  # sidebar open: the lane narrows
+        await _settle(pilot)
+        narrow_lane = view.scrollable_content_region.width
+        assert prompt._built_width == narrow_lane, "the fixture never wrapped at the narrow lane"
+        narrow_rows = _fresh_prose_rows(prompt)
+        assert len(narrow_rows) > len(
+            wide_rows
+        ), "the fixture does not fold differently at the two lanes"
+        assert (
+            _painted_prose_rows(app, prompt, narrow_rows) == narrow_rows
+        ), "the narrow fold is not the one on screen, so the sequence below proves nothing"
+        await _scroll_frame(app, pilot)
+
+        await _toggle_sidebar_behind_a_scroll(app, pilot)
+        lane = view.scrollable_content_region.width
+        assert lane > narrow_lane, "the sidebar did not close"
+        assert (
+            prompt._built_width == lane
+        ), f"the prompt is still authored at {prompt._built_width} in a {lane}-cell lane"
+        fresh = _fresh_prose_rows(prompt)
+        assert _painted_prose_rows(app, prompt, fresh) == fresh, (
+            "the painted prompt is not the build the block authors at this lane: it is "
+            "still showing the narrow fold"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_lane_change_rebuilds_an_authored_block_once() -> None:
+    """Both triggers can reach one block in one lane change; the guard makes it one build.
+
+    A lane change delivers the ordinary ``Resize`` to the blocks the compositor
+    does reach and the container's lane walk to every block that authors a
+    width, so one block can be notified twice for one rebuild. The width
+    equality in :meth:`TranscriptBlock.refit_width` is what makes the second
+    notification free; without it the walk would double the cost of the path
+    that already worked.
+    """
+    app = _app()
+    async with app.run_test(size=FRAME) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        prompt = UserBlock(PROMPT)
+        view.append_block(prompt)
+        await _settle(pilot)
+
+        builds = 0
+        original = UserBlock.set_content
+
+        def counting(self: UserBlock, renderable, *, layout: bool = True) -> None:
+            nonlocal builds
+            builds += 1
+            original(self, renderable, layout=layout)
+
+        UserBlock.set_content = counting  # type: ignore[method-assign]
+        try:
+            await pilot.press("ctrl+b")
+            await _settle(pilot)
+            assert view.scrollable_content_region.width < FRAME[0], "the lane did not move"
+        finally:
+            UserBlock.set_content = original  # type: ignore[method-assign]
+        assert builds == 1, f"one lane change built the prompt {builds} times"
+
+
+@pytest.mark.asyncio
+async def test_a_gutter_only_lane_move_leaves_one_right_edge() -> None:
+    """A scrollbar-only lane move is outside the ``changed`` gate — and must not tear.
+
+    ``scrollable_content_region.width`` also moves when the vertical thumb
+    appears or leaves without this container's own size moving, and that does
+    not reach ``_size_updated``'s ``changed`` gate, so the lane funnel does not
+    run (R3, review round 1; measured: the thumb leaving moves the lane 126→127
+    with ZERO funnel calls, and every row stays laid out at 126 — uniformly).
+
+    The symptom this file exists for is rows at DIFFERENT widths in one frame,
+    so the assertion is agreement rather than equality with the lane: reaching
+    the lane here would need the funnel on every layout pass, including the
+    passes that moved nothing, and reading ``scrollable_content_region`` on one
+    of those forces the deferred full arrangement (see the funnel's docstring).
+    """
+    app = _app()
+    async with app.run_test(size=FRAME) as pilot:
+        await pilot.pause()
+        view = app.query_one(TranscriptView)
+        await _seed_ledger(pilot, view)
+        assert view.show_vertical_scrollbar, "no thumb to remove: the fixture does not overflow"
+
+        lane_before = view.scrollable_content_region.width
+        view.styles.overflow_y = "hidden"
+        await _settle(pilot)
+        assert (
+            view.scrollable_content_region.width != lane_before
+        ), "the gutter did not move the lane"
+
+        rows = _ledger(view)
+        assert {b._built_width for b in rows} == {
+            lane_before
+        }, "a gutter-only move re-authored some rows and not others"
+        edges = []
+        for i, block in enumerate(rows):
+            try:
+                edges.append(_painted_right_edge(app, block, _marker(i)))
+            except AssertionError:
+                continue  # scrolled out of the frame
+        assert len(edges) >= 2, "too few rows on the painted frame to compare"
+        assert len(set(edges)) == 1, f"rows paint at different widths: {sorted(set(edges))}"

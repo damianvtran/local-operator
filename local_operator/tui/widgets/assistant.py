@@ -445,7 +445,10 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text:
             return Text("")
         if not self._frozen_text:
-            return self._flat_whole()
+            # The threaded width goes down with it: `_flat_whole` folds the whole
+            # message, and a rebuild has to author at the width its guard
+            # compared against rather than at a second derivation of it.
+            return self._flat_whole(width)
         console = self._flat_console()
         if self._frozen_flat is None or self._frozen_width != width:
             self._frozen_rendered = Markdown(self._frozen_text)
@@ -479,14 +482,34 @@ class AssistantBlock(TranscriptBlock):
         for 75 blocks, ~175 ms, all of the excess for a width that never
         changed.
         """
+        self.refit_width(self._flat_width())
+
+    def refit_width(self, width: int) -> None:
+        """Re-flatten when ``width`` is not the width these rows were built at.
+
+        The container's lane walk (:meth:`TranscriptView._refit_authored_blocks`)
+        reaches this the same way ``on_resize`` does, because this block is the
+        one that made the tear general: the rows are a flattened ``Text``, so
+        the fold is baked in rather than re-derived per repaint, and the only
+        thing that re-fits it is the ``Resize`` the compositor can drop. A
+        settled agent reply is the most-common wrapping block in the transcript,
+        so without this the lane fix would repair the tool rows above a reply
+        and leave the reply itself stopped short of them — the same one-viewport
+        two-right-edges frame, on the prose.
+
+        ``width`` is used as the REBUILD width rather than only as the trigger,
+        so a rebuild cannot land on a third number: rows are a pure function of
+        the text and the width, which is also what makes the ``_built_width``
+        equality a sound guard.
+        """
         if not self._full_text:
             return
-        if self._flat_width() == self._built_width:
+        if width == self._built_width:
             return
         was_finalized = self._finalized
         self._finalized = False
         try:
-            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            rows = self._flat_whole(width) if was_finalized else self._flat_rows(width)
             self._apply_rows(rows)
         finally:
             self._finalized = was_finalized
@@ -571,11 +594,18 @@ class AssistantBlock(TranscriptBlock):
         """Whether this message ended early (see :meth:`mark_truncated`)."""
         return self._truncated
 
-    def _flat_whole(self) -> Text:
-        """The whole message as one flatten, at the block's current width."""
+    def _flat_whole(self, width: int | None = None) -> Text:
+        """The whole message as one flatten, at ``width`` or the block's own.
+
+        ``width`` is a lane a caller has already published (:meth:`refit_width`)
+        and is used verbatim when given, for the reason that method records;
+        ``None`` keeps the ladder, which is what the streaming and retheme paths
+        want.
+        """
         if not self._full_text:
             return Text("")
-        return flatten(Markdown(self._full_text), self._flat_width(), self._flat_console())
+        lane = width if width is not None else self._flat_width()
+        return flatten(Markdown(self._full_text), lane, self._flat_console())
 
     def retheme(self) -> None:
         """Re-flatten in the new ramp, dropping every theme-baked cache.
