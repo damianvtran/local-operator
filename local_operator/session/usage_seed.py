@@ -175,12 +175,28 @@ def reading_window(
     larger — the ``268.2%`` class of defect this module exists to prevent,
     reintroduced through the denominator instead of the numerator.
 
-    So a window equal to that placeholder is refused UNLESS the model's own
-    metadata corroborates it: ``default_context_window`` is the row's documented
-    default budget, so a spec that reports 128_000 as its default is a model
-    that really does serve 128k (the ``settings`` path in
-    ``context_spec_for_access`` prefers exactly that value). In every placeholder
-    case the field is ``None``, so the two are distinguishable without guessing.
+    So a window equal to that placeholder is refused unless the spec carries
+    positive evidence of a real 128k budget, and the only such evidence on the wire
+    is ``default_context_window == window`` (the ``settings`` path of
+    ``context_spec_for_access`` prefers exactly that value, so a spec reporting it
+    is one whose row was live-enriched).
+
+    **The rule is therefore "only a live-resolved default vouches for 128k", and it
+    has a known false negative.** No row in the STATIC registry assigns
+    ``default_context_window`` at all, so a model whose genuine window is 128k —
+    ``gpt-4o``, ``gpt-4o-mini``, ``o3``, ``o4-mini`` — resolves to
+    ``window=128000, default=None`` and is refused a denominator too. There is no
+    spec-only discriminator: ``max_context_window`` is ``None`` on both the
+    placeholder and the static-row populations, so the value alone cannot separate
+    them (carrying positive evidence of a resolved row onto the spec is the fix
+    that would, and it belongs in the model layer, not here).
+
+    The consequence is honest and deliberately the safe direction: those sessions
+    show absolute tokens and no arc rather than a percentage. It is a MISSING
+    DENOMINATOR, never a wrong reading — and it is no worse than ``main``, which
+    seeds no window at all. The alternative order (trust the flag, accept 128k)
+    prints ``252.0%/128k`` as a measured reading for a conversation whose real
+    budget is larger, which is the lie this whole guard exists to refuse.
 
     A ``None`` here is not a refusal to show the tokens — the caller still has
     the numerator — it is the band's honest ``window unknown`` state: absolute
