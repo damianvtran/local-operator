@@ -227,9 +227,15 @@ def test_a_long_horizon_cycle_is_not_a_spike_in_a_step_budgeted_episode() -> Non
     63k micro-USD is an ordinary cycle in a 40-65k-token context: a 500-step
     episode under a 6 USD cap spends 12-24k micro-USD per STEP, and a step may
     bill two cycles. The deleted ceiling prorated that per-step allowance over
-    the 490 remaining steps (a ~40k ceiling), so it cut a lane that FINISHED
-    AND SCORED 50.00% on its eleventh cycle and called context growth a
-    runaway. With a step budget stated, price decides nothing here.
+    the 490 remaining steps (a ~40k ceiling), so on this snapshot it truncates
+    and calls context growth a runaway.
+
+    The snapshot is the counterfactual form of the measurement, and says so:
+    it is the recorded 50.00%-scoring lane ``batch-k3v7-0/task_016`` at its own
+    numbers, and that lane predates the ceiling, so the ceiling never cut it.
+    The cut the ceiling really made is ``batch-k3-canary6/task_010`` at step 337
+    of 500 (post-#988); the campaign's other 20 recorded cost-spike cuts were
+    the ratio's, each reproduced at its exact recorded step.
     """
 
     guard = CostRateGuard()

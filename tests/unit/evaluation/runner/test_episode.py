@@ -751,8 +751,10 @@ async def test_a_bounded_episode_is_stopped_by_its_cost_cap_not_by_a_prorated_pa
 
     Before this the same episode was cut at step 2 for exceeding a per-cycle
     pace prorated from the remaining budget -- a pace no cycle of a real
-    long-horizon episode can keep, which is exactly the defect that cut a lane
-    that finished and scored 50.00%.
+    long-horizon episode can keep. That prorated pace is the defect: it cut the
+    campaign's ``batch-k3-canary6/task_010`` at step 337 of 500, and replayed
+    over a lane that finished and scored 50.00% it would have cut that lane on
+    its eleventh cycle.
     """
 
     adapter = FakeAdapter(tmp_path, episode_id)

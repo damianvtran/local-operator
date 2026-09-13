@@ -202,20 +202,31 @@ class CostRateGuard:
 
     WHY, and this is a corrected defect rather than a preference. The ratio
     was once replaced, for such an episode, by a per-cycle ceiling prorated
-    from the budget actually left (``remaining cost / remaining steps``).
-    Replaying the recorded cost series of a lane that FINISHED AND SCORED
-    50.00% -- a 500-step episode under that campaign's own $6.00 cap -- through
-    that ceiling fires ``cost-spike`` on its eleventh cycle (a 47,591
-    micro-USD allowance against a 63,487 cycle) and keeps firing. The shape
-    of the error is structural: the ceiling prorates a PER-STEP allowance
-    while a cycle's price is set by CONTEXT SIZE, which grows with horizon by
-    design (12-24k micro-USD per step against 16-90k micro-USD per cycle at a
-    40-65k-token context). It measured context growth and called it waste, and
-    it TIGHTENED as the episode ran, because ``remaining_steps`` falls faster
-    than the budget is spent -- penalising exactly the long-horizon episodes
-    this benchmark is made of. Its predecessor had the same disease in a
-    cheaper form (a prompt-cache miss multiplies one cycle's input price while
-    the context is unchanged).
+    from the budget actually left (``remaining cost / remaining steps``). Two
+    measurements, kept apart here because only one of them is an observation:
+
+    * OBSERVED -- it cut ``batch-k3-canary6/task_010`` (harness 0.54.25, the
+      first release after the ceiling landed) at step 337 of a 500-step run.
+      That is the campaign's one recorded cost-spike cut made by the ceiling
+      rather than by the ratio, and replaying its sealed series reaches the
+      same step.
+    * COUNTERFACTUAL -- replayed over the recorded cost series of a lane that
+      FINISHED AND SCORED 50.00%, ``batch-k3v7-0/task_016`` (harness 0.52.4,
+      written days BEFORE the ceiling existed, so the ceiling never saw that
+      lane), it fires ``cost-spike`` on the lane's eleventh cycle (a 47,591
+      micro-USD allowance against a 63,487 cycle) and keeps firing. That is a
+      simulation of what the ceiling would do to a lane that scored; it is not
+      a cut the ceiling caused, and it must not be quoted as one.
+
+    The shape of the error is structural: the ceiling prorates a PER-STEP
+    allowance while a cycle's price is set by CONTEXT SIZE, which grows with
+    horizon by design (12-24k micro-USD per step against 16-90k micro-USD per
+    cycle at a 40-65k-token context). It measured context growth and called it
+    waste, and it TIGHTENED as the episode ran, because ``remaining_steps``
+    falls faster than the budget is spent -- penalising exactly the
+    long-horizon episodes this benchmark is made of. Its predecessor had the
+    same disease in a cheaper form (a prompt-cache miss multiplies one cycle's
+    input price while the context is unchanged).
 
     THE RULE THIS ENCODES, and it is what any future truncating cost guard
     must obey: such a guard may read an AUTHORITY (the operator's cap) or a
