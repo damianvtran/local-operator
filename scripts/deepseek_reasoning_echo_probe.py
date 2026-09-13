@@ -57,21 +57,53 @@ from typing import Any, cast
 
 import httpx
 
+import local_operator
 from local_operator.harness.types import (
     AgentTool,
     ChatRequest,
     Message,
     MessageRole,
+    ModelSpec,
     TextContent,
     ToolCall,
 )
 from local_operator.model.configure import build_model_spec
+from local_operator.providers import replay
 from local_operator.providers.clients import OpenAICompatClient
-from local_operator.providers.replay import REASONING_ECHO_PLACEHOLDER
 from local_operator.tools import builtin
 
 DEEPSEEK_URL = "https://api.deepseek.com/v1"
 AUTH_DB = Path("~/.local-operator/auth.db").expanduser()
+
+#: The text this branch's builder writes for an assistant turn it has no
+#: reasoning for, used here only to COUNT the turns that took it.
+#:
+#: Resolved off the module when it is present, and spelled out when it is not,
+#: because ``--digest`` has to run against a PRE-FIX tree: that is the whole
+#: recipe (main's body must build under ``PYTHONPATH=<origin/main worktree>``),
+#: and a module-level import of a branch-only symbol turns the comparison into an
+#: ImportError. On such a tree nothing is ever filled, so the fallback is only
+#: ever used to count zero turns -- and it cannot drift silently, because
+#: ``tests/unit/scripts/test_deepseek_reasoning_echo_probe.py`` asserts it equals
+#: the constant this branch ships.
+FALLBACK_ECHO_PLACEHOLDER = "[thinking not recorded]"
+
+
+def echo_placeholder() -> str:
+    """The shipped placeholder where this tree has one, else the literal above."""
+    return getattr(replay, "REASONING_ECHO_PLACEHOLDER", FALLBACK_ECHO_PLACEHOLDER)
+
+
+def without_echo(spec: ModelSpec) -> ModelSpec:
+    """``spec`` with the reasoning-echo capability off.
+
+    A no-op on a pre-fix tree, where the field does not exist and nothing is
+    filled: the point of the OFF body is to be the body that tree would build,
+    so the helper must not invent a field to switch off.
+    """
+    if "requires_reasoning_echo" not in type(spec).model_fields:
+        return spec
+    return spec.model_copy(update={"requires_reasoning_echo": False})
 
 
 def real_key() -> str:
@@ -205,10 +237,11 @@ async def check(
 ) -> bool:
     spec = build_model_spec("deepseek", "deepseek-flash")
     client = OpenAICompatClient(DEEPSEEK_URL)
-    spec_without_echo = spec.model_copy(update={"requires_reasoning_echo": False})
+    spec_without_echo = without_echo(spec)
     ok = True
 
     print(f"--- {name} ---")
+    print("tree:", local_operator.__file__)
     # Both bodies are BUILT first and posted second, so the ON body's fill count
     # can be compared against the OFF body's blank count -- the whole claim is
     # that the second is exactly the first plus the echo.
@@ -232,7 +265,7 @@ async def check(
 
     for label, body, entries in built:
         blank = [m for m in entries if not str(m.get("reasoning_content") or "").strip()]
-        filled = [m for m in entries if m.get("reasoning_content") == REASONING_ECHO_PLACEHOLDER]
+        filled = [m for m in entries if m.get("reasoning_content") == echo_placeholder()]
         async with httpx.AsyncClient(timeout=300) as http:
             # Posted VERBATIM: the body carries ``stream: true`` and
             # ``stream_options.include_usage``, as the runtime sends it, and
@@ -269,9 +302,10 @@ def digest(name: str, messages: list[Message], system: list[str], scope: str | N
     """
     client = OpenAICompatClient(DEEPSEEK_URL)
     spec = build_model_spec("deepseek", "deepseek-flash")
+    print("tree:", local_operator.__file__)
     print(f"--- {name} ---")
     for label, model in (
-        ("echo OFF", spec.model_copy(update={"requires_reasoning_echo": False})),
+        ("echo OFF", without_echo(spec)),
         ("echo ON", spec),
     ):
         body = client._build_body(
