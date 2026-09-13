@@ -5,7 +5,9 @@ Provides REST endpoints for interacting with the Local Operator agent
 through HTTP requests instead of CLI.
 """
 
+import asyncio
 import os
+import secrets
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -30,6 +32,7 @@ from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server import registry as serve_registry
 from local_operator.server.desktop import require_desktop
 from local_operator.server.routes import (
     agents,
@@ -128,30 +131,85 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await app.state.scheduler_service.start()
 
-    yield
-    # Clean up on shutdown
-    desktop_auth = getattr(app.state, "desktop_auth", None)
-    if desktop_auth is not None:
-        await desktop_auth.close()
-        app.state.desktop_auth = None
-    desktop_sessions_host = getattr(app.state, "desktop_sessions", None)
-    if desktop_sessions_host is not None:
-        await desktop_sessions_host.close()
-        app.state.desktop_sessions = None
-    # Off-record panels belong to this HTTP lifetime, not the durable session.
-    app.state.desktop_asides = None
-    app.state.desktop_receipts = None
-    await app.state.scheduler_service.shutdown()
+    # Publish this daemon's rendezvous record: the file that makes a running
+    # `lop serve` findable from another process, and makes THIS install
+    # identifiable (`/health` alone answered with a 200 from three different
+    # builds at once on this host, which is the failure this record exists to
+    # end).
+    #
+    # AFTER the scheduler starts, not before: a record says "a daemon you can
+    # talk to", and publishing one while the scheduler is still coming up
+    # would hand a reader exactly the same premature 200 this is meant to
+    # remove.
+    #
+    # A failure here FAILS STARTUP rather than degrading, deliberately: the
+    # record is this process's answer to "which install is serving", and a
+    # daemon nobody can find is indistinguishable from no daemon at all — the
+    # confusion this change exists to end. Nothing is being traded away for
+    # that, because an unwritable config root is already fatal a few lines up:
+    # the credential store, the config manager and the agent registry all write
+    # into the same root.
+    #
+    # `instance_id` is minted here and held on app state because two readers
+    # must agree on it: `/health` reports it, and a discoverer compares what
+    # `/health` said against the record it dialled from. Process-scoped and
+    # random, never persisted — it identifies THIS process, not the install.
+    app.state.instance_id = secrets.token_urlsafe(32)
+    serve_record = serve_registry.build_record(instance_id=app.state.instance_id)
+    # The config root resolved above, passed explicitly: the publisher pins the
+    # directory it publishes into for its whole life, so a heartbeat can never
+    # land in a different root than the one this process was started with.
+    serve_publisher = serve_registry.publisher(serve_record, root=config_dir)
+    app.state.serve_record = serve_record
+    # One task on the loop, cancelled below. The record is rewritten whole by
+    # the shared `publish`, so its atomicity and 0600/0700 permissions are the
+    # session registry's, not re-implemented here.
+    serve_heartbeat = asyncio.create_task(serve_registry.heartbeat_loop(serve_publisher))
+    app.state.serve_heartbeat = serve_heartbeat
 
-    app.state.credential_manager = None
-    app.state.config_manager = None
-    app.state.agent_registry = None
-    app.state.job_manager = None
-    app.state.websocket_manager = None
-    app.state.event_broker.close()
-    app.state.event_broker = None
-    app.state.env_config = None
-    app.state.scheduler_service = None
+    yield
+    try:
+        # Clean up on shutdown
+        desktop_auth = getattr(app.state, "desktop_auth", None)
+        if desktop_auth is not None:
+            await desktop_auth.close()
+            app.state.desktop_auth = None
+        desktop_sessions_host = getattr(app.state, "desktop_sessions", None)
+        if desktop_sessions_host is not None:
+            await desktop_sessions_host.close()
+            app.state.desktop_sessions = None
+        # Off-record panels belong to this HTTP lifetime, not the durable session.
+        app.state.desktop_asides = None
+        app.state.desktop_receipts = None
+        await app.state.scheduler_service.shutdown()
+
+        app.state.credential_manager = None
+        app.state.config_manager = None
+        app.state.agent_registry = None
+        app.state.job_manager = None
+        app.state.websocket_manager = None
+        app.state.event_broker.close()
+        app.state.event_broker = None
+        app.state.env_config = None
+        app.state.scheduler_service = None
+    finally:
+        # The record outlives nothing: it is removed here, LAST, and under
+        # `finally:` so that no exit path can leave a file behind claiming a
+        # live daemon at a port nothing listens on. The heartbeat keeps running
+        # through the teardown above on purpose — the process is still alive
+        # and still answering, so `live` is the truthful classification until
+        # the listener actually closes; a wedged record is what a reader would
+        # see if the teardown hung, which is also true.
+        #
+        # The removal itself is best-effort by contract (the shared
+        # `unpublish` swallows a missing file): a SIGKILLed daemon leaves its
+        # record for the next `scan` to reap, and an exit path must never raise
+        # over a file that a reader already reaped for us.
+        serve_heartbeat.cancel()
+        await asyncio.gather(serve_heartbeat, return_exceptions=True)
+        serve_publisher.close()
+        app.state.serve_record = None
+        app.state.serve_heartbeat = None
 
 
 app = FastAPI(
