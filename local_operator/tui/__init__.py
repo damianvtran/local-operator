@@ -14,6 +14,7 @@ from local_operator.logger import file_logging
 from local_operator.session.protocol import SessionProtocol
 from local_operator.tui.terminal_modes import (
     guard_pixel_mouse_latch,
+    install_pixel_mouse_gate,
     reset_in_band_resize,
 )
 
@@ -183,7 +184,20 @@ async def run_tui(
     # stop Textual re-enabling the mode after seeing our reset. See
     # `terminal_modes` for why neither half suffices alone.
     reset_in_band_resize()
-    guard_pixel_mouse_latch()
+    guarded = guard_pixel_mouse_latch()
+    if guarded:
+        # The guard's return value IS the configuration switch for the second
+        # half: with smooth scrolling closed, no in-band report can be a
+        # legitimate statement about OUR coordinates, so the parser's one-way
+        # pixel latch is gated off for the rest of the run. Deliberately NOT
+        # installed for a user who set TEXTUAL_SMOOTH_SCROLL=1 — that user asked
+        # for pixel coordinates and upstream behaviour must be untouched.
+        #
+        # This is the first import of `textual` on a boot that reaches here, and
+        # that is safe in this order and only in this order: it pulls
+        # `textual.constants` in, so it has to run AFTER the guard froze
+        # SMOOTH_SCROLL from the environment.
+        install_pixel_mouse_gate()
 
     from local_operator.tui.app import OperatorApp  # lazy: Textual import
 

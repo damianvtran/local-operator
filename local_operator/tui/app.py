@@ -206,6 +206,10 @@ from local_operator.tui.session_presentation import (
 )
 from local_operator.tui.session_workspace import SessionWorkspace
 from local_operator.tui.settings import settings_get
+from local_operator.tui.terminal_modes import (
+    InBandResizeReclaimer,
+    pixel_mouse_gate_installed,
+)
 from local_operator.tui.terminal_title import (
     TerminalTitle,
     cwd_label,
@@ -3131,6 +3135,11 @@ class OperatorApp(App[None]):
         #: which owns the terminal, and lent to the band, which owns the state
         #: it displays — see :meth:`_start_terminal_title`.
         self._terminal_title: TerminalTitle | None = None
+        #: Re-closes terminal mode 2048 mid-session, or ``None`` when there is
+        #: no terminal to close it on or the guard did not apply — see
+        #: :meth:`_start_mode_reclaimer`. Shares the driver writer with the
+        #: title and the notifier.
+        self._mode_reclaimer: InBandResizeReclaimer | None = None
         #: Publishes "this pane holds session <id>" to the host multiplexer, so
         #: a crash that takes the multiplexer down can bring the conversation
         #: back instead of opening a fresh shell (see
@@ -8175,6 +8184,11 @@ class OperatorApp(App[None]):
         # out-of-app counterpart (state vs edge — see `tui/notify.py`), and both
         # want the terminal available and the app non-headless.
         self._start_notifier()
+        # Second out-of-app escape on the same terms, and the one that has to
+        # exist BEFORE the first resize arrives: a co-tenant can dirty mode 2048
+        # at any moment, and the report for the resize that reveals it latches
+        # Textual's pixel divisor while that very report is parsed.
+        self._start_mode_reclaimer()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
         # and the band has to say so on the boot frame rather than on whichever
@@ -15985,6 +15999,13 @@ class OperatorApp(App[None]):
         gated on the screen height, and before main's `_refresh_band` landed
         nothing asked it to re-decide when the terminal crossed that floor.
         """
+        # The mode first, and the reason is ordering rather than taste: this
+        # handler runs AFTER the resize has happened, so every report the terminal
+        # sends from here on is one we no longer have to survive. The event itself
+        # may already have latched Textual's pixel divisor, which is what the
+        # parser gate answers; this half is what stops the NEXT one.
+        if self._mode_reclaimer is not None:
+            self._mode_reclaimer.reclaim()
         # The EVENT's size, not the app's: during a resize `self.size` is still the
         # previous frame's, and one stale cell is enough to put the card threshold on
         # the wrong side of itself — at 85 columns it decided "bar" for a box that was
@@ -20517,6 +20538,34 @@ class OperatorApp(App[None]):
         self.workers.cancel_all()
         await super()._shutdown()
 
+    def _start_mode_reclaimer(self) -> None:
+        """Keep the in-band resize mode closed for the rest of the session.
+
+        Same sink and same gate shape as :meth:`_start_terminal_title` and
+        :meth:`_start_notifier`: ``driver.write`` because a second writer
+        interleaves an escape into a frame Textual's writer thread is painting,
+        and no driver or a headless app because there is then no terminal mode
+        to re-close (``local-operator serve``, the headless REPL and ``exec``
+        all reach here that way).
+
+        The third gate is the configuration itself: this object exists only when
+        ``run_tui`` installed the parser gate, i.e. when the guard closed the
+        negotiation. A user who set ``TEXTUAL_SMOOTH_SCROLL=1`` asked for smooth
+        scrolling and pixel coordinates, and a mid-session ``?2048l`` would
+        switch that off underneath them.
+
+        The mode can be dirtied by any process sharing the tty, so this is
+        constructed at mount rather than lazily on the first resize: the report
+        that reveals a dirty mode latches the divisor while it is parsed, so the
+        re-closer has to already exist when the first one arrives.
+        """
+        driver = self._driver
+        if driver is None or self.is_headless:
+            return
+        if not pixel_mouse_gate_installed():
+            return
+        self._mode_reclaimer = InBandResizeReclaimer(driver.write)
+
     def _start_notifier(self) -> None:
         """Build the desktop notifier, on the same terms as the title writer.
 
@@ -21505,6 +21554,13 @@ class OperatorApp(App[None]):
         support a read receipt once the host and rendered anchor also agree.
         """
         self._attention_focus_observed = True
+        # While this app was not focused, another process writing to the same
+        # tty can have negotiated mode 2048 (a suspended TUI resuming, a shell
+        # running an unpatched `lop`), so it is re-closed here before the reports
+        # that would scale are the ones we are about to read. User-driven, so at
+        # most one 8-byte write per focus gain.
+        if self._mode_reclaimer is not None:
+            self._mode_reclaimer.reclaim()
         if self._notifier is not None:
             self._notifier.set_focused(True)
         self._set_animation_focused(True)
