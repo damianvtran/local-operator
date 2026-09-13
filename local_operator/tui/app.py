@@ -7043,6 +7043,26 @@ class OperatorApp(App[None]):
         else:
             editor.placeholder = "Draft a message…" if status else editor.resting_placeholder
 
+    async def _sidebar_session_was_stopped(self, session: Any) -> bool:
+        """The durable deliberate-stop read, on the declared viewer surface.
+
+        Extracted because the connect asks it in two places with the same
+        meaning and the same cost story: once BEFORE any dial
+        (`_connect_sidebar_source`), and once again to re-confirm a verdict the
+        app is about to re-publish instead of re-deriving it
+        (`_reclick_sidebar_source`). One implementation, so the two calls cannot
+        drift apart in what they mean by "stopped".
+
+        The read is the facade's own (`session_was_stopped`), never a second
+        marker probe in the TUI: it is the same fact `_recover_runtime` reads to
+        keep a takeover from resurrecting a session a kill switch just ended,
+        and its LIMIT is documented there -- a wake-less stop writes no marker,
+        so False is "not proven stopped", not "proven alive".
+        """
+        if not _is_viewer(session):
+            return False
+        return await session.session_was_stopped()
+
     def _start_sidebar_connection(
         self, source: SessionInteraction, *, continues_retry: bool = False
     ) -> None:
@@ -7201,6 +7221,51 @@ class OperatorApp(App[None]):
             session = source.session
             if not _is_viewer(session):
                 return
+            # A DELIBERATE STOP IS READABLE BEFORE THE DIAL, AND READING IT
+            # FIRST IS MOST OF THIS FIX. The durable marker a stop leaves on the
+            # wake-index entry (`stopped_at`; see `AttachedSession.
+            # session_was_stopped`) is the app's own record that this owner is
+            # not coming back, and it costs one small file to read. Until this
+            # call existed the app only asked on the FAILURE arm below -- after
+            # the round had already spent its whole engage envelope waiting for
+            # an owner that cannot answer. Measured on the reviewer's rig
+            # (PR #1049 round 2, findings U6.1): a row clicked long after its
+            # owner was stopped sat on `Saved · Connecting…` for 12.8-13.9 s and
+            # only then printed the honest sentence, with the latch reporting
+            # `attempts=1 elapsed=13.9s` -- i.e. the entire wait was the
+            # envelope, and the marker was consulted after it.
+            #
+            # WHAT IT COSTS ON THE HAPPY PATH, stated because this runs on every
+            # connect rather than only on a failing one: one small file read.
+            # The record scan inside `session_was_stopped` is reached only when
+            # that file carries a marker, so a healthy switch -- no stop record
+            # at all -- pays the read and nothing else. It buys back the whole
+            # envelope on the arm that matters, which is measured in seconds.
+            #
+            # THE FAILURE MODE THIS MUST NOT INTRODUCE is a recoverable session
+            # giving up early, and the marker's own contract is what prevents it:
+            # `session_was_stopped` requires the stop marker AND that no live
+            # runtime record exists, so a live owner -- including a successor
+            # that republished after a crash -- always answers False and takes
+            # the ordinary path. A stopped session that is later reopened clears
+            # the marker (the index rewrite on open does that), so the next click
+            # dials again. Both arms are pinned as negative controls in
+            # `test_sidebar_connect_retry.py`.
+            #
+            # WHAT IT CANNOT SEE, unchanged and recorded on the PR as deferred:
+            # a session with NO wake schedules writes no marker at all, so the
+            # app still cannot tell "stopped, nothing coming" from "owner died, a
+            # successor may republish" for that shape (UX U7). That needs the
+            # wakes-store/stop-path contract change, not a call added here.
+            #
+            # Raising rather than returning: the latch arm below is the ONE
+            # place this verdict's fields are written and its copy is chosen, so
+            # both ways of learning the same fact publish identically. The
+            # `except` arm cannot reach the marker read a second time -- it is
+            # skipped once `terminal_reason` is set.
+            if await self._sidebar_session_was_stopped(session):
+                terminal_reason = "the session was stopped"
+                raise OwnerWentCold(UNREACHABLE_OWNER_MESSAGE)
             # ``bind_runtime`` rather than the private ``_ensure_bound`` it
             # forwards to: this is a sidebar source being connected on the
             # user's behalf, which is exactly the "explicitly requested owner
@@ -7405,17 +7470,15 @@ class OperatorApp(App[None]):
             # promises a reselection that reuses this same facade. One report,
             # in the latch's register, is the whole honest answer.
             #
-            # A STOPPED SESSION IS THE OTHER WAY A ROUND IS UNRETRYABLE, and it
-            # is asked here rather than at the bind because the shape that
-            # reaches the user most often never returns from the bind at all: a
-            # row clicked long after its owner was stopped fails the DIAL
-            # (`Connect call failed`), which lands in this arm — eight rounds and
-            # 16 s later, ending on "Select again to retry", an affordance the
-            # reviewer followed for another 15 s to the same verdict (UX U2,
-            # round 1). `session_was_stopped` is the durable marker the facade
-            # already reads for this exact question, so it costs one marker read
-            # per FAILED round (never on the happy path) and stops being asked
-            # once it answers yes.
+            # A STOPPED SESSION IS THE OTHER WAY A ROUND IS UNRETRYABLE. It is
+            # normally caught BEFORE the dial now (see the pre-flight at the top
+            # of this method, which is where the 12.8-13.9 s of `Connecting…`
+            # went); the read is kept here as the backstop for the rounds that
+            # reached this arm anyway -- a stop that landed while this very round
+            # was in flight, and every failure raised before the pre-flight. It
+            # is the durable marker the facade already reads for this exact
+            # question, so it costs one marker read per FAILED round and stops
+            # being asked once it answers yes.
             #
             # WHAT THIS CANNOT SEE, stated because the residue is real rather
             # than hypothetical: a session with NO wake schedules leaves no
@@ -7537,8 +7600,20 @@ class OperatorApp(App[None]):
         message.stop()
         if self._session is not None and self._session.session_id == message.session_id:
             if self._interaction.display_only:
-                self._start_sidebar_connection(self._interaction)
-                self._show_sidebar_connection(self._interaction)
+                # A CLICK ON A ROW WHOSE VERDICT THE APP ALREADY HOLDS MUST NOT
+                # SPEND ANOTHER CONNECT. This is the arm UX round 2 filed as
+                # U6.2: with `can_never_bind` and `connection_error` already set
+                # on the source -- the app's own verdict, published seconds
+                # earlier -- clicking the row again went straight into
+                # `_start_sidebar_connection`, which clears the verdict, paints
+                # `Saved · Connecting…` and spends the whole envelope (measured
+                # 12.8 s) to re-print the identical sentence. `_reclick_*`
+                # re-confirms the held verdict with one cheap read and answers
+                # from it, or falls through to the ordinary connect when the
+                # session has genuinely come back.
+                self.run_worker(
+                    self._reclick_sidebar_source(self._interaction), group="sidebar-connect"
+                )
             elif self._publish_stopped_session_verdict(self._interaction, message.session_id):
                 # A STOPPED SESSION HAS NO CONNECT TO RUN, so the click used to be
                 # silently inert (UX U5, round 1): `display_only` is false here
@@ -7569,6 +7644,46 @@ class OperatorApp(App[None]):
             self._editor().focus()
             return
         self._select_sidebar_session(message.session_id)
+
+    async def _reclick_sidebar_source(self, source: SessionInteraction) -> None:
+        """Answer a repeat sidebar click from the verdict the app already holds.
+
+        THE WAIT THIS REMOVES (UX U6.2, PR #1049 round 2): the app offered the
+        user a wait it knew the answer to. `_start_sidebar_connection` clears
+        `connection_error` on entry -- correct for a fresh attempt, which is what
+        it is written for -- so a repeat click on a row whose connect had already
+        concluded painted `Saved · Connecting…` over the answer, and took the
+        full envelope again to put the identical sentence back.
+
+        WHY IT RE-CONFIRMS INSTEAD OF TRUSTING THE FLAGS. A held verdict is a
+        fact about the past, and the one that matters here -- "the owner is
+        stopped" -- can stop being true while this source never gets re-dialled:
+        the session can be reopened from another terminal, or by `/resume`, and
+        that clears the durable marker. The cheap marker read is what tells the
+        two apart, so a click that finds it cleared falls through to the ordinary
+        connect -- the same round a first click would run -- rather than
+        answering a question the app no longer knows the answer to. Cost: one
+        small file, and only on the arm that has a verdict to re-check.
+
+        `connect_attempts` is surrendered exactly as the latch surrenders it, so
+        the affordance behind any later successful dial still means a FULL
+        budget rather than a resume of this one.
+
+        The composer's refusal row is restated beside the band so the two
+        surfaces cannot disagree: both read the fields, and one of them is about
+        to be rendered for a click the user just made.
+        """
+        if (
+            source.connection_error
+            and source.can_never_bind
+            and await self._sidebar_session_was_stopped(source.session)
+        ):
+            source.connect_attempts = 0
+            self._show_sidebar_connection(source)
+            self._restate_composer_refusal()
+            return
+        self._start_sidebar_connection(source)
+        self._show_sidebar_connection(source)
 
     def _publish_stopped_session_verdict(self, source: SessionInteraction, session_id: str) -> bool:
         """Publish the stopped-session verdict for a row the app is ALREADY on.
