@@ -6505,6 +6505,25 @@ class AttachedSession:
         # harness, so a shared instance is one `+=` from corrupting state.
         return self.frontend_state.last_usage
 
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """No rows recovered on a VIEWER: the transcript is the runtime's.
+
+        Declared and implemented rather than left to a duck-probe, because the
+        TUI reads it on the resume path and an absent member there degrades the
+        band to a silently-short figure -- the shape of the /team and /agent
+        regressions.
+
+        An empty tuple is a SCOPE decision, not a capability limit: the search
+        spend a viewer would show comes from a process-wide ledger keyed by
+        session id (``web_search.cost.SEARCH_SPEND``), and the viewer's own
+        process holds no rows for the owner's searches, so recovering rows from
+        the journal here would not reach the screen this member feeds. Routing a
+        viewer's search spend from the runtime is its own change; until then an
+        empty tuple leaves the ledger untouched, which renders as absence rather
+        than as a confident ``$0.0000``.
+        """
+        return ()
+
     def running_subagents(self) -> int:
         return sum(
             1

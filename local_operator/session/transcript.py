@@ -1213,6 +1213,68 @@ class Transcript:
             if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
         ]
 
+    def search_spend_rows(self) -> list[dict[str, Any]]:
+        """Every ``web_search`` cost this conversation recorded, oldest first.
+
+        The search twin of :meth:`usages_since_compaction`, and deliberately NOT
+        bounded by the newest compaction the way that one is. That boundary
+        exists because a context SIZE reading taken before a pass describes a
+        context that no longer exists; money already spent is not invalidated by
+        a later rewrite of the context, so a figure from before the marker is a
+        fact rather than a stale reading. Copying the boundary here would
+        silently drop a resumed conversation's earlier search spend and make the
+        restored total a floor for no reason -- and the whole point of restoring
+        it is that the search ledger is process-wide and starts empty in a new
+        process (see ``local_operator.web_search.cost``).
+
+        Read off ``provider_payload["details"]["search_cost"]``, the harness's
+        own tool-result bookkeeping. PRUNING KEEPS IT: ``_pruned_entry`` copies
+        the payload and adds a flag, because it blanks content rather than
+        details, so a blanked tool result still yields its cost. A compaction
+        that drops rows out of the file is the remaining lossy path, which is
+        why the caller treats this as best-effort and never as a guarantee.
+
+        Returns the recorded mappings plus the serving ``provider``, raw: this
+        module owns persistence and not the search cost model, so parsing stays
+        with the caller -- the same split :meth:`usages_since_compaction` makes
+        for ``Usage``.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            details = (entry.payload.get("provider_payload") or {}).get("details")
+            if not isinstance(details, dict):
+                continue
+            # BOTH money rows: ``web_search`` records its per-search price under
+            # ``search_cost`` and ``web_read`` records its own under
+            # ``read_cost``. Reading only the first restored a read-heavy
+            # conversation's searches while silently dropping its reads, so the
+            # recovered figure sat below what the live ledger had shown for the
+            # same conversation.
+            for key, kind in (("search_cost", "search"), ("read_cost", "read")):
+                cost = details.get(key)
+                if not isinstance(cost, dict):
+                    continue
+                rows.append(
+                    {
+                        **cost,
+                        # The writer's own ledger key wins where it states one:
+                        # ``web_read`` carries no ``provider`` field, so deriving
+                        # ``<provider>:read`` labelled every restored read
+                        # ``:read`` -- one kind of spend split across two rows on
+                        # resume, against the live path's ``deepseek:read``.
+                        "provider": str(cost.get("ledger_provider") or "")
+                        or (
+                            str(details.get("provider") or "")
+                            if kind == "search"
+                            else f"{str(details.get('provider') or '')}:read"
+                        ),
+                        "kind": kind,
+                    }
+                )
+        return rows
+
     def pending_prunes(self) -> dict[str, str]:
         """``{target entry id: notice}`` for every un-folded prune entry.
 

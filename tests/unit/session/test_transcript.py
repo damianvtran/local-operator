@@ -946,3 +946,132 @@ class TestDurableConversationPath:
         assert durable_conversation_path(tmp_path / "absent.jsonl") is False
         torn = self._write(tmp_path, ["{torn", "not json"])
         assert durable_conversation_path(torn) is False
+
+
+@pytest.mark.asyncio
+async def test_search_spend_rows_survive_a_resume(tmp_path, transcript):
+    """A resumed conversation recovers the search spend its tool rows recorded.
+
+    Driven through the REAL persistence path — harness tool-result bookkeeping,
+    encode, file, replay — because what can break is not the read: it is whether
+    ``ToolResult.details`` reaches the row at all, and whether a SECOND session
+    built on the same directory can see it. A test that handed the accessor a
+    hand-made payload would prove neither.
+
+    The spend itself is real money that the model-token accounting never saw
+    (``web_search`` bills separately), so the ledger that displays it is
+    process-wide and starts empty in a new process; this read is the only thing
+    that stands between a resumed session and reporting a search-heavy
+    conversation as free.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_search",
+        content=[TextContent(text="Snippets are intentionally capped.")],
+        details={
+            "provider": "deepseek",
+            "search_cost": {
+                "usd": 0.0031,
+                "basis": "token estimate",
+                "priced_from_usage": False,
+                "session_usd": 0.0031,
+                "session_searches": 1,
+                "provider_searches": 1,
+            },
+        },
+    )
+    await transcript.append_message(Message.tool_result(result))
+    transcript.flush()
+
+    # A SECOND Transcript on the same directory is the resume: nothing is shared
+    # but the file, so the row that comes back is the one that was persisted.
+    resumed = Transcript(tmp_path / "sess")
+    rows = resumed.search_spend_rows()
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "deepseek"
+    assert rows[0]["usd"] == pytest.approx(0.0031)
+    assert rows[0]["basis"] == "token estimate"
+
+    # And through a real Session, which is the accessor the host actually calls
+    # on adopt. ``_make_session`` is the harness this module's siblings use; the
+    # point here is only that the seeding happens at construction and is
+    # available before any turn runs.
+    from tests.unit.session.test_cut_off_turns import _make_session
+
+    session = _make_session(tmp_path / "sess")
+    assert session.restored_search_spend() == tuple(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_pruned_search_row_keeps_its_cost(tmp_path, transcript):
+    """Pruning blanks a tool result's CONTENT, not its cost bookkeeping.
+
+    Compaction blanks hundreds of tool rows on a long conversation, and the
+    spend recovery reads those rows. If a prune took the details with the
+    content, a resumed session would quietly report a fraction of what it spent
+    — with no mark to say so — which is the loss this read exists to prevent.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_search",
+        content=[TextContent(text="a page of snippets")],
+        details={
+            "provider": "tavily",
+            "search_cost": {
+                "usd": 0.0080,
+                "basis": "tavily credits",
+                "priced_from_usage": True,
+            },
+        },
+    )
+    entry = await transcript.append_message(Message.tool_result(result))
+    await transcript.append_prune(entry.id, "[pruned]")
+    await transcript.compact_file(min_reclaim_bytes=0)
+
+    rows = Transcript(tmp_path / "sess").search_spend_rows()
+    assert rows and rows[0]["provider"] == "tavily"
+    assert rows[0]["usd"] == pytest.approx(0.0080)
+    assert "a page of snippets" not in transcript.path.read_text()
+
+
+@pytest.mark.asyncio
+async def test_a_reads_cost_row_is_recovered_with_its_own_ledger_key(tmp_path, transcript):
+    """Resume recovery must find ``read_cost`` rows, and key them as the tool did.
+
+    Round 1's review found the recovery reading only ``search_cost``, so a
+    read-heavy conversation came back with its searches and none of its reads.
+    Round 2's found the replacement deriving the key from a ``provider`` field a
+    read result does not carry, so the restored row landed under ``:read``
+    instead of the live ``deepseek:read`` -- one kind of spend split across two
+    rows on resume.
+
+    Driven through the real persistence path, like the search-row test beside it:
+    what can break is whether ``ToolResult.details`` reaches the row.
+    """
+    result = ToolResult(
+        tool_call_id="call-1",
+        tool_name="web_read",
+        content=[TextContent(text="Answer.")],
+        details={
+            "pages": 4,
+            "read_cost": {
+                "ledger_provider": "deepseek:read",
+                "usd": 0.002,
+                "basis": "tokens at list price",
+                "session_usd": 0.002,
+                "session_searches": 0,
+                "session_reads": 1,
+                "reads": 1,
+            },
+        },
+    )
+    await transcript.append_message(Message.tool_result(result))
+    transcript.flush()
+
+    resumed = Transcript(tmp_path / "sess")
+    rows = resumed.search_spend_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "deepseek:read"
+    assert rows[0]["kind"] == "read"
+    assert rows[0]["usd"] == pytest.approx(0.002)

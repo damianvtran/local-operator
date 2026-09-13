@@ -150,7 +150,7 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
-from local_operator.tui.costs import job_cost, turn_cost
+from local_operator.tui.costs import SearchSpendSnapshot, job_cost, turn_cost
 from local_operator.tui.error_text import error_text
 from local_operator.tui.events import (
     AssistantDelta,
@@ -8206,6 +8206,11 @@ class OperatorApp(App[None]):
         refresh_frontend_usage = getattr(session, "refresh_frontend_usage", None)
         if callable(refresh_frontend_usage):
             refresh_frontend_usage()
+        # The same adopt edge, for the other ledger a resumed conversation has to
+        # bring back with it: search spend. Must run BEFORE the subscription
+        # below hands `_apply_frontend_state` its first snapshot, because that
+        # path paints the band's money cell and folds search spend into it.
+        self._restore_search_spend(session)
         if callable(subscribe_frontend):
             from local_operator.session.frontend_state import FrontendSubscription
 
@@ -8508,6 +8513,13 @@ class OperatorApp(App[None]):
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
+        # Search spend rides the band cell here too. This path renders the
+        # STORE's cumulative model cost rather than `_spend_total()` (which
+        # already folds search spend in), so without this the canonical
+        # owner/follower path would show the model figure alone while the legacy
+        # path showed the combined one: one session, two numbers, the canonical
+        # one short.
+        search_usd = self._session_search_spend().usd
         self._status.update(
             model_label=getattr(state, "effective_model_label", "")
             or getattr(state, "model_label", ""),
@@ -8523,7 +8535,18 @@ class OperatorApp(App[None]):
             context_is_estimate=getattr(state, "context_is_estimate", None),
             context_window=getattr(state, "context_window", None),
             cost=(
-                self._spend_text(cost) if cost is not None else ("$—" if billed_unknown else None)
+                self._spend_text((cost or 0.0) + search_usd)
+                if cost is not None
+                else (
+                    # Model money unpriceable, search money real: the cell can
+                    # only show the half it knows, so it carries the band's
+                    # floor mark (``≥``). Showing a partial figure as if it were
+                    # the total is the lie
+                    # ``_spend_text``'s docstring calls the more expensive one.
+                    self._spend_text(search_usd, floor=True)
+                    if search_usd
+                    else ("$—" if billed_unknown else None)
+                )
             ),
             # A local opener label is DISPLAY state until a generated title is
             # accepted. Canonical snapshots correctly keep their persisted title
@@ -9208,6 +9231,68 @@ class OperatorApp(App[None]):
         #: Monotonic and never reset: a token from any earlier binding is simply
         #: unequal to the current one, which is all the comparison needs.
         self._binding_epoch += 1
+
+    def _restore_search_spend(self, session: Any) -> None:
+        """Seed a RESUMED conversation's search spend into the search ledger.
+
+        The search twin of :meth:`_restore_reported_usage`, and it exists for
+        the same reported shape of defect: the band's figure is fed by searches
+        that run while this process is alive, and
+        :data:`~local_operator.web_search.cost.SEARCH_SPEND` is process-wide, so
+        ``--resume`` opened on a conversation with real retrieval spend behind
+        it and reported none of it -- while the transcript on disk carried every
+        figure in its tool rows (see ``Session.restored_search_spend``).
+
+        Seed-only, and idempotent by CONSTRUCTION rather than by a flag: rows
+        are recorded only when this session has no ledger entries yet. Adoption
+        runs again on ``/reload`` (a swap back onto a session this process has
+        already watched), and replaying the transcript's rows on top of the live
+        ones there would double every search the reload could see. A session
+        that already has ledger rows keeps them -- they are the same searches,
+        recorded live, plus any whose transcript write has not landed yet.
+
+        Best-effort by design. ``restored_search_spend`` is optional (a reduced,
+        attached or SDK facade host has no transcript), and a failure leaves the
+        ledger exactly as it was; the panels then draw no search line at all,
+        which is the honest "nothing recovered".
+        """
+        restore = getattr(session, "restored_search_spend", None)
+        if not callable(restore):
+            return
+        try:
+            from local_operator.web_search.cost import SEARCH_SPEND
+            from local_operator.web_search.models import SearchCost
+
+            session_id = str(getattr(session, "session_id", "") or "")
+            # ``operations``, not ``searches``: a conversation whose only recorded
+            # spend is reads has entries too, and the guard exists to stop a
+            # reload double-recording them, not to let reads through.
+            if SEARCH_SPEND.session(session_id).operations:
+                return
+            # ``isinstance`` rather than a bare iteration: ``restore`` is
+            # duck-typed (a reduced host may expose anything), and the check is
+            # also what tells the type checker this is iterable at all.
+            restored = restore()
+            if not isinstance(restored, (list, tuple)):
+                return
+            for row in restored:
+                if not isinstance(row, dict):
+                    continue
+                usd = row.get("usd")
+                SEARCH_SPEND.record(
+                    session_id,
+                    str(row.get("provider") or ""),
+                    SearchCost(
+                        # ``None`` stays ``None``: an unpriced search recovered as
+                        # a confident 0.0 would render as free money.
+                        usd=float(usd) if isinstance(usd, (int, float)) else None,
+                        basis=str(row.get("basis") or ""),
+                        priced_from_usage=bool(row.get("priced_from_usage")),
+                    ),
+                    kind=str(row.get("kind") or "search"),
+                )
+        except Exception:  # noqa: BLE001 -- a recovered total is never worth a boot failure
+            logger.debug("search spend recovery failed", exc_info=True)
 
     def _park_unadopted_session(self, built: asyncio.Future[Any]) -> None:
         """Hand a built-but-never-adopted session to teardown, if there is one.
@@ -31286,7 +31371,20 @@ class OperatorApp(App[None]):
         # itself on Esc and returns nothing to reconcile, exactly like the
         # other read-only overlays.
         self.push_screen(
-            AnalyticsScreen(aggregate, daily=daily, monthly=monthly, window_totals=window_totals)
+            AnalyticsScreen(
+                aggregate,
+                daily=daily,
+                monthly=monthly,
+                window_totals=window_totals,
+                # Search spend is not in this ledger (``web_search`` bills
+                # separately), so the two halves are handed to the screen rather
+                # than derived from the aggregate. Read HERE, on the same pass
+                # that read the store, so the screen holds one snapshot of each
+                # and a repaint cannot show a search total from a different
+                # moment than the model one.
+                search_spend=self._process_search_spend(),
+                session_search_spend=self._session_search_spend(),
+            )
         )
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
@@ -31314,7 +31412,16 @@ class OperatorApp(App[None]):
         # is attached here rather than read inside capture(). /session reconciles
         # the band's ≥ against the ledger figure in prose; see the field's own
         # note for why the two marks stay separate.
-        runtime = replace(runtime, spend_is_floor=self._spend_is_floor)
+        runtime = replace(
+            runtime,
+            spend_is_floor=self._spend_is_floor,
+            # The search ledger is the second half of "what has this session
+            # spent", and it is LIVE process state rather than a ledger read, so
+            # it is attached here beside the band's floor mark instead of being
+            # read inside ``capture`` -- the panel then renders it even on a
+            # frame whose ledger read failed.
+            search_spend=self._session_search_spend(),
+        )
         # Own a visible, cancellable surface before starting IO. A late disk
         # result must update this surface, never push over a user's new draft.
         #
@@ -36310,7 +36417,14 @@ class OperatorApp(App[None]):
         if not canonical:
             self._harvest_subagent_costs()
         total = self._spend_total()
-        if cost is not None or (self._session is not None and self._subagent_costs):
+        # Search spend joins the children in this gate for the same reason: a turn
+        # that priced nothing ITSELF can still have paid for retrieval, and -
+        # without this - the session's first search-heavy turn would leave the
+        # segment holding the previous turn's figure while the ledger moved.
+        search_spend = self._session_search_spend()
+        if cost is not None or (
+            self._session is not None and (self._subagent_costs or search_spend.searches)
+        ):
             # A turn that priced nothing itself still has a total worth showing
             # once a child has spent — a parent whose entire turn was one `task`
             # call reports no usage of its own, and reading "$—" beside a working
@@ -37144,7 +37258,29 @@ class OperatorApp(App[None]):
                 total += self._live_manager_cost(nested, default_label, seen)
         return total
 
-    def _spend_text(self, total: float | None = None) -> str:
+    def _search_spend_is_floor(self) -> bool:
+        """Whether the search half makes the band's figure a lower bound.
+
+        Two shapes, both about the CELL rather than about any one search: the
+        session has an unpriced search (so the total covers part of the work),
+        or its search money is priced while its model money is not (so the cell
+        is showing half a session). Folded in here because the mark is a
+        property of the figure -- the same argument :meth:`_spend_text` makes
+        for centralizing it -- and because leaving it to the callers is how the
+        band came to print a combined total that was a floor, unmarked, while
+        `/session` for the same session printed `$0.0040+` beside an explicitly
+        unpriced row.
+        """
+        snapshot = self._session_search_spend()
+        # ``cost_is_partial`` alone. The model-money-unknown case this used to
+        # spell out here is unreachable -- ``usd`` only accrues for priced
+        # operations, which are exactly the ones that do not raise the unpriced
+        # count -- and the real case (a search-only figure against an
+        # unpriceable model) is marked at the call site that knows it is showing
+        # half a session.
+        return snapshot.cost_is_partial
+
+    def _spend_text(self, total: float | None = None, *, floor: bool | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.
 
         Every writer of the cost cell goes through here, because the mark is a
@@ -37182,7 +37318,8 @@ class OperatorApp(App[None]):
         spend = self._spend_total() if total is None else total
         if not spend:
             return ""
-        return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+        is_floor = self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+        return f"{RESTORED_COST_PREFIX if is_floor else ''}{format_cost(spend)}"
 
     @staticmethod
     def _frontend_child_costs(state: Any) -> dict[str, float]:
@@ -37195,7 +37332,8 @@ class OperatorApp(App[None]):
         return dict(getattr(state, "child_costs", {}) or {})
 
     def _spend_total(self) -> float:
-        """Everything this session has spent: its own turns plus its children's.
+        """Everything this session has spent: its own turns, its children's, and
+        its web searches.
 
         ONE blended number, which is what the band renders. A split
         (``$0.42 +$0.19``) was the alternative and is the wrong trade here: the
@@ -37205,8 +37343,76 @@ class OperatorApp(App[None]):
         band answers "what has this session cost me", which is one number; the
         per-child breakdown already has a home with more room in the subagent
         panel and the full-page view, where each row carries its own figure.
+
+        SEARCH SPEND IS FOLDED IN, and that is the decision this figure turns
+        on. ``web_search`` bills separately from the model and the model
+        accounting never saw it (see ``web_search.cost``), so a headline that
+        left it out UNDERSTATED what the session cost -- by a lot on a
+        search-heavy turn, which is precisely the session a reader is watching
+        the number for. The counter-argument, that the two are different kinds
+        of spend and belong distinguishable, is served where there is room for
+        it: ``/session`` and ``/analytics`` each render search spend as its own
+        attributed section beside the model figure, and both say that the band's
+        headline covers them together. A number that is right beats a number
+        that is itemised and short.
+
+        Two limits, both deliberate. Only PRICED searches add here: an unpriced
+        search contributes nothing and earns no new mark, which is the stance
+        this band already takes for an unpriced model call (an unpriced turn is
+        skipped rather than added as a zero) -- the panels state the unpriced
+        COUNT in words instead. And a SUBAGENT's searches are not included: the
+        ledger keys by the session that asked, a child's id is its own, and no
+        parent-to-child map for it exists here. ``/analytics``' process-wide total
+        is where a tree's search spend is complete; see ``_process_search_spend``.
         """
-        return self._total_cost + sum(self._subagent_costs.values())
+        return (
+            self._total_cost + sum(self._subagent_costs.values()) + self._session_search_spend().usd
+        )
+
+    def _session_search_spend(self) -> SearchSpendSnapshot:
+        """This session's search spend, frozen for display.
+
+        Read from the process-wide ledger the ``web_search`` tool writes rather
+        than from the session, because the tool has a ``ToolContext`` and this
+        app has the session -- the ledger is the seam the two already share (see
+        its module docstring). Keyed by session id, which is what keeps a
+        SUBAGENT's searches out of this figure: they land under the child's own
+        id. ``_spend_total`` documents that asymmetry; the reasoning behind it
+        is that no parent-to-child map for the ledger exists on this side.
+
+        Never raises and never returns ``None``: the band's money cell reads
+        this, and a lost ledger read must degrade to an empty snapshot rather
+        than take the frame with it.
+        """
+        session = self._session
+        if session is None:
+            return SearchSpendSnapshot()
+        try:
+            from local_operator.web_search.cost import SEARCH_SPEND
+
+            return SearchSpendSnapshot.of(
+                SEARCH_SPEND.session(str(getattr(session, "session_id", "") or ""))
+            )
+        except Exception:  # noqa: BLE001 -- a spend readout never takes the band down
+            logger.debug("session search spend read failed", exc_info=True)
+            return SearchSpendSnapshot()
+
+    def _process_search_spend(self) -> SearchSpendSnapshot:
+        """Search spend across every session in this process, frozen for display.
+
+        The ``/analytics`` counterpart of :meth:`_session_search_spend`: the
+        ledger's ``overall()`` merges every session key it holds, which is also
+        the only place a subagent's retrieval spend IS counted -- a child's
+        searches are recorded under the child's own session id, so the parent's
+        own figure (and therefore the band) does not include them.
+        """
+        try:
+            from local_operator.web_search.cost import SEARCH_SPEND
+
+            return SearchSpendSnapshot.of(SEARCH_SPEND.overall())
+        except Exception:  # noqa: BLE001 -- a spend readout never takes a screen down
+            logger.debug("process search spend read failed", exc_info=True)
+            return SearchSpendSnapshot()
 
     def on_turn_boundary_start(self, message: TurnBoundaryStart) -> None:
         """turn_start: one model call is beginning.
@@ -38592,7 +38798,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 108
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 109
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
