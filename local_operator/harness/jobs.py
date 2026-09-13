@@ -397,6 +397,21 @@ class AsyncJob(BaseModel):
     # a restored provider fallback is the model actually being called, and
     # ``_accumulate_usage`` prices usage off this field.
     model_label: str | None = None
+    # Whether a TIER or ROLE PIN chose that model, as opposed to the child
+    # inheriting the session's own. Written once, at REGISTRATION, from the spec
+    # the launch resolved (``model_spec is not None``), and never overwritten:
+    # it is an ATTRIBUTION, not a model, so the runner's later label write (a
+    # restored provider fallback, above) does not change whose choice it was.
+    #
+    # It cannot be inferred downstream, and the ``task`` result line is why it
+    # exists: that line used to decide between "on <model>" and "on this
+    # session's model (<model>)" by comparing labels, which reads a tier that
+    # happens to resolve to the session's OWN model as an inherit. That is not
+    # hypothetical — every tier in the operator's config resolved to their
+    # session's model for a while, and the line then told the delegating model
+    # the child had inherited when a pin had in fact been accepted. ``None`` is
+    # "not recorded" and the reader falls back to comparing labels.
+    owns_model: bool | None = None
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same

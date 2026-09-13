@@ -675,12 +675,11 @@ def test_operator_mode_tells_the_model_not_to_pass_effort(config_dir, tmp_path) 
     write_tiers(config_dir, THREE, model_choice=MODEL_CHOICE_OPERATOR)
     (task,) = create_tools(_context(tmp_path), enabled=["task"])
     assert "do not pass 'effort'" in task.description
-    assert "values.subagents.model_choice=operator" in task.description
-    # The clip is asserted, not the architect's fuller sentence: the wording was
-    # shortened to fit the start-context ratchet (``scripts/bench_context_budget.py``),
-    # so what this pins is the CONTENT a delegating model needs — a pin is still
-    # available to a role — not the phrasing.
-    assert "a role may pin its own" in task.description
+    # The key is asserted in the spelling the `/settings` page prints and `lop
+    # config edit` takes, not the ``values.``-prefixed file path: the page never
+    # shows the prefix, and a reader who is told to change a key they cannot
+    # find on their own screen has been told nothing.
+    assert "subagents.model_choice=operator" in task.description
 
 
 def test_operator_mode_leaves_the_agent_tool_only_the_sentinel(config_dir, tmp_path) -> None:
@@ -694,7 +693,7 @@ def test_operator_mode_leaves_the_agent_tool_only_the_sentinel(config_dir, tmp_p
     assert prop is not None
     assert _enum(prop) == ["inherit"]
     assert "no effort tiers are yours to choose" in prop["description"]
-    assert "operator sets tier pins" in prop["description"]
+    assert "clears a pin" in prop["description"]
 
 
 def test_operator_mode_with_zero_tiers_says_the_same_thing(config_dir, tmp_path) -> None:
@@ -718,13 +717,21 @@ def test_operator_mode_drops_the_model_choice_description_entirely(config_dir, t
 
 
 def test_model_mode_names_the_swap_in_its_description(config_dir, tmp_path) -> None:
+    """The FACTS, as substrings, never the sentence.
+
+    This copy is charged to the start-context ratchet
+    (``scripts/bench_context_budget.py``), so it gets trimmed — this PR trimmed
+    other copy for exactly that reason. An equality assertion would turn the
+    next trim into a failure unrelated to the behaviour under test, which is why
+    every other copy test here matches substrings too.
+    """
     write_tiers(config_dir, {"hi": THREE["hi"]}, model_choice=MODEL_CHOICE_MODEL)
     prop = _effort(_schemas(tmp_path)["task"], "properties")
     assert prop is not None
-    assert prop["description"] == (
-        "Swaps this child's MODEL (not its reasoning level): hi → anthropic/claude-opus-5. "
-        "Omit to inherit this session's model and reasoning effort."
-    )
+    assert "Swaps this child's MODEL" in prop["description"]
+    assert "not its reasoning level" in prop["description"]
+    assert "hi → anthropic/claude-opus-5" in prop["description"]
+    assert "Omit to inherit this session's model" in prop["description"]
 
 
 @pytest.mark.asyncio
@@ -735,12 +742,23 @@ async def test_operator_mode_refuses_a_tier_before_any_launch(config_dir, tmp_pa
 
     assert result.is_error
     assert "invalid arguments" in result.text
-    assert "effort is the operator's to choose" in result.text
+    assert "it is the operator's to choose" in result.text
     assert "'hi' would run it on anthropic/claude-opus-5 instead of this session's model" in (
         result.text
     )
     assert "Relaunch without 'effort'" in result.text
     assert "job:" not in result.text
+    # ORDER is part of the contract, not style: the tool card truncates per line
+    # and never wraps, so on the first line of the MESSAGE the remedy has to be
+    # COMPLETE, not merely early. ``_append_output_body`` spends ~23 cells on
+    # ``- effort: Value error, `` before the message begins, which leaves ~69
+    # cells visible at 100 columns (measured on a rendered frame). The wording
+    # this replaced put "Relaunch without 'effort'" at cell 274 of the message;
+    # a fact-first reorder put it at 73, still one word past the cut.
+    message = result.text.split("Value error, ", 1)[1]
+    window = message[:69]
+    assert "Relaunch without 'effort'" in window
+    assert "it is the operator's to choose" in window
 
 
 @pytest.mark.asyncio
@@ -750,7 +768,7 @@ async def test_operator_mode_omits_the_model_name_for_an_unconfigured_tier(
     write_tiers(config_dir, None, model_choice=MODEL_CHOICE_OPERATOR)
     result = await _call(tmp_path, "task", {"label": "r", "prompt": "p", "effort": "hi"})
     assert result.is_error
-    assert "effort is the operator's to choose" in result.text
+    assert "it is the operator's to choose" in result.text
     assert "would run it on" not in result.text
 
 
@@ -766,7 +784,7 @@ async def test_operator_mode_batch_item_is_refused_with_its_own_locator(
     )
     assert result.is_error
     assert "tasks.0.effort" in result.text
-    assert "effort is the operator's to choose" in result.text
+    assert "it is the operator's to choose" in result.text
     assert "job:" not in result.text
 
 
@@ -785,7 +803,10 @@ async def test_operator_mode_refuses_a_role_pin_and_accepts_the_sentinel(
     assert "a pin runs that role on a different MODEL ('hi' → anthropic/claude-opus-5)" in (
         refused.text
     )
-    assert "pass 'inherit' to clear an existing pin" in refused.text
+    assert "pass 'inherit' to clear a pin" in refused.text
+    # U2's other half: the person who wants one strong reviewer is told where a
+    # pin properly lives, not only how to stop asking for it.
+    assert "pins it in the role's profile" in refused.text
 
     for value in ("inherit", ""):
         ok = await _call(

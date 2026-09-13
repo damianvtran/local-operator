@@ -9927,28 +9927,49 @@ def _operator_choice_task_rejection(tier: str) -> str:
     level — an operator reading ``'hi'`` as "think harder" is the misreading
     that produced this change. Omitted when the tier is unconfigured (nothing
     resolves, and inventing the selector would be a lie).
+
+    ORDER matters here and is not stylistic: the tool-result card truncates PER
+    LINE at the pane's width and never wraps, so on the surface a person reads
+    the refusal on, only the first line survives — and that line spends ~23
+    cells on ``- effort: Value error, `` before this text begins. Measured on a
+    rendered frame at 100 columns, the visible window inside the message is ~69
+    cells, and three facts compete for it: the remedy, who owns the field, and
+    the key that names it. The wording below puts the remedy and the ownership
+    inside the window and lets the KEY be the part that trails — it is the one
+    of the three the operator can also read off the `/settings` row's own detail
+    line, and the delegating model, this message's first reader, receives it
+    whole either way. Two earlier orders were measured and rejected: fact first
+    put the remedy at cell 73 (one word past the cut), remedy first with the key
+    inline put the ownership past it.
     """
     selector = configured_effort_tiers().get(tier)
     where = (
         f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
     )
     return (
-        "effort is the operator's to choose in this configuration "
-        "(values.subagents.model_choice=operator). 'effort' selects a different "
-        f"MODEL for the child, not a reasoning level{where}. Relaunch without "
-        "'effort' — the child then inherits this session's model and reasoning effort."
+        "Relaunch without 'effort': it is the operator's to choose "
+        f"(subagents.model_choice=operator), and it swaps the child's MODEL, not its "
+        f"reasoning level{where}."
     )
 
 
 def _operator_choice_pin_rejection(tier: str) -> str:
-    """The ``agent`` create/update refusal for a tier the model may not pin."""
+    """The ``agent`` create/update refusal for a tier the model may not pin.
+
+    This one carries the OPERATOR's remedy as well as the model's, because
+    refusing a model-side pin would otherwise leave the person who wants one
+    strong reviewer with no route at all: the copy names both the row that
+    hands the picker back and the place a pin properly lives (the role's own
+    profile, which the desktop editor writes today). The model still gets its
+    instruction first — omit the field, or pass ``inherit`` to clear a pin.
+    """
     selector = configured_effort_tiers().get(tier)
     where = f" ('{tier}' → {selector})" if selector else ""
     return (
-        "effort is the operator's to choose in this configuration "
-        "(values.subagents.model_choice=operator): a pin runs that role on a "
-        f"different MODEL{where}, not at a different reasoning level. Omit "
-        "'effort', or pass 'inherit' to clear an existing pin."
+        "effort is the operator's to choose here (subagents.model_choice=operator): a "
+        f"pin runs that role on a different MODEL{where}, not at a different reasoning "
+        "level. Omit 'effort', or pass 'inherit' to clear a pin. To pin a role, the "
+        "operator sets subagents.model_choice='model' or pins it in the role's profile."
     )
 
 
@@ -10192,8 +10213,8 @@ def _effort_tier_field_description() -> str:
 #: absent field would otherwise imply, and it names the key so an operator (or
 #: a model asked to explain the refusal) can find the switch that changes it.
 _OPERATOR_CHOICE_EFFORT_SENTENCE = (
-    "No effort tiers are yours to choose (values.subagents.model_choice=operator): "
-    "children inherit this session's model — do not pass 'effort'; a role may pin its own."
+    "No effort tiers are yours to choose (subagents.model_choice=operator): "
+    "children inherit this session's model — do not pass 'effort'."
 )
 
 
@@ -10741,9 +10762,10 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     """Return a context-bounded handoff while keeping the full report readable.
 
     A task job's header names the model the child ran on, as recorded by the
-    harness (``job.model_label``, set from the child's own model-change event),
-    so the parent can STATE which model produced a delegated result rather
-    than assume it. This is the parent-visible half of the pinned-tier work:
+    harness (``job.model_label``, stamped by the launch at registration and
+    OVERWRITTEN from the built child — see :attr:`AsyncJob.model_label`), so the
+    parent can STATE which model produced a delegated result rather than assume
+    it. This is the parent-visible half of the pinned-tier work:
     ``subagent_start.model`` tells a stream consumer, this tells the model
     that launched the child. It is deliberately the harness's record and not
     anything the child said about itself, which is what makes it evidence
@@ -10780,6 +10802,32 @@ def _job_model_label(context: ToolContext | None, job_id: str) -> str:
     return str(getattr(job, "model_label", None) or "")
 
 
+def _job_owns_model(context: ToolContext | None, job_id: str) -> bool | None:
+    """Whether a TIER or ROLE PIN chose the registered job's model, or ``None``.
+
+    Read off the JOB, exactly as the label beside it is, because the job row is
+    stamped at registration and therefore knows this before the child exists. A
+    label comparison cannot answer it: a tier that resolves to the session's own
+    model produces the same string as an inherit, which is how a child that a
+    pin had moved was reported as inheriting while every tier in the operator's
+    config pointed at their session's model.
+
+    ``None`` — not ``False`` — when the host keeps no job manager, the row is
+    unknown, or the row predates the stamp (a resumed legacy row): the caller
+    then falls back to comparing labels rather than asserting an inherit it
+    cannot know.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return None
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — an attribution is decoration, never a launch
+        return None
+    owns = getattr(job, "owns_model", None)
+    return owns if isinstance(owns, bool) else None
+
+
 def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str:
     """One launched child, NAMING the model it will run on.
 
@@ -10794,7 +10842,12 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     child that owns a model (a tier, or a role's own pin). ``on this session's
     model (<model>)`` is a child that owns none — saying so is what stops the
     other wording from reading as "someone chose the model you already had".
-    The session's own label comes from the context (see
+    Which one applies comes from the job row's ``owns_model`` stamp, NOT from
+    comparing the two labels: those are equal whenever a pin resolves to the
+    session's own model, and the inherit wording then reports the one fact the
+    line exists to carry. Only when the stamp is absent (no job manager, an
+    unknown row, a legacy row) does this fall back to the comparison. The
+    session's own label comes from the context (see
     ``ToolContext.session_model_label``); when the host supplies none the line
     falls back to today's shape rather than claiming a model it cannot name.
     """
@@ -10805,7 +10858,8 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     session_model = str(getattr(context, "session_model_label", "") or "")
     if not model:
         return f"- {label} ({agent}): job {job_id}"
-    if model == session_model:
+    owns = _job_owns_model(context, job_id)
+    if owns is False or (owns is None and model == session_model):
         return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
     return f"- {label} ({agent}) on {model}: job {job_id}"
 

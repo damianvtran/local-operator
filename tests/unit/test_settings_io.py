@@ -1507,6 +1507,36 @@ class TestTheSubagentModelChoiceRow:
         )
         assert params.effort == "hi"
 
+    def test_the_model_choice_row_states_the_decision_and_fits_its_choices(self) -> None:
+        """U1 and D1's halves, pinned as facts rather than as wording.
+
+        U1: the help described the CAPABILITY ("Lets a delegating model swap a
+        child onto a configured model tier"), so at the shipped default it read
+        backwards — the resting state of the row claimed the picker was open.
+        It now says what the row DECIDES, which is true at either value, and
+        names the operator's own route to a pin (a role's profile), because the
+        model-side pin is refused on purpose.
+
+        D1: both choice descriptions are sized to the EXPANDED row — the only
+        place they render — and the bounds below are measured on a RENDERED
+        FRAME at 100 columns: 26 cells for the default's row (its ``(default)``
+        marker and the expansion's own marker cost the rest) and 40 for the
+        other. The pair this replaced measured 93 and 120 painted cells, so
+        "role pins still apply" and "different, costlier model" — the two
+        consequences the row exists to state — were clipped at every width the
+        page is measured at. Bounds, not the strings: this copy is sized against
+        a column, and the next person may find better words for the same cells.
+        """
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert "swap a child" not in setting.help
+        assert "pins" in setting.help and "profile" in setting.help
+        by_value = {choice.value: choice for choice in setting.choices}
+        assert cell_len(by_value["operator"].description) <= 26
+        assert cell_len(by_value["model"].description) <= 40
+        assert "inherits" in by_value["operator"].description
+        assert "costlier model" in by_value["model"].description
+
     @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
     def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
         """The two facts the incident proved these rows were missing.
@@ -1520,8 +1550,15 @@ class TestTheSubagentModelChoiceRow:
         setting = settings_io.resolve_key(f"subagents.models.{tier}")
         assert setting is not None
         assert "Bills at that model's rates" in setting.help
-        assert "empty keeps the parent's" in setting.help
-        assert "Picker: row above" in setting.help
+        # "empty inherits" rather than "empty keeps the parent's": the shorter
+        # verb is the one the rest of this change uses ("inherits this session's
+        # model"), and it buys the 8 cells that let the KEY PATH stay on the line
+        # at 100 columns — the frame the evidence is captured on.
+        assert "empty inherits" in setting.help
+        # Names the row instead of its position: registry order is
+        # max_running, model_choice, lo, med, hi, so "row above" points `med` at
+        # `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
+        assert "See subagents.model_choice" in setting.help
         # ...and they FIT beside the row's own key path at 100 columns, which is
         # the width the /settings evidence frames are captured at. The detail
         # line sheds the WHOLE help once it and the key no longer fit

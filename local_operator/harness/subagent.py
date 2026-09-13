@@ -699,6 +699,14 @@ def run_subagent(
             if model_spec is not None
             else (getattr(parent_session, "effective_model_label", "") or None)
         )
+        # And whose choice that was, on the same registration-time rule. Stamped
+        # here rather than inferred from the label later: a tier or role pin
+        # that resolves to the session's OWN model produces a label identical to
+        # the parent's, so the ``task`` result line cannot tell the two apart by
+        # comparing them — and it must, because "the child inherited" and "a pin
+        # was accepted" are different facts about who spent the money. The
+        # runner never rewrites this one (see ``AsyncJob.owns_model``).
+        job.owns_model = model_spec is not None
         jobs_manager._notify_roster_change()
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the

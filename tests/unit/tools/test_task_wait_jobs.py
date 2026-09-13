@@ -522,6 +522,61 @@ async def test_task_single_form_still_works_and_forwards_defaults(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_the_launch_line_reads_ownership_from_the_row_not_from_the_labels(tmp_path):
+    """``on <model>`` vs ``on this session's model (<model>)`` is an ATTRIBUTION.
+
+    The reviewer reproduced this live: with ``models.hi`` pointing at the
+    session's OWN model, a child launched at ``effort="hi"`` ran on a tier the
+    operator had configured, and the line told the delegating model it had
+    inherited — because the two labels were equal. Every tier in the operator's
+    config resolved to their session's model for a while, so this is the live
+    shape of the bug rather than a corner. The fact comes from the registration
+    stamp (``AsyncJob.owns_model``), which is the only thing that can tell the
+    two apart; the label comparison stays as the fallback for a row that
+    predates the stamp, a host with no job manager, or an unknown row.
+    """
+    session_model = "test/session-model"
+    manager = AsyncJobManager()
+    stamps = {
+        "owned": (session_model, True),
+        "inherited": (session_model, False),
+        "legacy": (session_model, None),
+        "legacy-other": ("other/model", None),
+    }
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        job_id = manager.register("task", label, _quick_runner, registrant_id=None)
+        model, owns = stamps[label]
+        row = manager.get(job_id)
+        assert row is not None
+        row.model_label = model
+        row.owns_model = owns
+        return job_id
+
+    context = ToolContext(
+        cwd=str(tmp_path),
+        session_id="s",
+        subagent_launcher=launcher,
+        jobs=manager,
+        session_model_label=session_model,
+    )
+    result = await _call(
+        _tools(context),
+        "task",
+        {"tasks": [{"label": label, "prompt": "go"} for label in stamps]},
+        context,
+    )
+    text = result.text
+
+    # The stamp decides, even when it disagrees with the label comparison.
+    assert f"- owned (task) on {session_model}: job " in text
+    assert f"- inherited (task) on this session's model ({session_model}): job " in text
+    # No stamp: the comparison is the only witness left, and it still reads both ways.
+    assert f"- legacy (task) on this session's model ({session_model}): job " in text
+    assert "- legacy-other (task) on other/model: job " in text
+
+
+@pytest.mark.asyncio
 async def test_task_rejects_mixed_and_half_forms(tmp_path):
     context = _engine_context(tmp_path, AsyncJobManager())
     tools = _tools(context)
