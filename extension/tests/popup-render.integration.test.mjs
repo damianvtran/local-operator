@@ -1435,3 +1435,104 @@ test("Q1 back-compat: a daemon predating the id lists keeps the old reading", as
     await bundle.close();
   }
 });
+
+test("Q1: the pair latch clears on a STANDBY confirmation, so a later revoke re-offers the form", async () => {
+  // The latch exists for the window between a successful pair and /health
+  // confirming it. It was cleared only in the connected branch, so an install
+  // that paired INTO THE STANDBY ROLE held it for as long as it stood by — and
+  // a later revoke then rendered the success view instead of putting the code
+  // field back, which is the Q1 dead end one state later. Found by rendering
+  // the real popup: pair -> standby card -> revoke -> blank/latched, not the
+  // form. This row drives the popup's own pair path with a stubbed socket so
+  // the latch is genuinely set, then confirms it survives... no further than
+  // the first standby render.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // Stage 1: not authorised yet — the form.
+  let health = {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.13",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  };
+  installHealth(() => health);
+  // A socket that answers the popup's own pair request, exactly as the daemon
+  // does: one pair_result with a token, then close.
+  const realWebSocket = globalThis.WebSocket;
+  class PairingSocket {
+    onopen = null; onmessage = null; onerror = null; onclose = null;
+    constructor() {
+      setTimeout(() => this.onopen && this.onopen(), 0);
+    }
+    send() {
+      setTimeout(
+        () => this.onmessage && this.onmessage({ data: JSON.stringify({ event: "pair_result", ok: true, token: "new-token" }) }),
+        5,
+      );
+    }
+    close() {}
+  }
+  globalThis.WebSocket = PairingSocket;
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"], "the form must be up before pairing");
+
+    // Submit the form: real code path, stubbed socket -> latch set + success view.
+    nodes.get("pair-code").value = "123456";
+    // The stub records listeners rather than implementing an event loop, so the
+    // submit handler is invoked the way a real form would invoke it.
+    for (const handler of nodes.get("pair-form")._handlers.submit || []) {
+      handler({ preventDefault: () => {} });
+    }
+    await tick(60);
+    assert.ok(
+      !visibleState(nodes).includes("pairing"),
+      "after a successful pair the form must be replaced by the success view",
+    );
+
+    // The worker reconnects as a STANDBY: /health now lists this install, and
+    // the render must take the standby card AND drop the latch.
+    health = {
+      paired: true,
+      extension_connected: true,
+      protocol_version: 1,
+      driver_extension_id: STORE_ID,
+      driver_label: "Chrome 0.1.13",
+      authorized_extension_ids: [STORE_ID, DEV_ID],
+      standby_extension_ids: [DEV_ID],
+    };
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(30);
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+
+    // Now the operator revokes it. With the latch cleared, the form returns.
+    health = {
+      paired: true,
+      extension_connected: true,
+      protocol_version: 1,
+      driver_extension_id: STORE_ID,
+      driver_label: "Chrome 0.1.13",
+      authorized_extension_ids: [STORE_ID],
+      standby_extension_ids: [],
+    };
+    await chrome.storage.session.set({ connState: "pairing" });
+    await tick(30);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a revoked install must be offered the code field again, not a latched success view",
+    );
+  } finally {
+    globalThis.WebSocket = realWebSocket;
+    await bundle.close();
+  }
+});
