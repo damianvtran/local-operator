@@ -813,21 +813,27 @@ def main() -> int:
     # the natural place: `lop mobile logs` covers both.
     #
     # BOUNDED and quiet, unlike the `logging.basicConfig(level=INFO,
-    # filename=...)` this replaces. That call wrote an UNBOUNDED file and handed
-    # the root level to INFO, so the wire clients logged one record per request:
-    # measured on the operator's machine, 6,928,291 `INFO:httpx2` request lines
-    # against 44,681 records anyone wanted, in a 420 MB file that nothing
-    # rotated. `configure_file_logging` pins those clients to WARNING and bounds
-    # the file at LOG_TOTAL_MAX_BYTES, so a chatty or wedged runtime costs a
-    # fixed ceiling instead of the disk.
+    # filename=...)` this replaces, which wrote an UNBOUNDED file and handed the
+    # root level to INFO so every wire client logged one record per request.
+    # `configure_file_logging` pins those clients to WARNING and bounds the file
+    # at LOG_TOTAL_MAX_BYTES, so a chatty or wedged runtime costs a fixed
+    # ceiling per writer instead of the disk.
+    #
+    # The file is the runtimes' OWN (`runtime.log`), not the daemon's
+    # `mobile.log`: the daemon's log is a launchd StandardOutPath whose fd can
+    # never be reopened, and bounding a file means RENAMING it, so a runtime
+    # rotating the daemon's log would move the daemon's stream out of what
+    # `lop mobile logs` reads. `lop mobile logs` reads both.
     from local_operator.logger import configure_file_logging
-    from local_operator.paths import log_dir
+    from local_operator.paths import runtime_log_path
 
-    log_dir().mkdir(parents=True, exist_ok=True)
-    configure_file_logging(path=log_dir() / "mobile.log", level=logging.INFO)
-    # One record per runtime, naming its own process: this file is written by the
-    # daemon and by every runtime child, so a reader has to be able to attribute
-    # a line to the process that wrote it.
+    target = runtime_log_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if configure_file_logging(path=target, level=logging.INFO) is None:
+        logger.warning("session runtime could not open a log file; records stay on stderr")
+    # One record per runtime, naming its own process: this file is shared by every
+    # runtime child, so a reader has to be able to attribute a line to the
+    # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
     try:
         return asyncio.run(amain())

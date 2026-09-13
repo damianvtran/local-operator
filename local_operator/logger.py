@@ -30,6 +30,7 @@ import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable, Iterator, Optional, TextIO
 
@@ -145,6 +146,22 @@ def configure_cli_logging() -> None:
     configure_console_logging(level=logging.INFO, fmt=CLI_LOG_FORMAT)
 
 
+def quiet_wire_clients(level: int = logging.WARNING) -> None:
+    """Pin the per-request wire clients so they cannot fill a log destination.
+
+    Exposed separately from both ``configure_*`` functions because the pin is not
+    a property of where records go, it is a property of the clients: they emit
+    one record per HTTP request at INFO, and every destination here is either a
+    console a human chose a level for or a file nobody reads unless something
+    broke. A daemon that configures its own stderr for a launchd log needs this
+    pin regardless of the level it picks there, which is exactly the trap of
+    spelling it only inside the console configurator (a later
+    ``configure_console_logging(level=INFO)`` would silently restore the flood).
+    """
+    for lib_logger in _CHATTY_WIRE_CLIENTS:
+        logging.getLogger(lib_logger).setLevel(level)
+
+
 def configure_file_logging(
     path: Path,
     level: Optional[int] = None,
@@ -153,23 +170,25 @@ def configure_file_logging(
 ) -> Optional[Path]:
     """Route the root logger to a BOUNDED rotating file, and quiet the wire clients.
 
-    For a process with no terminal whose log file is someone else's: the session
-    runtime appends to the mobile daemon's log, so that ``lop mobile logs``
-    covers the daemon and its children together (see
-    :mod:`local_operator.session.runtime.process`).
+    For a process with no terminal whose log is its own: the session runtimes
+    share one file, separate from the daemon's launchd log, because a rotating
+    handler RENAMES the file it bounds — which is fine for a file only runtimes
+    rotate and wrong for one a launchd ``StandardOutPath`` fd is appending to
+    (see :func:`local_operator.paths.runtime_log_path`).
 
     Two deliberate differences from :func:`configure_console_logging`, which this
     otherwise mirrors:
 
-    * the file is BOUNDED at :data:`LOG_TOTAL_MAX_BYTES`. A process with no
-      terminal also has no one watching it fill a disk — the unbounded
-      ``logging.basicConfig(level=INFO, filename=...)`` this replaces left a
-      420 MB file on the operator's machine, because nothing rotated it and
-      nothing bounded it.
-    * the noisy wire clients are pinned to WARNING rather than to ``level``. At
-      INFO they emit one record per request, which was 96% of that file, and a
-      background child's per-request trace tells a reader nothing they are not
-      already looking for: why a turn failed.
+    * the file is BOUNDED at :data:`LOG_TOTAL_MAX_BYTES` **per writer process**.
+      That is the honest figure: ``RotatingFileHandler.shouldRollover`` compares
+      this handler's own stream position, never the file's size, so N runtimes on
+      one path hold N such ceilings between them. It is still the property that
+      matters here — the unbounded ``logging.basicConfig(filename=...)`` this
+      replaces had no ceiling at all, and the runtimes are the writers that grow.
+    * the wire clients are pinned to WARNING rather than to ``level``. At INFO
+      they emit one record per request, and a background child's per-request
+      trace tells a reader nothing they are not already looking for: why a turn
+      failed.
 
     Returns the file it installed when one was opened, or ``None`` when none
     could be — no log file is a degraded runtime, a traceback on startup is a
@@ -185,11 +204,7 @@ def configure_file_logging(
         root_logger.removeHandler(existing)
     root_logger.addHandler(handler)
     root_logger.setLevel(resolved)
-
-    # ``max`` because a level is an integer where higher means less: pinning to
-    # WARNING must never make a client MORE verbose than the caller asked for.
-    for lib_logger in _CHATTY_WIRE_CLIENTS:
-        logging.getLogger(lib_logger).setLevel(max(resolved, logging.WARNING))
+    quiet_wire_clients(max(resolved, logging.WARNING))
     return opened
 
 
@@ -328,24 +343,42 @@ def _restore_console_handlers(state: _ConsoleSilence) -> None:
         logger_obj.addHandler(handler)
 
 
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A rotating handler whose files are 0o600 after every rotation, not just the first.
+
+    ``_open_rotating_handler`` chmods the file it opens, but each rotation
+    creates the next file through this same ``_open`` (and the backups are
+    renames of earlier ones), so a long-lived writer drifts to umask-created
+    0644 while the comment below promises 0o600 on a file that carries prompt
+    and error text.
+    """
+
+    def _open(self) -> TextIOWrapper:
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:  # Windows and exotic filesystems; the log still works
+            pass
+        return stream
+
+
 def _open_rotating_handler(
     max_bytes: int,
     backup_count: int,
     path: Optional[Path] = None,
 ) -> tuple[Optional[logging.Handler], Optional[Path]]:
-    """Open the bounded rotating handler, or ``(None, None)`` if impossible.
+    """Open a bounded rotating handler, or ``(None, None)`` if impossible.
 
     ``path`` defaults to this package's own console log. A caller with its own
-    file passes one: the session runtime appends to the mobile daemon's log so
-    that ``lop mobile logs`` covers both, and that file needs the same bound as
-    this one rather than the unbounded handler it used to get.
+    file passes one: the session runtimes share a file of their own, and it needs
+    the same bound as this one rather than the unbounded handler it used to get.
     """
     directory = ensure_log_dir()
     if directory is None:
         return None, None
     target = path if path is not None else directory / LOG_FILE_NAME
     try:
-        handler = logging.handlers.RotatingFileHandler(
+        handler = _PrivateRotatingFileHandler(
             target,
             maxBytes=max_bytes,
             backupCount=backup_count,

@@ -5325,3 +5325,29 @@ def test_an_oversized_relay_frame_names_the_field_that_grew(caplog) -> None:
         relay_frame_or_degraded({"op": "event", "data": None, "padding": filler}, _MAX_LINE_BYTES)
     assert "socket line limit" in caplog.text
     assert "largest fields:" not in caplog.text
+
+
+def test_a_field_named_in_both_a_wrapper_and_a_sibling_keeps_the_larger(caplog) -> None:
+    """A key collision must not silently drop the entry that made the frame big.
+
+    ``largest_frame_fields`` unwraps ``changes``/``snapshot`` so their children are
+    ranked as peers of every other field of ``data``. That trade is the whole
+    point (the bulk of a real oversized frame sits in ``job_trajectory_appends``, a
+    SIBLING of ``changes``), but it means a key can appear twice. First-writer-wins
+    would then name the smaller of the two and point a fix at the wrong field,
+    which is the failure this helper exists to prevent.
+    """
+    from local_operator.session.runtime.server import relay_frame_or_degraded
+
+    filler = "x" * (1 << 20)
+    frame = {
+        "op": "frontend_update",
+        "data": {
+            "changes": {"blob": "small"},
+            "blob": filler,
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+        relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+    assert f"blob={len(json.dumps(filler).encode()):,}B" in caplog.text, caplog.text
+    assert "blob=" + f"{len(json.dumps('small').encode()):,}B" not in caplog.text

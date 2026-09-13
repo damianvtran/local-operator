@@ -3923,11 +3923,21 @@ def mobile_command(args: argparse.Namespace) -> int:
     if command == "logs":
         import subprocess
 
+        from local_operator.paths import runtime_log_path
+
         log = mobile_install.log_path()
+        # Both writers, one command. The daemon and its runtime children keep
+        # separate files on purpose (see `paths.runtime_log_path` — a runtime
+        # must never rotate the launchd-owned file the daemon appends to), and an
+        # operator diagnosing a relay wants both streams in one view. The runtime
+        # file appears only once a runtime has started, so its absence is normal.
+        targets = [log]
+        if runtime_log_path().exists():
+            targets.append(runtime_log_path())
         tail = ["tail", "-n", str(args.lines)]
         if args.follow:
             tail.append("-f")
-        tail.append(str(log))
+        tail.extend(str(path) for path in targets)
         return subprocess.call(tail)
 
     if command == "password":
