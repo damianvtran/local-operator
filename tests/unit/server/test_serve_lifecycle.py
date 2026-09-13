@@ -30,17 +30,25 @@ def restore_app_state() -> Iterator[None]:
     ``app`` is a module-level singleton: the lifespan sets a dozen ``app.state``
     attributes to ``None`` on the way out, and the rest of the suite shares
     those attributes (that is why ``test_server_models`` documents the same
-    hazard). Snapshotting the whole state dict is deliberately blunt — a
+    hazard). Snapshotting the whole state is deliberately blunt — a
     hand-written list is exactly the thing that goes stale as the lifespan
     grows.
+
+    Taken through Starlette's mapping interface (``__iter__`` +
+    ``__getitem__``), NOT ``vars(app.state)``: that returns ``{'_state': …}``,
+    whose value is the same dict the app keeps writing into, so a snapshot taken
+    that way would restore the test's own changes. It matters here because
+    ``advertised_address(app)`` reads the announced address off this state.
     """
-    saved = dict(vars(app.state))
+    saved = {key: app.state[key] for key in app.state}
+    state = app.state
     try:
         yield
     finally:
-        state = vars(app.state)
-        state.clear()
-        state.update(saved)
+        for key in list(state):
+            del state[key]
+        for key, value in saved.items():
+            state[key] = value
 
 
 @pytest.mark.asyncio
@@ -54,7 +62,7 @@ async def test_lifespan_publishes_the_record_and_health_identifies_it(
     case the record exists for.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    serve_registry.announce_address("127.0.0.1", 58474)
+    serve_registry.announce_address(app, "127.0.0.1", 58474)
     path = serve_registry.record_path(os.getpid(), tmp_path)
 
     async with lifespan(app):
@@ -89,21 +97,21 @@ async def test_lifespan_removes_the_record_even_when_teardown_raises(
     the heartbeat ages out.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    serve_registry.announce_address("127.0.0.1", 58474)
+    serve_registry.announce_address(app, "127.0.0.1", 58474)
     path = serve_registry.record_path(os.getpid(), tmp_path)
 
     with pytest.raises(RuntimeError, match="teardown exploded"):
         async with lifespan(app):
             assert path.exists()
             # The FIRST teardown step, so everything after it is skipped.
-            # ``raising=False``: the attribute does not exist unless something
-            # else already built a desktop auth for this process.
-            monkeypatch.setattr(
-                app.state,
-                "desktop_auth",
-                type("Boom", (), {"close": staticmethod(_raise_teardown)})(),
-                raising=False,
-            )
+            #
+            # Set directly rather than through ``monkeypatch.setattr`` on
+            # purpose: the fixture's restore removes every key the test added,
+            # and monkeypatch's undo (which does not run until AFTER that
+            # restore) would then ``delattr`` a key that is already gone —
+            # ``State.__delattr__`` raises ``KeyError`` for that, turning a
+            # passing test into a fixture teardown error.
+            app.state.desktop_auth = type("Boom", (), {"close": staticmethod(_raise_teardown)})()
 
     assert not path.exists()
 
@@ -113,26 +121,53 @@ async def _raise_teardown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_unannounced_address_is_recorded_as_unknown(
+async def test_a_boot_that_was_never_announced_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
 ) -> None:
-    """An app started by something other than ``lop serve`` says so.
+    """A record is a claim that a daemon is listening at an address.
 
-    ``("", 0)`` is the truthful answer there, and the reader's identity check —
-    not the record's port — is what admits a candidate, so an unusable address
-    is a reportable state rather than a wrong port that dials a stranger.
+    An app started by something other than ``lop serve`` — a bare ``uvicorn
+    local_operator.server.app:app``, a wrapper script — has no address to make
+    that claim with, so it publishes NOTHING. A placeholder record (an empty
+    host, port 0) would be the artefact this module exists to remove: a reader
+    cannot dial it, and cannot tell it from a live daemon's until the heartbeat
+    ages out.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    monkeypatch.delenv(serve_registry.SERVE_HOST_ENV, raising=False)
-    monkeypatch.delenv(serve_registry.SERVE_PORT_ENV, raising=False)
-    path = serve_registry.record_path(os.getpid(), tmp_path)
+    monkeypatch.delenv(serve_registry.SERVE_ANNOUNCE_ENV, raising=False)
 
     async with lifespan(app):
-        record = json.loads(path.read_text())
-        assert (record["host"], record["port"]) == ("", 0)
-        # Still a complete, classifiable record: a daemon whose address is
-        # unknown is still identifiable, which is the other half of the point.
-        assert record["instance_id"] == app.state.instance_id
-        assert [(r.pid, state) for r, state in serve_registry.scan(tmp_path)] == [
-            (os.getpid(), "live")
-        ]
+        assert serve_registry.scan(tmp_path) == [], "no announcer, no record"
+        assert getattr(app.state, "serve_record", None) is None
+        assert getattr(app.state, "serve_heartbeat", None) is None
+        # Identity is not conditional on being discoverable: `/health` still
+        # names this process.
+        assert app.state.instance_id
+
+
+@pytest.mark.asyncio
+async def test_a_boot_that_only_INHERITED_an_announcement_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
+) -> None:
+    """The false-rendezvous leak: a nested boot must not advertise its parent.
+
+    ``--reload`` is the only path that announces through the environment, and
+    the value names the process that made it, so it is honoured only by a child
+    that process spawned. A process that merely INHERITED the variable — an
+    agent's shell tool running inside the daemon, a wrapper, a nested boot of the
+    same app — reads it, takes nothing from it, and publishes no record. Before
+    this rule it published one naming its PARENT's listener with its own pid:
+    exactly the record that claims a daemon where none is listening.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # A real announcement, in the real shape, addressed to a process that is not
+    # our spawner: this process's own pid (alive, but it spawned nothing).
+    monkeypatch.setenv(serve_registry.SERVE_ANNOUNCE_ENV, f"{os.getpid()} 10.0.0.1 9000")
+
+    async with lifespan(app):
+        assert serve_registry.scan(tmp_path) == []
+        assert getattr(app.state, "serve_record", None) is None
+        assert serve_registry.SERVE_ANNOUNCE_ENV not in os.environ, (
+            "the inherited announcement is consumed, so nothing this process "
+            "spawns can re-publish it"
+        )

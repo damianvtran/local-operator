@@ -18,6 +18,7 @@ import stat
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -157,6 +158,14 @@ def test_scan_classifies_live_wedged_and_stale_against_the_shared_rule(tmp_path:
     implementations would be free to disagree, and the reader that got the
     other answer is the one nobody was looking at. So the same three shapes are
     published into BOTH namespaces and the states are compared pairwise.
+
+    The three cases MUST carry three DIFFERENT pids, and that is load-bearing
+    rather than tidy: the records share one namespace keyed by pid, so two cases
+    on one pid mean the later write replaces the earlier file, and the
+    expectation for the earlier one is then asserting a record that no longer
+    exists — an assertion that cannot fail. (This test did exactly that: `live`
+    and `wedged` both defaulted to this process's pid, so nothing was ever
+    classified `live` here.)
     """
 
     def session_peer(pid: int) -> SessionRecord:
@@ -173,7 +182,13 @@ def test_scan_classifies_live_wedged_and_stale_against_the_shared_rule(tmp_path:
 
     live = make_record()
     dead = make_record(pid=2**22 - 3)  # a pid that does not exist
-    wedged = make_record()
+    # A pid that is alive and is NOT this process: the parent is the one live
+    # pid a test can name without forking one, and `wedged` must differ from
+    # `live` for the reason in the docstring. Asserted so the premise is stated
+    # rather than assumed — a dead pid here would classify `stale` and fail
+    # below with the reason already named.
+    wedged = make_record(pid=os.getppid())
+    assert session_registry.pid_alive(wedged.pid), "the wedged case needs a LIVE pid"
 
     serve_registry.publish(live, root=tmp_path)
     dead_path = serve_registry.publish(dead, root=tmp_path)
@@ -189,15 +204,16 @@ def test_scan_classifies_live_wedged_and_stale_against_the_shared_rule(tmp_path:
     session_registry.record_path(wedged.pid, tmp_path).write_text(json.dumps(stale_peer.to_json()))
 
     # ``ServeRecord`` is an ordinary dataclass and therefore unhashable, so the
-    # states are keyed by pid — which is the key both scans use anyway.
+    # states are keyed by pid — which is the key both scans use anyway. Each
+    # case is then asserted on ITS OWN pid, so a collapsed dict cannot pass for
+    # a matched one.
     serve_states = {r.pid: state for r, state in serve_registry.scan(tmp_path)}
     session_states = {r.pid: state for r, state in session_registry.scan(tmp_path)}
 
-    assert serve_states == {
-        live.pid: "live",
-        dead.pid: "stale",
-        wedged.pid: "wedged",
-    }
+    assert serve_states.get(live.pid) == "live"
+    assert serve_states.get(dead.pid) == "stale"
+    assert serve_states.get(wedged.pid) == "wedged"
+    assert len(serve_states) == 3, "three cases, three records: no pid is shared"
     assert serve_states == session_states, "one rule, two namespaces"
     assert not dead_path.exists(), "stale means the reader reaped the file"
 
@@ -234,27 +250,81 @@ def test_the_heartbeat_interval_is_the_shared_constant() -> None:
     assert HEARTBEAT_TIMEOUT_S == 45.0
 
 
-def test_advertised_address_reports_what_was_announced(monkeypatch) -> None:
-    monkeypatch.delenv(serve_registry.SERVE_HOST_ENV, raising=False)
-    monkeypatch.delenv(serve_registry.SERVE_PORT_ENV, raising=False)
-    assert serve_registry.advertised_address() == ("", 0)
+def fake_app() -> SimpleNamespace:
+    """The one attribute the announce/read pair touches: ``app.state``.
 
-    serve_registry.announce_address("127.0.0.1", 58474)
-    assert serve_registry.advertised_address() == ("127.0.0.1", 58474)
+    Real enough for this contract: Starlette's ``State`` maps
+    ``getattr``/``setattr`` onto a dict, which is what a namespace is, and this
+    module is stdlib-only by contract so its tests do not import Starlette to
+    stand in for a dict.
+    """
+    return SimpleNamespace(state=SimpleNamespace())
 
-    # A garbled port is "unknown", never a guess: a record naming the wrong
-    # port is the failure this module exists to remove.
-    monkeypatch.setenv(serve_registry.SERVE_PORT_ENV, "not-a-port")
-    assert serve_registry.advertised_address() == ("127.0.0.1", 0)
+
+def test_advertised_address_is_what_was_announced_to_this_process(monkeypatch) -> None:
+    """The in-process channel, and ``None`` when nothing announced one.
+
+    ``None`` rather than a ``("", 0)`` placeholder because the caller uses it to
+    decide whether to publish at all (see the lifespan test): a boot that cannot
+    name an address is not a daemon anyone can dial.
+    """
+    monkeypatch.delenv(serve_registry.SERVE_ANNOUNCE_ENV, raising=False)
+    app = fake_app()
+    assert serve_registry.advertised_address(app) is None
+
+    serve_registry.announce_address(app, "127.0.0.1", 58474)
+    assert serve_registry.advertised_address(app) == ("127.0.0.1", 58474)
+
+
+def test_an_announcement_addressed_to_somebody_else_is_ignored_and_cleared(monkeypatch) -> None:
+    """The false-rendezvous leak, at the registry: an announce that is not ours.
+
+    ``--reload`` is the only path that uses the environment, and its value names
+    the process that made it. A process that merely INHERITED the variable — an
+    agent shell inside a daemon, a wrapper, a nested boot of the same app — is
+    not that process's child, so it takes nothing from it. Consumed either way,
+    so nothing this process goes on to spawn can find it and re-publish its
+    ancestor's listener as its own.
+
+    The positive half of this gate (the announcement the ``--reload`` child
+    DOES take) needs a real ``multiprocessing`` spawn of uvicorn's child, which
+    no test here does; it is exercised by the CLI test that asserts what
+    ``serve_command`` writes, plus the parent-pid rule asserted by construction.
+    """
+    # Our own pid: alive, but not our multiprocessing spawner — a pytest process
+    # has no multiprocessing parent at all, which is exactly the shape refused.
+    monkeypatch.setenv(serve_registry.SERVE_ANNOUNCE_ENV, f"{os.getpid()} 10.0.0.1 9000")
+    assert serve_registry.advertised_address(fake_app()) is None
+    assert serve_registry.SERVE_ANNOUNCE_ENV not in os.environ, "read-and-cleared"
+
+    # Garbled values are consumed and never guessed at: a record naming the
+    # wrong address is the failure this module exists to remove.
+    monkeypatch.setenv(serve_registry.SERVE_ANNOUNCE_ENV, "not-an-announcement")
+    assert serve_registry.advertised_address(fake_app()) is None
+    assert serve_registry.SERVE_ANNOUNCE_ENV not in os.environ
+
+
+def test_the_in_process_announce_outranks_and_clears_an_inherited_one(monkeypatch) -> None:
+    """A daemon that inherited a stranger's announcement announces its own.
+
+    The explicit announce wins, and the inherited value is consumed with it, so
+    a later reader in this process cannot reach a stale address from an
+    ancestor.
+    """
+    monkeypatch.setenv(serve_registry.SERVE_ANNOUNCE_ENV, f"{os.getpid()} 10.0.0.1 9000")
+    app = fake_app()
+    serve_registry.announce_address(app, "127.0.0.1", 58474)
+
+    assert serve_registry.advertised_address(app) == ("127.0.0.1", 58474)
+    assert serve_registry.SERVE_ANNOUNCE_ENV not in os.environ
 
 
 def test_build_record_reads_this_processs_identity(monkeypatch) -> None:
     from local_operator.update import install_kind, installed_build
 
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "desktop-token")
-    serve_registry.announce_address("127.0.0.1", 58474)
 
-    record = serve_registry.build_record(instance_id="minted")
+    record = serve_registry.build_record(instance_id="minted", announced=("127.0.0.1", 58474))
 
     assert record.pid == os.getpid()
     assert (record.host, record.port) == ("127.0.0.1", 58474)
@@ -269,6 +339,23 @@ def test_build_record_reads_this_processs_identity(monkeypatch) -> None:
     assert record.claim_key == "", "reserved for the claim handshake, empty until then"
 
 
+def test_a_wildcard_bind_is_recorded_as_the_loopback_it_is_dialable_on() -> None:
+    """The record is read by another process to DIAL it, so it carries a
+    dialable host: a wildcard bind means "every interface", which is not an
+    address, and it is reachable on its own family's loopback."""
+    assert (
+        serve_registry.build_record(instance_id="x", announced=("0.0.0.0", 1111)).host
+        == "127.0.0.1"
+    )
+    assert serve_registry.build_record(instance_id="x", announced=("::", 1111)).host == "::1"
+    # An explicit address is recorded verbatim: rewriting it would be guessing at
+    # a route (and the dialer brackets an IPv6 literal when it builds a URL).
+    assert (
+        serve_registry.build_record(instance_id="x", announced=("127.0.0.1", 1111)).host
+        == "127.0.0.1"
+    )
+
+
 def test_build_record_reports_the_desktop_plane_as_unset(monkeypatch) -> None:
     monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_TOKEN", raising=False)
-    assert serve_registry.build_record(instance_id="x").desktop is False
+    assert serve_registry.build_record(instance_id="x", announced=("127.0.0.1", 1)).desktop is False

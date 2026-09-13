@@ -59,6 +59,12 @@ from local_operator.server.routes import (
 )
 from local_operator.server.utils.event_broker import EventBroker
 from local_operator.server.utils.websocket_manager import WebSocketManager
+
+# Annotating the lifespan's record publisher (`None` on a boot that was not
+# announced) needs the shared publisher's type. Zero runtime cost where it
+# matters: `server/registry.py` imports this module anyway, so it is already in
+# `sys.modules` by the time anything here runs.
+from local_operator.session.runtime import registry as session_registry
 from local_operator.types import OperatorType
 
 # NO logging configuration at import. `configure_console_logging` REPLACES the
@@ -155,17 +161,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `/health` said against the record it dialled from. Process-scoped and
     # random, never persisted — it identifies THIS process, not the install.
     app.state.instance_id = secrets.token_urlsafe(32)
-    serve_record = serve_registry.build_record(instance_id=app.state.instance_id)
-    # The config root resolved above, passed explicitly: the publisher pins the
-    # directory it publishes into for its whole life, so a heartbeat can never
-    # land in a different root than the one this process was started with.
-    serve_publisher = serve_registry.publisher(serve_record, root=config_dir)
-    app.state.serve_record = serve_record
-    # One task on the loop, cancelled below. The record is rewritten whole by
-    # the shared `publish`, so its atomicity and 0600/0700 permissions are the
-    # session registry's, not re-implemented here.
-    serve_heartbeat = asyncio.create_task(serve_registry.heartbeat_loop(serve_publisher))
-    app.state.serve_heartbeat = serve_heartbeat
+    # An announcer is what makes this process a DAEMON rather than merely an app
+    # that happens to answer HTTP: `serve_command` announces the address it
+    # bound, in-process for the daemon it serves and through the environment
+    # only for a `--reload` child (see `server/registry.py`).
+    #
+    # No announcement means this app was booted by something else — a bare
+    # `uvicorn local_operator.server.app:app`, a wrapper, a nested shell that
+    # inherited a parent's announcement. Then NO record is published, and the
+    # reason is the same one the record exists for: a record claims a daemon is
+    # listening at an address, and this process has no truthful address to put
+    # in one. Publishing a placeholder (an empty host, port 0) would recreate
+    # exactly the artefact this module removes — a reader dials nothing, and
+    # cannot tell that record from a live daemon's until the heartbeat ages out.
+    announced = serve_registry.advertised_address(app)
+    serve_publisher: session_registry.RecordPublisher | None = None
+    serve_heartbeat: asyncio.Task[None] | None = None
+    if announced is not None:
+        serve_record = serve_registry.build_record(
+            instance_id=app.state.instance_id, announced=announced
+        )
+        # The config root resolved above, passed explicitly: the publisher pins
+        # the directory it publishes into for its whole life, so a heartbeat can
+        # never land in a different root than the one this process was started
+        # with.
+        serve_publisher = serve_registry.publisher(serve_record, root=config_dir)
+        app.state.serve_record = serve_record
+        # One task on the loop, cancelled below. The record is rewritten whole
+        # by the shared `publish`, so its atomicity and 0600/0700 permissions
+        # are the session registry's, not re-implemented here.
+        serve_heartbeat = asyncio.create_task(serve_registry.heartbeat_loop(serve_publisher))
+        app.state.serve_heartbeat = serve_heartbeat
 
     yield
     try:
@@ -205,9 +231,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # `unpublish` swallows a missing file): a SIGKILLed daemon leaves its
         # record for the next `scan` to reap, and an exit path must never raise
         # over a file that a reader already reaped for us.
-        serve_heartbeat.cancel()
-        await asyncio.gather(serve_heartbeat, return_exceptions=True)
-        serve_publisher.close()
+        # Both only exist when a record was published; a boot that was not
+        # announced has neither a task to cancel nor a file to remove.
+        if serve_heartbeat is not None and serve_publisher is not None:
+            serve_heartbeat.cancel()
+            await asyncio.gather(serve_heartbeat, return_exceptions=True)
+            serve_publisher.close()
         app.state.serve_record = None
         app.state.serve_heartbeat = None
 

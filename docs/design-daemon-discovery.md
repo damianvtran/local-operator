@@ -1,6 +1,6 @@
 # Design: daemon discovery, attach, and update alignment between local-operator and local-operator-ui
 
-Status: proposal (architect). Scope: two repos, four backend PRs and one UI PR.
+Status: proposal (architect). Scope: two repos, three backend PRs and one UI PR.
 No `pyproject.toml` version bump — the release owner handles that.
 
 ## 1. The problem as found in the code
@@ -71,8 +71,12 @@ The primitives already exist:
 
 ## 2. The rendezvous record for the `serve` daemon
 
-**A new namespace, not the session one:** `run/serve/<pid>.json`, owned by a new
-module `local_operator/server/registry.py` (stdlib-only, import-light).
+**A new namespace, not the session one:** `run/serve/<pid>.json` **under the
+config root** (`paths.config_dir()` — `LOCAL_OPERATOR_CONFIG_DIR` when it is set,
+else `~/.local-operator`), owned by a new module
+`local_operator/server/registry.py` (stdlib-only, import-light). Nothing in this
+design ever means the checkout at `~/local-operator`: that is a source tree, and
+a reader that globs inside it finds nothing on a real install.
 
 Do **not** add the daemon to `run/mobile`. `types.py:~190-205` calls the dirname
 a wire constant precisely because an upgrade window has two binaries scanning it;
@@ -136,9 +140,12 @@ Replace `checkExistingBackend()` with `discoverDaemon()` in
 `src/main/backend/backend-service.ts` (new method, same class), called from
 `start()` and from the health-check failure path.
 
-1. **Enumerate** `~/local-operator/run/serve/*.json`, honouring
-   `LOCAL_OPERATOR_CONFIG_DIR` (the override `paths.py:56-67` treats as
-   authoritative). Unparseable → ignore; `started_at` far in the future (clock
+1. **Enumerate** the `run/serve/*.json` records from the config root —
+   `<paths.config_dir()>/run/serve/*.json`: `LOCAL_OPERATOR_CONFIG_DIR` when set,
+   else `~/.local-operator` (`paths.py:56-67`, `DEFAULT_CONFIG_DIRNAME =
+   ".local-operator"`). NOT `~/local-operator/run/serve/*.json`, which is inside
+   the source checkout on a developer machine and nonexistent on every real
+   install. Unparseable → ignore; `started_at` far in the future (clock
    skew) → ignore.
 2. **Liveness** — `process.kill(record.pid, 0)`: `ESRCH` → stale, do not attach;
    `EPERM` → alive. Same rule as `registry.py:118-128`.
@@ -146,7 +153,10 @@ Replace `checkExistingBackend()` with `discoverDaemon()` in
    require `result.instance_id === record.instance_id`. Both halves are needed:
    pid liveness alone is defeated by pid reuse, the port alone by port reuse.
    This is the check today's probe lacks, and the reason `:8080` at v0.44.66 was
-   acceptable to it.
+   acceptable to it. The record's `host` is always DIALABLE: a wildcard bind
+   (`--host 0.0.0.0` / `::`) is recorded as that family's loopback, while an
+   explicit address is recorded verbatim — and an IPv6 literal needs brackets
+   when this URL is built.
 4. **Stale records** — unlink only when `process.kill(pid, 0)` threw `ESRCH`
    *and* the record is older than `HEARTBEAT_TIMEOUT_S`. Never unlink a wedged
    (live-pid) record.
@@ -314,20 +324,22 @@ record (live pid, stale heartbeat) is degraded-and-named, never reaped.
 Order matters: UI work is inert without the record, and the handoff is inert
 without the posture refactor.
 
-**Backend, four PRs (each independently reviewable):**
-1. `feat(server): publish a discovery record for the serve daemon` —
+**Backend, three PRs (each independently reviewable):**
+1. `feat(server): publish a serve discovery record and identify the daemon` —
+   lands this design's items 1 and 2 TOGETHER (manager decision 2026-09-13: the
+   record is untestable end to end without `--port 0` resolution and the
+   `/health` identity that makes a candidate verifiable):
    `session/runtime/types.py` (Protocol + `SERVE_RUN_DIRNAME`),
    `session/runtime/registry.py` (dirname parameter, widened annotations), new
-   `server/registry.py`, `server/app.py` lifespan publish/heartbeat/unpublish.
-2. `feat(server): identify the daemon on /health and allow an ephemeral port` —
+   `server/registry.py`, `server/app.py` lifespan publish/heartbeat/unpublish,
    `HealthCheckResponse` gains `instance_id`, `pid`, `prefix`, `install_kind`
-   (additive, defaulted; `schemas.py:721-728`), `routes/health.py`, `cli.py` port
-   resolution.
-3. `feat(server): accept a desktop claim from the record` — `server/desktop.py`
+   (additive, defaulted; `schemas.py:721-728`), `routes/health.py`, `cli.py`
+   listener bind + port resolution + announcement.
+2. `feat(server): accept a desktop claim from the record` — `server/desktop.py`
    `desktop_posture()` + `POST /v1/desktop/claim`, and the five predicate sites
    switched to it. Security-sensitive: the only PR here whose QA matrix must cover
    refusal paths, not just the happy path.
-4. `feat(server): retire the daemon onto a new build` — the poll task and the
+3. `feat(server): retire the daemon onto a new build` — the poll task and the
    record's `retiring_from`/`retiring_to` fields.
 
 **UI, one PR:** `src/main/backend/backend-service.ts` (`discoverDaemon`, ranking,

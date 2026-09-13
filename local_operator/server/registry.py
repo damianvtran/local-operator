@@ -42,54 +42,154 @@ from typing import Any
 from local_operator.session.runtime import registry as session_registry
 from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, SERVE_RUN_DIRNAME
 
-#: How ``serve_command`` tells the app which address it actually bound.
+#: ``app.state`` attribute carrying the address ``cli.serve_command`` announced.
 #:
-#: An environment variable because it is the ONLY channel that reaches both
-#: hosts the app runs under: the in-process ASGI object (where the CLI already
-#: has a reference, but the app does not have one back) and, under
-#: ``--reload``, the supervisor's child, which re-imports ``server.app`` from
-#: an import string and shares nothing but the inherited environment.
-#:
-#: Read once, at startup, by :func:`build_record`. Nothing else reads it, so an
-#: agent's shell tool inheriting it is inert — and a nested ``lop serve``
-#: overwrites it before starting its own uvicorn, so it cannot inherit a stale
-#: address by accident.
-SERVE_HOST_ENV = "LOCAL_OPERATOR_SERVE_HOST"
-SERVE_PORT_ENV = "LOCAL_OPERATOR_SERVE_PORT"
+#: A state attribute and not a module global, because two ASGI apps can live in
+#: one process (a test's and a daemon's) and an announcement must not leak from
+#: one to the other; and not the environment, because this is the announce that
+#: makes the environment unnecessary — see :func:`announce_address`.
+ANNOUNCED_STATE_ATTR = "serve_announced_address"
 
-#: Port ``0`` in a record means "not announced" — see :func:`advertised_address`.
+#: The ``--reload``-only announcement channel: ``"<announcer pid> <host> <port>"``.
+#:
+#: Under ``--reload`` uvicorn re-imports ``server.app`` in a CHILD process from
+#: an import string, so the app object cannot be reached and the inherited
+#: environment is the only channel that survives into it. The announcer's pid
+#: travels INSIDE the value rather than beside it, because the two must not be
+#: separable: an announcement is only ours when the process that made it also
+#: spawned us (:func:`advertised_address`). That is exactly uvicorn's reload
+#: child — ``uvicorn._subprocess.get_subprocess`` spawns it with
+#: ``multiprocessing`` — and it is what stops a process that merely INHERITED
+#: the variable from publishing its ancestor's listener as its own.
+SERVE_ANNOUNCE_ENV = "LOCAL_OPERATOR_SERVE_ANNOUNCE"
+
+#: Port ``0`` in a record means "not announced", i.e. undialable. Nothing in
+#: this module writes one any more — a boot that was not announced publishes no
+#: record at all — but a record written by another build still has to parse, and
+#: a reader must treat it as no address rather than as port zero.
 ANNOUNCED_PORT_UNKNOWN = 0
 
 
-def announce_address(host: str, port: int) -> None:
-    """Announce the bound address to the app in this process (and its children).
+#: Hosts that name "every interface" rather than a dialable address, mapped to
+#: the loopback form of their own family. See :func:`_dialable_host`.
+_WILDCARD_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}
+
+
+def _dialable_host(host: str) -> str:
+    """The host a reader should DIAL for a listener bound to ``host``.
+
+    ``--host 0.0.0.0`` (or ``::``) means "listen on every interface"; it is not
+    an address anybody can connect to, and the design's dial string
+    (``http://{host}:{port}/health``) cannot name a wildcard. The same listener
+    is reachable on its own family's loopback, so that is what the record
+    carries — a record is only useful if the address in it works — and the port
+    is unchanged.
+
+    Explicit addresses are recorded verbatim: rewriting them would be guessing
+    at a route, and an IPv6 literal needs brackets when a dialer turns it into a
+    URL, which is the dialer's job (as it already is for ``::1``).
+    """
+    return _WILDCARD_LOOPBACK.get(host, host)
+
+
+def announce_address(app: Any, host: str, port: int) -> None:
+    """Announce the bound address to the app THIS process is about to serve.
 
     Called by ``cli.serve_command`` after it has bound the listener, so the
     record and ``/health`` name the port the kernel actually gave us rather
     than the ``--port`` argument. That distinction is the whole point of
     ``--port 0``: the UI's own child asks for an ephemeral port, and a record
     that named ``0`` would be unusable exactly where it is needed most.
+
+    Deliberately NOT written to the environment: this process may spawn
+    children (an agent's shell tool, a wrapper, another entry point booting the
+    same app) and an inherited variable would let any of them publish OUR
+    listener as its own — a rendezvous record for a daemon that is not there.
     """
-    os.environ[SERVE_HOST_ENV] = host
-    os.environ[SERVE_PORT_ENV] = str(port)
+    setattr(app.state, ANNOUNCED_STATE_ATTR, (host, port))
+    # An announcement inherited from an ancestor is not ours. The explicit one
+    # above wins, and consuming the inherited value here means no later reader
+    # in this process can reach for it.
+    _take_reload_announcement()
 
 
-def advertised_address() -> tuple[str, int]:
-    """The address this process was told it is serving on.
+def announce_to_reload_child(host: str, port: int) -> None:
+    """Announce the bound address to the ``--reload`` child we are about to spawn.
 
-    ``("", 0)`` when nothing announced one, which is what a process started
-    through some other ASGI runner gets — and the record says so rather than
-    guessing ``127.0.0.1:1111``, because a record that names the WRONG address
-    is the class of error this module exists to remove: a reader would dial it,
-    reach a different daemon, and have no way to tell. An announced-but-garbled
-    port is treated the same way, for the same reason.
+    The one path an in-process announce cannot cover, and the only writer of
+    :data:`SERVE_ANNOUNCE_ENV`. The value names THIS process, so the announce is
+    honoured only by a process this one spawned (see
+    :func:`_take_reload_announcement`).
     """
-    port_raw = os.environ.get(SERVE_PORT_ENV, "")
+    os.environ[SERVE_ANNOUNCE_ENV] = f"{os.getpid()} {host} {port}"
+
+
+def _spawner_pid() -> int | None:
+    """The pid of the process that spawned this one, or ``None``.
+
+    ``multiprocessing``'s own bookkeeping, deliberately: uvicorn spawns the
+    ``--reload`` child through ``multiprocessing.get_context("spawn")``
+    (``uvicorn._subprocess.get_subprocess``), so "the process that spawned me"
+    and "the process that announced my address" are the same process there.
+    Imported lazily — only a process that FOUND an announcement pays for it,
+    which is never the ordinary daemon.
+    """
     try:
-        port = int(port_raw)
+        import multiprocessing
+
+        parent = multiprocessing.parent_process()
+    except Exception:  # noqa: BLE001 — an unavailable channel is "not announced"
+        return None
+    return parent.pid if parent is not None else None
+
+
+def _take_reload_announcement() -> tuple[str, int] | None:
+    """Read-and-CLEAR the reload announcement, when it is addressed to us.
+
+    Cleared unconditionally, and that is the point: the ``--reload`` child is
+    the only process the announcement was addressed to, so once it has read the
+    value nothing IT spawns later can find it and re-publish its parent's
+    address.
+
+    A garbled value, or one naming somebody other than our own spawner, is
+    consumed and ignored — never guessed at.
+    """
+    raw = os.environ.pop(SERVE_ANNOUNCE_ENV, "")
+    if not raw:
+        return None
+    try:
+        announcer_raw, host, port_raw = raw.split(" ", 2)
+        announcer, port = int(announcer_raw), int(port_raw)
     except ValueError:
-        port = ANNOUNCED_PORT_UNKNOWN
-    return os.environ.get(SERVE_HOST_ENV, ""), port
+        return None
+    if announcer != _spawner_pid():
+        return None
+    return host, port
+
+
+def advertised_address(app: Any = None) -> tuple[str, int] | None:
+    """The address THIS process was told it is serving on, or ``None``.
+
+    Two channels, tried in this order:
+
+    1. the app object this process is serving — ``serve_command`` without
+       ``--reload`` holds the app it hands uvicorn, and ``app.state`` is shared
+       with the lifespan;
+    2. the ``--reload`` child's environment, read-and-cleared, honoured only
+       when the announcing pid is our own spawner.
+
+    ``None`` when nothing announced one, and it is load-bearing rather than a
+    ``("", 0)`` placeholder: a record exists so another process can DIAL a
+    daemon, so a boot that cannot name a truthful address publishes no record at
+    all (see the lifespan in ``server/app.py``). A record naming the wrong
+    address is the class of error this module exists to remove — a reader would
+    dial it, reach a different daemon, and have no way to tell.
+    """
+    if app is not None:
+        announced = getattr(app.state, ANNOUNCED_STATE_ATTR, None)
+        if announced is not None:
+            return announced
+    return _take_reload_announcement()
 
 
 @dataclass
@@ -118,8 +218,9 @@ class ServeRecord:
     #: ``os.getpid()`` — the serving process, and the record's filename.
     pid: int
     #: The address the listener is bound to, as announced by ``serve_command``
-    #: (``""``/``0`` when nothing announced one; see
-    #: :func:`advertised_address`).
+    #: and reduced to a DIALABLE host (:func:`_dialable_host`) — see
+    #: :func:`advertised_address`. A record is only published when one was
+    #: announced.
     host: str
     #: The port ACTUALLY BOUND, which is not the ``--port`` argument when that
     #: was ``0``.
@@ -177,8 +278,16 @@ class ServeRecord:
         return ServeRecord(**{k: v for k, v in data.items() if k in known})
 
 
-def build_record(*, instance_id: str, desktop_token_set: bool | None = None) -> ServeRecord:
+def build_record(
+    *, instance_id: str, announced: tuple[str, int], desktop_token_set: bool | None = None
+) -> ServeRecord:
     """Assemble the record for THIS process, reading identity fresh.
+
+    ``announced`` is required rather than read from the environment here: the
+    caller resolves it once (:func:`advertised_address`) and uses the same
+    answer to decide whether to publish at all, so the reload channel's single
+    read-and-clear cannot be spent twice, and this function stays a pure
+    assembler.
 
     ``local_operator.update`` is imported here rather than at module scope: the
     install identity is read exactly once per process, at startup, and every
@@ -191,7 +300,7 @@ def build_record(*, instance_id: str, desktop_token_set: bool | None = None) -> 
     """
     from local_operator.update import install_kind, installed_build
 
-    host, port = advertised_address()
+    host, port = announced
     build = installed_build()
     desktop = (
         bool(os.environ.get("LOCAL_OPERATOR_DESKTOP_TOKEN"))
@@ -200,7 +309,7 @@ def build_record(*, instance_id: str, desktop_token_set: bool | None = None) -> 
     )
     return ServeRecord(
         pid=os.getpid(),
-        host=host,
+        host=_dialable_host(host),
         port=port,
         instance_id=instance_id,
         version=build.version,
