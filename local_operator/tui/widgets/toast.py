@@ -239,7 +239,22 @@ def format_mcp_startup(
             # line scannable as a failure list rather than as prose.
             detail = _fit_failure_line(names[0], outcome.failures[names[0]], max(1, max_cells))
         else:
-            detail = truncate_cells("failed: " + ", ".join(names), max(1, max_cells))
+            # Multiple failures are a LIST, and when they share one cause the
+            # list is the wrong shape: naming nine servers that all say the same
+            # thing buries the one fact the user can act on, which is that the
+            # machine's connection is what is broken. So a group that is ENTIRELY
+            # connectivity is labelled once instead — ``failed (network): a, b``
+            # keeps the names (the user may care which servers are dark) while
+            # stating the shared cause up front. The label is longer than
+            # ``failed: ``, so it spends the same fixed budget: the clamp still
+            # truncates, keeping the header and the leading names on the card
+            # rather than wrapping it to a third line. The single-failure path
+            # above deliberately does NOT take this branch — its text is the full
+            # ``network: …`` line, which already names the network.
+            if outcome.all_failures_are_network:
+                detail = truncate_cells("failed (network): " + ", ".join(names), max(1, max_cells))
+            else:
+                detail = truncate_cells("failed: " + ", ".join(names), max(1, max_cells))
         text.append("\n")
         text.append(
             detail,

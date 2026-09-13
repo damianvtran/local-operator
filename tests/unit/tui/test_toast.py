@@ -51,6 +51,30 @@ MULTI = McpStartupOutcome(
     failures={"slack": "command not found", "linear": "handshake timed out"},
     tool_count=12,
 )
+#: Every failure the network's: the shape the operator hit (9 of 11 remote
+#: servers dark at once) and the one whose footer must say WHY, once, instead of
+#: listing nine names that all mean the same thing.
+NETWORK_MULTI = McpStartupOutcome(
+    configured=("github", "linear", "slack"),
+    connected=("github",),
+    failures={
+        "slack": "network: cannot reach slack.example.com",
+        "linear": "network: cannot resolve linear.example.com",
+    },
+    tool_count=4,
+    network_failures=frozenset({"slack", "linear"}),
+)
+#: One network failure and one local one: no shared cause, so no grouping.
+MIXED_MULTI = McpStartupOutcome(
+    configured=("github", "linear", "slack"),
+    connected=("github",),
+    failures={
+        "slack": "network: cannot reach slack.example.com",
+        "linear": "command not found: linear-mcp",
+    },
+    tool_count=4,
+    network_failures=frozenset({"slack"}),
+)
 
 
 class ToastApp(App[None]):
@@ -116,6 +140,63 @@ def test_several_failures_coalesce_into_one_two_line_message() -> None:
     text, _duration = payload
     assert text.plain.count("\n") == 1
     assert text.plain.split("\n")[1] == "failed: linear, slack"
+
+
+def test_a_wholly_network_group_says_so_once_instead_of_listing_bare_names() -> None:
+    """A fleet-wide outage is ONE fact, not N server faults.
+
+    Reported as a bare list it read as nine unrelated MCP problems; the grouped
+    form states the shared cause up front while still naming the servers."""
+    payload = format_mcp_startup(NETWORK_MULTI)
+    assert payload is not None
+    text, _duration = payload
+    assert text.plain.split("\n")[1] == "failed (network): linear, slack"
+
+
+def test_a_mixed_group_keeps_the_plain_list() -> None:
+    """The grouped label claims a SHARED cause, so one local failure takes it
+    away — the plain list names each server instead."""
+    payload = format_mcp_startup(MIXED_MULTI)
+    assert payload is not None
+    text, _duration = payload
+    assert text.plain.split("\n")[1] == "failed: linear, slack"
+
+
+def test_a_single_network_failure_keeps_its_own_network_line() -> None:
+    """``_fit_failure_line`` carries the whole message, which already says the
+    network — grouping it would only make the line longer."""
+    outcome = McpStartupOutcome(
+        configured=("github", "slack"),
+        connected=("github",),
+        failures={"slack": "network: cannot reach slack.example.com"},
+        network_failures=frozenset({"slack"}),
+    )
+    payload = format_mcp_startup(outcome)
+    assert payload is not None
+    text, _duration = payload
+    assert text.plain.split("\n")[1] == "failed: slack — network: cannot reach slack.example.com"
+
+
+def test_the_grouped_footer_still_clamps_to_the_card_it_was_given() -> None:
+    """The label is longer than ``failed: ``, so the budget is what keeps the
+    second line from wrapping into a third: the clamp eats the NAMES, and the
+    shared cause stays readable on every card width that fits it at all."""
+    for max_cells in (58, 44, 24, 12):
+        payload = format_mcp_startup(NETWORK_MULTI, max_cells)
+        assert payload is not None
+        text, _duration = payload
+        footer = text.plain.split("\n")[1]
+        assert cell_len(footer) <= max_cells, (max_cells, footer)
+        if max_cells >= len("failed (network): "):
+            assert footer.startswith("failed (network): "), (max_cells, footer)
+
+
+def test_the_wide_card_carries_the_whole_grouped_footer() -> None:
+    """At 100 columns the row fits entirely: nothing is shed."""
+    payload = format_mcp_startup(NETWORK_MULTI, TOAST_MAX_WIDTH - TOAST_PADDING_CELLS)
+    assert payload is not None
+    text, _duration = payload
+    assert text.plain.split("\n")[1] == "failed (network): linear, slack"
 
 
 def _fills(text) -> dict[str, str]:  # type: ignore[no-untyped-def]
