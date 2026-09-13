@@ -47,6 +47,7 @@ from local_operator.harness.types import (
     StreamUsageEvent,
     Usage,
 )
+from scripts.run_episode import _outcome_json
 from tests.unit.evaluation.runner.conftest import (
     ROUTE,
     FakeAdapter,
@@ -712,10 +713,10 @@ async def test_a_waiting_model_runs_to_the_step_cap_under_default_guards(
 async def test_a_bounded_episode_is_not_cut_by_the_cost_rate_ratio(
     tmp_path: Path, episode_id: str
 ) -> None:
-    """The regression this guards: an episode with a stated step budget AND an
-    explicit cost cap is judged by those caps, so a per-cycle cost jump (a
-    prompt-cache miss) no longer truncates it at the ratio's first full
-    windows -- it reaches the step budget instead."""
+    """The regression this guards: an episode that states a step budget is
+    judged by that budget, so a per-cycle cost jump (a prompt-cache miss) no
+    longer truncates it at the ratio's first full windows -- it reaches the
+    step budget instead."""
 
     adapter = FakeAdapter(tmp_path, episode_id)
     # Ten cheap cycles then a ten-cycle jump: a 3x ratio guard fires on this.
@@ -741,16 +742,22 @@ async def test_a_bounded_episode_is_not_cut_by_the_cost_rate_ratio(
 
 
 @pytest.mark.asyncio
-async def test_a_bounded_episode_still_stops_a_cycle_over_its_remaining_pace(
+async def test_a_bounded_episode_is_stopped_by_its_cost_cap_not_by_a_prorated_pace(
     tmp_path: Path, episode_id: str
 ) -> None:
-    """The caps are the authority, and the prorated ceiling is part of them: a
-    cycle costing more than the remaining budget affords per remaining step is
-    still truncated, and before the ratio could fire (two cycles in)."""
+    """The caps are the authority, and the cost cap is the only COST stop a
+    bounded episode has: 300_000 micro-USD per cycle is unremarkable until the
+    1_000_000 the operator declared is actually reached, at step 4.
+
+    Before this the same episode was cut at step 2 for exceeding a per-cycle
+    pace prorated from the remaining budget -- a pace no cycle of a real
+    long-horizon episode can keep. That prorated pace is the defect: it cut the
+    campaign's ``batch-k3-canary6/task_010`` at step 337 of 500, and replayed
+    over a lane that finished and scored 50.00% it would have cut that lane on
+    its eleventh cycle.
+    """
 
     adapter = FakeAdapter(tmp_path, episode_id)
-    # 300_000 micro-USD per cycle against a 1_000_000 cap over 8 steps: inside
-    # the pace at step 1 (400_000), over it at step 2 (266_666).
     model = ScriptedModel(["step"] * 20, cost_micros=300_000)
     runner = EpisodeRunner(
         build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
@@ -768,9 +775,119 @@ async def test_a_bounded_episode_still_stops_a_cycle_over_its_remaining_pace(
     assert root is not None
     assert verify_bundle(root).valid
     steps = payloads(root, EnvironmentStepPayload)
-    assert len(steps) == 2
+    assert len(steps) == 4
     assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "budget-cap"
+    # ...and the reason an operator reads is the cap's own number, not a
+    # diagnosis of pace.
+    assert outcome.truncation_reason == "budget-cap"
+    assert outcome.truncation_detail is not None
+    assert "provider_usd_micros" in outcome.truncation_detail
+
+
+#: Per-cycle cost profiles a bounded episode may legitimately show, repeated to
+#: their last value. Each would trip the ratio guard on its own (a cache miss, a
+#: growing context, a runaway) and none may reach ``cost-spike`` when the
+#: episode states both its own step budget and its own cost cap.
+_BOUNDED_COST_PROFILES: dict[str, list[int]] = {
+    "flat": [7],
+    "cache-miss-spike": [7] * 20 + [70],
+    "long-horizon-growth": [7_000] * 10 + [63_000],
+    "runaway": [500_000],
+}
+
+
+@pytest.mark.parametrize("profile", sorted(_BOUNDED_COST_PROFILES))
+@pytest.mark.asyncio
+async def test_a_doubly_capped_run_cannot_end_as_a_cost_spike(
+    tmp_path: Path, episode_id: str, profile: str
+) -> None:
+    """End to end for the rule the guard now encodes: with the episode's own
+    step budget and cost cap both declared, and no operator cycle cap set,
+    price is not an authority this episode has. No cost profile can produce
+    ``cost-spike``; the only reasons available are the step cap and the cost
+    cap, whatever the cycle prices do. (The operator's ``max_cycle_usd`` is
+    excluded here on purpose: that one IS an authority, and its firing is
+    asserted in ``test_a_guard_truncation_detail_reaches_the_outcome_record``.)
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["step"] * 40, cost_micros=_BOUNDED_COST_PROFILES[profile])
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 6_000_000}),
+        build_config(tmp_path, max_steps=24),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    reasons = [step.truncation_reason for step in steps]
+    assert "cost-spike" not in reasons
+    assert reasons[-1] in ("max-steps", "budget-cap")
+    assert steps[-1].truncated is True
+
+
+@pytest.mark.asyncio
+async def test_a_guard_truncation_detail_reaches_the_outcome_record(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The verdict's why is reported, not dropped.
+
+    A truncation analysis used to have to be re-derived from ``events.jsonl``
+    by hand: the step payload records the guard's CODE (it must stay a stable
+    identifier consumers compare runs on) and the outcome a caller writes out
+    -- ``scripts/run_episode.py`` prints it as ``outcome.json``, the record the
+    campaign harness collects -- carried neither the code nor the detail. Both
+    are on the outcome now, taken from the firing verdict.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # The operator's absolute cycle cap, the one price-based stop left: a
+    # 1_000 micro-USD cycle against a 100 micro-USD cap fires it on step 1.
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=8, max_cycle_cost_micros=100),
+        selector=selector(tmp_path),
+        model=ScriptedModel(["step"] * 8, cost_micros=1_000),
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
     assert steps[-1].truncation_reason == "cost-spike"
+    assert outcome.truncation_reason == "cost-spike"
+    assert outcome.truncation_detail == "one model cycle cost 1000 micro-USD (cap 100)"
+    record = _outcome_json(outcome)
+    assert record["truncation_reason"] == "cost-spike"
+    assert record["truncation_detail"] == outcome.truncation_detail
+
+
+@pytest.mark.asyncio
+async def test_a_clean_finish_reports_no_truncation_reason(tmp_path: Path, episode_id: str) -> None:
+    """A run that finished on its own must not look truncated in the record a
+    caller writes out: the fields are set only by a real truncation."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    runner = _runner(tmp_path, episode_id, adapter=adapter, model=ScriptedModel(["finish"]))
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    assert outcome.truncation_reason is None
+    assert outcome.truncation_detail is None
+    assert _outcome_json(outcome)["truncation_reason"] is None
 
 
 @pytest.mark.asyncio
@@ -787,6 +904,11 @@ async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id:
     assert verify_bundle(root).valid
     steps = payloads(root, EnvironmentStepPayload)
     assert [step.truncation_reason for step in steps] == [None, "max-steps"]
+    # The step cap reaches the caller's own record too, with no judge to quote:
+    # ``max-steps`` is its own why, so the detail stays empty rather than being
+    # filled with a sentence nobody wrote.
+    assert outcome.truncation_reason == "max-steps"
+    assert outcome.truncation_detail is None
 
 
 def _wait_reply(observation_message: Any) -> str:
