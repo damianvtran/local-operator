@@ -1666,3 +1666,63 @@ async def test_an_unattributable_receipt_seeds_no_cost(tmp_path: Path, monkeypat
         assert state.cost_knowledge == CostKnowledge.UNKNOWN
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_cut_read_leaves_the_cold_seed_unset(tmp_path: Path, monkeypatch) -> None:
+    """n1: the seed follows the same cut as the replay it rides on.
+
+    ``_read_transcript`` stashes the accounting fallback from the rows it read,
+    but a ``through_id`` cursor discards rows ABOVE the cursor from that replay. A
+    receipt from those rows describes a window this viewer is not showing, so the
+    seed is skipped there rather than a second copy of the cut rule being written
+    beside the replay's — a second boundary is exactly the disagreement the shared
+    scan exists to prevent.
+
+    Cold passes no cursor today, which is why this pins the SHAPE: a future
+    ``want_checkpoint=True`` caller that negotiates a window must not seed from
+    receipts the window excludes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+    _configure_provider(tmp_path)
+
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("older turn"))
+    cursor = await transcript.append_message(
+        Message.assistant("receipt below the cursor", usage=_stamped(90_000))
+    )
+    await transcript.append_message(Message.user("newer turn"))
+    await transcript.append_message(
+        Message.assistant("receipt above the cursor", usage=_stamped(322_546))
+    )
+
+    # Built the way ``cold()`` builds one, WITHOUT its consume-and-clear step:
+    # the stash is explicitly one-shot, so the read has to be observed directly.
+    viewer = AttachedSession(
+        config_dir=tmp_path,
+        session_id=SESSION_ID,
+        takeover_factory=_never,
+        surface="terminal",
+    )
+    try:
+        # An uncut read seeds from every receipt in the file...
+        await viewer._load_history(None, want_checkpoint=True)
+        seeded = viewer._cold_seed_usage
+        assert seeded is not None and seeded.context_tokens == 322_546
+
+        # ...a read cut at a row BEFORE the newest receipt must not seed from it.
+        await viewer._load_history(cursor.id, want_checkpoint=True)
+        assert (
+            viewer._cold_seed_usage is None
+        ), "a receipt above the cursor is not part of the window this viewer replays"
+
+        # And the gate is the cut alone: the same read without one seeds again.
+        await viewer._load_history(None, want_checkpoint=True)
+        restored = viewer._cold_seed_usage
+        assert restored is not None and restored.context_tokens == 322_546
+    finally:
+        await viewer.dispose()
