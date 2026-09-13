@@ -37,6 +37,11 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import spill_truncate, validation_error_result
 from local_operator.tools.spill import get_store
+from local_operator.web_fetch.failure import (
+    attempt_summary,
+    block_lead,
+    retry_after_note,
+)
 from local_operator.web_fetch.models import FetchResult
 from local_operator.web_fetch.service import (
     CacheEntry,
@@ -63,8 +68,14 @@ _DESCRIPTION = (
     "cache TTL reuses stored content with no network call. Use this (or "
     "`read <url>`) instead of `browser` for headless, subagent, and server "
     "contexts; use `browser` only when a page needs a real logged-in session or "
-    "JavaScript rendering. Need several pages? Issue multiple web_fetch calls in "
-    "one turn — they run in parallel instead of one-at-a-time."
+    # The retry/block sentence is deliberately terse: this string is billed on
+    # EVERY turn of every session, and `scripts/bench_context_budget.py` had
+    # ~41 tokens of headroom before this change. It has to say only what the
+    # agent cannot work out from the result itself — that retries already
+    # happened, so a blocked result is final and the named step is the move.
+    "JavaScript rendering. Transient failures retry themselves; a blocked result "
+    "is final, so take the step it names. Need several pages? Issue multiple "
+    "web_fetch calls in one turn — they run in parallel instead of one-at-a-time."
 )
 
 
@@ -164,6 +175,13 @@ def _header_line(result_like: dict[str, Any]) -> str:
     the page content, so the agent's own judgement has a reliable signal. The
     rendered body still follows (it can carry a useful message) but the lead makes
     clear it is the error RESPONSE body, never the requested content.
+
+    A CONFIRMED block refines that lead with the reason (``blocked by Akamai bot
+    protection``) instead of the generic error/block wording, because "this is a
+    bot wall, and another fetch will not clear it" and "this page is missing" are
+    different facts with different next steps. An UNSIGNED refusal keeps the
+    generic wording: claiming bot protection we did not detect would send the
+    agent to `browser` when it should be asking the user for access.
     """
     status = int(result_like["status"])
     final = result_like["final_url"]
@@ -171,13 +189,47 @@ def _header_line(result_like: dict[str, Any]) -> str:
     method = result_like["render_method"]
     cache = result_like["cache"]
     tail = f"{method} · {ctype} · cache {cache}"
+    # The attempt count rides in the meta line so a 2.4 s fetch that used to look
+    # like a slow network now reads as what it was. Only when it is not 1: a
+    # single attempt is the norm and says nothing.
+    attempts = result_like.get("attempts")
+    if isinstance(attempts, int) and attempts > 1:
+        profiles = result_like.get("profiles")
+        summary = attempt_summary(attempts, profiles if isinstance(profiles, list) else ())
+        if summary:
+            tail += f" · {summary}"
     if 200 <= status < 300:
         quality = " · sparse/JS-gated (try `browser`)" if result_like.get("low_quality") else ""
         return f"[{status}] {final}\n{tail}{quality}"
+    if result_like.get("failure_kind") == "blocked":
+        # The reason clause is IMPORTED, not re-typed: this line, the TUI card's
+        # danger row and the tests that pin both must not be able to drift into
+        # three opinions about the same refusal (review round 1, R5).
+        vendor = str(result_like["block_vendor"]) if result_like.get("block_vendor") else None
+        warn = f"⚠ HTTP {status} {_status_reason(status)} — {block_lead(vendor)}. {final}"
+        # NO "the body below is the error response" note for this class: the
+        # body below is no longer the origin's response at all, it is our own
+        # statement of what happened plus the next step (the challenge markup is
+        # dropped). Keeping the note would describe the wrong thing.
+        return f"{warn}\n{tail}"
     warn = (
         f"⚠ HTTP {status} {_status_reason(status)} — this is an error/block page, "
         f"not page content. {final}"
     )
+    # §3.4: a Retry-After too long to sleep on is REPORTED, not obeyed — and
+    # reporting it only in ``details`` reaches nothing, because the agent reads
+    # this text. ``describe`` would say the same thing, but it is only reached
+    # for a class with no response at all; a 429 HAS a response, so its lead is
+    # built here and this is where the number has to land.
+    retry_after = result_like.get("retry_after_s")
+    if result_like.get("failure_kind") == "ratelimit" and isinstance(retry_after, (int, float)):
+        # AFTER the parenthetical, so the card's header strip still recognises the
+        # header block it removes (lead + meta + note) and leaves this sentence
+        # where a reader looks for it: in the body, as the reason the call stopped.
+        return (
+            f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)\n"
+            f"{retry_after_note(float(retry_after))}"
+        )
     return f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)"
 
 
@@ -278,6 +330,15 @@ def _cache_hit_result(
         "cache": "hit",
         "ok": http_ok,
         "http_error": not http_ok,
+        # Truthfully zero: a cache hit made no network attempt at all. The other
+        # diagnostic keys are absent rather than zero/None because a cached entry
+        # records no failure to describe.
+        "attempts": 0,
+        # …and for the same reason NO profiles: ``profiles`` names the identities
+        # that made the requests, and a hit made none. Leaving the model's default
+        # (``["default"]``) in place would report a request identity for a call
+        # that never opened a socket (review round 1, N3).
+        "profiles": [],
     }
     # Same declared supersede key as a fresh fetch: a cached re-read describes
     # the same resource, so it must group with the fresh ones rather than
@@ -440,7 +501,33 @@ async def run_fetch(
     except asyncio.CancelledError:
         return "web_fetch aborted.", {"url": normalized, "cache": "miss"}, True
     except FetchError as error:
-        return str(error), {"url": normalized, "cache": "miss"}, True
+        # A TERMINAL failure (no response ever arrived) still carries what it
+        # knows: the class says whether another try could help, and a blocked
+        # stall names `browser` as the next step. Without this the card and the
+        # transcript show a bare sentence for exactly the failures that most
+        # need explaining.
+        details: dict[str, Any] = {"url": normalized, "cache": "miss"}
+        # The retry facts ride the exception (``FetchError.attempts/profiles``)
+        # precisely so this branch can carry them too: the preview states "2
+        # attempts" in prose, and a structured payload that omits what its own
+        # text says is the contract gap §5.3 exists to close (review round 1,
+        # Q1). ``profiles`` is reported only when there was more than one
+        # identity to report, matching the fresh-fetch path exactly.
+        if error.attempts:
+            details["attempts"] = error.attempts
+            if error.attempts > 1 and error.profiles:
+                details["profiles"] = list(error.profiles)
+        if error.failure is not None:
+            details["failure_kind"] = error.failure.kind
+            if error.failure.vendor:
+                details["block_vendor"] = error.failure.vendor
+            if error.failure.reference:
+                details["block_reference"] = error.failure.reference
+            if error.failure.retry_after_s is not None:
+                details["retry_after_s"] = error.failure.retry_after_s
+            if error.failure.kind in ("blocked", "stall"):
+                details["suggested_tool"] = "browser"
+        return str(error), details, True
     except Exception as error:  # pragma: no cover - defensive; unexpected transport bug
         return f"web_fetch failed for {normalized!r}: {error}", {"url": normalized}, True
 
@@ -462,6 +549,29 @@ async def run_fetch(
         "ok": http_ok,
         "http_error": not http_ok,
     }
+    # Retry/block diagnostics: ADDITIVE keys only. Nothing above changes name,
+    # type or meaning, so the TUI card, the UI row model and any stored
+    # transcript keep working untouched — and a key is omitted rather than set
+    # to None when it has nothing to say, so a reader can test presence.
+    result_like["attempts"] = result.attempts
+    if result.attempts > 1:
+        result_like["profiles"] = list(result.profiles)
+    if result.failure_kind:
+        result_like["failure_kind"] = result.failure_kind
+    if result.block_vendor:
+        result_like["block_vendor"] = result.block_vendor
+    if result.block_reference:
+        result_like["block_reference"] = result.block_reference
+    if result.profile != "default":
+        result_like["profile"] = result.profile
+    if result.retry_after_s is not None:
+        result_like["retry_after_s"] = result.retry_after_s
+    if result.failure_kind == "blocked":
+        # The escalation the agent should take next, as DATA as well as prose —
+        # `browser` is write-tier and approval-gated, so this names the step
+        # rather than taking it (design §8.1).
+        result_like["suggested_tool"] = "browser"
+
     preview, details, handle = _shape_from_content(
         result_like, result.content, tool_name, context, variant=base_variant
     )

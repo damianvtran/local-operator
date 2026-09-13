@@ -7,6 +7,7 @@ real against an isolated config dir.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Callable
 
 import httpx
@@ -290,8 +291,21 @@ async def test_non_2xx_surfaced_as_error_not_content(
     assert details["status"] == status
     # (b) leads with the prominent, unmissable status line
     assert preview.startswith(f"⚠ HTTP {status} {reason}")
-    assert "error/block page, not page content" in preview
-    assert "The body below is the error response" in preview
+    if status == 403:
+        # A 403 is now classified: this body carries no vendor signature, so the
+        # lead says the origin refused the request and names the ambiguity
+        # instead of the generic "error/block page" wording. The F1 property
+        # under test — an unmissable lead that cannot be mistaken for content —
+        # is unchanged and asserted above; only the reason phrase is sharper.
+        # The class also replaces the challenge body with an explanation, so the
+        # "body below is the error response" note is deliberately absent (it
+        # would describe the wrong thing).
+        assert "the origin refused this request" in preview
+        assert details["failure_kind"] == "blocked"
+        assert details["suggested_tool"] == "browser"
+    else:
+        assert "error/block page, not page content" in preview
+        assert "The body below is the error response" in preview
     # (c) not cached: a second fetch hits the network again
     calls = transport.calls
     _p2, d2, _e2 = await run_fetch(
@@ -577,3 +591,296 @@ async def test_a_disabled_fetch_refuses_per_call_without_touching_the_network(
     )
     assert is_error is False
     assert transport.calls >= 1
+
+
+# --- retries, cacheability, and the blocked result shape --------------------
+
+
+CHALLENGE_HEADERS = {"content-type": "text/html", "server": "AkamaiGHost"}
+#: The real shoppersdrugmart.ca body, entities intact (see test_failure.py).
+AKAMAI_BODY = (
+    "<HTML><HEAD>\n<TITLE>Access Denied</TITLE>\n</HEAD><BODY>\n"
+    "<H1>Access Denied</H1>\n \n"
+    "You don't have permission to access this server.<P>\n"
+    "Reference&#32;&#35;18&#46;44182117&#46;1789250166&#46;2be4ae76\n</BODY>\n</HTML>"
+)
+
+
+def _cache_files() -> list[str]:
+    try:
+        return [p.name for p in service.cache_dir().iterdir() if p.suffix == ".json"]
+    except OSError:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_details_agree_with_its_own_preview(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, Q1: the terminal path dropped ``attempts``/``profiles``.
+
+    The preview said "3 attempts" while ``details`` carried only ``failure_kind``,
+    so the structured contract §5.3 defines (``attempts`` is a key, excluded only
+    for a cache hit) was broken on exactly the failures that need it most. The
+    facts now ride the exception from the engine, so the two cannot disagree.
+    """
+    monkeypatch.setattr(service, "_backoff_sleep", lambda delay: asyncio.sleep(0))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("no route", request=request)
+
+    transport = _CountingTransport(handler)
+    preview, details, is_error = await run_fetch(
+        "https://dead.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    assert details["failure_kind"] == "transport"
+    assert details["attempts"] == 3
+    assert details["profiles"] == ["default", "default", "default"]
+    assert "3 attempts" in preview
+
+
+@pytest.mark.asyncio
+async def test_a_large_retry_after_reaches_the_model_text(context: ToolContext) -> None:
+    """Review round 1, Q2: §3.4 requires the interval in the TEXT and in details.
+
+    A 429 bears a response, so its preview is built by ``_header_line`` and never
+    by ``describe`` — which meant the number reached ``details`` and stopped
+    there, leaving the agent to be silently refused after one attempt with no
+    reason given. Reproduced before the fix: ``error: ⚠ HTTP 429 Too Many
+    Requests — this is an error/block page …`` with no mention of 600.
+    """
+    transport = _CountingTransport(
+        lambda req: httpx.Response(
+            429,
+            text="slow down",
+            headers={"content-type": "text/plain", "retry-after": "600"},
+        )
+    )
+    preview, details, is_error = await run_fetch(
+        "https://busy.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    assert details["retry_after_s"] == 600.0
+    assert "600" in preview
+    assert "asked us to wait" in preview
+    # Not slept on, and not retried either: one attempt, reported. ``attempts`` is
+    # the structured form of that claim (a second try would read 2), and it is the
+    # one that cannot be confused by an enrichment probe also reaching the
+    # transport.
+    assert details["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_5xx_is_never_cached_and_a_retried_200_is(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4 still holds AFTER retries: a transient outage must never be replayed
+    for the TTL, while a success that took two tries is an ordinary success.
+
+    Asserted on the cache DIRECTORY rather than a mock, because "nothing was
+    written" is a statement about the disk.
+    """
+    monkeypatch.setattr(service, "_backoff_sleep", lambda delay: asyncio.sleep(0))
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Count only the TARGET path: an enrichment probe (``/x.md``) is a real
+        # request but not the one under test, and letting it consume a scripted
+        # response would make the attempt numbers describe the optimisation
+        # instead of the fetch.
+        if not request.url.path.endswith("/x"):
+            return httpx.Response(404, text="no probe here")
+        state["n"] += 1
+        if state["n"] <= 3:
+            return httpx.Response(500, text="down")
+        return httpx.Response(200, text="back up", headers={"content-type": "text/plain"})
+
+    transport = _CountingTransport(handler)
+    _p, details, is_error = await run_fetch(
+        "https://flaky.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is True
+    assert details["attempts"] == 3
+    assert _cache_files() == []  # three failures wrote nothing
+
+    _p2, d2, e2 = await run_fetch(
+        "https://flaky.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert e2 is False
+    assert d2["attempts"] == 1
+    assert len(_cache_files()) == 1  # the success IS cached
+
+
+@pytest.mark.asyncio
+async def test_retried_success_is_cached_with_its_attempt_count(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 500-then-200 is a success that happened to cost two requests."""
+    monkeypatch.setattr(service, "_backoff_sleep", lambda delay: asyncio.sleep(0))
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Only the target path is scripted; see the note in the test above.
+        if not request.url.path.endswith("/x"):
+            return httpx.Response(404, text="no probe here")
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, text="content here", headers={"content-type": "text/plain"})
+
+    transport = _CountingTransport(handler)
+    preview, details, is_error = await run_fetch(
+        "https://slow.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is False
+    assert details["attempts"] == 2
+    # The count rides in the header meta line, so a longer duration is legible
+    # rather than looking like a slow network.
+    assert "2 attempts" in preview
+    assert len(_cache_files()) == 1
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_reports_zero_attempts(context: ToolContext) -> None:
+    """Truthful: a cache hit made no network attempt at all."""
+    transport = _CountingTransport(
+        lambda req: httpx.Response(200, text="page", headers={"content-type": "text/plain"})
+    )
+    await run_fetch(
+        "https://example.com/cached", tool_name="web_fetch", context=context, transport=transport
+    )
+    _p, details, _e = await run_fetch(
+        "https://example.com/cached", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert details["cache"] == "hit"
+    assert details["attempts"] == 0
+    # …and no identity either. ``profiles`` names the clients that made the
+    # requests, and a hit made none: ``attempts: 0`` beside
+    # ``profiles: ["default"]`` reported a request identity for a call that never
+    # opened a socket (review round 1, N3).
+    assert details["profiles"] == []
+
+
+@pytest.mark.asyncio
+async def test_blocked_result_drops_the_challenge_body_and_names_the_escalation(
+    context: ToolContext,
+) -> None:
+    """§5.2: the challenge markup is REPLACED, not inlined.
+
+    The body is unusable by construction — markup whose purpose is to be executed
+    by a browser — and inlining it cost ~5.5 KB of context (measured on
+    medium.com) to tell the agent nothing, under a lead that invited the misread
+    that it was page content. What survives is the one durable fact (the origin's
+    reference id) plus the named next step.
+    """
+    transport = _CountingTransport(
+        lambda req: httpx.Response(403, text=AKAMAI_BODY, headers=CHALLENGE_HEADERS)
+    )
+    preview, details, is_error = await run_fetch(
+        "https://walled.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    # The markup is gone.
+    assert "Access Denied" not in preview
+    assert "<html" not in preview.lower()
+    # The useful parts are not.
+    assert "18.44182117.1789250166.2be4ae76" in preview
+    assert "browser" in preview
+    assert "Akamai" in preview
+    # And the escalation is data as well as prose, so a UI or a future caller
+    # does not have to parse the sentence.
+    assert details["failure_kind"] == "blocked"
+    assert details["block_vendor"] == "akamai"
+    assert details["block_reference"] == "18.44182117.1789250166.2be4ae76"
+    assert details["suggested_tool"] == "browser"
+
+
+@pytest.mark.asyncio
+async def test_404_body_is_still_inlined(context: ToolContext) -> None:
+    """The §5.2 narrowing applies to the ``blocked`` class ONLY: a 404's body,
+    like a 451's and a 500's, often genuinely explains itself."""
+    body = "<html><body><h1>Page moved</h1><p>See /guide/new-page instead.</p></body></html>"
+    transport = _CountingTransport(
+        lambda req: httpx.Response(404, text=body, headers={"content-type": "text/html"})
+    )
+    preview, details, is_error = await run_fetch(
+        "https://docs.example.com/old", tool_name="web_fetch", context=context, transport=transport
+    )
+    assert is_error is True
+    assert "Page moved" in preview
+    assert "/guide/new-page" in preview
+    assert details["failure_kind"] == "client"
+    assert "suggested_tool" not in details
+
+
+@pytest.mark.asyncio
+async def test_existing_details_keys_keep_their_names_and_types(
+    context: ToolContext,
+) -> None:
+    """§5.3 is ADDITIVE: the card, the UI row model and any stored transcript
+    read these, so a rename or a retype here breaks a second repo silently."""
+    transport = _CountingTransport(
+        lambda req: httpx.Response(200, text="hello", headers={"content-type": "text/plain"})
+    )
+    _p, details, _e = await run_fetch(
+        "https://example.com/x", tool_name="web_fetch", context=context, transport=transport
+    )
+    expected: dict[str, type] = {
+        "url": str,
+        "final_url": str,
+        "status": int,
+        "content_type": str,
+        "render_method": str,
+        "bytes": int,
+        "complete": bool,
+        "low_quality": bool,
+        "cache": str,
+        "ok": bool,
+        "http_error": bool,
+    }
+    for key, kind in expected.items():
+        assert key in details, f"{key} disappeared from details"
+        assert isinstance(details[key], kind), f"{key} changed type"
+
+
+@pytest.mark.asyncio
+async def test_abort_during_a_backoff_returns_promptly(context: ToolContext) -> None:
+    """§3.5: the backoff is a plain ``asyncio.sleep`` inside the raced coroutine,
+    so an abort lands on it immediately rather than waiting the delay out.
+
+    Structural, not timed: the signal is set while the sleep is in flight and the
+    assertion is on the RESULT, so the test cannot flake under load.
+    """
+    from local_operator.harness.types import AbortSignal
+
+    signal = AbortSignal()
+    started = asyncio.Event()
+
+    async def slow_backoff(delay: float) -> None:
+        started.set()
+        await asyncio.sleep(30)  # never completes; the abort must cut it short
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(service, "_backoff_sleep", slow_backoff)
+        transport = _CountingTransport(lambda req: httpx.Response(503, text="down"))
+
+        async def abort_when_sleeping() -> None:
+            await started.wait()
+            signal.abort()
+
+        waiter = asyncio.create_task(abort_when_sleeping())
+        preview, _details, is_error = await run_fetch(
+            "https://example.com/x",
+            tool_name="web_fetch",
+            context=context,
+            transport=transport,
+            signal=signal,
+        )
+        await waiter
+
+    assert is_error is True
+    assert "aborted" in preview.lower()

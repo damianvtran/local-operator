@@ -1872,6 +1872,27 @@ SETTINGS: tuple[Setting, ...] = (
         help="Try .md, llms.txt and content negotiation before scraping HTML.",
         choices=_bool_choices("try cleaner sources first", "scrape HTML directly"),
     ),
+    Setting(
+        key="web_fetch.max_attempts",
+        path=("web_fetch", "max_attempts"),
+        section="web_fetch",
+        label="Attempts per hop",
+        kind=Kind.INT,
+        default=3,
+        help="Retries share the call's timeout, so more attempts never take longer.",
+        minimum=1,
+        maximum=5,
+    ),
+    Setting(
+        key="web_fetch.blocked_retry",
+        path=("web_fetch", "blocked_retry"),
+        section="web_fetch",
+        label="Browser-profile retry",
+        kind=Kind.BOOL,
+        default=True,
+        help="After a refusal, retry once with browser-shaped headers.",
+        choices=_bool_choices("retry refusals once", "stay self-identifying"),
+    ),
     # -- tools --------------------------------------------------------------
     # ``path`` mirrors ``tools.builtin.BASH_SHELL_PATH``; the two are pinned
     # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
