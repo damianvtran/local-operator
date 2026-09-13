@@ -53,9 +53,9 @@ def test_logs_reads_the_daemon_and_the_runtimes_in_one_tail(tmp_path, monkeypatc
 
 
 def test_logs_passes_a_runtime_file_that_does_not_exist_yet(tmp_path, monkeypatch) -> None:
-    """Before any runtime has started the file does not exist, and it must still be
-    named: `-F` retries a missing path, so the follow picks the file up the moment
-    a runtime creates it — which omitting the path would make impossible."""
+    """Under `--follow` the not-yet-created file must still be named: `-F` retries
+    a missing path, so the follow picks the file up the moment a runtime creates
+    it — which omitting the path would make impossible."""
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     daemon_log = log_dir() / "mobile.log"
     daemon_log.parent.mkdir(parents=True, exist_ok=True)
@@ -68,3 +68,39 @@ def test_logs_passes_a_runtime_file_that_does_not_exist_yet(tmp_path, monkeypatc
     argv = call.call_args.args[0]
     assert str(daemon_log) in argv
     assert str(runtime_log_path()) in argv
+
+
+def test_logs_without_follow_omits_a_missing_file_rather_than_erroring(
+    tmp_path, monkeypatch
+) -> None:
+    """A plain `tail` does NOT tolerate a missing operand: it warns and exits 1,
+    which is what shipped for one revision and would have made `lop mobile logs`
+    fail on every freshly booted machine (measured through the real CLI: exit 1
+    and `tail: …/logs/runtime.log: No such file or directory`). Only the following
+    branch may pass a path that may not exist."""
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    daemon_log = log_dir() / "mobile.log"
+    daemon_log.parent.mkdir(parents=True, exist_ok=True)
+    daemon_log.write_text("daemon\n", encoding="utf-8")
+    assert not runtime_log_path().exists()
+
+    with patch("subprocess.call", return_value=0) as call:
+        assert mobile_command(_args("--lines", "2")) == 0
+
+    argv = call.call_args.args[0]
+    assert str(daemon_log) in argv
+    assert str(runtime_log_path()) not in argv
+    assert "-F" not in argv and "-f" not in argv
+
+
+def test_logs_with_no_log_files_at_all_does_not_read_stdin(tmp_path, monkeypatch, capsys) -> None:
+    """`tail` with no operand reads STDIN, so an empty file list would hang the
+    command on a machine whose daemon has not written yet. It must say so instead."""
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    assert not log_dir().exists()
+
+    with patch("subprocess.call", return_value=0) as call:
+        assert mobile_command(_args()) == 0
+
+    call.assert_not_called()
+    assert "no log files yet" in capsys.readouterr().out
