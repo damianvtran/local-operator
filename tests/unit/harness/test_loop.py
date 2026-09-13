@@ -3989,3 +3989,168 @@ async def test_a_never_id_call_is_promoted_once_not_per_state():
     starts = [e.tool_call_id for e in events if isinstance(e, ToolExecutionStartEvent)]
     assert sorted(starts) == sorted(promotions.values())
     assert executed == ["echo", "echo", "echo"]
+
+
+# ---------------------------------------------------------------------------
+# The DeepSeek reasoning-echo refusal: bounded recovery
+# ---------------------------------------------------------------------------
+#
+# A thinking-mode request that does not carry reasoning back on every assistant
+# turn is refused with an HTTP 400, which the failover layer rightly treats as
+# non-retryable (the same body cannot succeed). It arrives here as a rendered
+# "invalid request (HTTP 400): ..." string on an ``error`` end, and the loop can
+# recover from it where the client cannot: the SAME conversation answers 200
+# with thinking turned off (measured live). One retry, then the failure surfaces.
+
+_REASONING_ECHO_ERROR = (
+    "invalid request (HTTP 400): The `reasoning_content` in the thinking mode "
+    "must be passed back to the API."
+)
+
+
+def _echo_model(effort: str = "high") -> ModelSpec:
+    return ModelSpec(
+        provider="deepseek",
+        model_id="deepseek-flash",
+        reasoning_efforts=("none", "low", "high", "max"),
+        reasoning_effort=effort,
+        requires_reasoning_echo=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_refusal_retries_once_with_thinking_disabled():
+    """The refusal is recoverable: retry the turn with thinking off, and say so.
+
+    The user is losing the model's reasoning for the rest of the run, which is a
+    real degradation and must be visible rather than inferred from a quieter
+    answer.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[0].model.reasoning_effort == "high"
+    assert stream.requests[1].model.reasoning_effort == "none"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and not end.aborted and end.error is None
+    # The refused turn carried nothing the user read, so it must not reach the
+    # retry's history: the next request re-sends the conversation that failed.
+    assert all(
+        not (m.role == "assistant" and not m.text and not m.tool_calls)
+        for m in context.messages
+        if isinstance(m, Message)
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_refusal_is_retried_once_and_then_surfaces():
+    """Retries are bounded at one, and a second refusal ends with the provider's
+    own words rather than looping."""
+    stream = ScriptedStream(
+        [[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]] * 2
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_reasoning_echo_recovery_never_replays_output_the_user_read():
+    """Only a turn with nothing SHOWN may be replayed.
+
+    A provider that emitted content before failing has already been read; a
+    retry would show it twice, so the loop ends the run with the failure.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="partial answer"),
+                StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        # The capability, not the wording, decides. A route that never sends the
+        # echo must not have a rung of its ladder disabled on the strength of a
+        # message that happens to match.
+        _laddered_model(),
+        _echo_model("none"),  # already off: the retry could not change the body
+    ],
+)
+async def test_reasoning_echo_recovery_needs_the_capability_and_a_rung(model):
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=model), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "thinking disabled" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_only_half_the_wording_is_not_the_condition():
+    """``reasoning_content`` alone is a field name every DeepSeek-shaped error
+    mentions; matching it alone would disable thinking on unrelated failures."""
+    stream = ScriptedStream(
+        [
+            [
+                StreamEndEvent(
+                    stop_reason="error",
+                    error="invalid request (HTTP 400): unsupported key reasoning_content",
+                )
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=_echo_model()), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is not None
