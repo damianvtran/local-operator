@@ -1536,3 +1536,228 @@ test("Q1: the pair latch clears on a STANDBY confirmation, so a later revoke re-
     await bundle.close();
   }
 });
+
+/* ---------------------------------------------------------------------------
+ * Round 2 (QA R2-2 / R2-3, review R2-2 / R2-3).
+ *
+ * R2-2: the gate must not read the FILE's allow-list as "this link is paired".
+ * An install the file authorises whose worker holds no token rendered the
+ * standby card — "This one takes over if that one disconnects" — while the
+ * daemon did not list it as a standby, it could never be promoted, and the code
+ * field it needed was hidden. The link's own state decides; the file only
+ * widens authority.
+ *
+ * R2-3: with two signals available, `driver_extension_id` has THREE cases, not
+ * two — absent (a daemon predating the field), empty (a multi-identity daemon
+ * with nothing attached), and naming an id.
+ * ------------------------------------------------------------------------- */
+
+const TOKENLESS = {
+  paired: false,
+  extension_connected: false,
+  protocol_version: 1,
+  driver_extension_id: STORE_ID,
+  driver_label: "Chrome 0.1.13",
+  // The FILE authorises this install — but its link holds no token, which is
+  // exactly what the daemon reports: not a standby, counted as an unlisted dial.
+  authorized_extension_ids: [STORE_ID, DEV_ID],
+  standby_extension_ids: [],
+  unlisted_extension_count: 1,
+};
+
+test("R2-2: a file-authorised install whose link is unpaired gets the FORM", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => TOKENLESS);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    // The worker's own statement: its hello_ack said paired: false.
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "the file's allow-list is authority, not authentication: this install must be offered the code field",
+    );
+    assert.equal(nodes.get("pair-code")["hidden"] ?? false, false, "the code field must be visible");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-2: a stale standby connState is overruled by the daemon's live list", async () => {
+  // The token went away and the worker has not re-dialled yet, so session
+  // storage still says "standby" while /health lists this install in NO role.
+  // The live answer wins: no standby claim, and no form either (this install
+  // holds a token) — the "Paired." card, which is what it will be again after
+  // the next dial.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => TOKENLESS);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "kept-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: the state that changed is the daemon's list, and no card goes stale", async () => {
+  // QA's R2-3 repro, one step on: the tokenless install, then a revoke. Nothing
+  // writes session storage, so nothing re-renders on an event — which is only a
+  // defect if the card that stays up is WRONG. It is not: the install was
+  // already on the form (R2-2) and the form is still the right answer, so the
+  // repaint is a no-op rather than a stale claim. This row pins the pair of
+  // states so the next change cannot reintroduce a card that outlives its state.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = TOKENLESS;
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+
+    // The out-of-process revoke: the file no longer authorises this id, and no
+    // storage key changes. The same render is re-entered by the popup's own
+    // paths; assert the card a re-render produces AND that the live one was
+    // already correct.
+    health = { ...TOKENLESS, authorized_extension_ids: [STORE_ID], unlisted_extension_count: 1 };
+    await chrome.storage.session.set({ connState: "pairing" });
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["pairing"], "the form must survive the revoke");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: an empty driver field is 'nobody drives', not 'this install drives'", async () => {
+  // A multi-identity daemon with nothing attached names NO driver (`""`), which
+  // is a different state from a daemon that predates the field. The install is
+  // authorised and paired, so it shows "Paired. Code accepted. Connecting…" —
+  // never the connected card (the agent cannot drive it yet) and never the form
+  // (it holds a token).
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: false,
+    extension_connected: false,
+    protocol_version: 1,
+    driver_extension_id: "",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R2-3: an absent driver field still means the old single-identity reading", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("review R2-2: a wedged DRIVER does not show the wedge card to another install", async () => {
+  // `extension_unresponsive` is the driver's latch. Before this was scoped, a
+  // never-paired second install rendered "the extension has stopped responding"
+  // — a false statement about itself, with a Reload that reloads its own worker
+  // and clears nothing — instead of the form it needed.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "the driver's wedge must not hide this install's code field",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("review R2-2 control: the DRIVER's own popup still gets the wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["unresponsive"]);
+  } finally {
+    await bundle.close();
+  }
+});
