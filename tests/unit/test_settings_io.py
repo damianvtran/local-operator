@@ -1506,3 +1506,25 @@ class TestTheSubagentModelChoiceRow:
             effort="hi",
         )
         assert params.effort == "hi"
+
+    @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
+    def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
+        """The two facts the incident proved these rows were missing.
+
+        A deliberate tier pin read as harmless: nothing said a child on it RUNS,
+        and is billed, at that model's rates, and nothing pointed at the row that
+        decides who may pick one. Both are pinned here because the sentence is
+        one string — a later edit that trims either half for width drops the
+        fact, not a word.
+        """
+        setting = settings_io.resolve_key(f"subagents.models.{tier}")
+        assert setting is not None
+        assert "Bills at that model's rates" in setting.help
+        assert "empty keeps the parent's" in setting.help
+        assert "Picker: row above" in setting.help
+        # ...and they FIT beside the row's own key path at 100 columns, which is
+        # the width the /settings evidence frames are captured at. The detail
+        # line sheds the WHOLE help once it and the key no longer fit
+        # (``settings_view``'s shed ladder), so an edit that buys words here
+        # loses the billing fact in exactly the state the row is read in.
+        assert cell_len(setting.help) <= 74, setting.help

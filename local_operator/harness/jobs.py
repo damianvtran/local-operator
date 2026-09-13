@@ -386,10 +386,16 @@ class AsyncJob(BaseModel):
     # its relay (``harness/subagent.py``), read by the TUI's subagent panel and
     # by parent-side cost aggregation.
     #
-    # The CHILD session's ``provider/model_id``, captured once when the child
-    # is built. Read off the child, never off the parent: ``run_subagent``
-    # takes a ``model_spec`` override, and a child running on a different
-    # model is exactly the fact this records.
+    # The CHILD session's ``provider/model_id``. Written in TWO phases, and the
+    # split is what lets a row that has not started yet still be truthful:
+    # ``run_subagent`` stamps it at REGISTRATION from the spec the launch
+    # resolved (a tier or a role pin), or from the PARENT's label when the
+    # child owns no model and inherits — an absent label there would be
+    # ambiguous between "inherits" and "nobody knows", and the ``task`` result
+    # line the parent model reads has to say which. The runner then OVERWRITES
+    # it from the built child (``effective_model_label``), and that write wins:
+    # a restored provider fallback is the model actually being called, and
+    # ``_accumulate_usage`` prices usage off this field.
     model_label: str | None = None
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
