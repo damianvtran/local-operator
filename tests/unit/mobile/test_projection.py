@@ -553,14 +553,16 @@ def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
 
 
 def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
-    """The last tier before the honest warning: identity plus a count.
+    """The last tier before the honest warning: identity rows only.
 
     A roster wide enough that even identity rows cannot fit is genuinely
     unbounded, so the frame degrades to one row per child carrying only what a
-    reader cannot derive — job id, label, parent edge, lifecycle — plus the
-    roster WIDTH, because a roster that reads as empty would be a worse lie than
-    one that says how many children there are. Everything dropped is fetchable
-    per child, the same trade the transcript already makes with /history.
+    reader can neither derive nor fetch: job id, label, parent edge and
+    lifecycle. The rows ARE the count (no ``subagent_count`` key: the client's
+    rebuild filters to ``SessionProjection``'s fields and would drop an unknown
+    key on the floor). Everything else is fetchable per child — except
+    ``error_text``, which exists nowhere else and is the real price of this
+    tier.
     """
     from local_operator.mobile.projection import (
         FRAME_CAP_ROSTER_IDENTITY_FIELDS,
@@ -583,10 +585,10 @@ def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() ->
     data, degraded = cap_projection_frame(projection)
 
     assert degraded is True
-    assert data["subagent_count"] == 4_000
     assert len(data["subagents"]) == 4_000
     assert all(set(row) <= set(FRAME_CAP_ROSTER_IDENTITY_FIELDS) for row in data["subagents"])
     assert all("parent_job_id" in row for row in data["subagents"])
+    assert "subagent_count" not in data
     assert oversized_frame_report({"op": "projection", "data": data}, _MAX_LINE_BYTES) is None
     # The frame must still rebuild into a projection on the client, or the
     # degradation would trade an unreadable frame for an unusable one.

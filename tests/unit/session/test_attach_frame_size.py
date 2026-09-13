@@ -1095,6 +1095,89 @@ async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
 
 
 @pytest.mark.asyncio
+async def test_a_genuinely_unfittable_welcome_still_opens_the_session(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """The ceiling's own case, driven through the real attach.
+
+    A roster whose IDENTITY rows are still over the line limit is unfittable by
+    every tier — the labels are what is left once the derived graph is shed — so
+    the cap does exactly what its warning says and returns an over-limit frame.
+    That is the case the ceiling exists for: the welcome is replaced by the
+    identity-only projection, whose whole job is the client's identity check,
+    and the canonical state rides the ``frontend_sync`` that follows on the same
+    connection. The session stays OPENABLE instead of dying on a line nobody can
+    read.
+
+    Driven through ``AttachedSession.connect`` rather than a synthetic peer,
+    because a substitute that cannot satisfy the client's own identity check
+    would not be worth having.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    projection = _wide_roster_projection(256)
+    projection.conversation_name = "osworld"
+    for row in projection.subagents:
+        # Identity rows keep their LABEL: a label this size is what makes the
+        # frame unfittable after every tier has fired.
+        row.label = "osworld-eval-" + "x" * 4_600
+    handle._projection = projection
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    substitutions: list[dict[str, Any]] = []
+    original_readable = registrant._readable_frame
+
+    def recording_readable(conn, frame, size):  # noqa: ANN001, ANN202
+        """Record what the ceiling decided to substitute, if anything."""
+        replacement, close_reason = original_readable(conn, frame, size)
+        if replacement is not None:
+            substitutions.append(replacement)
+        return replacement, close_reason
+
+    registrant._readable_frame = recording_readable  # type: ignore[assignment]
+    viewer = None
+    try:
+        # The precondition, asserted rather than assumed: this roster is over the
+        # line limit even after EVERY cap tier, which is what makes the welcome
+        # unrunnable (the tier-6 identity rows below are what the cap returns).
+        from local_operator.mobile.projection import cap_projection_frame
+
+        capped, degraded = cap_projection_frame(projection)
+        assert degraded is True
+        assert (
+            _line_bytes({"op": "projection", "data": capped}) > _MAX_LINE_BYTES
+        ), "the fixture must be unfittable after every tier, including the shed"
+        assert all("label" in row for row in capped["subagents"])
+
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            viewer = await AttachedSession.connect(
+                await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+            )
+        # The client read a frame it could parse and identify, so the substitute
+        # reached the wire; the identity-only payload is what it was.
+        assert not viewer.is_cold
+        assert substitutions, "the ceiling never ran on the welcome"
+        welcome = substitutions[0]
+        assert welcome["op"] == "projection"
+        assert welcome["data"]["session_id"] == "s1"
+        assert welcome["data"]["conversation_name"] == "osworld"
+        assert welcome["data"]["kind"] == "tui"
+        assert welcome["data"]["subagents"] == []
+        assert welcome["data"]["transcript"] == []
+        assert welcome["data"]["pending"] is None
+        # The WELCOME branch is the one that ran: a repaint would have been
+        # dropped instead (see the family test), and its log line says so.
+        assert "refusing to write an unreadable projection" in caplog.text
+        assert "unreadable projection repaint" not in caplog.text
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
 async def test_the_send_ceiling_never_writes_an_unreadable_frame(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1158,17 +1241,7 @@ async def test_the_send_ceiling_never_writes_an_unreadable_frame(
 
         filler = "x" * (limit + 1_000_000)
 
-        # 1. The welcome/broadcast family: replaceable state, so it degrades to
-        #    the identity-only projection rather than killing the socket. The
-        #    identity is what the client's connect actually needs.
-        await _send({"op": "projection", "data": {"session_id": "s1", "subagents": [filler]}})
-        line = await _read_line()
-        assert line is not None and line.get("op") == "projection"
-        assert line["data"]["subagents"] == []
-        assert line["data"]["transcript"] == []
-        assert line["data"]["session_id"] == "s1"
-
-        # 2. A reply: somebody is waiting for it, so it arrives as the error
+        # 1. A reply: somebody is waiting for it, so it arrives as the error
         #    frame that names the oversize instead of as silence.
         await _send({"op": "result", "req": 77, "data": {"blob": filler}})
         line = await _read_line()
@@ -1176,7 +1249,7 @@ async def test_the_send_ceiling_never_writes_an_unreadable_frame(
         assert line.get("req") == 77
         assert "socket line limit" in str(line.get("message"))
 
-        # 3. Relay traffic: degraded by its own belt at enqueue, degraded again
+        # 2. Relay traffic: degraded by its own belt at enqueue, degraded again
         #    here if a future caller bypasses it.
         await _send(
             {
@@ -1188,7 +1261,38 @@ async def test_the_send_ceiling_never_writes_an_unreadable_frame(
         assert line is not None and line.get("op") == "frontend_update"
         assert line["data"].get("degraded") is True
 
-        # 4. The connect-time ``frontend_sync`` PUSH has no ``req``, so there is
+        # 3. ``event`` is the family the module docstring records as the one
+        #    that killed a socket outright (1,129,319 bytes from ONE 1 MB
+        #    transcript row), and its stand-in must still be a VALID frame of
+        #    its own op: ``deserialize_event`` requires a ``type``.
+        await _send({"op": "event", "data": {"type": "tool_execution_end", "result": filler}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "event"
+        assert line["data"].get("type") == "notice"
+
+        # 4. A MID-STREAM repaint that cannot fit is dropped, never blanked: no
+        #    canonical sync follows a repaint, so an identity-only payload would
+        #    replace the phone's good state with an empty session and leave the
+        #    daemon's version fence as the only thing standing in the way. (The
+        #    WELCOME case is the one that DOES blank, and it is driven through
+        #    ``AttachedSession.connect`` in the test below.) The ordering here is
+        #    the assertion: the next frame the peer sees is the marker, so the
+        #    repaint produced NO line at all.
+        await _send({"op": "projection", "data": {"session_id": "s1", "subagents": [filler]}})
+        await _send({"op": "result", "req": 91, "data": {"ok": True}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "result"
+        assert line.get("req") == 91
+
+        # 5. An op with no readable substitute is dropped (never written raw),
+        #    and the connection survives it.
+        await _send({"op": "mystery_op", "data": {"blob": filler}})
+        await _send({"op": "result", "req": 92, "data": {"ok": True}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "result"
+        assert line.get("req") == 92
+
+        # 6. The connect-time ``frontend_sync`` PUSH has no ``req``, so there is
         #    nobody to answer — and a viewer left waiting on a base that never
         #    comes reports the owner as unresponsive 15 s later, which is the
         #    misdiagnosis this class of bug is made of. So it closes: the peer
