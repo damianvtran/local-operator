@@ -39,6 +39,7 @@ import os
 import platform
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -4430,6 +4431,69 @@ def mobile_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _bind_serve_socket(host: str, port: int) -> socket.socket:
+    """Bind the listener ``serve`` will hand to uvicorn, and return it.
+
+    Bound HERE rather than by uvicorn for one reason: ``--port 0`` asks the
+    kernel for an ephemeral port and the daemon's rendezvous record must carry
+    the port ACTUALLY BOUND. Binding is the only way to know it — resolving an
+    ephemeral port with a bind/close/rebind probe can lose the port to another
+    process in between, and then the record and the listener disagree, silently
+    and precisely on the machines the record exists for. It is the design the
+    UI's own child needs, since it asks for port 0 deliberately so that two
+    daemons cannot collide on a fixed one.
+
+    Mirrors ``uvicorn.Config.bind_socket()``: the address family follows a host
+    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set, and the
+    socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
+    on the socket it is handed, which is the same sequence uvicorn uses on its
+    own path. Raising is deliberate: the caller reports a bind failure through
+    :func:`_refuse_serve_bind`, rather than letting it surface as a traceback.
+
+    ``SO_REUSEADDR`` is kept because it is what lets a daemon restart
+    immediately after a crash. What it does NOT do was measured rather than
+    assumed, because the first version of the collision test got it wrong: it
+    does not make a bind succeed over a LISTENING holder — that is refused on
+    Linux and on macOS, which is why that test holds its port with a real
+    listener rather than a bare bound socket. On the Linux CI runner it DOES let
+    a second bind succeed over a holder that has only bound and not listened
+    (measured: that is the shape that failed shard 3), while on this macOS host
+    (Darwin 25.6.0, arm64) every permutation of a bound-but-not-listening holder
+    was refused. So the friendly refusal below is guaranteed against a LISTENING
+    holder; against a merely-bound one on Linux the collision instead surfaces
+    from uvicorn's own ``listen``, as its own error.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family=family)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((host, port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _refuse_serve_bind(host: str, port: int, exc: OSError) -> int:
+    """Report a bind this process could not make, naming the address.
+
+    The one refusal shape for BOTH binds ``serve_command`` makes — the listener
+    it hands uvicorn and the ``--reload`` probe — because to the operator they
+    are the same failure, and the address is what makes it actionable: the
+    common cause is a daemon already running on the default 1111, which
+    "address already in use" alone does not say.
+
+    Exit code 1, deliberately NOT uvicorn's ``STARTUP_FAILURE`` (3, from its own
+    ``Config.bind_socket``): this refusal is printed by us, with the address
+    named, and the tests assert 1. Nothing in this repo branches on the number.
+    """
+    print(
+        f"\n\033[1;31mError: cannot bind http://{host}:{port}: {exc}\033[0m",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def serve_command(host: str, port: int, reload: bool) -> int:
     """Start the FastAPI server using uvicorn.
 
@@ -4437,6 +4501,26 @@ def serve_command(host: str, port: int, reload: bool) -> int:
     behind the ``server`` extra, so a default install (and every non-server
     entry point) must be able to ``import local_operator.cli`` without
     fastapi/uvicorn/starlette and their dependency chain present.
+
+    The listener is bound here and handed to uvicorn as an open socket
+    (``uvicorn.Server.run(sockets=[...])``, supported by the pinned uvicorn —
+    ``Server.startup`` takes the explicit-sockets branch and
+    ``loop.create_server`` adopts them), so that ``--port 0`` works and the
+    resolved port is known to THIS process. That port is announced to the app
+    before uvicorn starts — on the app object for the path that serves it
+    in-process, and through the environment only for a ``--reload`` child, which
+    cannot be reached any other way (``server.registry``) — because the
+    app publishes the daemon's rendezvous record at startup and that record
+    has to name the port the kernel gave us rather than the ``--port``
+    argument.
+
+    ``--reload`` is the one exception: uvicorn only reloads an app given as an
+    import string, and the reloader re-imports it in a CHILD process, so the
+    socket cannot be handed over here. That path keeps ``uvicorn.run`` and, for
+    ``--port 0``, resolves the port with the bind/close probe described above —
+    the race is acceptable in a development mode that no daemon discovery
+    depends on, and the identity check a discovery does (``/health``'s
+    ``instance_id``, never the record's port) is what admits a candidate.
     """
     try:
         import uvicorn
@@ -4447,17 +4531,80 @@ def serve_command(host: str, port: int, reload: bool) -> int:
         )
         return 1
 
-    print(f"Starting server at http://{host}:{port}")
-    if reload:
+    # Imported here for the same reason as uvicorn (it is the server package),
+    # and it is import-light by contract: stdlib plus the session registry.
+    from local_operator.server import registry as serve_registry
+
+    listener: socket.socket | None = None
+    resolved_port = port
+    if not reload:
+        try:
+            listener = _bind_serve_socket(host, port)
+        except OSError as exc:
+            return _refuse_serve_bind(host, port, exc)
+        resolved_port = listener.getsockname()[1]
+    elif port == 0:
+        # ``--reload`` only: the port is resolved here purely so the record and
+        # the banner name something, then the probe socket is released for
+        # uvicorn to bind again. Its child re-imports the app, so this is the
+        # one place the address cannot be handed over.
+        #
+        # Refused exactly like the listener above, and for the same reason: a
+        # host that cannot be bound is the operator's mistake on this path too,
+        # and a traceback is not a better report of it than a named address.
+        try:
+            probe = _bind_serve_socket(host, port)
+        except OSError as exc:
+            return _refuse_serve_bind(host, port, exc)
+        try:
+            resolved_port = probe.getsockname()[1]
+        finally:
+            probe.close()
+
+    # With a socket handed down, uvicorn SKIPS its own "Uvicorn running on …"
+    # line (it cannot know which of several listeners to name), so this print is
+    # the one place the resolved address is reported — which is why it names
+    # ``resolved_port``, not the ``--port`` argument that may have been 0.
+    print(f"Starting server at http://{host}:{resolved_port}")
+    if listener is not None:
+        # A bound listener exists exactly when we are NOT reloading, and it is
+        # the app object (not its import string) that is served in that case:
+        # with no reloader there is nothing to re-import the app, so handing
+        # over the object is what lets this process announce its address to the
+        # very app it serves.
+        from local_operator.server.app import app as asgi_app
+
+        # Announced on the app object, NOT in the environment, and that is the
+        # whole point of the split: this process may spawn children (an agent's
+        # shell tool, a wrapper, another entry point booting the same app) and an
+        # inherited variable would let any of them publish a record naming OUR
+        # listener as its own.
+        serve_registry.announce_address(asgi_app, host, resolved_port)
+        config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # ``KeyboardInterrupt`` caught here because this path replaces
+        # ``uvicorn.run``, which catches it around the same call. uvicorn's own
+        # signal handling turns Ctrl+C into a clean shutdown while it is
+        # installed, so this only covers the windows either side of that — but
+        # those windows are exactly where a traceback would otherwise reach the
+        # operator instead of a plain exit.
+        try:
+            uvicorn.Server(config).run(sockets=[listener])
+        except KeyboardInterrupt:
+            pass
+    else:
+        # The reloader re-imports ``server.app`` in a CHILD process, so the app
+        # object cannot be reached above and the inherited environment is the
+        # only channel that survives into it. The value carries OUR pid, so only
+        # the child this process spawns honours it, and it is read-and-cleared
+        # there so nothing that child later spawns can re-publish it.
+        serve_registry.announce_to_reload_child(host, resolved_port)
         uvicorn.run(
             "local_operator.server.app:app",
             host=host,
-            port=port,
+            port=resolved_port,
             reload=reload,
             reload_excludes=[".venv"],
         )
-    else:
-        uvicorn.run("local_operator.server.app:app", host=host, port=port, reload=reload)
     return 0
 
 
