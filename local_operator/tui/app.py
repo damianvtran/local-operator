@@ -37328,9 +37328,7 @@ class OperatorApp(App[None]):
         is where a tree's search spend is complete; see ``_process_search_spend``.
         """
         return (
-            self._total_cost
-            + sum(self._subagent_costs.values())
-            + self._session_search_spend().usd
+            self._total_cost + sum(self._subagent_costs.values()) + self._session_search_spend().usd
         )
 
     def _session_search_spend(self) -> SearchSpendSnapshot:

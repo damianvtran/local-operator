@@ -27,7 +27,12 @@ from local_operator.web_search.models import SearchCost
 from tests.unit.analytics.test_store import _snap
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 from tests.unit.tui.test_band_panels import _async_factory
-from tests.unit.tui.test_cost_aggregation import _Session, _band_cost, _resolving, _settle_boot
+from tests.unit.tui.test_cost_aggregation import (
+    _band_cost,
+    _resolving,
+    _Session,
+    _settle_boot,
+)
 from tests.unit.tui.test_slash_echo import _submit
 
 
@@ -156,9 +161,7 @@ async def test_a_turn_that_priced_nothing_still_shows_its_search_spend() -> None
 
 
 @pytest.mark.asyncio
-async def test_session_panel_prints_search_spend_and_each_provider(
-    tmp_path, monkeypatch
-) -> None:
+async def test_session_panel_prints_search_spend_and_each_provider(tmp_path, monkeypatch) -> None:
     """``/session`` shows the total, the count, and a row per provider."""
     monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
     store = AnalyticsStore(tmp_path / "l.db")
