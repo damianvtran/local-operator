@@ -1821,6 +1821,51 @@ class AttachedSession:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
 
+    @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this facade could EVER succeed.
+
+        NOT simply "does ``_ensure_bound``'s first guard return": it demands an
+        owner that is actually unreachable, and two of the three reasons
+        ``is_cold`` can be true are excluded by the terms below.
+
+        ``_recovering`` is the first exclusion: a facade with a recovery loop
+        RUNNING is on its way back, so it answers True even on the legacy
+        contract where the flag that guard reads is still unset. Every exit of
+        that loop either attaches this facade or releases it rebindable
+        (``_give_up_recovery`` sets ``_can_go_cold`` before it goes cold), so no
+        arm of it ends more closed than it started.
+
+        The second exclusion is a CONNECTED CLIENT, and it is not the same
+        fact: ``is_cold`` is also true while ``_refresh_display_history``
+        rebuilds the window with the socket UP and the runtime still serving
+        (``_ready_for_events`` is its third disjunct, and ``/move``'s seam in
+        this file grades the same conflation MAJOR). Such a facade is cold,
+        un-diallable — and perfectly alive, on its way to a sync that completes on
+        its own, so a caller that read the guard's two flags alone would report
+        a live session as gone and skip the round that waits the refresh out.
+
+        THE REACHABLE False IS A DELIBERATE STOP ON THE LEGACY CONTRACT, and it
+        is worth stating here because nothing else in this file says it plainly:
+        ``connect`` without ``viewer=True`` builds ``_can_go_cold = False``, and
+        ``_on_disconnected``'s deliberate-stop branch returns BEFORE setting
+        ``_recovering`` or starting ``_recover_runtime`` — so there is no loop,
+        nothing sets the flag, no client is left connected, and the facade is
+        cold and closed to dialling for the rest of the process's life. Two
+        routes reach it, both with the honest sentence already painted on that
+        screen: this viewer's own ``/stop``, and a stop someone ELSE issued
+        (``lop stop``, another terminal's ``/stop all``) that
+        ``_recover_runtime`` discovers from the wake marker. ``lop --resume``
+        leaves exactly that facade behind, and the TUI registers it as a sidebar
+        source. The disposed arm is latent by comparison: every ``dispose()``
+        reachable from a sidebar source retires the source first or is app
+        shutdown.
+        """
+        client = self._client
+        return not self._disposed and (
+            self._can_go_cold or self._recovering or (client is not None and client.connected)
+        )
+
     async def attach_existing(self) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
@@ -4744,7 +4789,7 @@ class AttachedSession:
             self._streaming = True
             self._generation = snapshot_generation
 
-    async def _session_was_stopped(self) -> bool:
+    async def session_was_stopped(self) -> bool:
         """True when the disconnect's cause is a DELIBERATE stop, not owner death.
 
         Two shapes, one meaning — the session ended on purpose, so there is
@@ -4759,6 +4804,23 @@ class AttachedSession:
            reconnect), and the owner never rediscovers. Both conditions
            together are the deliberate-stop wire shape: a dead owner leaves
            the marker absent, a stopped one leaves it set.
+
+        DECLARED on :class:`ViewerSessionProtocol` rather than kept private,
+        because a host that missed the disconnect still has to tell the two
+        apart: the sidebar's connect re-dials a clicked row, and an owner that
+        was STOPPED never answers however many rounds are spent on it — which
+        is what made "Select again to retry" an unkeepable promise on that arm
+        (UX U2, round 1). ``_recover_runtime`` reads the same fact for the same
+        reason, so this is one implementation rather than a second marker probe
+        in the TUI.
+
+        ITS LIMIT, stated because a caller may need to act on the absence: the
+        marker is stamped by ``control._mark_wakes_dormant``, which writes
+        nothing at all for a session with no wake schedules (it returns 0 on an
+        absent entry — "absent-file-is-no-wakes is the store's own contract"),
+        and clears on the next open. So False is "not proven stopped", not
+        "proven alive"; a wake-less stop leaves no trace here and the caller
+        has to fall back on what it can establish for itself.
         """
         if self._deliberate_stop:
             return True
@@ -5175,7 +5237,7 @@ class AttachedSession:
                 # shape. Read it once at the top of each pass — cheap (one
                 # small file, threaded) and it is what keeps the takeover
                 # from resurrecting a session a kill switch just ended.
-                if not self._deliberate_stop and await self._session_was_stopped():
+                if not self._deliberate_stop and await self.session_was_stopped():
                     self._deliberate_stop = True
                     self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
