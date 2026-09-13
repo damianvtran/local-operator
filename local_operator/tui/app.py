@@ -8189,7 +8189,7 @@ class OperatorApp(App[None]):
         # at any moment, and the report for the resize that reveals it latches
         # Textual's pixel divisor while that very report is parsed. Not the very
         # first Resize message the app ever sees — Textual dispatches a synthetic
-        # one before `Mount` (textual/app.py:3433 vs :3438), so no `on_mount`
+        # one before `Mount` (textual/app.py:3434 vs :3438), so no `on_mount`
         # body can be there for it; that event is built by
         # `Resize.from_dimensions` rather than parsed, so it can latch nothing.
         self._start_mode_reclaimer()
@@ -20571,7 +20571,7 @@ class OperatorApp(App[None]):
         that reveals a dirty mode latches the divisor while it is parsed, so the
         re-closer has to already exist when the first resize after mount arrives.
         (The synthetic ``Resize`` Textual dispatches BEFORE ``Mount`` —
-        textual/app.py:3433 vs :3438 — cannot be covered by anything built here:
+        textual/app.py:3434 vs :3438 — cannot be covered by anything built here:
         it is constructed by ``Resize.from_dimensions`` rather than parsed, so it
         latches nothing, and the boot reset owns the boot case.)
         """
@@ -21572,9 +21572,9 @@ class OperatorApp(App[None]):
         self._attention_focus_observed = True
         # While this app was not focused, another process writing to the same
         # tty can have negotiated mode 2048 (a suspended TUI resuming, a shell
-        # running an unpatched `lop`), so it is re-closed here before the reports
-        # that would scale are the ones we are about to read. User-driven, so at
-        # most one 8-byte write per focus gain.
+        # running an unpatched `lop`), so both halves of the pair are re-closed
+        # here before the reports that would scale are the ones we are about to
+        # read. User-driven, so at most one 16-byte write per focus gain.
         if self._mode_reclaimer is not None:
             self._mode_reclaimer.reclaim()
         if self._notifier is not None:

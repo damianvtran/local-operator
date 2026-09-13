@@ -403,9 +403,10 @@ async def test_no_re_closer_when_the_negotiation_is_still_open(
 
     The gate is refused here (``SMOOTH_SCROLL`` on, non-iTerm — the state
     ``run_tui`` leaves a user who asked for pixel coordinates in), so nothing
-    installed it and the app must build no re-closer: writing ``?2048l`` would
-    switch the mode off underneath that user on every resize and focus gain,
-    which is the exact behaviour this half exists to avoid.
+    installed it and the app must build no re-closer: writing the
+    ``?2048l``/``?1016l`` pair would switch both modes off underneath that user
+    on every resize and focus gain, which is the exact behaviour this half exists
+    to avoid.
 
     Both names the decision reads are pinned, because both freeze from the
     environment at ``textual`` import time and the developer's own terminal must
@@ -431,8 +432,9 @@ async def test_the_mid_session_reset_honours_the_kill_switch(
     """``LOCAL_OPERATOR_NO_MODE_RESET`` suppresses the mid-session write too.
 
     The switch already suppressed the boot reset, so a reader running `lop`
-    under something capturing raw terminal output expects no ``?2048l`` from us
-    at any point in the session, not just the first one.
+    under something capturing raw terminal output expects no
+    ``?2048l``/``?1016l`` pair from us at any point in the session, not just the
+    first one.
     """
     writes: list[str] = []
     _isolate_tui_settings(monkeypatch, tmp_path)
