@@ -3707,14 +3707,19 @@ def test_the_clock_row_keeps_every_value_with_its_unit() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "age_s,expected",
+    "started_s,worked_s,expected",
     [
-        (60.0, "started just now · last worked 1m"),
-        (1033 * 86_400.0, "last worked 1033d"),
+        # The designer's own repro: both values present and wide, 33 cells once
+        # the two ` ago` suffixes are gone, 41 with them — the old row was cut
+        # mid-unit (`last worked 1033…`).
+        (1033 * 86_400.0, 1033 * 86_400.0, "started 1033d · last worked 1033d"),
+        # ...and the rung below it: `started just now · last worked 1033d` is 36
+        # cells, so the recency survives alone rather than losing its unit.
+        (5.0, 1033 * 86_400.0, "last worked 1033d"),
     ],
 )
 async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
-    tmp_path: Path, age_s: float, expected: str
+    tmp_path: Path, started_s: float, worked_s: float, expected: str
 ) -> None:
     """The same defect, on the frame the designer measured it on.
 
@@ -3722,8 +3727,25 @@ async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
     app under the production stylesheet — the unit-level test above cannot see a
     row that wraps, which is how this row was broken in the first place (the
     wrapped clock row took the pane's last line with it).
+
+    BOTH halves are pinned by writing the session's own ``created_at.json``.
+    That is the canonical creation time the store prefers on every platform, and
+    the reason is not tidiness: without it the pane falls back to the directory's
+    ``st_birthtime``, which macOS has and Linux does not — so a fixture that only
+    set the row's ``created_at`` painted `started just now` on the author's
+    machine and `started 1m` on the ubuntu shard, and this test failed in CI for
+    a difference that says nothing about the pane.
     """
     _over_window_transcript(tmp_path, "cc0000000001")
+    sessions = tmp_path / "sessions"
+    # A clock large enough that a 1033-day age is a POSITIVE epoch: the store
+    # rejects a negative stored date (`_timestamp`) and would fall back to the
+    # directory's birthtime, which is the platform difference this test exists
+    # not to measure.
+    clock = 100_000_000.0
+    (sessions / "cc0000000001" / "created_at.json").write_text(
+        json.dumps(clock - started_s), encoding="utf-8"
+    )
     app = _real_app()
     async with app.run_test(size=(40, 15)) as pilot:
         await pilot.pause()
@@ -3731,25 +3753,28 @@ async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
             [
                 SessionRow(
                     id="cc0000000001",
-                    mtime=NOW - age_s,
+                    mtime=clock - worked_s,
                     name="a long conversation",
-                    created_at=NOW - age_s,
+                    created_at=clock - started_s,
                 )
             ],
-            NOW,
+            clock,
         )
         app.push_screen(screen)
         await pilot.pause()
         await pilot.pause()
-        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        await _open_with_transcript(screen, pilot, sessions)
+        # The store MUST be reading the file this fixture wrote, not the
+        # directory's birthtime — that fallback is the whole difference between
+        # the two CI platforms, and a test that silently walks into it passes on
+        # one and fails on the other. Asserted rather than assumed.
+        assert (
+            screen._previews().created_at("cc0000000001") == clock - started_s
+        ), "the store ignored created_at.json: this frame would then depend on st_birthtime"
         frame = _pane_frame(app, screen)
         clock = [row for row in frame.rows if "last worked" in row]
         assert len(clock) == 1, (clock, frame.rows)
-        # The value arrives WITH its unit, on one row: no `ago`, no ellipsis, and
-        # never a bare `last wor…`. The second case is the designer's own repro —
-        # a 1033d age under a 12-cell label does not fit the 34 cells beside
-        # `started`, so the recency survives alone rather than being cut.
-        assert expected in clock[0], (age_s, clock)
+        assert expected in clock[0], (started_s, worked_s, clock)
         assert "ago" not in clock[0], clock
         assert "…" not in clock[0], clock
         assert frame.conversation, frame
