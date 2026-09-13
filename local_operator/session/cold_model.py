@@ -64,10 +64,15 @@ def resolve_conversation_model(
     the runtime's own on first engage.
 
     ``selection_sink`` receives the selection this function read anyway. It is
-    not decoration: ``AttachedSession`` needs the same value to attribute a usage
-    receipt that predates the serving-identity stamp (``usage_seed.reading_
-    identity``), and re-reading the journal for it would scan a transcript that
-    reaches 103 MB a second time on every cold open.
+    not decoration, and it is a deliberate extension of the documented signature
+    (the design lists five parameters; the documented call is unchanged and still
+    works): ``AttachedSession`` needs the same value to attribute a usage receipt
+    that predates the serving-identity stamp (``usage_seed.reading_identity``),
+    and re-reading the journal for it would scan a transcript that reaches 103 MB
+    a second time on every cold open. The alternative — having the caller read the
+    selection itself — either duplicates that read or duplicates this resolution,
+    and a second resolution is the defect this module exists to remove. Pass
+    ``None`` (the default) if the value is not wanted.
     """
     model: FrontendModelSpec | None = None
     saved: StoredModelSelection | None = None
