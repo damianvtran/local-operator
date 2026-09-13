@@ -70,6 +70,7 @@ from local_operator.tui.widgets.tool_card import (
     compact_path,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.web_fetch.failure import FetchFailure, describe, retry_after_note
 from tests.unit.tui.conftest import TCSS_PATH, StyledTranscriptApp
 
 #: Every width the one-line guarantee is checked at: pathological narrow,
@@ -839,6 +840,204 @@ def test_the_escalation_survives_the_narrow_rendered_row() -> None:
     # count. At the standard width the byte count is the field that goes.
     assert row.index("2 attempts") < len(row)
     assert "Rendered: markdownify · 2 attempts (default, browser-profile) · 800 lines" in row
+
+
+def test_a_no_response_card_paints_no_rendered_row_and_d7_ordering_holds() -> None:
+    """Design review round 3, D12, and the D7 fact it must not break.
+
+    Moving the attempt summary so it could LEAD a narrowed success row (D7) also
+    let it stand alone on a card with no field of its own: a terminal no-response
+    failure has no ``render_method``/``lines``/``bytes``, so the row claimed
+    ``Rendered: 2 attempts (default, browser-profile)`` on a fetch that rendered
+    nothing AND repeated the ``(2 attempts: …)`` clause the ``⚠`` lead already
+    carried one row up. Both cards are asserted here because they are one
+    decision — where the summary may ride — and a guard that fixed one by
+    breaking the other has to fail this test.
+    """
+    url = "https://stalls.example/x"
+    # The preview is composed by the engine's OWN ``describe`` (the shipped path
+    # for a terminal failure), not re-typed here: the promoted ⚠ lead is what
+    # carries the attempt clause, and a hand-written body without it would test a
+    # card the app never paints.
+    stall = ToolCard("t", "web_fetch", {"url": url})
+    stall.restore(
+        state="error",
+        result_text=describe(
+            FetchFailure(
+                kind="stall",
+                retryable=False,
+                detail=(
+                    "read timed out after 9.6s — the origin accepted the connection "
+                    "but never sent a response"
+                ),
+            ),
+            attempts=2,
+            profiles=("default", "browser"),
+            url=url,
+        ),
+        error="Read timed out after 9.6s",
+        details={
+            "url": url,
+            "cache": "miss",
+            "failure_kind": "stall",
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+            "suggested_tool": "browser",
+        },
+    )
+    stall.toggle_expanded()
+    stalled = stall._build_content(100).plain
+    # The false row is gone…
+    assert "Rendered:" not in stalled
+    # …and the escalation is still stated, exactly once, by the promoted lead.
+    # Normalised first: the lead reflows at 100 columns, so the clause straddles
+    # a row boundary as ``(2\n  attempts: …)``.
+    flat = " ".join(stalled.split())
+    assert flat.count("(2 attempts: default, browser-profile)") == 1
+
+    # D7, re-pinned on a RESPONSE-bearing card: the summary leads the row's
+    # counts, so a narrow clip can only ever take a count.
+    ok = ToolCard("t", "web_fetch", {"url": "https://medium.com/"})
+    ok.mark_done(
+        "[200] https://medium.com/\nmarkdownify · text/html · cache miss\n\npage",
+        {
+            "url": "https://medium.com/",
+            "final_url": "https://medium.com/",
+            "status": 200,
+            "content_type": "text/html",
+            "render_method": "markdownify",
+            "cache": "miss",
+            "bytes": 53067,
+            "lines": 800,
+            "ok": True,
+            "attempts": 2,
+            "profiles": ["default", "browser"],
+        },
+    )
+    ok.toggle_expanded()
+    rendered = next(
+        row.strip()
+        for row in ok._build_content(80).plain.splitlines()
+        if row.strip().startswith("Rendered:")
+    )
+    assert rendered.startswith("Rendered: markdownify · 2 attempts (default, browser-profile)")
+
+
+def test_the_retry_after_note_reflows_while_origin_bytes_still_clip() -> None:
+    """Design review round 3, D13, and the D6 boundary it must not move.
+
+    On a 503 carrying ``Retry-After`` the §3.4 sentence is OUR prose, but it
+    arrives in the BODY beside the origin's own bytes, where the painter may not
+    reflow anything (D6). Painted with the body's clip rule it read
+    ``…the wait was not spen…`` at 80 columns and lost exactly the clause it
+    exists for. It takes the wrap path per line, recognised by the lead
+    ``failure.py`` exports, and keeps the body ink because the terminal shape of
+    the same sentence rides the statement path in ``muted`` — the origin body on
+    the next row still clips, which is the boundary.
+    """
+    url = "https://api.example.com/v1/orders"
+    note = retry_after_note(600.0)
+    origin_body = (
+        "<html><body><h1>503 Service Unavailable</h1><p>The orders service is "
+        "draining and cannot take new work until the pool refills.</p></body></html>"
+    )
+    card = ToolCard("t", "web_fetch", {"url": url})
+    card.mark_failed(
+        "⚠ HTTP 503 Service Unavailable — error/block page, not page content.",
+        result_text=(
+            "⚠ HTTP 503 Service Unavailable — error/block page, not page content. "
+            f"{url}\ntext · text/html · cache miss · 1 attempts\n"
+            "(The body below is the error response, not the requested page.)\n"
+            f"{note}\n\n{origin_body}"
+        ),
+        details={
+            "url": url,
+            "final_url": url,
+            "status": 503,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "bytes": 612,
+            "lines": 1,
+            "ok": False,
+            "http_error": True,
+            "attempts": 1,
+            "failure_kind": "server",
+            "retry_after_s": 600.0,
+        },
+        measured_s=0.4,
+    )
+    card.toggle_expanded()
+
+    narrow = card._build_content(80).plain.splitlines()
+    start = next(
+        index for index, row in enumerate(narrow) if row.strip().startswith("The origin asked")
+    )
+    # The sentence reflows instead of clipping: the lead opens it and the last
+    # row carries the clause the note exists for.
+    note_rows: list[str] = []
+    for row in narrow[start:]:
+        if not row.strip():
+            break
+        note_rows.append(row.strip())
+    assert len(note_rows) >= 2
+    joined = " ".join(note_rows)
+    assert "the wait was not spent inside this call." in joined
+    assert "…" not in joined
+
+    # The origin body's own row is untouched by the permission: still clipped.
+    body_rows = [row.strip() for row in narrow if row.strip().startswith("<html>")]
+    assert body_rows
+    assert body_rows[0].endswith("…")
+    assert "draining and cannot take" not in body_rows[0]
+
+    # Ink: the same sentence in its terminal shape rides ``muted``, so the
+    # response-bearing shape must not disagree about it.
+    built = card._build_content(80)
+    assert _triplet(_style_at(built, "The origin asked us to wait").color) == _triplet(
+        Style(color=theme_mod.semantic_color("muted")).color
+    )
+
+    # At 100 columns the sentence fits on its own row whole.
+    wide = card._build_content(100).plain.splitlines()
+    wide_note = [row.strip() for row in wide if row.strip().startswith("The origin asked")]
+    assert len(wide_note) == 1
+    assert wide_note[0].endswith("the wait was not spent inside this call.")
+
+    # The permission is structural, not a bare prefix match: an ORIGIN body that
+    # happens to begin with the same sentence, on a failure that reported NO
+    # interval, is still clipped. Without the ``retry_after_s`` precondition a
+    # line of origin bytes could be reflowed, which is the D6 defect.
+    echo = ToolCard("t", "web_fetch", {"url": url})
+    echo.mark_failed(
+        "⚠ HTTP 503 Service Unavailable — error/block page, not page content.",
+        result_text=(
+            "⚠ HTTP 503 Service Unavailable — error/block page, not page content. "
+            f"{url}\ntext · text/html · cache miss\n"
+            "(The body below is the error response, not the requested page.)\n\n"
+            f"{note} The origin quoted our own sentence back at us, at length.\n"
+            "and then some more of its own body, long enough to clip as well."
+        ),
+        details={
+            "url": url,
+            "final_url": url,
+            "status": 503,
+            "content_type": "text/html",
+            "render_method": "text",
+            "cache": "miss",
+            "ok": False,
+            "http_error": True,
+            "attempts": 1,
+            "failure_kind": "server",
+        },
+        measured_s=0.4,
+    )
+    echo.toggle_expanded()
+    echoed = echo._build_content(80).plain.splitlines()
+    echoed_note = [row.strip() for row in echoed if row.strip().startswith("The origin asked")]
+    assert len(echoed_note) == 1
+    assert echoed_note[0].endswith("…")
+    assert "quoted our own sentence back" not in echoed_note[0]
 
 
 def test_the_classified_danger_row_wraps_at_seventy_columns() -> None:
