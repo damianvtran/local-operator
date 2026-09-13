@@ -2714,7 +2714,7 @@ async def test_the_wheel_over_the_preview_scrolls_the_preview_not_the_list(tmp_p
 
 @pytest.mark.asyncio
 async def test_the_painted_name_field_equals_the_plan_across_the_id_gap_band() -> None:
-    """QA Q1 = design D2, asserted where the defect lived: the PAINT.
+    """QA Q1 = design D2, asserted on the plane the defect lived on: the TEXT.
 
     At 52-71 columns every row reserved 14 cells for an id nobody drew, so the
     painted name field went 29 (48 cols) → **17** (52) → 36 (71) → 37 (72, the
@@ -2722,6 +2722,14 @@ async def test_the_painted_name_field_equals_the_plan_across_the_id_gap_band() -
     and 18 cells sat blank at the right edge of every row. The existing sweep
     asserts ``plan_layout`` alone and is monotone across the band, so it could
     not see the plane the user reads.
+
+    WHERE THIS IS AND IS NOT A FRAME ASSERTION. ``render_lines_for_test`` is the
+    widget's own ``Text``, not the compositor, so this bites for the defect it
+    targets — the row is built four cells too wide and the arithmetic fails — but
+    it cannot see a row the compositor then wraps or drops. It is not wrong to
+    say this is the plane the defect lived on (the row's own construction is
+    where the id went missing) and it IS wrong to call it the paint, which an
+    earlier version of this docstring did (agent review round 4, MINOR).
     """
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.session_picker import GUTTER_CELLS
@@ -2964,3 +2972,407 @@ async def test_the_context_line_carries_the_query_in_both_layouts() -> None:
             context = [line for line in drawn[1:] if "retention" in line]
             assert context, (size, drawn)
             assert any("retention" in line for line in context), (size, context)
+            # ...AND IT STILL FITS THE PANE. The context line is built from the
+            # indent plus ``_context_width()``; dropping the indent from that
+            # subtraction — the D17 contract broken the other way — leaves the
+            # drawn line four cells wider than the pane, Textual wraps it and
+            # every row below shifts, while the content assertions above stay
+            # green. A line that cannot fit has to fail, so the width is asserted
+            # on the same plane the content is (agent review round 4, MINOR).
+            for line in drawn:
+                assert cell_len(line) <= screen._usable(), (size, cell_len(line), line)
+
+
+def _real_app() -> App[None]:
+    """The REAL ``OperatorApp`` — ``_PickerHost`` declares no ``CSS_PATH``.
+
+    Imported here rather than at module scope for the reason the other tests in
+    this file import it in their bodies: the app module pulls the whole TUI in,
+    and collection pays for it once per session instead of once per file.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    return OperatorApp(lambda: _factory(FakeSession()))
+
+
+def _pane_rows(app: App[None], screen) -> list[tuple[int, str]]:
+    """``(strip index, text)`` for every painted row of the preview pane's region.
+
+    THE COMPOSITOR, blanks included — ``painted_rows`` drops blank rows, and the
+    row budget this round is about is exactly a question of blank rows: the pane
+    painting seven of its eight content rows and leaving the last bare is a
+    defect made of a blank.
+    """
+    preview = screen.query_one("#session-picker-preview")
+    strips = list(app.screen._compositor.render_strips())
+    region = preview.region
+    rows = []
+    for y in range(max(0, region.y), min(len(strips), region.bottom)):
+        rows.append((y, strips[y].crop(max(0, region.x), max(0, region.right)).text.rstrip()))
+    return rows
+
+
+def _status_row(app: App[None], screen) -> tuple[int, str] | None:
+    """The pane's status row — its strip index and its text — or ``None``.
+
+    Found by the ARITHMETIC it carries rather than by position, so a pane whose
+    status row is missing, blanked or painted on the wrong row all read as
+    ``None``/wrong row here.
+    """
+    for y, text in _pane_rows(app, screen):
+        if re.search(r"\d+–\d+ of \d+", text) or text.strip() == "⋮":
+            return y, text
+    return None
+
+
+def _chrome(text: str, name: str) -> bool:
+    """Is this painted pane row chrome rather than conversation?
+
+    Every chrome row has a shape no body line has: the rule rows are all
+    ``─``, the name row carries the row's name, the clock row opens
+    ``started``, and the status row carries the arithmetic or the bare ``⋮``.
+    Classifying by chrome rather than by the body's own text is what lets the
+    same predicate read the frame at the TOP (whose first body line is the
+    session's opening message) and at ``ctrl+g`` (whose last body line is the
+    tail of the newest reply, and says nothing identifiable).
+    """
+    stripped = text.strip()
+    if not stripped or stripped == "⋮" or set(stripped) == {"─"}:
+        return True
+    if name in stripped or stripped.startswith("started "):
+        return True
+    return bool(re.search(r"\d+–\d+ of \d+", stripped)) or "not read" in stripped
+
+
+async def _open_with_transcript(screen, pilot, sessions: Path) -> None:
+    screen.use_previews_for_test(sessions)
+    await pilot.pause()
+
+
+def _long_transcript(root: Path, session_id: str, turns: int = 40) -> None:
+    _write_transcript(
+        root,
+        session_id,
+        [_message("user", f"turn {index} " + "conversation body " * 12) for index in range(turns)],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 14), (100, 16), (40, 15), (40, 16), (45, 17), (60, 20)])
+async def test_the_pane_never_paints_without_a_line_of_conversation(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Agent review round 4 MAJOR = UX round 2 U5, at the heights that defeat them.
+
+    ``max(1, height - 1)`` emitted a body line AND a status line into a one-row
+    budget. Textual clips the LAST line, so the loser was the affordance the
+    round before had just added: at 100x14 the opening frame painted chrome plus
+    ``1–0 of 299`` — an inverted range — with no conversation at all, and one
+    scroll further the body line painted and the status row vanished. At 40x15
+    and 40x16 the pane is drawn by the plan too (``PREVIEW_DRAW_MIN`` rows) and
+    painted the same nothing, because a clipped row's body still had to absorb
+    the reserved status row and could lose its only line to the D30 gutter guard.
+
+    These are the sizes the plan draws the pane at and no existing test covered:
+    the delta's two pane guards sit at 120x36 (drawn, mid-size) and 30x12 (pane
+    hidden), so nothing exercised the band where the pane is drawn AND its
+    status row cannot fit.
+    """
+    _long_transcript(tmp_path, "cc0000000001")
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row("cc0000000001", "a long conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        preview = screen.query_one("#session-picker-preview")
+        assert preview.display, f"the plan draws the pane at {size}"
+
+        for label in ("top=0", "ctrl+g"):
+            if label == "ctrl+g":
+                screen.action_pane_end()
+                await pilot.pause()
+            rows = _pane_rows(app, screen)
+            painted = [text for _, text in rows if text.strip()]
+            # THE WHOLE BAND, in one assertion: a pane that is on screen says
+            # something about the conversation it is a window onto.
+            conversation = [text for text in painted if not _chrome(text, "a long conversation")]
+            assert conversation, (label, painted)
+            # ...and no row states a position whose end precedes its start.
+            for text in painted:
+                match = re.search(r"(\d+)–(\d+) of (\d+)", text)
+                if match:
+                    assert int(match.group(2)) >= int(match.group(1)), (label, text)
+
+        # The pane's own text never exceeds the rows it is given — the silent
+        # clip is what put the affordance on the floor in the first place.
+        assert len(screen.render_preview_for_test()) <= preview.size.height
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 14), (40, 14), (30, 13)])
+async def test_the_status_row_is_spent_only_where_there_is_one_to_spare(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """The reservation's rule, from both sides, on the painted frame.
+
+    At one body row the pane has room for a line of conversation OR for the
+    status row, never both, and the CONVERSATION wins: the pane is a window onto
+    a session, and a position marker over a body nobody can read is how the
+    MAJOR above presented itself. One row higher there is room for both, and
+    both are painted. Below the plan's floor there is room for neither and the
+    pane is not drawn at all (UX U5) — the third case here, so the band is
+    closed from both ends rather than only from the middle.
+    """
+    _long_transcript(tmp_path, "cc0000000001")
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row("cc0000000001", "a long conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        preview = screen.query_one("#session-picker-preview")
+        if not preview.display:
+            # THE FLOOR: no pane at all — and its clock row, which only the pane
+            # draws, is nowhere on the frame either. A bare header painted where
+            # the pane would have been IS the state U5 is about, so the assertion
+            # is on the whole frame rather than on the hidden widget's region.
+            assert screen._layout().preview_rows == 0, size
+            frame = [strip.text for strip in app.screen._compositor.render_strips()]
+            assert not any(text.strip().startswith("started ") for text in frame), (size, frame)
+            return
+
+        painted = [text for _, text in _pane_rows(app, screen) if text.strip()]
+        has_conversation = any(not _chrome(text, "a long conversation") for text in painted)
+        status = _status_row(app, screen)
+
+        assert has_conversation, (size, painted)
+        if screen._pane_height() == 1:
+            # one row: the conversation line, and no marker claiming a range
+            assert status is None, (size, status)
+        else:
+            assert status is not None, (size, painted)
+            # ...and the body under it is not one row short of what the pane
+            # reserved: the marker is the pane's LAST content row, which is the
+            # row the D9 shortfall left bare.
+            assert status[0] == preview.content_region.bottom - 1, (size, status, painted)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 16), (100, 20), (100, 30), (120, 36)])
+async def test_the_stacked_pane_spends_every_content_row_it_reserves(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Agent review round 4 MINOR: the stacked ``-1`` over-subtracted a border row.
+
+    ``content_region.height`` already excludes the pane's ``border-top`` — its
+    docstring says "inside the widget's own border and padding" — and the pane
+    subtracted it a second time, so every stacked preview painted ONE
+    CONVERSATION LINE FEWER than it had room for (measured: 100x20 painted 7 of
+    8 rows with a blank tail, 100x30 8 of 9, 100x16 5 of 7 with the inverted
+    ``1–0``). At 100x16 the row it cost is what tipped the pane into the state
+    where the status row had nowhere to go at all.
+
+    Pinned as ROWS, from the frame: the status row is the pane's last content
+    row, so no reserved row is left bare below the text the pane draws.
+    """
+    _long_transcript(tmp_path, "cc0000000001")
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row("cc0000000001", "a long conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        preview = screen.query_one("#session-picker-preview")
+
+        assert len(screen._preview_lines()) > screen._pane_height(), "fixture is not clipped"
+        # The pane's budget is its CONTENT rows, and the widget's own text fills
+        # them: header + window + status, with nothing left over.
+        assert len(screen.render_preview_for_test()) == preview.content_region.height, size
+        status = _status_row(app, screen)
+        assert status is not None, size
+        assert status[0] == preview.content_region.bottom - 1, (
+            size,
+            status,
+            _pane_rows(app, screen),
+        )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_g_lands_on_the_newest_line_not_one_short_of_it(tmp_path: Path) -> None:
+    """Design round 5 D9, the scroll half: the chord named "newest" stopped short.
+
+    At 100x30 ``ctrl+g`` reported ``offset 198`` and painted ``199–201 of 202``
+    while the newest line was the 202nd, because the clamp used the pane's
+    RESERVED height while the paint cut the window from a budget one row smaller
+    — ``ctrl+d`` once more reached ``200–202 of 202``, so it was a landing error
+    rather than an unreachable state, and only the counter revealed it.
+    """
+    _write_transcript(
+        tmp_path,
+        "cc0000000001",
+        [_message("user", f"turn {index} " + "conversation body " * 12) for index in range(40)],
+    )
+    app = _real_app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row("cc0000000001", "a long conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        total = len(screen._preview_lines())
+        assert total > screen._pane_height(), "fixture is not clipped"
+
+        screen.action_pane_end()
+        await pilot.pause()
+        status = _status_row(app, screen)
+        assert status is not None, _pane_rows(app, screen)
+        match = re.search(r"(\d+)–(\d+) of (\d+)", status[1])
+        assert match, status
+        assert int(match.group(3)) == total
+        # THE NEWEST LINE IS SHOWN, which is the whole claim the chord makes.
+        assert int(match.group(2)) == total, (status[1], total)
+
+
+@pytest.mark.asyncio
+async def test_the_bounded_read_says_so_at_the_top_of_the_pane(tmp_path: Path) -> None:
+    """UX round 2 U12: the "middle was not read" statement was thousands of lines down.
+
+    On the 509 KB repro the marker is the 3540th wrapped line of 7065 — 704
+    ``ctrl+u`` presses from ``ctrl+g``, counted by driving the keys — so a reader
+    at the very top of the pane had no hint that the transcript being drawn is a
+    bounded read at all. It is painted as the pane's first body row now, in the
+    row the pane already spends on chrome whenever it clips, and only where
+    there is a row to spare (the line of conversation wins at one row).
+    """
+    filler = "y" * 8_000
+    _write_transcript(
+        tmp_path,
+        "aa0000000001",
+        [
+            _message("user", f"burst {index}: open the file {filler}", ts=float(index))
+            for index in range(80)
+        ],
+    )
+    transcript = tmp_path / "sessions" / "aa0000000001" / "transcript.jsonl"
+    assert transcript.stat().st_size > 2 * PREVIEW_TAIL_BYTES, "fixture is not over-window"
+
+    app = _PickerHost([_row("aa0000000001", "burst 0: open the file")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        pane = screen.render_preview_for_test()
+        body = [line.strip() for line in pane if line.strip()]
+        header_end = next(index for index, line in enumerate(body) if line.startswith("─"))
+        assert GAP_TEXT in body[header_end + 1], body[header_end : header_end + 3]
+        # ...and the conversation is still drawn under it, so the statement
+        # tells the reader what it is looking at rather than replacing it.
+        assert any(line.startswith("burst 0:") for line in body[header_end + 2 :]), body
+
+    # A file inside one read window is not a bounded read and says nothing.
+    _write_transcript(tmp_path, "bb0000000002", [_message("user", "a short one")])
+    app = _PickerHost([_row("bb0000000002", "a short one")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        assert not any("not read" in line for line in screen.render_preview_for_test())
+
+
+def _checkpoint_entry(model: str, cwd: str, ts: float = 0.0) -> dict[str, object]:
+    """A frontend-state checkpoint as the picker's own reader expects it.
+
+    The discriminator is ``payload["custom_type"]``, NOT ``payload["kind"]`` —
+    that is ``None`` on these entries, which is why the reader has to look at
+    ``type == "custom"`` (see ``preview.CHECKPOINT_CUSTOM_TYPE``).
+    """
+    return {
+        "id": "c1",
+        "ts": ts,
+        "type": "custom",
+        "payload": {
+            "custom_type": "frontend_state_checkpoint_v1",
+            "details": {
+                "state": {
+                    "effective_model": {"model_id": f"anthropic/{model}"},
+                    "cwd": cwd,
+                }
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 14), (100, 15), (40, 15), (100, 16)])
+async def test_the_optional_header_row_is_shed_before_the_conversation_line(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """UX round 2 U5's last row: the pane on screen, costing its rows, saying nothing.
+
+    ``PREVIEW_DRAW_MIN`` is the SHORTEST header plus one body line, and the plan
+    draws the pane from it whatever the selected row holds. A row carrying a
+    checkpoint makes the header one row longer (D7's ``model · cwd`` line), and
+    reserving that row unconditionally left the pane painting its name, both
+    clocks, the model line and its rule and NOT ONE LINE of the conversation —
+    measured against the finished frame at 100x14 and 40x14, exactly the band
+    the round-4 MAJOR lives in. The row is the header's optional one, so it is
+    the one that goes: the name and the two clocks are what identify the row.
+    """
+    _write_transcript(
+        tmp_path,
+        "dd0000000001",
+        [
+            _checkpoint_entry("claude-opus-5", "/Users/example/workspace"),
+            *[
+                _message("user", f"turn {index} " + "conversation body " * 12)
+                for index in range(40)
+            ],
+        ],
+    )
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row("dd0000000001", "a checkpointed conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        preview = screen.query_one("#session-picker-preview")
+        assert preview.display, size
+        assert screen._selected_checkpoint(), "the fixture's checkpoint was not read"
+
+        painted = [text for _, text in _pane_rows(app, screen) if text.strip()]
+        assert any("turn 0" in text for text in painted), (size, painted)
+        # ...and the model line is drawn only where there is a row under it.
+        shed = screen._content_rows() - 4 < 1
+        assert any("claude-opus-5" in text for text in painted) is not shed, (size, painted)
+        assert len(screen.render_preview_for_test()) <= preview.size.height, size
+
+
+def test_the_position_marker_never_states_a_range_that_ends_before_it_starts() -> None:
+    """Agent review round 4 MAJOR, the arithmetic half: ``1–0 of 299`` on screen.
+
+    A window of zero drawn lines printed an end BEFORE its own start. The pane
+    now guarantees itself a drawn line, so this pins the ARITHMETIC rather than
+    a reachable frame: the state is what the round's frame tests cover, and this
+    is what stops a future caller — a different pane shape, a different budget —
+    from painting the inverted range again. A guard on a resolved contract,
+    which is the only thing a helper this small can honestly hold.
+    """
+    screen = SessionPickerScreen([_row("aaa111aaa111", "one")], NOW)
+    for drawn in range(4):
+        text = screen._preview_pane_status(40, 0, drawn, 299).plain
+        match = re.search(r"(\d+)–(\d+) of (\d+)", text)
+        assert match, (drawn, text)
+        assert int(match.group(2)) >= int(match.group(1)), (drawn, text)
+    # One drawn line reads as the one line it is at, not as nothing.
+    assert screen._preview_pane_status(40, 0, 0, 299).plain.startswith("1–1 of 299")
