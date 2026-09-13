@@ -5351,3 +5351,138 @@ def test_a_field_named_in_both_a_wrapper_and_a_sibling_keeps_the_larger(caplog) 
         relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
     assert f"blob={len(json.dumps(filler).encode()):,}B" in caplog.text, caplog.text
     assert "blob=" + f"{len(json.dumps('small').encode()):,}B" not in caplog.text
+
+
+def _payload_event(index: int, *, payload_chars: int) -> dict[str, Any]:
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": f"call_{index:06d}",
+        "tool_name": "read",
+        "result": {"content": [{"type": "text", "text": "p" * payload_chars}]},
+        "_traj_seq": index,
+    }
+
+
+def _payload_jobs(count: int, rows: int, *, payload_chars: int) -> list[JobState]:
+    return [
+        JobState(
+            id=f"job{index}",
+            type="task",
+            label=f"child {index}",
+            status="running",
+            trajectory=[_payload_event(row, payload_chars=payload_chars) for row in range(rows)],
+        )
+        for index in range(count)
+    ]
+
+
+def _delta_payload(jobs: list[JobState]) -> dict[str, Any]:
+    """Drive the real producer, so these tests measure what the runtime ships."""
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    store.subscribe(lambda _update: None)
+    store.mutate(jobs=[])
+    update = store.mutate(jobs=jobs)
+    assert update is not None
+    return update.model_dump(mode="json")
+
+
+def test_a_watched_jobs_burst_is_trimmed_to_the_budget_and_marked_for_reset() -> None:
+    """A WATCHED job's own burst is what produced the 44,681 oversized frames.
+
+    The scope filter is what the delta stream had, and it cannot bound this: the
+    page the viewer is reading is exactly the page whose rows are allowed
+    through. Bounding them is only half the fix — appends EXTEND the viewer's
+    local list, so a short suffix would leave a hole in the middle of a
+    transcript it believes is complete, which is why dropping any row must carry
+    the replacement marker that resets the list to what actually rides.
+    """
+    from local_operator.session.frontend_state import (
+        JOB_TRAJECTORY_FRAME_BUDGET_BYTES,
+        _live_row_cost,
+    )
+
+    # Rows at the producer's 8 KiB tool-text cap: the shape that measured a
+    # 4,390,839-byte frame for 500 of them on the operator's machine.
+    payload = _delta_payload(_payload_jobs(1, 200, payload_chars=8_192))
+    original = payload["job_trajectory_appends"]["job0"]
+    assert len(original) == 200, "the fixture stopped producing a full burst"
+
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    kept = filtered["job_trajectory_appends"]["job0"]
+
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+    assert 0 < len(kept) < len(original), (len(kept), len(original))
+    # Newest rows only, and whole rows: nothing is silently clipped.
+    assert kept == original[len(original) - len(kept) :]
+    assert all(row in original for row in kept)
+    assert sum(_live_row_cost(row) for row in kept) <= JOB_TRAJECTORY_FRAME_BUDGET_BYTES
+    # Without this marker the viewer would keep the rows it had and append a
+    # suffix to them, i.e. show a transcript with its middle missing.
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_an_under_budget_watched_delta_is_returned_unchanged() -> None:
+    """The bound must not cost a copy or a marker on the common delta."""
+    payload = _delta_payload(_payload_jobs(1, 3, payload_chars=512))
+    assert (
+        filter_update_trajectories(payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES)
+        is payload
+    )
+
+
+def test_one_oversize_row_rides_when_the_line_can_carry_it() -> None:
+    """A single 342 KB tool result fits a 1 MiB line.
+
+    The first cut of the budget measured only itself, so a row bigger than it
+    shipped an EMPTY window for that job — hiding an event the socket could have
+    carried (measured against the real producer: frame 343,489 B before and
+    after, and an emptied one in between). The ceiling is the room left under the
+    caller's line limit, measured against the rest of the frame.
+    """
+    payload = _delta_payload(_payload_jobs(1, 1, payload_chars=342_517))
+    original = payload["job_trajectory_appends"]["job0"]
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert filtered["job_trajectory_appends"]["job0"] == original
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+
+
+def test_a_row_larger_than_the_whole_line_is_replaced_by_an_empty_window() -> None:
+    """Past the line limit there is nowhere for a row to ride, and clipping it
+    would render a cut transcript as a complete one. The viewer resets and
+    fetches the page on demand instead."""
+    payload = _delta_payload(_payload_jobs(1, 1, payload_chars=1_500_000))
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert filtered["job_trajectory_appends"]["job0"] == []
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_an_unwatched_burst_cannot_starve_a_watched_sibling_of_budget() -> None:
+    """The budget is spent on what this connection actually receives, so a
+    watched job's rows must survive an unwatched sibling's flood untouched."""
+    payload = _delta_payload(
+        _payload_jobs(1, 3, payload_chars=512)
+        + [
+            JobState(
+                id="job-big",
+                type="task",
+                label="noisy child",
+                status="running",
+                trajectory=[_payload_event(row, payload_chars=8_192) for row in range(200)],
+            )
+        ]
+    )
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert len(filtered["job_trajectory_appends"]["job0"]) == len(
+        payload["job_trajectory_appends"]["job0"]
+    )
+    assert "job-big" not in filtered["job_trajectory_appends"]
+    # Scope-dropping needs no replacement marker: the viewer never had those rows.
+    assert "job-big" not in filtered["job_trajectory_replacements"]

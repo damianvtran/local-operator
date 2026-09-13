@@ -3279,7 +3279,9 @@ class RuntimeServer:
         # Per-connection, and applied on THIS loop rather than at the producer:
         # one canonical update fans out to every client, each of which has its
         # own open child page (or none).
-        data = filter_update_trajectories(data, conn.watched_jobs.__contains__)
+        data = filter_update_trajectories(
+            data, conn.watched_jobs.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+        )
         if not conn.frontend_ready:
             if len(conn.frontend_pending) >= _EVENT_QUEUE_MAX:
                 # A join that cannot install its boundary before this many
