@@ -344,9 +344,18 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
         # answer plus a top-level source list, carrying the soft sign-in marker,
         # was raised away -- the call site ANDs the verdict with ``not sources``,
         # which protects only the shape the extractor ACCEPTED.
+        # A row counts as SERVED only when it carries a URL, which is what makes
+        # it a search result at all: ``_perplexity_sources`` builds nothing from a
+        # row without one, so a name-only or empty dict row beside a wall would
+        # leave the wall's own sentence as the response -- the original bug,
+        # through this door (round-1 review MINOR-1, whose own repro shows a
+        # name-only row being served). A row WITHOUT a scheme still counts: it is
+        # a result the extractor rejects, which is the shape this check exists for.
         for key in ("sources_list", "search_results"):
             rows = event.get(key)
-            if isinstance(rows, list) and any(isinstance(row, dict) for row in rows):
+            if isinstance(rows, list) and any(
+                isinstance(row, dict) and row.get("url") for row in rows
+            ):
                 served_blocks.add(f"top_level_{key}")
                 break
         for block in event.get("blocks") or []:
