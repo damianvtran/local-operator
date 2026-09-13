@@ -74,11 +74,13 @@ derivation, and only one of them lossy.
 So delivery is retried on the worker thread, in place, up to
 ``len(RETRY_BACKOFF_S)`` times with 0.5 s / 2.0 s / 8.0 s between attempts.
 The geometry matters more than the numbers: the first retry is inside a
-human's "did that register?" window, and the last lands ~10.5 s out, which
-covers a Herdr server being restarted under a running pane without the
-worker sitting on a wedged socket for a minute. The item stays at the HEAD
-of the queue while it is retried, which preserves the module's ordering
-invariant (mint order == delivery order) rather than merely not breaking it;
+human's "did that register?" window, and the BACKOFF schedule ends ~10.5 s
+out, which covers a Herdr server being restarted under a running pane. Note
+that this sum bounds only the waiting BETWEEN attempts, not how long the item
+can occupy the worker — see the exhaustion arithmetic below. The item stays
+at the HEAD of the queue while it is retried, which preserves the module's
+ordering invariant (mint order == delivery order) rather than merely not
+breaking it;
 a retry that lands after a newer report would be harmless anyway, because
 Herdr's high-water mark discards the lower seq. On exhaustion the item is
 dropped and logged at WARNING, not DEBUG: a row that has stopped tracking a
@@ -88,11 +90,23 @@ hid for a whole release.
 That WARNING covers the MID-LIFE case — a pane still running when its retries
 run out, which is the one where a stale row persists while somebody is there
 to notice it. It is NOT reachable for a ``release-agent`` exhausting at exit,
-and the prose used to promise otherwise (review round 2, M5). The arithmetic:
-attempts land at ~0 s, ~0.5 s, ~2.5 s and ~10.5 s, so exhaustion is ~10.5 s
-out — but the exit drain gives up after :data:`EXIT_DRAIN_TIMEOUT_S` (2 s),
-and the interpreter then kills the daemon worker where it sits, mid-backoff,
-before even the third attempt. Nothing survives to log the WARNING.
+and the prose used to promise otherwise (review round 1, M5).
+
+**Exhaustion is bounded by the CALL TIMEOUT, not by the backoff.** The 10.5 s
+quoted above is only the sum of the waits BETWEEN attempts; it is not how
+long the worker can be busy on one item. An attempt that hangs rather than
+failing fast costs a full :data:`CALL_TIMEOUT_S` (5 s), and an item gets
+``len(RETRY_BACKOFF_S) + 1`` = 4 of them, so the real worst case is
+``4 x 5 s + 10.5 s = 30.5 s`` before the WARNING is logged — measured end to
+end at **30.82 s** against a wedged supervisor, which is what a reviewer
+timed. The prose here used to imply 10.5 s, which is the backoff alone
+(review round 1, MINOR-2).
+
+Nothing about that 30.5 s reaches the exit path. The drain gives up after
+:data:`EXIT_DRAIN_TIMEOUT_S` (2 s), and the interpreter then kills the daemon
+worker where it sits, mid-backoff, before even the third attempt — so the
+exit path's loss is bounded rather than reported, and the mid-life case above
+is the only one that logs.
 
 Loss on the exit path is therefore BOUNDED rather than reported: the drain
 caps what it costs the user, and a row left behind falls to Herdr's own
@@ -128,7 +142,7 @@ invisible.
 
 The cost is one subprocess per pane per 30 s, and it is NEW work rather than
 a rounding error on existing work: comparing it against the 12.5 Hz tick
-(review round 2, M3) was wrong, because that tick is de-duped and spawns
+(review round 1, M3) was wrong, because that tick is de-duped and spawns
 NOTHING for the whole of a turn. In spawns, which is the unit that costs
 anything: an idle pane goes from 0 to 2 per minute — 2880 a day, per pane —
 and a busy pane adds those same 2 a minute on top of its transitions. That
@@ -158,7 +172,7 @@ real defect: the heartbeat samples ``working``, the turn ends, ``report``
 mints ``idle`` at seq N, the heartbeat then mints its already-stale
 ``working`` at N+1 — and Herdr's high-water mark, which exists to discard
 lower seqs, keeps the HIGHER stale one. Reproduced as a row reading
-``working`` against a session that was ``idle`` (review round 2, M2).
+``working`` against a session that was ``idle`` (review round 1, M2).
 
 The obvious fix — hold ``_lock`` across the provider call — is worse than the
 bug. It puts caller-supplied code inside the one critical section ``report``
@@ -399,7 +413,7 @@ class HerdrReporter:
         #: How many seqs have been minted, under `_lock`. Not a sequence
         #: number and never sent: purely the generation counter the heartbeat
         #: compares against to tell whether a transition overtook the state it
-        #: just read (review round 2, M2).
+        #: just read (review round 1, M2).
         self._mints = 0
         #: Every call ever enqueued, in seq order. `None` is the worker's
         #: stop sentinel and is enqueued exactly once, by `release`.
@@ -453,8 +467,11 @@ class HerdrReporter:
         """The state of the last ``report-agent`` that actually landed.
 
         None before the first delivery, and again after a delivered
-        ``release-agent``. Differs from :attr:`last_state` exactly when a
-        delivery is in flight, being retried, or was dropped on exhaustion.
+        ``release-agent``. Differs from :attr:`last_state` when a delivery is
+        in flight, being retried, or was dropped on exhaustion — and after a
+        DELIVERED ``release-agent``, which clears this one while ``_last``
+        keeps whatever state the released row ended on (review round 1,
+        NIT-2).
         """
         return self._delivered
 
@@ -510,11 +527,19 @@ class HerdrReporter:
         if provider is None:
             self._state_provider = None
             return
-        if self._released.is_set():
-            return
-        self._state_provider = provider
         with self._lock:
-            if self._resync_thread is not None or self._released.is_set():
+            # Re-tested INSIDE the lock, and the store happens inside it too:
+            # "attaching to a released reporter stores nothing" is only true
+            # if the check and the assignment cannot be separated by a
+            # concurrent `release`, which is exactly what checking outside the
+            # window and assigning after it allowed (review round 1, NIT-3).
+            if self._released.is_set():
+                return
+            # Stored even when a heartbeat is already running: the loop
+            # re-reads this attribute on every tick, so a later provider
+            # replaces the one it reads. Only the THREAD is start-once.
+            self._state_provider = provider
+            if self._resync_thread is not None:
                 return
             thread = threading.Thread(
                 target=self._resync_loop, name="lop-herdr-resync", daemon=True
@@ -560,7 +585,7 @@ class HerdrReporter:
         measured at 2.02 s — which let a single reporter overrun the shared
         ``remaining`` that :func:`_drain_at_exit` computes against
         :data:`EXIT_DRAIN_TIMEOUT_S`, so the documented worst-case exit delay
-        was the bound times the number of threads (review round 2, M1).
+        was the bound times the number of threads (review round 1, M1).
         """
         deadline = time.monotonic() + timeout
         for thread in (self._thread, self._resync_thread):
@@ -600,7 +625,7 @@ class HerdrReporter:
         enqueueing. If another mint has happened since, that state was read
         before a transition this reporter has already queued, so enqueueing it
         would re-assert a value the session has moved off — the call is
-        dropped instead (review round 2, M2). ``None`` means "no guard", which
+        dropped instead (review round 1, M2). ``None`` means "no guard", which
         is every caller that already knows its own state.
         """
         # Re-tested INSIDE the lock below, not only here. This early exit is a

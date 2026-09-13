@@ -20,7 +20,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Sequence, cast
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -42,6 +42,12 @@ from local_operator.herdr.reporter import (
 #: worker runs a fake invoker that returns in microseconds, so a wait that
 #: reaches this is a wedge, not slowness.
 WAIT_S = 10.0
+
+#: How long a caller parked outside the critical section is given to finish
+#: before it is treated as blocked. A caller that CAN proceed touches no I/O
+#: and returns in microseconds, so reaching this is a wedge detector rather
+#: than an expectation — see `_ParkedInSection`.
+BLOCKED_PROBE_S = 2.0
 
 
 class Recorder:
@@ -181,6 +187,63 @@ def _reporter(
         clock=lambda: next(counter),
         retry_backoff_s=retry_backoff_s,
     )
+
+
+class _ParkedInSection(HerdrReporter):
+    """The REAL reporter, with a seam that parks a caller in its critical section.
+
+    ``_enqueue`` is only ever called with ``_lock`` held — that is the invariant
+    under test — so parking here parks the whole mint-and-enqueue section and
+    turns "the gap between the mint and the put is a few bytecodes" into "the
+    gap is exactly as wide as this test says it is".
+
+    Only the FIRST caller to reach the seam parks, so one caller can be held
+    inside the section while a second one tries to get in.
+
+    A seam rather than ``sys.setswitchinterval``, because a widened-but-still-
+    probabilistic window is what made the original guard unable to fail
+    (review round 1, MINOR-1).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.in_section = threading.Event()
+        self.open_gate = threading.Event()
+        self._parked = False
+
+    def _enqueue(self, item: tuple[str, tuple[str, ...]]) -> None:
+        # Parked BEFORE the put: the section a caller must not escape is
+        # "mint AND queue", so a seam placed after the put would leave nothing
+        # for a second caller to interleave with.
+        if not self._parked:
+            self._parked = True
+            self.in_section.set()
+            self.open_gate.wait(WAIT_S)
+        super()._enqueue(item)
+
+    def enqueue_heartbeat(self) -> None:
+        """What the resync loop does with the state it read: mint and enqueue.
+
+        The real path, so this is the call the assertion is about.
+        :class:`_BypassingHeartbeat` overrides it with the shape the design
+        forbids.
+        """
+        self._enqueue_report("working", dedupe=False)
+
+
+class _BypassingHeartbeat(_ParkedInSection):
+    """The control: a heartbeat that mints and queues with NO lock held.
+
+    Under the identical arrangement it claims a HIGHER seq while the
+    transition is still parked inside the section, so the delivered order
+    inverts. That is what makes the real heartbeat's assertion one that CAN
+    fail, rather than one that describes what the code happens to do.
+    """
+
+    def enqueue_heartbeat(self) -> None:
+        seq = self._next_seq_locked()
+        argv = self._argv("report-agent", "--state", "working", "--seq", str(seq))
+        self._queue.put(("report-agent", argv))
 
 
 # ---------------------------------------------------------------------------
@@ -1174,51 +1237,65 @@ def test_join_bounds_the_total_wait_not_each_thread() -> None:
 
 
 def test_the_heartbeat_does_not_break_mint_order_under_contention() -> None:
-    """The module's central claim, with a heartbeat minting concurrently.
+    """The heartbeat enqueues through the SAME critical section as a transition.
 
-    The heartbeat enqueues through the same `_enqueue_report` critical
-    section as `report`, so it is just a third caller; this is the assertion
-    that says so rather than the docstring. Same forced switch interval as
-    `test_delivery_order_is_mint_order_under_contention`.
+    WHY A SEAM AND NOT A SWITCH INTERVAL. This used to force the window open
+    with ``sys.setswitchinterval(1e-6)`` and assert the delivered seqs were
+    ascending. Measured, that is a bet on the scheduler rather than a test:
+    restoring the pre-fix split in production left it green 11 runs in 12, and
+    the sibling control printed 0/12, 1/12 and 2/12 inversions across runs
+    (review round 1, MINOR-1). So the guarantee is pinned structurally here
+    instead.
+
+    A transition is parked INSIDE the mint-and-enqueue section — the lock is
+    held, its item is not yet queued — and the heartbeat's own enqueue is
+    called from another thread. In the real shape it cannot mint: it blocks on
+    the lock, and ``mints_while_held`` is the reporter's own count of every
+    mint, so the assertion is about the code rather than about how long the
+    test waited. The control runs the IDENTICAL arrangement with
+    :class:`_BypassingHeartbeat`, which mints and queues without the lock: it
+    takes the next seq while the section is held and the delivery order
+    inverts. Same measurement on both sides, so the real half is a guard.
     """
-    recorder = Recorder()
-    counter = itertools.count(1)
-    reporter = HerdrReporter(
-        pane_id="w1:p1",
-        binary="/opt/herdr",
-        invoker=recorder,
-        clock=lambda: next(counter),
-        resync_interval_s=0.001,
-    )
-    reporter.set_state_provider(lambda: "working")
-    start = threading.Event()
 
-    def hammer(states: Sequence[HerdrState]) -> None:
-        start.wait()
-        for state in states:
-            reporter.report(state)
+    def run(reporter_type: type[_ParkedInSection]) -> tuple[bool, int, Recorder]:
+        recorder = Recorder()
+        counter = itertools.count(1)
+        reporter = reporter_type(
+            pane_id="w1:p1",
+            binary="/opt/herdr",
+            invoker=recorder,
+            clock=lambda: next(counter),
+        )
+        transition = threading.Thread(target=lambda: reporter.report("blocked"))
+        transition.start()
+        assert reporter.in_section.wait(WAIT_S), "the transition never reached the section"
 
-    previous = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    try:
-        threads = [
-            threading.Thread(
-                target=hammer, args=(cast(Sequence[HerdrState], ("working", "idle") * 20),)
-            ),
-            threading.Thread(
-                target=hammer, args=(cast(Sequence[HerdrState], ("blocked", "idle") * 20),)
-            ),
-        ]
-        for thread in threads:
-            thread.start()
-        start.set()
-        for thread in threads:
-            thread.join(WAIT_S)
+        heartbeat = threading.Thread(target=reporter.enqueue_heartbeat)
+        heartbeat.start()
+        heartbeat.join(BLOCKED_PROBE_S)
+        blocked_while_held = heartbeat.is_alive()
+        mints_while_held = reporter._mints
+
+        reporter.open_gate.set()
+        transition.join(WAIT_S)
+        heartbeat.join(WAIT_S)
         reporter.release()
         reporter.join(timeout=WAIT_S)
-    finally:
-        sys.setswitchinterval(previous)
+        return blocked_while_held, mints_while_held, recorder
 
+    # THE CONTROL FIRST: unless the bypassing shape can invert, the assertion
+    # on the real one is not a guard.
+    blocked, mints, recorder = run(_BypassingHeartbeat)
+    assert not blocked, "the control's heartbeat never ran while the section was held"
+    assert mints == 2, f"the control never claimed the next seq: {mints}"
+    seqs = recorder.seqs()
+    assert seqs != sorted(seqs), f"the control did not invert the delivery order: {seqs}"
+
+    # The real heartbeat path.
+    blocked, mints, recorder = run(_ParkedInSection)
+    assert blocked, "the heartbeat minted while a transition held the section"
+    assert mints == 1, f"the heartbeat minted {mints} times while the section was held"
     seqs = recorder.seqs()
     assert seqs == sorted(seqs), f"delivered out of mint order: {seqs}"
     assert len(set(seqs)) == len(seqs), f"duplicate seq: {seqs}"
