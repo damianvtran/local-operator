@@ -88,6 +88,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
+from local_operator.incidents import REASONING_ECHO_MARKERS
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -222,16 +223,16 @@ CONNECTIVITY_CONTINUATION_PROMPT = (
 )
 
 
-#: The provider wording that means "this DeepSeek thinking-mode request never
-#: carried the reasoning back".
-#:
-#: Matched on the provider's OWN words, because it arrives as a plain 400 beside
-#: every other malformed-request refusal (and is classified as one). Both halves
-#: are required: ``reasoning_content`` alone is a field name every DeepSeek-shaped
-#: reply and error mentions, and "must be passed back" alone would match any
-#: provider demanding some other field back. The message this pins is, verbatim,
-#: "The `reasoning_content` in the thinking mode must be passed back to the API."
-_REASONING_ECHO_MARKERS = ("reasoning_content", "must be passed back")
+# How the loop recognises "this DeepSeek thinking-mode request never carried the
+# reasoning back": matched on the provider's OWN words (it arrives as a plain 400
+# beside every other malformed-request refusal, and is classified as one), using
+# the markers defined in ``local_operator.incidents`` and imported rather than
+# re-spelled here. The classifier that names the refusal for the USER and the
+# gate below that decides whether to RETRY it are answering the same question,
+# and while each held a private copy they combined the two halves differently
+# (this one requiring both, the rule only one) -- so a 429 body quoting the field
+# name and the legacy rows' "unsupported field" 400 were both reported to the
+# user as our own recovery having failed.
 
 #: Turns this RUN has retried after such a refusal. One, not more: the retry
 #: changes the request's thinking mode, and a second attempt at the same body
@@ -244,7 +245,7 @@ def _is_reasoning_echo_rejection(error: str | None) -> bool:
     if not error:
         return False
     text = error.lower()
-    return all(marker in text for marker in _REASONING_ECHO_MARKERS)
+    return all(marker in text for marker in REASONING_ECHO_MARKERS)
 
 
 def _thinking_off_effort(model: "ModelSpec") -> str | None:
@@ -1027,6 +1028,17 @@ class AgentLoop:
                         # it is the wording that decides; the rung check below
                         # is the real precondition, because a model with no
                         # thinking-off rung is one the retry cannot help.
+                        #
+                        # That precondition excludes the route this was written
+                        # for: `openrouter/deepseek/deepseek-v4.1-flash` ships
+                        # the ladder ('low','high','max') with no `none` rung, so
+                        # a refusal there still ends the turn after one request.
+                        # On that route the echo DERIVATION is the whole
+                        # protection and this is a backstop for the routes that
+                        # do have a rung; it is not the recovery that saves the
+                        # aggregator, and the test that pins it must derive its
+                        # spec rather than hand one a rung production never
+                        # builds.
                         if (
                             stop_reason == "error"
                             and reasoning_echo_retries < MAX_REASONING_ECHO_RETRIES

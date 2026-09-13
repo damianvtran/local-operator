@@ -46,6 +46,27 @@ from local_operator.incidents import (
             "the thinking mode must be passed back to the API.",
             "reasoning-echo",
         ),
+        # The three texts the ORed rule misclassified as this category (review
+        # round 1, MAJOR 1). Each names the field and none is the refusal, so
+        # each must keep the category its OWN fault earns: a throttle is a
+        # throttle, a relayed 502 is the provider, and the legacy rows' reject of
+        # an input ``reasoning_content`` is the error the capability exists to
+        # avoid -- reporting it as our recovery having failed inverted it.
+        (
+            '429 Too Many Requests: {"error":{"message":"rate limited",'
+            ' "metadata":{"requested":{"reasoning_content":null}}}}',
+            "rate-limit",
+        ),
+        (
+            "502 Bad Gateway from upstream: the relay could not resolve "
+            "reasoning_content for this turn",
+            "provider",
+        ),
+        (
+            "invalid request (HTTP 400): unsupported field 'reasoning_content' for "
+            "model deepseek-reasoner",
+            "unknown",
+        ),
         ("something completely novel happened", "unknown"),
     ],
 )
@@ -74,6 +95,23 @@ def test_the_reasoning_echo_refusal_names_a_next_step():
     )
     assert incident.category == "reasoning-echo"
     assert "switching model" in incident.hint
+
+
+def test_the_reasoning_echo_hint_does_not_claim_a_retry_that_may_not_have_run():
+    """The hint is one static string; whether a retry happened is per-model.
+
+    On a model with no thinking-off rung -- which includes the live aggregator
+    routes to these weights -- the loop never re-asks, so a hint saying a retry
+    "did not clear" this describes a call that was never made (QA round 1, Q2).
+    The wording has to be true of both cases, since the category is the same in
+    both and nothing on the incident says which one it was.
+    """
+    hint = classify_incident(
+        "invalid request (HTTP 400): The `reasoning_content` in the thinking "
+        "mode must be passed back to the API."
+    ).hint
+    assert "did not clear" not in hint
+    assert "no such rung" in hint
 
 
 def test_unknown_has_no_invented_hint():

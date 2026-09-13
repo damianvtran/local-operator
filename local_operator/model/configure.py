@@ -508,6 +508,16 @@ def _served_model_family(model_id: str) -> str:
     the final ``/``): deeper prefixes are all the same idea, and a rule that
     stripped only a known vendor list would stop matching the day a new
     aggregator shipped.
+
+    Only a ``/`` namespace is stripped, and that is a KNOWN limit rather than
+    an oversight: ``build_model_spec`` receives the caller's model NAME, not a
+    route id, so the harness's own normalised ``provider_smodel`` spelling the
+    marker table above documents (``minimax_sminimax-m3``) is not a shape that
+    reaches here -- no live caller passes one, and one that did would match
+    nothing and silently lose the family rule. Splitting on ``:`` or ``_s`` too
+    would be dead code claiming coverage it does not have; if a caller ever
+    starts passing a route id, widen this and add its row to the derivation
+    table at the same time (review round 1, NIT 2).
     """
     return model_id.rpartition("/")[2]
 

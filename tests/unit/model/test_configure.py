@@ -4918,6 +4918,12 @@ def test_reasoning_echo_capability_ignores_the_route_namespace_only():
     assert _served_model_family("deepseek/deepseek-v4.1-flash") == "deepseek-v4.1-flash"
     assert _served_model_family("deepseek-flash") == "deepseek-flash"
     assert _served_model_family("vendor/deepseek/DeepSeek-V4-Flash") == "DeepSeek-V4-Flash"
+    # The KNOWN limit, pinned so the docstring's claim is executable: only a
+    # ``/`` namespace is stripped, so the harness's own normalised
+    # ``provider_smodel`` spelling passes through untouched and matches no family
+    # rule. No live caller passes one; this row is here to fail the day one does
+    # (review round 1, NIT 2).
+    assert _served_model_family("minimax_sminimax-m3") == "minimax_sminimax-m3"
 
 
 @pytest.mark.parametrize("provider", ["ollama", "vllm", "llamacpp", "lmstudio"])

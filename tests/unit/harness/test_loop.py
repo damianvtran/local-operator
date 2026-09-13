@@ -4134,7 +4134,7 @@ async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
 
 
 @pytest.mark.asyncio
-async def test_the_refusals_own_words_recover_a_route_the_capability_missed():
+async def test_the_refusals_own_words_recover_a_derived_route_the_capability_missed():
     """A route whose spec lacks the capability is still recovered.
 
     The capability is a prediction about which routes run DeepSeek's
@@ -4145,8 +4145,22 @@ async def test_the_refusals_own_words_recover_a_route_the_capability_missed():
     the prediction as authoritative over it is what turned a recoverable
     refusal into a dead turn recorded as an unclassified
     ``unknown: invalid request (HTTP 400)`` incident.
+
+    The spec is DERIVED, deliberately, and the route is chosen for what it can
+    prove. This recovery has a SECOND precondition -- a ``none`` rung to retreat
+    to -- and the DeepSeek aggregator route the change was written for does not
+    have one (``('low','high','max')``, so the turn still ends after one request
+    on it; pinned by the test below). A hand-built spec carrying both the missed
+    bit AND a ``none`` rung, as this test used to be, therefore passed on a
+    configuration production never builds. Deriving the spec leaves the two
+    tests together stating the whole truth: the wording recovers a route that
+    CAN retreat, and the aggregator route cannot.
     """
-    missed_route = _echo_model().model_copy(update={"requires_reasoning_echo": False})
+    from local_operator.model.configure import build_model_spec
+
+    missed_route = build_model_spec("openrouter", "openai/gpt-5.2")
+    assert missed_route.requires_reasoning_echo is False, "the missed bit this covers"
+    assert "none" in missed_route.reasoning_efforts, "the rung this recovery needs"
     stream = ScriptedStream(
         [
             [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
@@ -4166,6 +4180,38 @@ async def test_the_refusals_own_words_recover_a_route_the_capability_missed():
     assert any("thinking disabled" in n.text for n in notices)
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_aggregator_deepseek_route_has_no_rung_and_still_ends_the_turn():
+    """The honest reach of the recovery, on the spec production DERIVES.
+
+    ``openrouter/deepseek/deepseek-v4.1-flash`` is the route this change was
+    written for and ships ``('low','high','max')`` -- no ``none`` rung -- so the
+    retry cannot change the body and the turn ends after one request. What
+    protects that route is the echo DERIVATION, not this recovery. Pinned here
+    so the claim cannot drift back to "the recovery saves the aggregator": the
+    previous version of the test above asserted exactly that, on a hand-built
+    ladder production never builds.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    aggregator = build_model_spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert aggregator.requires_reasoning_echo is True, "the echo is what saves this route"
+    assert "none" not in aggregator.reasoning_efforts, "the missing rung this test pins"
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=aggregator), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 1
+    assert not [e for e in events if isinstance(e, NoticeEvent) and "thinking disabled" in e.text]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is not None and "reasoning_content" in end.error
 
 
 @pytest.mark.asyncio

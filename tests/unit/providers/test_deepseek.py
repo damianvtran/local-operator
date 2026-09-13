@@ -768,6 +768,51 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
     assert all(str(entry["reasoning_content"]).strip() for entry in assistant_entries(capable))
 
 
+@pytest.mark.parametrize(
+    "provider,model_id",
+    [
+        ("openrouter", "openai/gpt-5.2"),
+        ("openrouter", "anthropic/claude-opus-4.6"),
+    ],
+)
+def test_a_derived_unrelated_aggregator_route_keeps_the_old_body(provider, model_id):
+    """The DERIVED spec, not a hand-flipped field, keeps the old body.
+
+    The sibling test above pins the body builder's field gating by flipping
+    ``requires_reasoning_echo`` by hand, which leaves the DERIVER's own
+    contribution to an unrelated route uncovered: nothing asserted that
+    ``build_model_spec`` on a live aggregator row for another family yields the
+    body that route got before the capability existed. On a route whose every
+    other field is decided by the same registry, that is the composition the
+    regression would actually arrive through.
+    """
+    client = OpenAICompatClient(f"https://{provider}.invalid/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(tool_calls=[ToolCall(id="call_e", name="inspect", arguments={})]),
+        Message(role="tool", tool_call_id="call_e", content=[TextContent(text="found")]),
+        native_turn(text="done"),
+    ]
+    derived = configure.build_model_spec(provider, model_id)
+    assert derived.requires_reasoning_echo is False, "this family must not gain the field"
+    req = ChatRequest(model=derived, messages=history, system_blocks=["Stable"])
+
+    body = client._build_body(req, scope=scope)
+
+    assert all("reasoning_content" not in entry for entry in assistant_entries(body))
+    # Sensitive rather than vacuous: the SAME request on the SAME derived history
+    # does gain the key once the field is set, so a deriver that flipped an
+    # unrelated family would fail here instead of passing quietly.
+    capable = client._build_body(
+        req.model_copy(
+            update={"model": derived.model_copy(update={"requires_reasoning_echo": True})}
+        ),
+        scope=scope,
+    )
+    assert all(str(entry["reasoning_content"]).strip() for entry in assistant_entries(capable))
+
+
 def test_thinking_off_still_echoes_and_needs_no_special_case():
     """``thinking: disabled`` accepts the echo too, so the rule stays total.
 
