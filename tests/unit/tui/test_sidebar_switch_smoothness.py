@@ -238,6 +238,24 @@ async def test_switch_never_refuses_the_readiness_gate() -> None:
     branch is deliberately KEPT — the container-lands-before-its-children case
     it was written for is real — so this asserts it stays dead, not that it is
     gone.
+
+    THE FIXTURE USED TO HAND THE GATE AN EASY FRAME, and that is why this test
+    passed while every uncached switch paid three refusals (the hazard recorded
+    as H5 by the switch profiling pass this change was briefed on, not a PR).
+    Every target carried an EMPTY draft, so the composer never
+    changed height across a switch — and the docked composer is `height: auto`,
+    which makes the dock's height the thing the readiness gate's fail-tail
+    branch actually trips on: `editor.load_text` puts the incoming draft into a
+    composer still holding the outgoing one, the transcript's viewport and
+    extent follow, and the first armed frame is a clipped tail
+    (`TAIL_BLOCK_BELOW_CONTENT`). With every draft empty the geometry never
+    moved, the first frame was already settled, and the assertion held for a
+    reason the real switch does not enjoy.
+
+    The drafts are therefore STAGGERED here (1..4 rows, the same shape the bench
+    harness uses) and the composer heights the switch actually painted are
+    asserted to have MOVED — so the fixture proves it is still exercising the
+    failing shape rather than quietly going back to the easy one.
     """
     home = SidebarRemote("home-session")
     targets = [_conversation(f"target-{i}", 40) for i in range(3)]
@@ -248,19 +266,42 @@ async def test_switch_never_refuses_the_readiness_gate() -> None:
             for _ in range(20):
                 await pilot.pause()
 
+            # Registered up front, with the draft each target will be handed at
+            # commit: the dock only moves when consecutive targets disagree
+            # about how tall the composer should be.
+            for index, remote in enumerate(targets):
+                source = SessionInteraction(remote)
+                source.draft.text = "\n".join(
+                    f"target {index} draft line {n}" for n in range(1 + index % 4)
+                )
+                app._sidebar_sources[remote.session_id] = source
+                app._interactions[id(remote)] = source
+
+            recorder = _FrameRecorder(app)
+            recorder.armed = True
             for remote in targets:
                 await _switch_bound(app, pilot, remote)
             # And back again: a return leg hits the retained-presentation path,
             # which reaches the gate by a different route than a first visit.
             for remote in targets:
                 await _switch_bound(app, pilot, remote)
+            recorder.armed = False
 
             # The gate must actually have been REACHED, or a zero below would
             # mean "never armed" rather than "never refused".
             assert app._sidebar_gate_reached > 0, "no switch reached the readiness gate"
+            # And the dock must actually have MOVED, or the zero below would mean
+            # "the fixture never gave the gate a tail to clip" -- the rig-shaped
+            # pass this test shipped with.
+            heights = sorted(set(recorder.editor_heights))
+            assert len(heights) > 1, (
+                f"the fixture painted a single composer height ({heights}), so it never "
+                "handed the gate the dock-resize shape this test exists to refuse on"
+            )
             assert app._sidebar_gate_recoveries == 0, (
                 "the readiness gate was refused and paid a recovery relayout; "
-                "the arming refresh is no longer producing a full LayoutUpdate"
+                "the geometry of the incoming dock/transcript is not settled before "
+                "the gate is armed (see `_settle_sidebar_geometry_before_gate`)"
             )
 
 

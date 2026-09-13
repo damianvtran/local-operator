@@ -375,6 +375,16 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         editor_before = app._editor().outer_size.height
         state["armed"] = True
+        # THE GATE'S OWN COUNTERS, per switch. They are the load-independent
+        # evidence for the readiness gate's cost, and they are read as a DELTA
+        # because both are app-global: `reached` counts consultations and
+        # `recoveries` counts the full-screen relayouts bought by a refusal.
+        # A switch that reports `reached == 0` was never asked about (or was
+        # never armed), which is a different fact from `recoveries == 0`, so the
+        # pair is reported together -- either alone cannot tell "never asked"
+        # from "always accepted".
+        gate_reached_before = app._sidebar_gate_reached
+        gate_recoveries_before = app._sidebar_gate_recoveries
         wall0, cpu0 = time.perf_counter(), time.thread_time()
         app.post_message(SessionSidebar.Selected(target))
         # Drive the loop, not a sleep: readiness is published by the app, and
@@ -413,6 +423,8 @@ def _run_worker(args: argparse.Namespace) -> None:
             "prepare_ms": state["prepare_ms"],
             "commit_ms": state["commit_ms"],
             "displays": state["displays"],
+            "gate_reached": app._sidebar_gate_reached - gate_reached_before,
+            "gate_recoveries": app._sidebar_gate_recoveries - gate_recoveries_before,
             "call_after_refresh": state["after_refresh"],
             "layouts": state["layouts"],
             "reveal_displays": state["reveal_displays"],
@@ -603,6 +615,8 @@ def _summarise(records: list[dict[str, Any]]) -> dict[str, Any]:
         "prepare_ms",
         "commit_ms",
         "displays",
+        "gate_reached",
+        "gate_recoveries",
         "call_after_refresh",
         "layouts",
         "reveal_displays",
