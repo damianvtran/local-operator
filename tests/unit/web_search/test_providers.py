@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
 from local_operator.credentials import CredentialManager
-from local_operator.web_search.models import WebSearchSettings
+from local_operator.web_search.models import SearchResponse, WebSearchSettings
 from local_operator.web_search.providers import PROVIDERS, parse_duckduckgo_html
 
 
@@ -769,3 +770,273 @@ async def test_a_truncated_evidence_pass_is_reported_not_passed_off_as_complete(
     assert response.evidence_applied is True
     # ...and the truncation is on the record rather than invisible.
     assert any("token cap" in failure for failure in response.failures), response.failures
+
+
+@pytest.mark.asyncio
+async def test_perplexity_anonymous_wall_is_a_refusal_not_a_result(tmp_path) -> None:
+    """A sign-in wall must not be served as the search the model asked for.
+
+    The anonymous endpoint refuses with a normally completed stream: HTTP 200,
+    ``status: COMPLETED``, and ``text`` asking the reader to sign up. Because the
+    chain accepts an empty-source response when its answer is non-empty (a
+    provider may legitimately answer without citations), that sentence was
+    returned as a successful search -- observed five times in one real session,
+    each one a search that returned nothing while looking like one that worked.
+    The refusal is marked structurally by ``upsell_information``.
+    """
+    wall_event = {
+        "uuid": "pplx-wall",
+        "status": "COMPLETED",
+        "final": True,
+        "text": "Sign up and repeat your request.",
+        "upsell_information": {
+            "name": "fraud_authwall_upsell",
+            "upsell_type": "LOGIN",
+            "cta": "SIGN_UP_OR_LOGIN",
+        },
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = "data: " + json.dumps(wall_event) + "\n\ndata: [DONE]\n"
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError) as caught:
+            await PROVIDERS["perplexity"].search(
+                client,
+                _credentials(tmp_path),
+                WebSearchSettings(),
+                "query",
+                3,
+            )
+
+    message = str(caught.value)
+    # The reason names the wall and says what to do about it.
+    assert "fraud_authwall_upsell" in message
+    assert "PERPLEXITY_API_KEY" in message or "another provider" in message
+    # ...and never the invitation itself, which is what used to be returned.
+    assert "Sign up and repeat your request." not in message
+
+
+@pytest.mark.asyncio
+async def test_perplexity_keeps_sources_returned_alongside_a_wall(tmp_path) -> None:
+    """Some pages plus an upsell is still a result: never discard real sources."""
+    source_event = {
+        "uuid": "pplx-2",
+        "blocks": [
+            {
+                "intended_usage": "web_results",
+                "web_result_block": {
+                    "web_results": [
+                        {"name": "Source", "url": "https://example.com", "snippet": "E"}
+                    ]
+                },
+            }
+        ],
+        "upsell_information": {"name": "fraud_authwall_upsell", "upsell_type": "LOGIN"},
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = "data: " + json.dumps(source_event) + "\n\ndata: [DONE]\n"
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["perplexity"].search(
+            client,
+            _credentials(tmp_path),
+            WebSearchSettings(),
+            "query",
+            3,
+        )
+
+    assert response.sources[0].url == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_chain_of_empty_providers_fails_loudly(tmp_path, monkeypatch) -> None:
+    """When every enabled provider comes back empty, the search says so.
+
+    The alternative -- returning the last provider's empty response -- is what
+    made a real session's five empty searches look successful.
+    """
+    from local_operator.web_search import service as service_module
+    from local_operator.web_search.service import WebSearchService
+
+    def empty(*_args, **_kwargs):
+        return SearchResponse(provider="duckduckgo", auth_mode="free", sources=[], answer=None)
+
+    def walled(*_args, **_kwargs):
+        raise RuntimeError("anonymous tier walled this request (fraud_authwall_upsell/LOGIN)")
+
+    class _Table(dict[str, Any]):
+        def __getitem__(self, key):
+            return _Entry(empty if key == "duckduckgo" else walled)
+
+    class _Entry:
+        def __init__(self, fn):
+            self.search = fn
+
+    monkeypatch.setattr(service_module, "PROVIDERS", _Table())
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"])
+    service = WebSearchService(settings, _credentials(tmp_path))
+
+    with pytest.raises(RuntimeError) as caught:
+        await service.search("query")
+
+    message = str(caught.value)
+    assert "duckduckgo" in message and "perplexity" in message
+
+
+# ---------------------------------------------------------------------------
+# Refusal shape matrix (round-1 review: MAJOR-1 and MINOR-1)
+# ---------------------------------------------------------------------------
+
+#: The in-thread sign-in NUDGE. Live probes of the anonymous endpoint found this
+#: on refusals too, so it must keep raising; it is not, on its own, proof that
+#: nothing was served -- that is what the served-block test settles.
+SOFT_UPSELL = {
+    "name": "logged_out_thread_sign_in",
+    "upsell_type": "LOGIN",
+    "app_location": "IN_THREAD_INPUT",
+    "title": "Sign in to save your history and access more features",
+}
+WALL_UPSELL = {
+    "name": "fraud_authwall_upsell",
+    "upsell_type": "LOGIN",
+    "app_location": "MODAL",
+    "title": "Sign in to continue using Perplexity",
+}
+_ASK_ONLY_BLOCKS = [
+    {
+        "intended_usage": "ask_text",
+        "markdown_block": {"answer": "Sign up and repeat your request."},
+    }
+]
+
+
+def _sse(*events: dict[str, object]) -> str:
+    return "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n"
+
+
+def _wall(body: str) -> str | None:
+    from local_operator.web_search.providers import (
+        _parse_perplexity_sse,
+        _perplexity_authwall,
+    )
+
+    return _perplexity_authwall(_parse_perplexity_sse(body))
+
+
+def test_refusal_carrying_only_the_soft_marker_is_still_a_refusal() -> None:
+    """Three live refusals carried ONLY this marker, so it has to raise.
+
+    Narrowing the test to ``fraud_authwall_upsell`` would reopen the original
+    bug for that shape (round-1 review MAJOR-1).
+    """
+    body = _sse({"upsell_information": SOFT_UPSELL, "blocks": _ASK_ONLY_BLOCKS})
+    assert _wall(body) is not None
+
+
+def test_a_served_block_beside_a_soft_marker_is_a_result_not_a_refusal() -> None:
+    """MAJOR-1: "no recognised sources" is not "nothing was served".
+
+    A shopping, hotels, maps or media answer is served content that the source
+    extractor has no rows for. Raising on its absence discarded a real answer
+    that happened to carry a sign-in nudge.
+    """
+    for block_key in (
+        "shopping_block",
+        "hotels_mode_block",
+        "maps_mode_block",
+        "media_block",
+        "web_result_block",
+    ):
+        body = _sse(
+            {
+                "upsell_information": SOFT_UPSELL,
+                "blocks": [
+                    {"intended_usage": "web_results", block_key: {"items": [{"name": "x"}]}}
+                ],
+            }
+        )
+        assert _wall(body) is None, f"a served {block_key} was mistaken for a refusal"
+
+
+def test_a_double_encoded_wall_is_still_a_refusal() -> None:
+    """MINOR-1: the JSON-string branch had one unwrap, and two escaped it.
+
+    A wall arriving as a double-encoded string was served to the model as a
+    search result -- this fix's own bug, in the shape the stream sometimes uses.
+    """
+    body = _sse(
+        {
+            "upsell_information": json.dumps(json.dumps(WALL_UPSELL)),
+            "blocks": _ASK_ONLY_BLOCKS,
+        }
+    )
+    assert _wall(body) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_served_shopping_answer_survives_the_chain(tmp_path) -> None:
+    """The end-to-end half of MAJOR-1, through the provider entry point."""
+    body = _sse(
+        {
+            "upsell_information": SOFT_UPSELL,
+            "blocks": [
+                {
+                    "intended_usage": "web_results",
+                    "shopping_block": {"products": [{"name": "marathon shoe"}]},
+                },
+                {
+                    "intended_usage": "ask_text",
+                    "markdown_block": {"answer": "Here are the best marathon shoes."},
+                },
+            ],
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["perplexity"].search(
+            client, _credentials(tmp_path), WebSearchSettings(), "query", 3
+        )
+
+    # Not raised away: the answer is the served one, and the sign-in nudge is
+    # not treated as the reason to discard it.
+    assert response.answer == "Here are the best marathon shoes."
+
+
+@pytest.mark.asyncio
+async def test_a_forced_provider_failure_names_only_that_provider(tmp_path, monkeypatch) -> None:
+    """Round-1 design review D2: the message described a chain that never ran.
+
+    With one candidate -- a forced provider, or the only one enabled -- the old
+    text said "All configured web search providers failed" while the others had
+    not been asked.
+    """
+
+    from local_operator.web_search.service import WebSearchService
+
+    manager = _credentials(tmp_path)
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"], strategy="ordered")
+    service = WebSearchService(settings, manager)
+
+    async def walled(*_args: object, **_kwargs: object):
+        raise RuntimeError("Fetch a page directly, or set PERPLEXITY_API_KEY: refused")
+
+    # Replace the whole registry ENTRY: ``PROVIDERS`` maps ids to provider
+    # DEFINITIONS (objects, not dicts), and only ``.search`` is reached here.
+    monkeypatch.setitem(PROVIDERS, "perplexity", SimpleNamespace(search=walled))
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query", forced_provider="perplexity")
+
+    message = str(raised.value)
+    assert "all configured web search providers failed" not in message.lower()
+    assert "only provider tried" in message
+    assert "duckduckgo" not in message
+    # D1: the provider's actionable sentence leads, so it survives the card's
+    # single-line crop; the scope note follows it rather than preceding it.
+    assert message.index("Fetch a page directly") < message.index("only provider tried")
