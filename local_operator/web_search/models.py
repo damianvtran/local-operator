@@ -104,6 +104,12 @@ class SearchResponse(BaseModel):
     auth_mode: str
     sources: list[SearchSource] = Field(default_factory=list)
     answer: str | None = None
+    #: True when at least one source's SNIPPET came from the evidence pass, so
+    #: the render can label model-reported text as such. A boolean of its own
+    #: rather than "any relevance is set": the snippet and the relevance are
+    #: chosen independently, and a pass that quoted a page but scored it
+    #: unusably still puts model-reported text in front of the model.
+    evidence_applied: bool = False
     request_id: str | None = None
     failures: list[str] = Field(default_factory=list)
     usage: SearchUsage | None = None

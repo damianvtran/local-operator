@@ -114,6 +114,67 @@ async def test_band_total_folds_in_search_spend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_band_marks_a_figure_that_an_unpriced_search_makes_a_floor() -> None:
+    """A combined total is a LOWER BOUND when one of its halves is unpriced.
+
+    The band printed `◆ $0.104` unmarked while `/session` for the same session
+    printed `$0.0040+` next to ``future-engine  $—  1 search · no published
+    price``: one figure, two spellings, and the band's was the dishonest one.
+    """
+    session = _Session("anthropic/opus")
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await _settle_boot(pilot, app, session)
+        with _resolving():
+            app.post_message(
+                TurnEnded(False, None, context_tokens=0, usage=Usage(input_tokens=10_000))
+            )
+            await pilot.pause()
+            assert _band_cost(app) == "$0.100"
+
+            # A priced search keeps the figure exact...
+            _record()
+            app.post_message(
+                TurnEnded(False, None, context_tokens=0, usage=Usage(input_tokens=10_000))
+            )
+            await pilot.pause()
+            assert _band_cost(app) == "$0.203"
+
+            # ...and an unpriced one turns the same figure into a floor.
+            _record(provider="future-engine", usd=None)
+            app.post_message(
+                TurnEnded(False, None, context_tokens=0, usage=Usage(input_tokens=10_000))
+            )
+            await pilot.pause()
+            assert _band_cost(app) == "≥$0.303"
+
+
+@pytest.mark.asyncio
+async def test_the_canonical_band_marks_a_search_only_figure_as_partial() -> None:
+    """Unpriceable model money plus priced search money is HALF a session.
+
+    The canonical branch falls back to the search figure when the store reports
+    no model cost, and it did so unmarked -- presenting the retrieval half as the
+    session total, which is the failure mode the money cell's own docstring calls
+    the more expensive lie.
+    """
+    session = _Session("anthropic/opus")
+    app = OperatorApp(_async_factory(session))
+    async with app.run_test(size=(100, 28)) as pilot:
+        await _settle_boot(pilot, app, session)
+        _record()
+        state = FrontendSessionState(
+            session_id="sess",
+            epoch="e",
+            cumulative_parent_cost=None,
+            cost_knowledge=CostKnowledge.UNKNOWN,
+        )
+        app._apply_frontend_state(state)
+        await pilot.pause()
+    assert _band_cost(app) == "≥$0.0031"
+
+
+@pytest.mark.asyncio
 async def test_frontend_snapshot_band_folds_in_search_spend() -> None:
     """The canonical path renders the STORE's figure, so it needs the fold too.
 
@@ -277,3 +338,128 @@ def test_a_host_without_a_transcript_seeds_nothing() -> None:
     app._session = FakeSession()
     app._restore_search_spend(app._session)
     assert SEARCH_SPEND.session("sess").searches == 0
+
+
+@pytest.mark.asyncio
+async def test_a_read_row_is_labelled_as_a_read(tmp_path, monkeypatch) -> None:
+    """A read is not a search, on screen as well as in the ledger.
+
+    ``web_read`` records under ``<provider>:read`` precisely so its money lands
+    in the total without inflating the search count -- and then the row rendered
+    "1 search", which is the one thing the row exists to deny.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    _record()
+    SEARCH_SPEND.record(
+        "sess",
+        "deepseek:read",
+        SearchCost(usd=0.0020, basis="token estimate", priced_from_usage=True),
+        kind="read",
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    # The total names the read apart from the searches...
+    assert "1 search · 1 read" in text or "1 search · 1 unpriced" in text
+    # ...and the row says read.
+    assert " └ deepseek:read" in text
+    assert "1 read" in text
+    # The search count is untouched: a read is not counted as a search.
+    assert "2 searches" not in text
+
+
+@pytest.mark.asyncio
+async def test_the_search_block_carries_the_cost_legend(tmp_path, monkeypatch) -> None:
+    """A marked search figure owes the footnote that explains the mark.
+
+    The legend predicate named only the model scopes, so `$0.015+` and `$—`
+    appeared with nothing on screen to define them -- the failure the predicate's
+    own comment calls out as the thing it exists to prevent.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    _record(provider="future-engine", usd=None)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    assert "$—" in text
+    assert "+ lower bound" in text and "$— no published price" in text
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_frame_keeps_the_search_count(tmp_path, monkeypatch) -> None:
+    """Below the shortest rung the qualifier wraps; it is never dropped.
+
+    At a 60-column terminal the headline row printed `Total spend  $0.015+` with
+    no count at all and `└ future-engine  $—` with no words, because the ladder
+    fell through to a silent crop.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    _record()
+    SEARCH_SPEND.record("sess", "tavily", SearchCost(usd=0.0080, basis="per-search rate"))
+    SEARCH_SPEND.record("sess", "future-engine", SearchCost(usd=None, basis=""))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    assert "Search spend" in text
+    # The count survives, even where the row had to give up its qualifier.
+    assert "3 searches" in text
+    # The unpriced engine still says why, on its own line if need be.
+    assert "unpriced" in text or "no published price" in text
+
+
+def test_a_reads_known_price_is_rendered_not_hidden() -> None:
+    """A priced read is priced, even though it is not a search.
+
+    ``priced_searches`` counted only searches, so a read-only row -- or a
+    session whose only spend was reads -- reported ``cost_is_known`` False and
+    rendered ``$—`` for money the ledger had recorded exactly. Caught in a
+    rendered frame, not by a test: the fixture's read had a price and the panel
+    printed the unknown-price mark over it.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot
+
+    SEARCH_SPEND.reset()
+    SEARCH_SPEND.record(
+        "sess",
+        "deepseek:read",
+        SearchCost(usd=0.002, basis="token estimate", priced_from_usage=True),
+        kind="read",
+    )
+    snapshot = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    row = snapshot.rows[0]
+
+    assert row.cost_is_known is True
+    assert row.cost_usd == pytest.approx(0.002)
+    assert snapshot.cost_is_known is True
+    # ...and a read with an UNKNOWN price still reads as unknown, not free.
+    SEARCH_SPEND.record("sess", "deepseek:read", None, kind="read")
+    partial = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    assert partial.cost_is_partial is True
+    SEARCH_SPEND.reset()

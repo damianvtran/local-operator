@@ -289,11 +289,15 @@ def test_model_reported_evidence_is_rendered_and_labelled_as_such() -> None:
 
     Grounding checks put the DeepSeek evidence quotes at roughly three quarters
     verbatim, so the rendering has to say they are not page text -- otherwise a
-    model will quote them as if they were.
+    model will quote them as if they were. The footer is driven by
+    ``evidence_applied`` (a snippet CAME from the pass), which the provider sets
+    while merging -- not by the presence of a score, since the two are chosen
+    independently.
     """
     response = SearchResponse(
         provider="deepseek",
         auth_mode="api-key",
+        evidence_applied=True,
         sources=[
             SearchSource(
                 title="Adverse Media Categories",

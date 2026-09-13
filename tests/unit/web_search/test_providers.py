@@ -550,13 +550,17 @@ def test_deepseek_evidence_merge_fills_snippets_and_ranks() -> None:
         SearchSource(title="B", url="https://example.com/b"),
         SearchSource(title="C", url="https://example.com/c"),
     ]
-    merged = _apply_deepseek_evidence(
+    merged, applied = _apply_deepseek_evidence(
         sources,
         {
             "https://example.com/b": {"relevance": 95, "quote": "B is the relevant one"},
             "https://example.com/a": {"relevance": 40, "summary": "A is tangential"},
         },
     )
+
+    # The pass supplied snippets, so the footer that follows this flag must be
+    # the model-reported one, not the "page text" one.
+    assert applied is True
 
     # Ranked by relevance, and the uncovered source is kept at the end rather
     # than dropped: the pass is a top-N view, not a verdict on the rest.

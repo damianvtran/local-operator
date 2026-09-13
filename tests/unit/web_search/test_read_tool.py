@@ -9,7 +9,12 @@ import pytest
 from local_operator.harness.types import ToolContext
 from local_operator.web_search import read_tool
 from local_operator.web_search.cost import SEARCH_SPEND
-from local_operator.web_search.models import SearchResponse, SearchSource, SearchUsage
+from local_operator.web_search.models import (
+    SearchResponse,
+    SearchSource,
+    SearchUsage,
+    WebSearchSettings,
+)
 from local_operator.web_search.pages import PAGE_CONTEXTS, PageContextStore
 
 BLOCKS: list[dict[str, Any]] = [
@@ -174,7 +179,7 @@ async def _answer_payload(text: str, *, input_tokens: int = 200, output_tokens: 
 @pytest.mark.asyncio
 async def test_read_refuses_actionably_when_no_pages_were_captured(monkeypatch) -> None:
     result = await read_tool.execute_web_read(
-        "call-1", {"question": "What is the pricing?"}, _context()
+        "call-1", {"question": "What is the pricing?"}, None, None, _context()
     )
 
     assert result.is_error is True
@@ -201,7 +206,7 @@ async def test_read_replays_blocks_verbatim_and_reports_cited_pages(monkeypatch)
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
     result = await read_tool.execute_web_read(
-        "call-2", {"question": "What does Agentic Disposition do?"}, _context()
+        "call-2", {"question": "What does Agentic Disposition do?"}, None, None, _context()
     )
 
     assert result.is_error is False
@@ -230,7 +235,9 @@ async def test_read_detects_the_refusal_marker_and_says_so(monkeypatch) -> None:
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    result = await read_tool.execute_web_read("call-3", {"question": "pricing?"}, _context())
+    result = await read_tool.execute_web_read(
+        "call-3", {"question": "pricing?"}, None, None, _context()
+    )
 
     assert result.is_error is False
     assert result.details["refused"] is True
@@ -255,7 +262,7 @@ async def test_read_filters_invented_sources(monkeypatch) -> None:
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    result = await read_tool.execute_web_read("call-4", {"question": "q"}, _context())
+    result = await read_tool.execute_web_read("call-4", {"question": "q"}, None, None, _context())
 
     assert result.details["cited"] == ["https://example.com/a"]
     assert "Ignored source(s)" in result.content[0].text
@@ -274,7 +281,7 @@ async def test_read_records_spend_under_its_own_provider_key(monkeypatch) -> Non
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    result = await read_tool.execute_web_read("call-5", {"question": "q"}, _context())
+    result = await read_tool.execute_web_read("call-5", {"question": "q"}, None, None, _context())
 
     totals = SEARCH_SPEND.session("s1")
     assert totals.searches == 1
@@ -296,7 +303,7 @@ async def test_read_reports_an_expired_context_as_a_refusal(monkeypatch) -> None
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    result = await read_tool.execute_web_read("call-6", {"question": "q"}, _context())
+    result = await read_tool.execute_web_read("call-6", {"question": "q"}, None, None, _context())
 
     assert result.is_error is True
     assert "web_fetch" in result.content[0].text
@@ -304,7 +311,14 @@ async def test_read_reports_an_expired_context_as_a_refusal(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
-    """The one-call form prefers DeepSeek, because only it captures pages."""
+    """The one-call form pins DeepSeek ONLY when the session has it configured.
+
+    Forcing a provider that is not in the session's chain raises before any
+    search happens -- and that is the default install, where a DeepSeek model
+    login makes ``provider_available`` true while ``web_search.providers`` holds
+    duckduckgo/tavily/perplexity. Pinning on credential availability alone made
+    every ``search=`` read fail with "provider 'deepseek' is disabled".
+    """
     seen: dict[str, Any] = {}
 
     class StubService:
@@ -334,11 +348,31 @@ async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    result = await read_tool.execute_web_read(
-        "call-7", {"question": "q", "search": "minerva adverse media"}, _context()
+    # Configured + available: pin it, because only it captures readable pages.
+    monkeypatch.setattr(
+        read_tool,
+        "load_read_settings",
+        lambda _manager: WebSearchSettings(providers=["deepseek"]),
     )
-
+    result = await read_tool.execute_web_read(
+        "call-7", {"question": "q", "search": "minerva adverse media"}, None, None, _context()
+    )
     assert seen == {"query": "minerva adverse media", "forced": "deepseek"}
+    assert result.is_error is False
+
+    # NOT configured: fall back to the session's own chain rather than forcing a
+    # provider the chain does not contain.
+    PAGE_CONTEXTS.reset()
+    monkeypatch.setattr(
+        read_tool,
+        "load_read_settings",
+        lambda _manager: WebSearchSettings(providers=["duckduckgo", "tavily"]),
+    )
+    seen.clear()
+    result = await read_tool.execute_web_read(
+        "call-8", {"question": "q", "search": "minerva adverse media"}, None, None, _context()
+    )
+    assert seen == {"query": "minerva adverse media", "forced": None}
     assert result.is_error is False
 
 
@@ -360,3 +394,36 @@ def test_read_tool_is_absent_when_search_or_reading_is_disabled() -> None:
     assert tool.name == "web_read"
     assert tool.approval_tier == "read"
     assert tool.concurrency == "shared"
+
+
+@pytest.mark.asyncio
+async def test_the_tool_dispatches_in_the_harness_order(monkeypatch) -> None:
+    """The executor must be callable exactly as the loop calls it.
+
+    ``ToolExecuteFn`` (harness/types.py) and the loop dispatch POSITIONALLY as
+    ``(call.id, args, signal, on_update, context)``. An executor declared in any
+    other order takes the signal as its context and fails at the session
+    boundary -- while direct calls in tests, which pass what they named, still
+    pass. This calls through the real tool object so the order is exercised the
+    way a session exercises it, with a context carrying a session id that HAS
+    captured pages: a swapped order cannot be mistaken for "no pages".
+    """
+    ctx = PAGE_CONTEXTS.store(provider="deepseek", query="q", blocks=BLOCKS, sources=SOURCES)
+    assert ctx is not None
+    PAGE_CONTEXTS.attach("s1", ctx.context_id)
+    _patch_client(monkeypatch, _StubClient(await _answer_payload("Answer.\nSOURCES:")))
+
+    async def fake_key(_credentials):
+        return "sk-test"
+
+    monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
+    tool = read_tool.build_web_read_tool(
+        ToolContext(cwd=".", session_id="s1", web_search_settings={"enabled": True})
+    )
+    assert tool is not None
+
+    # Exactly the loop's positional call shape.
+    result = await tool.execute("call-9", {"question": "q"}, None, None, _context("s1"))
+
+    assert result.is_error is False
+    assert "Answer." in result.content[0].text

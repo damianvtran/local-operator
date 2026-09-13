@@ -647,8 +647,12 @@ async def _resolve_deepseek_key(credentials: CredentialManager) -> str:
 
 
 def _cached_deepseek_balance_verdict() -> bool | None:
-    """The last balance verdict within its TTL, or None when there is none."""
-    global _DEEPSEEK_BALANCE
+    """The last balance verdict within its TTL, or None when there is none.
+
+    Read-only: no ``global`` declaration, because this function never ASSIGNS the
+    module global and flake8's F824 (rightly) treats a declaration that only
+    reads as dead code.
+    """
     with _DEEPSEEK_BALANCE_LOCK:
         if _DEEPSEEK_BALANCE is None:
             return None
@@ -770,7 +774,7 @@ async def _deepseek_evidence_pass(
     key: str,
     assistant_blocks: list[Any],
     prompt: str,
-) -> tuple[dict[str, dict[str, Any]], SearchUsage]:
+) -> tuple[dict[str, dict[str, Any]], SearchUsage, bool]:
     """Replay the search turn and ask for per-page evidence, in one extra turn.
 
     The assistant blocks are sent back EXACTLY as received, including each
@@ -810,12 +814,19 @@ async def _deepseek_evidence_pass(
     _ensure_success("DeepSeek evidence", response)
     payload = response.json()
     usage = _deepseek_usage(payload)
+    # A pass cut off at the token cap is NOT the same result as a complete one:
+    # the rows it lost are the later, lower-ranked pages, which is precisely the
+    # part of the set the pass exists to triage. ``stop_reason`` is in the same
+    # payload and was unused, so the truncation used to be invisible whenever at
+    # least one row parsed -- a silent partial enrichment. Reported through the
+    # same channel as a hard failure so the caller can say it out loud.
+    truncated = str(payload.get("stop_reason") or "").lower() in {"max_tokens", "length"}
     text = "\n".join(
         str(block.get("text") or "")
         for block in (payload.get("content") or [])
         if isinstance(block, dict) and block.get("type") == "text"
     )
-    return parse_deepseek_evidence(text), usage
+    return parse_deepseek_evidence(text), usage, truncated
 
 
 async def resolve_deepseek_key(credentials: CredentialManager) -> str:
@@ -941,6 +952,7 @@ async def _search_deepseek(
     #: checker is right that the invariant is non-obvious here even though both
     #: arms assign it. An explicit empty default states it once.
     evidence: dict[str, dict[str, Any]] = {}
+    evidence_applied = False
     if settings.deepseek_evidence:
         # Enrichment only. A failed, truncated or unparseable evidence pass must
         # leave the sources exactly as the search returned them, because the
@@ -949,7 +961,7 @@ async def _search_deepseek(
         # swallowed -- an unenriched result that says why is diagnosable, and one
         # that silently looks like "this provider has no snippets" is not.
         try:
-            evidence, evidence_usage = await _deepseek_evidence_pass(
+            evidence, evidence_usage, evidence_truncated = await _deepseek_evidence_pass(
                 client, key, payload.get("content") or [], prompt
             )
         except Exception as error:  # noqa: BLE001 -- see comment above
@@ -959,11 +971,20 @@ async def _search_deepseek(
             # Both legs of an enriched search are billed tokens on the same
             # account, so one search's cost is the sum of the two calls.
             usage = usage.merge(evidence_usage)
-            evidence_failure = (
-                None if evidence else "deepseek evidence pass: returned no usable rows"
-            )
-        sources = _apply_deepseek_evidence(sources, evidence)
+            if not evidence:
+                evidence_failure = "deepseek evidence pass: returned no usable rows"
+            elif evidence_truncated:
+                # Partial, and says so: the pages it did not reach are the ones
+                # the pass was supposed to triage, so calling this complete would
+                # overstate the enrichment the caller is looking at.
+                evidence_failure = "deepseek evidence pass: hit the token cap, later pages unscored"
+            else:
+                evidence_failure = None
+        sources, evidence_applied = _apply_deepseek_evidence(sources, evidence)
     else:
+        # No pass ran, so nothing on screen came from one. (Stated rather than
+        # defaulted: the footer reads this, and a pass that DID run may still
+        # have applied nothing -- see ``_apply_deepseek_evidence``.)
         evidence_failure = None
 
     # Capture the page context whatever else happened: the blocks are what make
@@ -987,6 +1008,7 @@ async def _search_deepseek(
         auth_mode="api-key",
         sources=sources,
         answer=answer,
+        evidence_applied=evidence_applied,
         request_id=str(response.headers.get("x-request-id") or "").strip() or None,
         failures=[evidence_failure] if evidence_failure else [],
         usage=usage,
@@ -997,7 +1019,7 @@ async def _search_deepseek(
 
 def _apply_deepseek_evidence(
     sources: list[SearchSource], evidence: dict[str, dict[str, Any]]
-) -> list[SearchSource]:
+) -> tuple[list[SearchSource], bool]:
     """Merge the evidence rows onto the sources, then rank them by relevance.
 
     Ordering is the point of the pass: DeepSeek's own result order is opaque,
@@ -1008,6 +1030,7 @@ def _apply_deepseek_evidence(
     """
     scored: list[SearchSource] = []
     unscored: list[SearchSource] = []
+    applied = False
     for source in sources:
         row = evidence.get(source.url)
         if not row:
@@ -1015,6 +1038,8 @@ def _apply_deepseek_evidence(
             continue
         quote = str(row.get("quote") or "").strip()
         summary = str(row.get("summary") or "").strip()
+        if quote or summary:
+            applied = True
         relevance = row.get("relevance")
         if isinstance(relevance, bool) or not isinstance(relevance, (int, float)):
             relevance = None
@@ -1024,12 +1049,21 @@ def _apply_deepseek_evidence(
                     # A verbatim quote is a real snippet; the summary is the
                     # fallback when a page could not be quoted.
                     "snippet": quote or summary or source.snippet,
-                    "relevance": int(relevance) if relevance is not None else None,
+                    # Clamped: ``relevance`` is whatever the model wrote, and a
+                    # "500" would otherwise be rendered into the model's own
+                    # context as ``[relevance 500/100]``.
+                    "relevance": (
+                        max(0, min(100, int(relevance))) if relevance is not None else None
+                    ),
                 }
             )
         )
     scored.sort(key=lambda item: item.relevance if item.relevance is not None else -1, reverse=True)
-    return [*scored, *unscored]
+    # ``applied`` is tracked while merging rather than derived from the sources
+    # afterwards: a snippet and a relevance are chosen independently, so
+    # "some relevance is set" is not the same question as "some snippet came from
+    # the pass", and the footer has to follow the snippet.
+    return [*scored, *unscored], applied
 
 
 async def _search_brave(

@@ -60,6 +60,7 @@ from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
     METRIC_TOKENS,
+    _CostLike,
     append_cost,
     format_cost,
     format_percent,
@@ -816,7 +817,10 @@ def build_session_report(
         # Drawn on the loading frame too, and before the blank the ledger sections
         # would have added: search spend is not awaiting that read, so holding it
         # back would make the one number on this screen that is already final the
-        # only one that appears late.
+        # only one that appears late. The blank goes ABOVE the block for the same
+        # reason every settled section has one -- without it the section header
+        # abuts the loading notes and reads as a fourth note about the ledger.
+        body.blank()
         _draw_search_spend(body, runtime)
         return body.to_text()
 
@@ -1087,7 +1091,20 @@ def _draw_recorded_usage(
     # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
     # own scope has no reason to report, and omitting it here would put that
     # mark on screen with its footnote suppressed.
-    scopes = [aggregate, subtree, *report.by_model.values(), *report.by_purpose.values()]
+    scopes: list[_CostLike] = [
+        aggregate,
+        subtree,
+        *report.by_model.values(),
+        *report.by_purpose.values(),
+    ]
+    # The search-spend block is a SECOND money vocabulary on this screen (`+`
+    # for a lower bound, `$—` for an unpriced engine) and it drew its marks with
+    # no footnote at all: the INVARIANT above failed the moment a section below
+    # rendered `$`-figures from scopes outside this list. Its total and its
+    # per-provider rows are those scopes.
+    if runtime.search_spend is not None:
+        scopes.append(runtime.search_spend)
+        scopes.extend(runtime.search_spend.rows)
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()

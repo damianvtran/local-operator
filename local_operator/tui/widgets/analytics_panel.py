@@ -203,7 +203,9 @@ def scope_needs_cost_legend(scope: "_CostLike") -> bool:
 
 
 def _needs_cost_legend(
-    aggregate: "UsageAggregate", forest: list["SessionNode"] | None = None
+    aggregate: "UsageAggregate",
+    forest: list["SessionNode"] | None = None,
+    search_scopes: "list[_CostLike] | None" = None,
 ) -> bool:
     """Whether any scope on screen shows a ``+`` (partial) or ``$—`` (unknown).
 
@@ -232,6 +234,10 @@ def _needs_cost_legend(
         *aggregate.by_session.values(),
         *(node.total for node in _iter_nodes(forest)),
     ]
+    # The search block is a second money vocabulary on this screen and it is not
+    # in the aggregate at all, so its scopes are handed in explicitly.
+    if search_scopes:
+        scopes.extend(search_scopes)
     return any(scope_needs_cost_legend(s) for s in scopes)
 
 
@@ -322,18 +328,41 @@ def search_spend_section(
         # search COUNT, which is the part that must not be lost -- the unpriced
         # tally is the refinement the narrow rungs trade away.
         budget = width - line.cell_len - 2
-        for candidate in notes:
-            if len(candidate) <= budget:
-                line.append(f"  {candidate}", style=semantic_style("dim"))
-                break
+        chosen = next((candidate for candidate in notes if len(candidate) <= budget), None)
+        if chosen is not None:
+            line.append(f"  {chosen}", style=semantic_style("dim"))
         line.truncate(width, overflow="crop")
         lines.append(line)
+        if chosen is None and notes:
+            # Below the shortest rung, the qualifier WRAPS to its own indented
+            # line instead of being dropped: the ladder used to fall through to
+            # a bare crop, which at a 60-column terminal printed
+            # `Total spend  $0.015+` with no count at all and
+            # `└ future-engine  $—` with no words -- a money figure whose scope
+            # the reader cannot recover, the same defect the tool-error-rate row
+            # fixes by wrapping its scope below the shortest rung. Every rung
+            # leads with the count, so what survives a crop here is the part
+            # that matters.
+            # The continuation line has the whole width, so take the WIDEST rung
+            # that fits THERE rather than defaulting to the terse one: the
+            # shortest rung is only short because it shares a line with the name.
+            cont_budget = width - 4
+            cont_note = next(
+                (candidate for candidate in notes if len(candidate) <= cont_budget), notes[-1]
+            )
+            cont = Text()
+            cont.append(f"    {cont_note}", style=semantic_style("dim"))
+            cont.truncate(width, overflow="crop")
+            lines.append(cont)
 
-    def search_notes(n: int, unpriced: int) -> tuple[str, ...]:
+    def search_notes(n: int, unpriced: int, *, kind: str = "search") -> tuple[str, ...]:
         # Widest first, and the COUNT is on every rung: it is the part that must
         # not be lost. ``search``/``searches`` rather than an "s" suffix -- the
-        # plural of this word is not its singular with an s on the end.
-        word = "search" if n == 1 else "searches"
+        # plural of this word is not its singular with an s on the end -- and a
+        # READ says read, because a row recorded under ``<provider>:read`` exists
+        # precisely to keep reads out of the search count.
+        singular, plural = ("read", "reads") if kind == "read" else ("search", "searches")
+        word = singular if n == 1 else plural
         if not unpriced:
             return (f"{n} {word}",)
         if unpriced == n:
@@ -346,8 +375,16 @@ def search_spend_section(
             f"{n} · {unpriced} unpriced",
         )
 
+    def total_notes() -> tuple[str, ...]:
+        """The total's own counts, reads named separately when there are any."""
+        base = search_notes(snapshot.searches, snapshot.unpriced_searches)
+        if not snapshot.reads:
+            return base
+        read_word = "read" if snapshot.reads == 1 else "reads"
+        return tuple(f"{note} · {snapshot.reads} {read_word}" for note in base)
+
     lines.append(section_header("Search spend", meta))
-    row("Total spend", snapshot, search_notes(snapshot.searches, snapshot.unpriced_searches))
+    row("Total spend", snapshot, total_notes())
     if session is not None and session.searches:
         # The share is of the PRICED total, and says ``—`` when there is no
         # priced total to take a share of: a process whose searches are all
@@ -362,7 +399,12 @@ def search_spend_section(
             session,
             (
                 f"{session.searches} {word} · {share} of search spend",
-                f"{session.searches} {word} · {share}",
+                # The compact rung keeps a referent: a bare ``· 100%`` says a
+                # proportion of nothing, which is the failure the denominator
+                # rule above already calls out. ``of search`` is shorter than
+                # ``of search spend`` and still names what the share is OF.
+                f"{session.searches} {word} · {share} of search",
+                f"{session.searches} {word} · {share} share",
                 f"{session.searches} {word}",
             ),
         )
@@ -377,7 +419,9 @@ def search_spend_section(
         for index, entry in enumerate(snapshot.rows):
             glyph = " └ " if index == len(snapshot.rows) - 1 else " ├ "
             row(
-                glyph + entry.provider, entry, search_notes(entry.searches, entry.unpriced_searches)
+                glyph + entry.provider,
+                entry,
+                search_notes(entry.count, entry.unpriced_searches, kind=entry.kind),
             )
     if note:
         # Wrapped with the continuation indented, for the reason
@@ -1142,7 +1186,12 @@ def build_report(
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    if _needs_cost_legend(aggregate, forest):
+    search_scopes: list[_CostLike] = []
+    for snapshot in (search_spend, session_search_spend):
+        if snapshot is not None:
+            search_scopes.append(snapshot)
+            search_scopes.extend(snapshot.rows)
+    if _needs_cost_legend(aggregate, forest, search_scopes):
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)

@@ -113,14 +113,18 @@ def deepseek_is_peak_hour(moment: datetime | None = None) -> bool:
 def _deepseek_cost(usage: SearchUsage, moment: datetime | None) -> SearchCost:
     peak = deepseek_is_peak_hour(moment)
     scale = 1.0 if peak else 0.5
-    input_tokens = usage.input_tokens or 0
-    cache_reads = usage.cache_read_tokens or 0
-    # Cache reads are billed at their own (much cheaper) rate, so they must come
-    # out of the input count rather than being charged twice.
-    miss_tokens = max(input_tokens - cache_reads, 0)
+    # The search route is the ANTHROPIC Messages wire, whose ``input_tokens``
+    # EXCLUDES the cached reads -- the distinction ``model/configure.py`` spells
+    # out in ``_cache_tokens_are_inside_input``. (That helper keys off the MODEL
+    # provider's wire, and the model-side ``deepseek`` provider is
+    # OpenAI-compatible, so it would answer the wrong question here: this
+    # endpoint is Anthropic-shaped regardless of who serves the chat route.) The
+    # two counts are therefore ADDED. Subtracting them -- the OpenAI-shaped
+    # reading -- charged nothing for fresh input on a cache-dominated turn, which
+    # under-charged every enriched search and every page read.
     usd = (
-        miss_tokens * DEEPSEEK_PEAK_INPUT_USD_PER_TOKEN
-        + cache_reads * DEEPSEEK_PEAK_CACHE_HIT_USD_PER_TOKEN
+        (usage.input_tokens or 0) * DEEPSEEK_PEAK_INPUT_USD_PER_TOKEN
+        + (usage.cache_read_tokens or 0) * DEEPSEEK_PEAK_CACHE_HIT_USD_PER_TOKEN
         + (usage.output_tokens or 0) * DEEPSEEK_PEAK_OUTPUT_USD_PER_TOKEN
     ) * scale
     window = "peak" if peak else "off-peak"
@@ -147,8 +151,11 @@ def estimate_search_cost(
     if provider_id == "deepseek":
         if usage is not None and (usage.input_tokens or usage.output_tokens):
             return _deepseek_cost(usage, moment)
-        # No usage captured: fall back to the measured median for one DeepSeek
-        # search so the ledger is not silently empty. Labelled as a fallback.
+        # No usage captured: UNPRICED, not a guessed median. An earlier comment
+        # here claimed a "measured median" fallback that the code never had, and
+        # promising a number the ledger cannot defend is the one thing this
+        # module refuses to do -- the row is counted in ``unpriced_searches`` so
+        # the total reads as the floor it is.
         return SearchCost(
             usd=None,
             basis=f"{BASIS_TOKENS}; usage not captured",
@@ -193,9 +200,19 @@ class ProviderSearchSpend:
     #: covers only some of the work says so instead of reading as complete.
     unpriced_searches: int = 0
     bases: set[str] = field(default_factory=set)
+    #: ``search`` or ``read``. A page read is not a search -- it runs no query
+    #: and bills no provider search -- and it is recorded under its own provider
+    #: key so the money lands in the total without inflating the search count.
+    #: The kind is what lets a caller LABEL it correctly; a row that exists to
+    #: separate reads from searches must not be rendered as one of them.
+    kind: str = "search"
+    reads: int = 0
 
-    def add(self, usd: float | None, basis: str) -> None:
-        self.searches += 1
+    def add(self, usd: float | None, basis: str, *, kind: str = "search") -> None:
+        if kind == "read":
+            self.reads += 1
+        else:
+            self.searches += 1
         if usd is None:
             self.unpriced_searches += 1
         else:
@@ -203,10 +220,18 @@ class ProviderSearchSpend:
         if basis:
             self.bases.add(basis)
 
+    @property
+    def count(self) -> int:
+        """Everything this row covers, whichever kind it is."""
+        return self.searches + self.reads
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
+            "kind": self.kind,
             "searches": self.searches,
+            "reads": self.reads,
+            "count": self.count,
             "usd": round(self.usd, 6),
             "unpriced_searches": self.unpriced_searches,
             "basis": "; ".join(sorted(self.bases)),
@@ -220,15 +245,26 @@ class SearchSpendTotals:
     searches: int = 0
     usd: float = 0.0
     unpriced_searches: int = 0
+    #: Page reads (``web_read``), counted apart from searches because they are
+    #: not queries: the money belongs in the total, the count does not belong in
+    #: the search count.
+    reads: int = 0
     by_provider: dict[str, ProviderSearchSpend] = field(default_factory=dict)
 
     @property
     def priced_searches(self) -> int:
         return self.searches - self.unpriced_searches
 
+    @property
+    def operations(self) -> int:
+        """Searches plus reads: everything that cost money here."""
+        return self.searches + self.reads
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "searches": self.searches,
+            "reads": self.reads,
+            "operations": self.operations,
             "usd": round(self.usd, 6),
             "unpriced_searches": self.unpriced_searches,
             "by_provider": [entry.as_dict() for entry in self.by_provider.values()],
@@ -261,20 +297,26 @@ class SearchSpendLedger:
         cost: SearchCost | None,
         *,
         searches: int = 1,
+        kind: str = "search",
     ) -> ProviderSearchSpend:
         key = session_id or "unattributed"
         usd = cost.usd if cost is not None else None
         basis = cost.basis if cost is not None else ""
         with self._lock:
             totals = self._sessions.setdefault(key, SearchSpendTotals())
-            entry = totals.by_provider.setdefault(provider, ProviderSearchSpend(provider=provider))
+            entry = totals.by_provider.setdefault(
+                provider, ProviderSearchSpend(provider=provider, kind=kind)
+            )
             for _ in range(max(searches, 1)):
-                totals.searches += 1
+                if kind == "read":
+                    totals.reads += 1
+                else:
+                    totals.searches += 1
                 if usd is None:
                     totals.unpriced_searches += 1
                 else:
                     totals.usd += usd
-                entry.add(usd, basis)
+                entry.add(usd, basis, kind=kind)
             return entry
 
     def session(self, session_id: str) -> SearchSpendTotals:
@@ -286,13 +328,15 @@ class SearchSpendLedger:
             merged = SearchSpendTotals()
             for totals in self._sessions.values():
                 merged.searches += totals.searches
+                merged.reads += totals.reads
                 merged.usd += totals.usd
                 merged.unpriced_searches += totals.unpriced_searches
                 for provider, entry in totals.by_provider.items():
                     target = merged.by_provider.setdefault(
-                        provider, ProviderSearchSpend(provider=provider)
+                        provider, ProviderSearchSpend(provider=provider, kind=entry.kind)
                     )
                     target.searches += entry.searches
+                    target.reads += entry.reads
                     target.usd += entry.usd
                     target.unpriced_searches += entry.unpriced_searches
                     target.bases |= entry.bases

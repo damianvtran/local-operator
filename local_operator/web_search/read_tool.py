@@ -49,8 +49,9 @@ the fetch it replaced.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -59,6 +60,7 @@ from local_operator.credentials import CredentialManager
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
+    AgentToolUpdate,
     TextContent,
     ToolContext,
     ToolResult,
@@ -212,21 +214,38 @@ async def _abortable(call, signal: AbortSignal | None):
         done, _pending = await asyncio.wait({task, abort}, return_when=asyncio.FIRST_COMPLETED)
         if abort in done:
             task.cancel()
+            # AWAIT the cancellation rather than abandoning it. An un-awaited
+            # cancelled task can surface later as "Task exception was never
+            # retrieved", and any exception the request had already raised (a
+            # 4xx, a transport error) would be swallowed by nobody. We are
+            # raising the abort either way, so suppressing here loses nothing.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
             raise asyncio.CancelledError(signal.reason or "aborted")
         return task.result()
     finally:
         if not abort.done():
             abort.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await abort
 
 
 async def execute_web_read(
     tool_call_id: str,
     params: dict[str, Any],
-    context: ToolContext | None = None,
     signal: AbortSignal | None = None,
-    on_update: Any = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
 ) -> ToolResult:
-    """Answer a question from pages a previous search captured."""
+    """Answer a question from pages a previous search captured.
+
+    The parameter ORDER is the harness's (``ToolExecuteFn``,
+    ``harness/types.py``): the loop dispatches positionally as
+    ``(call.id, args, signal, on_update, context)``. An executor declared in any
+    other order is not merely mis-typed -- it receives an ``AbortSignal`` where
+    it expects a context and fails at the session boundary, while direct calls in
+    tests still pass. Ordering it the harness way is the only version that runs.
+    """
     try:
         parsed = WebReadParams.model_validate(params)
     except ValidationError as error:
@@ -247,7 +266,19 @@ async def execute_web_read(
     # without the DeepSeek provider still gets an honest failure rather than a
     # hang.
     if page_context is None and parsed.search:
-        forced = "deepseek" if provider_available("deepseek", credentials, settings) else None
+        # Only pin the provider when the session actually has it CONFIGURED.
+        # ``provider_available`` answers whether a credential exists, not whether
+        # the provider is in the session's chain, and forcing an unconfigured one
+        # fails the whole call -- on a default install (duckduckgo, tavily,
+        # perplexity) a DeepSeek model login would make every `search=` read fail
+        # with "provider 'deepseek' is disabled". Falling back to the configured
+        # chain is honest: if it captures no pages, the refusal below says so.
+        forced = (
+            "deepseek"
+            if "deepseek" in settings.providers
+            and provider_available("deepseek", credentials, settings)
+            else None
+        )
         service = WebSearchService(
             settings,
             credentials,
@@ -315,6 +346,18 @@ async def execute_web_read(
         try:
             status, payload = await _abortable(call(), signal)
         except asyncio.CancelledError:
+            # The turn may have been accepted and billed before the abort landed,
+            # and we cannot see its usage because we stopped reading the
+            # response. Recorded as an UNPRICED read rather than left out
+            # entirely: a suspected charge the ledger never mentions is how a
+            # total quietly stops being a total. ``None`` (not 0.0) keeps the
+            # module's rule that unknown and free are different facts.
+            SEARCH_SPEND.record(
+                str(getattr(context, "session_id", "") or ""),
+                "deepseek:read",
+                None,
+                kind="read",
+            )
             return _result(tool_call_id, "Web read aborted.", error=True)
         except Exception as error:
             return _result(tool_call_id, f"Web read failed: {error}", error=True)
@@ -378,7 +421,8 @@ async def execute_web_read(
             "basis": cost.basis,
             "session_usd": round(session_totals.usd, 6),
             "session_searches": session_totals.searches,
-            "reads": entry.searches,
+            "session_reads": session_totals.reads,
+            "reads": entry.reads,
         },
         "usage": usage.model_dump(mode="json"),
     }
