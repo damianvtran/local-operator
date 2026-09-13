@@ -392,6 +392,44 @@ def test_the_capture_keeps_the_streams_and_the_log_levels_it_found() -> None:
         task_logger.setLevel(saved_level)
 
 
+def test_a_maximal_capture_still_fits_the_score_detail_limit(tmp_path: Path) -> None:
+    """The bounds are sized so the refusal marker is never the path taken.
+
+    Measured rather than asserted in prose: a capture filled to every one of its
+    bounds, with the most expensive character canonical JSON can be handed, must
+    still attach as real evidence. If a future bound is raised without checking
+    this, the first symptom would otherwise be silently refused diagnostics.
+    """
+
+    block = {
+        "schema": diagnostics.DIAGNOSTICS_SCHEMA,
+        "stdout": {"text": "\x00" * diagnostics.MAX_STREAM_CHARS},
+        "stderr": {"text": "\x00" * diagnostics.MAX_STREAM_CHARS},
+        "fetched_state": {
+            "entries": [
+                {
+                    "path": f"f{index:03d}.txt",
+                    "bytes": diagnostics.MAX_FETCHED_TEXT_CHARS,
+                    "text": "\x00" * diagnostics.MAX_FETCHED_TEXT_CHARS,
+                }
+                for index in range(
+                    diagnostics.MAX_FETCHED_TEXT_TOTAL_CHARS // diagnostics.MAX_FETCHED_TEXT_CHARS
+                )
+            ],
+            "entries_cut": False,
+            "text_cut": False,
+        },
+    }
+
+    artifact = scoring.score_to_artifact(0.0, artifact_root=_root(tmp_path), diagnostics=block)
+
+    assert artifact.details is not None
+    assert artifact.details.byte_count < scoring.MAX_SCORE_DETAIL_BYTES
+    data = json.loads((tmp_path / artifact.details.sha256).read_bytes())
+    assert data[scoring.EVALUATOR_DIAGNOSTICS_KEY] == block
+    assert data[scoring.EVALUATOR_RESULT_KEY] == 0.0
+
+
 def test_fetched_state_is_bounded_and_omits_binary_content(tmp_path: Path) -> None:
     """The manifest is bounded, never follows a symlink, and says why it cut."""
 

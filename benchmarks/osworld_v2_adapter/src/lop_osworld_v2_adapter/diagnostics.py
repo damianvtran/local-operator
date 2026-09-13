@@ -80,10 +80,15 @@ EVALUATOR_LOG_PREFIXES: tuple[str, ...] = (
 #: Schema tag on the retained block, so a reader can tell which shape it holds.
 DIAGNOSTICS_SCHEMA = "lop-evaluator-diagnostics-v1"
 
-#: Bounds, chosen so a maximal capture cannot approach the score-detail limits
-#: (``scoring.MAX_SCORE_DETAIL_BYTES`` is 1 MiB, ``..._NODES`` 100_000). Two
-#: streams at 32k characters plus 64k of aggregate file text is at most ~384 KiB
-#: once JSON-escaped, which leaves the byte limit a margin of well over 2x.
+#: Bounds, chosen so a maximal capture always fits the score-detail limits
+#: (``scoring.MAX_SCORE_DETAIL_BYTES`` is 1 MiB, ``..._NODES`` 100_000) instead
+#: of being refused there. Measured on the true worst case -- both stream rings
+#: full of NUL characters, the most expensive input canonical JSON accepts (six
+#: bytes each), plus the aggregate file text -- the artifact is 786_975 bytes
+#: against the 1 MiB ceiling; with the printable characters a real evaluator
+#: emits (quotes and newlines are the next dearest at two bytes) the same
+#: maximal capture is 262_687 bytes. ``scoring``'s refusal marker is therefore a
+#: belt, not the path any captured output takes.
 MAX_STREAM_CHARS = 32 * 1024
 MAX_RECORD_CHARS = 2_000
 MAX_FETCHED_ENTRIES = 128
