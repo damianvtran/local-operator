@@ -262,12 +262,49 @@
              to "The other install is driving right now." -->
         <section id="standby" class="state hidden" role="status">
           <h1 class="title">Standing by.</h1>
-          <p class="sub">
+          <!-- The promise carries an id because popup.ts now rewrites it: two
+               further sentences qualify it, both built from facts the daemon
+               already publishes and neither true of the healthy case above
+               (UX round 4, U9). While the wheel is attached and merely silent
+               it gains the clause naming THIS event (the driver going mute),
+               because the driver's silence is what a standby usually waits
+               through; once the daemon commits it is replaced by the countdown
+               from /health.takeover_within_s. The paragraph this ships with is
+               what every other case renders — including the healthy one, which
+               is why it must keep rendering byte-identically to the frame the
+               earlier design and UX rounds approved. -->
+          <p class="sub" id="standby-promise">
             This browser is paired, but the agent is connected to another browser right now.
             If that one disconnects, this browser takes over and the agent opens a new tab;
             the tab the agent was using stays open where it is.
           </p>
           <p class="sub" id="standby-driver"></p>
+        </section>
+
+        <!-- Paired, and connected to NOTHING: the daemon severed the wheel-holder
+             for silence and no install has taken the wheel since, so
+             `driver_extension_id` is empty, `link_attached` is false and the
+             unresponsive latch is up (UX round 4, U10).
+
+             This is not the `paired` card's state — that card says "Code
+             accepted. Connecting this browser…" over a connection that does not
+             exist and offers the user nothing to do — and it is not the
+             `unresponsive` card either, because once the driver field is cleared
+             the daemon cannot say WHICH install went mute, so the copy has to be
+             true of both installs and the sentence must not claim "yours"
+             stopped answering. The same condition also covers a healthy
+             standby's ~0.5 s pre-promotion window, which is why the tone is the
+             neutral hairline rather than danger: a red flash there would be a
+             false alarm about a browser that is about to start serving. -->
+        <section id="severed" class="state hidden" role="status">
+          <h1 class="title">Not connected.</h1>
+          <p class="sub">
+            Local Operator isn't driving this browser right now. If this browser's extension
+            has stopped answering, reload it.
+          </p>
+          <div class="actions">
+            <button id="severed-reload" class="btn block">Reload the extension</button>
+          </div>
         </section>
 
         <!-- Origin-decision acknowledgement, shown from the click alone
