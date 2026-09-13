@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+import logging
+import os
 import signal
 import sys
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -117,6 +119,46 @@ def _install_sigterm_handler(
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
 
 
+def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
+    """SIGHUP is IGNORED: this worker's lifetime is not an interface's to end.
+
+    A background worker is spawned detached (``start_new_session=True``) and
+    writes its log to a file, so losing a controlling terminal is not a reason
+    to drop a run half-done. Left at the default disposition a HUP kills the
+    interpreter outright, which truncates the job log mid-write, skips the
+    ledger's terminal record (``--job-id``) and leaks provider connections —
+    the same hard-exit shape SIGTERM handling exists to prevent.
+
+    SIGTERM remains the one signal that ends this run (``_install_sigterm_handler``);
+    a HUP only produces a bounded, one-shot log line.
+    """
+    logged = [False]
+
+    def handler() -> None:
+        if logged[0]:
+            return
+        logged[0] = True
+        logging.getLogger(__name__).info(
+            "exec worker: ignoring SIGHUP (pid %d); this worker is detached from interfaces",
+            os.getpid(),
+        )
+
+    # ``SIGHUP`` is POSIX-only; a platform without it must not fail to start a
+    # worker over a signal it could not have received. The same shape as
+    # ``session/runtime/process.amain``, which ignores a HUP for the same
+    # reason.
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is None:
+        return
+    try:
+        loop.add_signal_handler(sighup, handler)
+    except (NotImplementedError, RuntimeError):
+        # A platform whose loop cannot take signal callbacks: SIG_IGN is the
+        # disposition this handler means to install, so fall back to it rather
+        # than letting a HUP kill the run.
+        signal.signal(sighup, signal.SIG_IGN)
+
+
 def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionProtocol]:
     """Build the real session via the shared composition root.
 
@@ -183,6 +225,12 @@ def run(
         interrupted = asyncio.Event()
         session_box: list[SessionProtocol] = []
         _install_sigterm_handler(loop, session_box, interrupted)
+        # After the kill switch, deliberately: the two handlers are independent,
+        # but a failure inside this registration (``signal.signal`` on a
+        # non-main thread raises) must not be able to cost the run its SIGTERM
+        # path. Ordering the terminating disposition first makes that failure
+        # harmless instead of fatal.
+        _install_sighup_ignore(loop)
 
         async def execute() -> int:
             source = factory()
