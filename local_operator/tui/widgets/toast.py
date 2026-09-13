@@ -119,6 +119,16 @@ def toast_max_width(terminal_width: int) -> int:
 #: the reason.
 _FAILURE_REASON_SEP = " — "
 
+#: The lead of the transport family's copy (``manager.NETWORK_FAILURE_MARKER``).
+#: Mirrored rather than imported: this widget renders an outcome and must not
+#: reach into the SDK-backed MCP manager module for a string. Two facts make it
+#: a reliable signal rather than a guess — the manager only ever composes it
+#: WITH a host (its hostless stdio copy is asserted never to contain it), and
+#: it is the same spelling the durable notice and the ``/mcp`` row print, which
+#: is what makes one marker legible across all three surfaces (design reviews
+#: D1-6).
+_NETWORK_MARKER = "network: "
+
 #: What a failure line must LEAD with for its tail to be a droppable REASON.
 #: Deliberately the command prefix rather than "the text contains a dash": the
 #: no-OAuth-endpoint challenge line (``notion rejected our credentials (401) —
@@ -126,6 +136,35 @@ _FAILURE_REASON_SEP = " — "
 #: the statement, and it is explicitly out of this change's scope (design review
 #: D10), so it must keep rendering exactly as it does today.
 _COMMAND_LEAD = "/mcp "
+
+
+def _network_group_line(names: list[str], max_cells: int) -> str:
+    """``network: a, b`` — the shared-cause footer — or a COUNT when names do not fit.
+
+    The marker, not ``failed (network): ``: the durable notice and the ``/mcp``
+    row both print ``network: …``, so a reader who learns the marker from either
+    one met a differently-shaped label here (design review D1-6). One spelling,
+    and the head line above already states the failure (``MCP: 0 of 3 servers
+    up``), so dropping the word costs nothing.
+
+    The COUNT is the narrow-width fallback, and it is deliberate: the marker
+    takes cells the names used to have, so the old clamp truncated the payload
+    to nothing (measured at 28 columns, ``failed (network): l…`` where the base
+    fitted ``failed: linear, not…``). The marker is the signal this change
+    exists to add and the part that must survive; the names are still carried
+    whole by the durable notice and by ``/mcp``, so a group that does not fit is
+    reported as its count rather than as a one-letter ghost of a list (design
+    review D1-3).
+    """
+    labelled = _NETWORK_MARKER + ", ".join(names)
+    if cell_len(labelled) <= max_cells:
+        return labelled
+    counted = f"{_NETWORK_MARKER}{len(names)} {_plural(len(names), 'server')}"
+    if cell_len(counted) <= max_cells:
+        return counted
+    # Not even the count fits: keep the marker and clamp the count, so the
+    # shared cause still reads as the shared cause.
+    return truncate_cells(counted, max(1, max_cells))
 
 
 def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
@@ -145,6 +184,13 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
 
     So the budget decides what gets SHED, not merely where the string is cut:
 
+    * **Transport lines drop the head** — a ``network:`` line already names its
+      server BY HOST, so ``failed: linear — network: cannot reach
+      linear.example.com`` stacked two colons and said ``linear`` twice inside
+      57 cells. The host is the identity the user acts on, so the head goes and
+      the phrase keeps both the layer and the server (design review D1-2). The
+      hostless stdio copy has no host and therefore keeps the head, which is why
+      the marker (only ever composed WITH a host) is what selects this rung.
     * **Rung 1** — the whole row, whenever it fits. Byte-identical to the clamp
       for the corpus design review D9 verified at 100 columns (57/53/47 cells at
       a 6-cell name), so the pinned rows are untouched.
@@ -170,6 +216,8 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
     (D11's resolution 2), so the fall-through keeps the base's pixels there and
     the named constraint is recorded on the deferral instead.
     """
+    if text.startswith(_NETWORK_MARKER):
+        return truncate_cells(text, max(1, max_cells))
     label = f"failed: {name} — "
     full = label + text
     if cell_len(full) <= max_cells:
@@ -243,16 +291,18 @@ def format_mcp_startup(
             # list is the wrong shape: naming nine servers that all say the same
             # thing buries the one fact the user can act on, which is that the
             # machine's connection is what is broken. So a group that is ENTIRELY
-            # connectivity is labelled once instead — ``failed (network): a, b``
-            # keeps the names (the user may care which servers are dark) while
-            # stating the shared cause up front. The label is longer than
-            # ``failed: ``, so it spends the same fixed budget: the clamp still
-            # truncates, keeping the header and the leading names on the card
-            # rather than wrapping it to a third line. The single-failure path
-            # above deliberately does NOT take this branch — its text is the full
-            # ``network: …`` line, which already names the network.
+            # connectivity is labelled once instead — ``network: a, b`` keeps the
+            # names (the user may care which servers are dark) while stating the
+            # shared cause up front, in the SAME spelling the durable notice and
+            # ``/mcp`` print. The marker is longer than ``failed: ``, so it spends
+            # the same fixed budget: the clamp still truncates, and when even the
+            # names cannot survive the clamp the line falls back to the count
+            # (``network: 3 servers``) rather than to a one-letter ghost of a
+            # name. The single-failure path above deliberately does NOT take this
+            # branch — its text is the full ``network: …`` line, which already
+            # names the network.
             if outcome.all_failures_are_network:
-                detail = truncate_cells("failed (network): " + ", ".join(names), max(1, max_cells))
+                detail = _network_group_line(names, max(1, max_cells))
             else:
                 detail = truncate_cells("failed: " + ", ".join(names), max(1, max_cells))
         text.append("\n")

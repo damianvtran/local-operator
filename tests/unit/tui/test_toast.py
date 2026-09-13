@@ -142,15 +142,20 @@ def test_several_failures_coalesce_into_one_two_line_message() -> None:
     assert text.plain.split("\n")[1] == "failed: linear, slack"
 
 
-def test_a_wholly_network_group_says_so_once_instead_of_listing_bare_names() -> None:
+def test_a_wholly_network_group_states_the_cause_in_the_one_marker() -> None:
     """A fleet-wide outage is ONE fact, not N server faults.
 
     Reported as a bare list it read as nine unrelated MCP problems; the grouped
-    form states the shared cause up front while still naming the servers."""
+    form states the shared cause up front while still naming the servers — in
+    the SAME ``network: `` spelling the durable notice and the ``/mcp`` row
+    print, so one marker is legible across all three surfaces (design review
+    D1-6). Dropping the word ``failed`` costs nothing: the head line on the row
+    above already states it (``MCP: 0 of 2 servers up``).
+    """
     payload = format_mcp_startup(NETWORK_MULTI)
     assert payload is not None
     text, _duration = payload
-    assert text.plain.split("\n")[1] == "failed (network): linear, slack"
+    assert text.plain.split("\n")[1] == "network: linear, slack"
 
 
 def test_a_mixed_group_keeps_the_plain_list() -> None:
@@ -162,9 +167,15 @@ def test_a_mixed_group_keeps_the_plain_list() -> None:
     assert text.plain.split("\n")[1] == "failed: linear, slack"
 
 
-def test_a_single_network_failure_keeps_its_own_network_line() -> None:
-    """``_fit_failure_line`` carries the whole message, which already says the
-    network — grouping it would only make the line longer."""
+def test_a_single_network_failure_carries_the_phrase_alone() -> None:
+    """D1-2: the transport line names its own server, so the head is a duplicate.
+
+    ``failed: slack — network: cannot reach slack.example.com`` stacked two
+    colons and said the server twice inside 57 cells; the host is the identity
+    the user acts on, the phrase carries both the layer and the server, and the
+    head is what goes. The headless (hostless) stdio copy keeps its head — see
+    ``test_a_hostless_transport_line_keeps_its_head``.
+    """
     outcome = McpStartupOutcome(
         configured=("github", "slack"),
         connected=("github",),
@@ -174,21 +185,65 @@ def test_a_single_network_failure_keeps_its_own_network_line() -> None:
     payload = format_mcp_startup(outcome)
     assert payload is not None
     text, _duration = payload
-    assert text.plain.split("\n")[1] == "failed: slack — network: cannot reach slack.example.com"
+    assert text.plain.split("\n")[1] == "network: cannot reach slack.example.com"
+
+
+def test_a_hostless_transport_line_keeps_its_head() -> None:
+    """The other half of D1-2, and the reason the marker selects the rung.
+
+    A hostless stdio failure has no host to identify its server, so dropping
+    the head there would lose WHICH server failed. The manager only ever puts
+    the ``network: `` marker on a line that names a host, which is what makes
+    the marker a reliable signal rather than a string sniff.
+    """
+    outcome = McpStartupOutcome(
+        configured=("local",),
+        failures={"local": "transport closed before the server answered"},
+    )
+    payload = format_mcp_startup(outcome)
+    assert payload is not None
+    text, _duration = payload
+    line = text.plain.split("\n")[1]
+    # R1-3: the CAUSE leads, so the clamp can only ever eat the tail — the old
+    # copy put ``closed`` in a trailing parenthetical that every narrow card
+    # cut off entirely (``failed: local — the tra…``).
+    assert line.startswith("failed: local — transport closed before the server")
+    assert cell_len(line) <= TOAST_MAX_WIDTH - TOAST_PADDING_CELLS
 
 
 def test_the_grouped_footer_still_clamps_to_the_card_it_was_given() -> None:
-    """The label is longer than ``failed: ``, so the budget is what keeps the
-    second line from wrapping into a third: the clamp eats the NAMES, and the
-    shared cause stays readable on every card width that fits it at all."""
+    """The budget is what keeps the row from wrapping into a third line.
+
+    The marker leads on every card width that fits it at all, and below that it
+    sheds whole (see the count test below) rather than leaving a one-letter
+    ghost of a name."""
     for max_cells in (58, 44, 24, 12):
         payload = format_mcp_startup(NETWORK_MULTI, max_cells)
         assert payload is not None
         text, _duration = payload
         footer = text.plain.split("\n")[1]
         assert cell_len(footer) <= max_cells, (max_cells, footer)
-        if max_cells >= len("failed (network): "):
-            assert footer.startswith("failed (network): "), (max_cells, footer)
+        if max_cells >= len("network: "):
+            assert footer.startswith("network: "), (max_cells, footer)
+
+
+def test_a_group_that_will_not_fit_reports_its_count_not_a_ghost_of_a_name() -> None:
+    """D1-3: the marker survives the narrow end; the names are the parts shed.
+
+    Measured before this change at 28 columns: ``failed (network): l…`` where
+    the base fitted ``failed: linear, not…``, i.e. the card kept the category and
+    lost the payload. The marker is the signal this change exists to add and the
+    names are still carried whole by the durable notice and by ``/mcp``, so a
+    group that cannot fit beside the marker is reported as its count.
+    """
+    payload = format_mcp_startup(NETWORK_MULTI, 20)
+    assert payload is not None
+    text, _duration = payload
+    assert text.plain.split("\n")[1] == "network: 2 servers"
+    # Below even the count, the marker still leads rather than vanishing.
+    narrow = format_mcp_startup(NETWORK_MULTI, 12)
+    assert narrow is not None
+    assert narrow[0].plain.split("\n")[1].startswith("network: ")
 
 
 def test_the_wide_card_carries_the_whole_grouped_footer() -> None:
@@ -196,7 +251,7 @@ def test_the_wide_card_carries_the_whole_grouped_footer() -> None:
     payload = format_mcp_startup(NETWORK_MULTI, TOAST_MAX_WIDTH - TOAST_PADDING_CELLS)
     assert payload is not None
     text, _duration = payload
-    assert text.plain.split("\n")[1] == "failed (network): linear, slack"
+    assert text.plain.split("\n")[1] == "network: linear, slack"
 
 
 def _fills(text) -> dict[str, str]:  # type: ignore[no-untyped-def]
