@@ -145,6 +145,30 @@ PAIR_MAX_ATTEMPTS = 5
 #: 1005, not 1000, on the installed uvicorn (`websockets_impl.py:377`, `:386`), and
 #: the extension's own four `wire.close()` calls send no code either — so neither
 #: can be confused with 1012, and no runner needs to be trusted for it.
+#:
+#: WHAT THIS DOES NOT GUARANTEE (review round 5, finding 1). A browser cannot send
+#: 1012 (`WebSocket.close()` rejects codes outside 1000 and 3000-4999), but the
+#: Origin header is shape validation, not a boundary, so a LOCAL process can dial
+#: `chrome-extension://` shaped and put 1012 on the wire itself. There is no
+#: corroboration available at this point to tell that frame from uvicorn's own
+#: teardown: the server's shutdown path puts 1012 on the socket BEFORE the lifespan
+#: event that sets `_shutting_down`, and `asgi_receive` returns one code for both
+#: cases, so "the server is leaving" cannot be cross-checked here without a signal
+#: the app does not get before the close. The mitigation is therefore a narrowing,
+#: not a proof: the latch fires only for a link that holds PAIRING AUTHORITY or the
+#: WHEEL (see the read site), which is exactly the set of links whose ending can
+#: move the durable record — so a stranger's forged 1012 is inert, and reaching the
+#: freeze now requires a local process that either pairs (i.e. obtained the terminal
+#: code) or first took the free wheel.
+#:
+#: The RESIDUAL RISK, stated rather than implied: a local process that takes the
+#: free wheel with no install attached and then closes with 1012 can still latch
+#: this flag for the life of the process, which freezes the durable record and
+#: disables failover (a denial of service against the bridge, not a disclosure).
+#: Closing it would need the daemon to corroborate "the server is leaving" from a
+#: trusted signal — the production entrypoint has one (`watch_server_exit` polls
+#: `server.should_exit`, which is why that path is tested separately), an ASGI
+#: app with no server object does not.
 SERVER_GOING_DOWN_CLOSE_CODE = 1012
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
@@ -350,30 +374,74 @@ LAST_SEEN_REFRESH_S = 60.0
 def note_identity_seen(root: Path | None, extension_id: str) -> None:
     """Refresh one identity's ``last_seen_at`` once it has gone stale.
 
-    Called from the handshake. Deliberately routed through ``_write_pairing``, the
-    single writer, so the legacy trio keeps naming the DRIVER (rule 2 of
-    ``_driver_record_id``) rather than the install that just dialled: this file is
-    also the rollback contract, and a cosmetic refresh must not move it. A no-op
-    for an unlisted id (no entry) and while the stamp is fresh.
+    Called from the handshake. What it does in each case, stated because the first
+    version of this function got the third one wrong and broke the zero-migration
+    promise (QA round 5, Q5-3):
+
+    * **no entry for this id** → return; a dial cannot create pairing authority.
+    * **entry with NO ``last_seen_at``** (a schema-1 record, i.e. every file written
+      before this field existed) → return. Absent is *unknown*, never "infinitely
+      stale": the staleness test read the missing stamp as ``0.0``, so the first
+      handshake of a legacy install rewrote the operator's pairing file 163 B →
+      392 B and schema 1 → 2. Decision 1 promises zero migration in BOTH
+      directions, and a silent rewrite of the user's own file on connect is exactly
+      the user-state mutation the design exists to avoid.
+    * **entry whose stamp is malformed** → return; a broken value is not evidence
+      of staleness either.
+    * **stamp is fresh** (within ``LAST_SEEN_REFRESH_S``) → return, no read-modify-
+      write at all beyond the parse. This is the ordinary reconnect.
+    * **stamp is stale** → one guarded write, which is the only case that touches
+      the file:
+
+      - the identities are re-read immediately before the write, and the write is
+        skipped if this id is gone from that fresh read — ``lop browser pair
+        --revoke`` runs in a SEPARATE process and writes this same file, and the
+        failure direction of clobbering it is authority-critical (a revoke that
+        reports success and does not stick). The race window is the microseconds
+        between that read and ``os.replace``; it cannot be closed from here because
+        the file has no lock and the other writer is another process, which is why
+        the window is also stated in ``_write_pairing``'s contract rather than
+        implied to be zero.
+      - ``OSError`` is absorbed, because this runs on the handshake path where a
+        full or read-only config root must not fail the connection — the same
+        reason ``publish_safely`` exists next door. A refresh that cannot be
+        written is a stale timestamp, not a broken bridge.
+
+    Deliberately routed through ``_write_pairing``, the single writer, so the legacy
+    trio keeps naming the DRIVER (rule 2 of ``_driver_record_id``) rather than the
+    install that just dialled: this file is also the rollback contract, and a
+    cosmetic refresh must not move it.
     """
-    entries = _identities(root)
-    now = time.time()
-    refreshed: list[dict[str, Any]] = []
-    changed = False
-    for entry in entries:
-        if str(entry.get("extension_id", "")) != extension_id:
-            refreshed.append(entry)
-            continue
-        try:
-            age = now - float(entry.get("last_seen_at", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            age = float("inf")
-        if age < LAST_SEEN_REFRESH_S:
-            refreshed.append(entry)
-            continue
-        refreshed.append({**entry, "last_seen_at": now})
-        changed = True
-    if changed:
+    entry = next(
+        (item for item in _identities(root) if str(item.get("extension_id", "")) == extension_id),
+        None,
+    )
+    if entry is None:
+        return
+    stamp = entry.get("last_seen_at")
+    if stamp is None:
+        return
+    try:
+        age = time.time() - float(stamp)
+    except (TypeError, ValueError):
+        return
+    if age < LAST_SEEN_REFRESH_S:
+        return
+    # Re-read: the revoke watcher's caller is another process writing this file, and
+    # losing a revoke to a cosmetic timestamp is the one failure direction this
+    # function may not have.
+    current = _identities(root)
+    if not any(str(item.get("extension_id", "")) == extension_id for item in current):
+        return
+    refreshed = [
+        (
+            {**item, "last_seen_at": time.time()}
+            if str(item.get("extension_id", "")) == extension_id
+            else item
+        )
+        for item in current
+    ]
+    with suppress(OSError):
         _write_pairing(root, refreshed)
 
 
@@ -1384,7 +1452,14 @@ class BridgeService:
         self.state.extension_id = self.link.extension_id
         self.state.browser_name = self.link.browser
         # The latched "attached but stopped answering" verdict, so the discovery
-        # file can tell a reader what /health would say. It matters because the
+        # file carries the same WHY as `/health`. Note the two are no longer the
+        # same VALUE and must not be compared (review round 5, NIT 4): this field
+        # is `drop_latched()` ungated, while `/health`'s `extension_unresponsive`
+        # also asks whether a proven link is serving, so for the TTL window after a
+        # promotion the file says "a drop is latched" and `/health` says "the
+        # driver is answering". Both are true of different questions; the file is
+        # read by the demotion guard, which wants the latched fact.
+        # It matters because the
         # demotion guard in `tools/builtin.py` decides from the FILE (a probe on
         # the ABSENT side is forbidden by `bridge_browser_reachable`'s contract)
         # and a drop writes `extension_connected=false` — without this the file
@@ -2432,7 +2507,17 @@ class BridgeService:
             # `SERVER_GOING_DOWN_CLOSE_CODE` for why 1001 is deliberately NOT
             # accepted here (a peer's "going away" frame would latch this flag
             # permanently, freezing the record and disabling failover).
-            if exc.code == SERVER_GOING_DOWN_CLOSE_CODE:
+            #
+            # Scoped to a link that holds pairing authority or the WHEEL (review
+            # round 5, finding 1). Those are precisely the links whose ending can
+            # move the durable record, or hand the wheel to a standby on the way
+            # out — the harm the guard exists for. A stranger that dials with a
+            # forged origin and sends 1012 holds neither, so its frame is inert
+            # instead of latching the daemon's permanent flag. See the constant for
+            # the residual this does NOT close.
+            if exc.code == SERVER_GOING_DOWN_CLOSE_CODE and (
+                link.paired or link.generation == self.driver_generation
+            ):
                 self.begin_shutdown()
         finally:
             if link.websocket is websocket:
