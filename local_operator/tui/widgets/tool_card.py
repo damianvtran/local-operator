@@ -1981,7 +1981,7 @@ class ToolCard(ExpandableActionBlock):
 
     # -- resize (TUI-017: rebuild the row when the width changes) -----------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the row at the new width.
+        """Re-fit the row at the new width — or at a new shared column.
 
         Guarded on the WIDTH, because the card's content is a pure function of
         its state and the width it is folded to — a resize that only changed
@@ -1990,9 +1990,16 @@ class ToolCard(ExpandableActionBlock):
         raises a Resize that landed straight back here. Measured on a session
         replay, this handler was a third of the ``_refresh_row`` calls: 645
         builds for 215 cards, ~366 ms.
+
+        The other term is the ledger's shared name column, which the same claim
+        needs and which the width cannot stand in for: a card authored before it
+        was appended builds parentless, so it bakes the floor, and a fold hint
+        promising the width it will be given made the width term report
+        "unchanged" when it landed. See
+        :meth:`ExpandableActionBlock._layout_moved`.
         """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -2108,6 +2115,11 @@ class ToolCard(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from, and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because `ExpandableActionBlock._layout_moved` reads the
+        # pair to decide whether this row still fits the ledger it landed in.
+        self._built_name_col = self._name_col(width)
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized

@@ -774,6 +774,21 @@ class ExpandableActionBlock(TranscriptBlock):
     #: which is the honest answer for a row that has not been drawn yet.
     _built_width: int = -1
 
+    #: The shared name column the APPLIED content was built with, written beside
+    #: :attr:`_built_width` and for the same reason — it is the second input to
+    #: the geometry that was painted, and the only one a width guard cannot stand
+    #: in for.
+    #:
+    #: The two are written together because they are read together by
+    #: :meth:`_layout_moved`; ``None`` is "nothing applied yet", and it never
+    #: equals a real column, so a row that has never painted always re-fits on its
+    #: first layout pass. That is the ground this attribute exists to restore: a
+    #: row authored while it was parentless cannot read the shared column at all
+    #: (there is no ledger to ask), so it bakes the floor and records the width it
+    #: authored at — and when a fold hint has promised exactly that width, the
+    #: width term alone reported "unchanged" and the row kept the floor for good.
+    _built_name_col: int | None = None
+
     @classmethod
     def _bound_keys(cls) -> frozenset[str]:
         """Every key this row class answers itself, MERGED across the hierarchy.
@@ -815,6 +830,57 @@ class ExpandableActionBlock(TranscriptBlock):
     def _refresh_row(self) -> None:
         """Rebuild and apply this subclass's current summary/expansion."""
         raise NotImplementedError
+
+    def _name_col(self, width: int) -> int:
+        """The ledger's shared name column, in cells, as THIS row reads it.
+
+        Declared on the base because :meth:`_layout_moved` asks the question of
+        every ledger row, and each row type already answers it: the column is the
+        transcript's shared value above the width gate and the floor below it, or
+        the floor for a row with no ledger to ask. Implementing the ladder once
+        here instead would give the base an import of `tool_card` at class-body
+        time (the modules import each other) and, worse, a second copy of the
+        gate — which is the kind of duplicate that drifts and tears the column.
+        """
+        raise NotImplementedError
+
+    def _layout_moved(self, width: int) -> bool:
+        """Whether the APPLIED content is stale for a row laid out at ``width``.
+
+        Every ledger row's ``on_resize`` used to guard on the width alone, and the
+        width is only ONE of the two inputs its geometry is built from. The other
+        is the shared name column, which a row cannot read until it is mounted.
+
+        That is not a rare window. The replay and paging paths author a row before
+        they append it — deliberately, so the row folds once at its destination
+        width instead of flashing at the terminal's — and they say where it is
+        going through :meth:`set_fold_hint`. So the row builds parentless, bakes
+        the floor (`NAME_COL`, because there is no ledger to ask), records the
+        hinted width, and is then laid out at EXACTLY that width. The width term
+        says "unchanged", the rebuild is skipped, and the row keeps the floor
+        while its mounted neighbours paint the shared column: two `bash` rows on
+        one screen at different summary offsets, which is the tear the operator
+        reported. A pointer crossing such a row re-fitted THAT row and no other,
+        which is why it read as tearing under a moving cursor and why it healed
+        one row at a time.
+
+        Asked of the subclass's own :meth:`_name_col`, so the builder's ladder and
+        this question cannot disagree, and against :attr:`_built_name_col` — the
+        column the applied content was really built with — never against the
+        current column alone, which would rebuild every row on every resize that
+        happened to leave the width alone.
+        """
+        if width != self._built_width:
+            return True
+        if self._built_name_col is None:
+            # Nothing is applied to be stale: `_built_name_col` is written only
+            # where content is really applied, so `None` covers both a row that
+            # has never built (the `-1` placeholder) and one whose content was
+            # measured but could not be applied — the detached rung. Reading that
+            # as "the column moved" would rebuild rows no reader can see, on
+            # every height-only resize.
+            return False
+        return self._name_col(width) != self._built_name_col
 
     def _row_indent(self) -> int:
         """Cells of left inset on this row's summary line AS BUILT.
@@ -1719,9 +1785,16 @@ class WakeBlock(ExpandableActionBlock):
         return True
 
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
-        """Re-fit the row at the new width (same guard as the tool card)."""
+        """Re-fit the row at the new width — or at a new shared column.
+
+        Same guard as the tool card, and the same two terms: the width this row is
+        laid out at and the ledger's shared column. A resize that moved neither
+        reproduces the row byte for byte; see
+        :meth:`ExpandableActionBlock._layout_moved` for why the column has to be
+        one of them.
+        """
         size = getattr(event, "size", None)
-        if size is not None and size.width == self._built_width:
+        if size is not None and not self._layout_moved(size.width):
             return
         self._refresh_row()
 
@@ -1770,6 +1843,11 @@ class WakeBlock(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from — and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because :meth:`_layout_moved` reads the pair to decide
+        # whether this row still fits the ledger it just landed in.
+        self._built_name_col = self._name_col(width)
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -2386,6 +2464,11 @@ class PeerMessageBlock(ExpandableActionBlock):
         if detached:
             return
         self._built_width = width
+        # The shared column is the OTHER input this content was built from — and
+        # the one a parentless build cannot read, so it bakes the floor. Recorded
+        # beside the width because :meth:`_layout_moved` reads the pair to decide
+        # whether this row still fits the ledger it just landed in.
+        self._built_name_col = self._name_col(width)
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -4063,7 +4146,12 @@ class TranscriptView(ScrollableContainer):
                 # to ask for the shared column, would fit it to the console rung
                 # and paint one frame at the old width before its own layout
                 # pass corrected it. It derives the column on that pass, like
-                # any other newcomer.
+                # any other newcomer — which is a promise `_layout_moved` is
+                # what keeps: a row authored parentless bakes the floor, and
+                # without that second term in the resize guard the layout pass
+                # could see a width it had already built at and skip the rebuild
+                # that re-reads the column. Then this skip would be a tear, not
+                # a saving.
                 continue
             repaint = getattr(block, "refresh_row", None)
             if callable(repaint):
