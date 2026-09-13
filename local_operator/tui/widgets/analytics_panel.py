@@ -274,6 +274,19 @@ def _money_run(scope: "_CostLike", cell: int) -> Text:
     return run
 
 
+def search_block_needs_legend(snapshot: "SearchSpendSnapshot | None") -> bool:
+    """Whether the search block will draw the money legend for its own marks.
+
+    Shared by the block itself and by ``build_report``'s foot-legend decision
+    (design round 3, D12): the two must agree, or the screen either prints the
+    identical footnote twice or loses it entirely — which is exactly the
+    disagreement this helper exists to make impossible.
+    """
+    if snapshot is None:
+        return False
+    return any(scope_needs_cost_legend(scope) for scope in (snapshot, *snapshot.rows))
+
+
 def search_spend_section(
     snapshot: SearchSpendSnapshot,
     width: int,
@@ -399,7 +412,9 @@ def search_spend_section(
 
     lines.append(section_header("Search spend", meta))
     row("Total spend", snapshot, total_notes())
-    if session is not None and session.searches:
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # reads has a share worth showing, and the guard dropped the row for it.
+    if session is not None and session.count:
         # The share is of the PRICED total, and says ``—`` when there is no
         # priced total to take a share of: a process whose searches are all
         # unpriced has no denominator, and "0%" would read as "this session
@@ -444,10 +459,7 @@ def search_spend_section(
     # all, and `/analytics` puts the model legend at the foot of a body this
     # block sits nowhere near. Beside the marks is the only placement that is
     # always co-visible with them.
-    block_scopes: list[_CostLike] = [snapshot, *snapshot.rows]
-    footnote = ""
-    if any(scope_needs_cost_legend(scope) for scope in block_scopes):
-        footnote = COST_LEGEND
+    footnote = COST_LEGEND if search_block_needs_legend(snapshot) else ""
     for paragraph in (note, footnote):
         if not paragraph:
             continue
@@ -800,6 +812,7 @@ def build_report(
     lines: list[Text] = []
     # Built once and spliced into BOTH branches below, because search spend is
     # not in the ledger the ``calls == 0`` gate is a statement about.
+    search_legend_drawn = search_block_needs_legend(search_spend)
     search_lines = (
         search_spend_section(
             search_spend,
@@ -1213,7 +1226,13 @@ def build_report(
 
     # Legend for the cost markers, drawn only when a ``+`` or ``$—`` is on
     # screen (review D1). ``dim`` so it reads as a footnote, not a row.
-    if _needs_cost_legend(aggregate, forest):
+    #
+    # Suppressed when the search block already printed it on this same screen:
+    # the string explains both vocabularies at once, so a frame can otherwise
+    # carry the identical footnote twice (design round 3, D12) -- once beside
+    # the marks it is about and once here for a model row's mark, with nothing
+    # telling the reader they are the same legend.
+    if _needs_cost_legend(aggregate, forest) and not search_legend_drawn:
         lines.append(Text())
         legend = Text()
         legend.append("  " + COST_LEGEND, style=dim)
