@@ -504,6 +504,18 @@ class ApprovalBlock(TranscriptBlock):
             self._finalized = was_finalized
 
     def on_resize(self, event: object) -> None:
+        self.refit_width(self.size.width)
+
+    def refit_width(self, width: int) -> None:
+        """Rebuild the prompt's row when the lane moved.
+
+        Reached by the container's lane walk
+        (:meth:`TranscriptView._refit_authored_blocks`). ``_build`` reads the
+        width off this block's own reconciled size — which is already the NEW
+        lane in the frame the walk runs in — so this rebuilds exactly as
+        ``on_resize`` does, and ``_refresh_row`` is unconditional here for the
+        same reason it is there: one row, rebuilt from state.
+        """
         self._refresh_row()
 
     def _build(self) -> RenderableType:

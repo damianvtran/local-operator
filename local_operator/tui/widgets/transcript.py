@@ -512,12 +512,18 @@ class TranscriptBlock(Static):
         The container knows the lane the moment its own layout is reconciled
         (:meth:`TranscriptView._refit_ledger_lane`), and when it says so that
         number is the authority. Re-deriving one here instead asks a SECOND
-        question -- this row's own ``size``, which is a compositor map lookup --
-        and a lane change is exactly the moment the two can disagree: the row is
-        full width on screen (the paint uses the arrangement the container was
-        just given) while the content it authors is measured against something
-        older. Threading the container's number through makes the rebuild land on
-        the lane it was rebuilt for, whatever the map would have said.
+        question — the ladder again — and the two only agree by accident, not by
+        construction: the ladder's map-derived rungs (``region``/``size``) are
+        answered by the compositor the frame is painted from, so in the window
+        this funnel exists for they already name the NEW lane while the row's
+        *held* content is the old one (measured on the base tree at 130x36, the
+        torn frame: ``built=79, region.width=126, size.width=126,
+        outer_size.width=126`` for every row — nothing lags but the authored
+        width, which is why re-deriving is not the fix; the NOTIFICATION is, and
+        the funnel is it). Threading the container's number through is therefore
+        a guarantee rather than a correction: a rebuild always lands on the lane
+        the container published it for, whatever any second derivation would
+        have said in that frame.
 
         ``None`` or ``0`` falls through to :meth:`fold_width` unchanged, so a
         caller with no lane to publish (a hover, an expand, the name-column
@@ -526,6 +532,37 @@ class TranscriptBlock(Static):
         if width is not None and width > 0:
             return width
         return self.fold_width(0)
+
+    def refit_width(self, width: int) -> None:
+        """Re-author this block's rows if the LANE it was built at has moved.
+
+        The counterpart of :meth:`fit_width` for a block that AUTHORS its rows —
+        it wraps or truncates text itself, so a stale width is baked into its
+        content rather than re-folded at paint time. Called by
+        :meth:`TranscriptView._refit_authored_blocks` with the lane the container
+        just reconciled, and by the block's own ``on_resize`` with the width its
+        layout pass reports, so the two triggers share one guard and one rebuild
+        and cannot disagree about what "stale" means.
+
+        It has to exist because the notification such a block would rely on —
+        ``Resize`` — is not delivered in one specific frame; :meth:`
+        TranscriptView._refit_ledger_lane` documents the mechanics. Measured on
+        the base tree at 130x36, in the lane-change frame itself: a long
+        ``UserBlock`` stayed wrapped for the 79-cell sidebar lane inside a
+        126-cell box — four prose rows stopping ~50 cells short of the tool rows
+        directly above them — and it did not heal on hover, unlike a ledger row.
+        Pre-existing on main rather than introduced by the lane funnel (the base
+        tree repairs neither), but it is the same defect on the same screen, so
+        it is closed here rather than left as a second tear to rediscover.
+
+        The default is a NO-OP: most blocks hand a renderable to Rich and fold it
+        at PAINT time, so they have no width baked in and nothing to re-fit.
+        ``UserBlock``/``NoticeBlock``/``WorkingBlock`` override it. Ledger rows
+        are deliberately not part of this walk — they thread the lane into their
+        rebuild through :meth:`_repaint_ledger_rows`, which has to know which row
+        type it is holding.
+        """
+        return
 
     def invalidate_row_measurements(self) -> None:
         """Drop the memoized row counts (content or WIDTH changed).
@@ -1241,14 +1278,33 @@ class UserBlock(TranscriptBlock):
         mount. Safe because the rows are a pure function of the text, the
         attachment count and the width, all three fixed at construction — a
         prompt whose body changed is a new block — and `retheme` rebuilds
-        directly without consulting this. The gap re-ask below stays OUTSIDE
-        the guard: it answers a spacing question the width did not settle.
+        directly without consulting this. The gap re-ask stays OUTSIDE the
+        guard (it answers a spacing question the width did not settle), which is
+        why this delegates to :meth:`refit_width` rather than inlining: the
+        container's lane walk has to reach the SAME rebuild and the SAME
+        unconditional re-ask, or a prompt re-wrapped by one trigger and not the
+        other lands a row off its neighbours.
         """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-wrap the prompt if ``width`` is not the width it holds.
+
+        ``width`` is either the lane the container published
+        (:meth:`TranscriptView._refit_authored_blocks`) or the width this
+        block's own layout pass reported. It is used as the REBUILD width, not
+        merely as the trigger, so a rebuild cannot land on a third number: the
+        rows are a pure function of the prompt, the attachment count and this
+        width, which is what makes the guard sound ("the same rows" is exactly
+        what a matching width means) and what keeps a prompt re-fitted by the
+        lane walk identical to one re-fitted by its own ``Resize``.
+        """
+        lane = width if width > 0 else self.fold_width(80)
         was_finalized = self._finalized
         self._finalized = False
         try:
-            if self.fold_width(80) != self._built_width:
-                self.set_content(self._build())
+            if lane != self._built_width:
+                self.set_content(self._build(lane))
         finally:
             self._finalized = was_finalized
         parent = self.parent
@@ -1315,7 +1371,7 @@ class UserBlock(TranscriptBlock):
         finally:
             self._finalized = was_finalized
 
-    def _build(self) -> RenderableType:
+    def _build(self, width: int | None = None) -> RenderableType:
         """The prompt, every row prefixed by the gutter rule.
 
         The height is PINNED to the row count rather than left to ``auto``, the
@@ -1333,6 +1389,13 @@ class UserBlock(TranscriptBlock):
         A block that authors its own rows KNOWS its height; measuring it is the
         bug. Writing the style is itself a layout refresh, so the correction
         lands on the next pass.
+
+        ``width`` is the lane a caller has already published
+        (:meth:`refit_width`), and it is used verbatim when it is a real width —
+        the same precedence :meth:`fit_width` gives a container's number, kept
+        here as well so the rows a rebuild authors and the ``_built_width`` its
+        guard records can never be two different measurements. ``None`` keeps
+        the ladder, which is what construction and :meth:`retheme` want.
         """
         rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
         text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
@@ -1340,8 +1403,9 @@ class UserBlock(TranscriptBlock):
         # ladder can still answer with the width it is about to be given (its
         # parent's content region, or the hint a builder supplied). Reading the
         # size alone is what made a detached prompt unable to receive one.
-        body = max(self.fold_width(80) - self.RULE_COLS, self.MIN_BODY)
-        self._built_width = self.fold_width(80)
+        lane = width if width is not None and width > 0 else self.fold_width(80)
+        body = max(lane - self.RULE_COLS, self.MIN_BODY)
+        self._built_width = lane
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
         self._set_authored_height(len(rows))
@@ -1541,13 +1605,32 @@ class NoticeBlock(TranscriptBlock):
         the width it is about to be given is re-authored identically by the
         mount's own 0→W resize, and a notice whose text is replaced goes
         through :meth:`restate`, which rebuilds directly. The gap re-ask stays
-        outside the guard, for the reason recorded there.
+        outside the guard, for the reason recorded there — which is why this
+        delegates to :meth:`refit_width`, the same rebuild the container's lane
+        walk reaches, so a notice re-wrapped by one trigger and not the other
+        cannot land off its neighbours.
         """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-wrap the notice if ``width`` is not the width it holds.
+
+        ``width`` is either the lane the container published
+        (:meth:`TranscriptView._refit_authored_blocks`) or the width this block's
+        own layout pass reported, and it is used as the REBUILD width rather
+        than only as the trigger — the rows are a pure function of the text and
+        this width, so a rebuild has to author at exactly the width the guard
+        compared against. Most notices are single-row and unaffected by a lane
+        change; the ones that wrap are the ``/stop all`` listings and refusals,
+        and those were reaching :meth:`on_resize` — the notification this funnel
+        exists because the compositor can drop.
+        """
+        lane = width if width > 0 else self.fold_width(80)
         was_finalized = self._finalized
         self._finalized = False
         try:
-            if self.fold_width(80) != self._built_width:
-                self.set_content(self._build())
+            if lane != self._built_width:
+                self.set_content(self._build(lane))
         finally:
             self._finalized = was_finalized
         parent = self.parent
@@ -1619,7 +1702,7 @@ class NoticeBlock(TranscriptBlock):
             rows.pop()
         return rows
 
-    def _build(self) -> RenderableType:
+    def _build(self, width: int | None = None) -> RenderableType:
         """Glyph + text on the spine, WRAPPED with a hanging indent.
 
         A notice is the one block whose text can exceed its row and whose author
@@ -1649,14 +1732,23 @@ class NoticeBlock(TranscriptBlock):
         shared left edge instead. A notice is prose, not a centred mass like the
         wordmark or the card's caret, so it gets the same treatment: one column,
         found by the block's offset rather than by each row's own width.
+
+        ``width`` is the lane a caller has already published
+        (:meth:`refit_width`) and is used verbatim, so the rows and the
+        ``_built_width`` its guard records always describe the same build;
+        ``None`` keeps the ladder for construction and :meth:`retheme`.
         """
         style = Style(color=theme_mod.semantic_color(self._token))
         indent = " " * SPINE_INDENT
         hanging = " " * (SPINE_INDENT + 2)
         # The ladder, for the reason `UserBlock._build` records: a detached
         # notice must be able to fold for the destination its builder named.
-        body = self.body_budget(self.fold_width(80))
-        self._built_width = self.fold_width(80)
+        # A lane a caller published (`refit_width`) is used verbatim instead, so
+        # the rows and the `_built_width` the guard compares cannot be two
+        # different measurements.
+        lane = width if width is not None and width > 0 else self.fold_width(80)
+        body = self.body_budget(lane)
+        self._built_width = lane
         rows = self._rows(body)
         # PINNED to the authored row count, for the reason ``UserBlock._build``
         # gives: under ``auto`` the engine measures this block, and the first
@@ -3075,8 +3167,23 @@ class WorkingBlock(TranscriptBlock):
         row already held. Nothing else reaches this row without a paint either
         (`set_activity`, `sync_animation_rate` and `_tick` all call
         :meth:`_paint` directly), so the guard can only ever remove a duplicate.
+        Delegated to :meth:`refit_width` so the container's lane walk reaches
+        the same paint with the same guard.
         """
-        if self.fold_width(80) != self._built_width:
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-truncate the row if ``width`` is not the width it was built at.
+
+        ``width`` is the lane the container published
+        (:meth:`TranscriptView._refit_authored_blocks`) or the width this row's
+        own layout pass reported. :meth:`_paint` reads the width off the ladder
+        (the lane's own number, measured equal to it in the frame under test),
+        so this is a repaint trigger and not a second width to thread — the row
+        is already repainted on its own cadence, and the guard is what keeps a
+        lane change from costing a second paint of an identical line.
+        """
+        if width > 0 and width != self._built_width:
             self._paint()
 
     def _tick(self) -> None:
@@ -4166,9 +4273,12 @@ class TranscriptView(ScrollableContainer):
           on a widget the visible map does not hold, plus the app's own
           measuring) re-arranges at the NEW size and stores that as
           ``_full_map``. The corrective full reflow then compares against it,
-          finds nothing changed, and sends ``Resize`` to NOBODY — so the narrow
-          content is permanent until something else happens to call
-          ``_refresh_row`` (a hover, which is exactly the operator's one-row-at-
+          finds nothing changed, and sends ``Resize`` to NOBODY — the map's
+          membership decides what is resized (``shown | resized``,
+          ``screen.py:1365-1377``), not ``_size_updated``'s return value, so not
+          even a widget whose size hook just answered "changed" is told. The
+          narrow content is then permanent until something else happens to call
+          ``refresh_row`` (a hover, which is exactly the operator's one-row-at-
           a-time cure).
 
         Being keyed on this container's OWN reconciled geometry is what makes
@@ -4176,12 +4286,56 @@ class TranscriptView(ScrollableContainer):
         overlay threshold, a settings position change, a boot-column sync, a
         terminal resize. The container is told about its own size in
         :meth:`_size_updated` even when the rows are not, and ``changed`` there
-        is exactly "my geometry moved".
+        is exactly "my geometry moved". Two limits of that gate are recorded
+        here rather than papered over:
+
+        * A SCROLLBAR-GUTTER-ONLY move can change ``scrollable_content_region``
+          (the lane) without this container's own ``_size`` moving, and so does
+          not reach here (R3, review round 1). It does not need to: a thumb
+          appearing is a reflow of its own, the rows are re-fitted through their
+          ordinary ``Resize`` on it, and review could not produce a tear from
+          one — the content growing enough to raise a thumb moves
+          ``virtual_size``/``container_size`` with it, which is a geometry
+          change like any other. Widening the gate to cover it would mean
+          reading ``scrollable_content_region`` on every ``_size_updated``,
+          including the passes that moved nothing.
+        * The correction lands in the pass AFTER the lane change (D2, design
+          round 1): a frame captured in the same tick as
+          ``action_toggle_sidebar`` still shows the old width, and one
+          event-loop turn later it does not. That is inherent rather than a
+          defect — the container has to be RECONCILED at the new lane before it
+          can publish it, and the pass that moved the lane may be one this
+          container is not in (the visible-only pass visits the widgets it
+          exposed, not the ones already on screen). The gap is therefore bounded
+          by one message-loop turn, and this code cannot close it: ``Screen``'s
+          update timer is a callback timer (``Timer._tick`` awaits
+          ``_on_timer_update`` directly, not through the queue), so a live
+          terminal is not *provably* unable to paint inside that window. What it
+          cannot do is keep the tear, which is what was actually reported: a
+          stale row that survived settles and needed a hover to heal. Accepted.
+
+        The ``scrollable_content_region`` read below is a compositor-map lookup,
+        and with ``_full_map_invalidated`` still set in this frame it re-arranges
+        the whole tree from inside ``Screen._refresh_layout``'s iteration over
+        its captured layer list (R2, review round 1). Deliberate and bounded:
+        one arrangement per LANE change, attributed by review as
+        ``full:inside_refit_lane: 1``, and arrangement counts are at parity with
+        the base tree (51 vs 50 across an 8-step resize drag) because this
+        replaces the per-row ``Resize`` the base tree spent on the same pass. The
+        screen iterates the list it captured, and the map the lane is then taken
+        from is the new geometry — which is what makes the lane authoritative
+        here rather than a second opinion.
 
         Cost is one O(rows) walk per LANE change (a toggle or a resize, not a
         frame): each row compares the published lane against ``_built_width``
         and returns untouched when it already matches, so a lane change only
         rebuilds the rows that the missing ``Resize`` left behind.
+
+        Coverage is not ledger-only: the same missing notification strands a
+        block that authors its rows at a width — a wrapping ``UserBlock`` prompt
+        stays wrapped for the old lane inside the new box, which is the same
+        two-right-edges frame one block type over — so
+        :meth:`_refit_authored_blocks` is walked here too.
         """
         try:
             lane = self.scrollable_content_region.width
@@ -4199,6 +4353,41 @@ class TranscriptView(ScrollableContainer):
             return
         self._row_width_applied = lane
         self._repaint_ledger_rows(width=lane)
+        self._refit_authored_blocks(lane)
+
+    def _refit_authored_blocks(self, width: int) -> None:
+        """Re-fit the non-ledger blocks that author their rows at a width.
+
+        The companion of :meth:`_repaint_ledger_rows`: that walk carries the
+        lane into a ledger row's rebuild, and this one reaches the blocks that
+        are not ledger rows but are built the same way — a block that wraps or
+        truncates its own text bakes the lane into its content, so a lane change
+        it is not told about leaves it authoring for a width it no longer has.
+        Measured on the base tree in this exact frame, with a wrapping prompt at
+        the bottom of a 40-row ledger: the ledger rows were left narrow and so
+        was the prompt, and on the head before this walk existed the rows were
+        repaired while the prompt stayed wrapped for the 79-cell lane inside a
+        126-cell box — prose stopping ~50 cells short of the tool rows directly
+        above it, in one viewport, which is the operator's "some lines will be
+        full width and some won't" one block type over. ``NoticeBlock`` and the
+        working line share the shape (both re-author through ``on_resize``, the
+        notification this window drops); ``RichBlock`` does not, and most blocks
+        never will — the base :meth:`TranscriptBlock.refit_width` is a no-op, so
+        a block with nothing to re-fit costs one attribute lookup.
+
+        Skipped when unmounted, for the reason the ledger walk records: a block
+        that is not a child of this container is not on screen to be torn and
+        derives on its own first layout, and one being re-parented mid-pass must
+        not be re-authored from a stale position.
+        """
+        for block in self._blocks:
+            if getattr(block, "LEDGER_ROW", False):
+                # Already re-fitted by `_repaint_ledger_rows(width=lane)`, which
+                # threads the lane into the row's own rebuild.
+                continue
+            if block.parent is not self:
+                continue
+            block.refit_width(width)
 
     def _settle_gaps(self, blocks: list[TranscriptBlock]) -> None:
         """Re-decide the gaps a batch changed, touching each boundary once.
