@@ -468,7 +468,6 @@ async function daemonHealth(): Promise<Health | null> {
 let renderRunning: Promise<void> | null = null;
 let renderQueued: Promise<void> | null = null;
 
-
 function render(): Promise<void> {
   if (renderQueued) return renderQueued;
   if (!renderRunning) {
