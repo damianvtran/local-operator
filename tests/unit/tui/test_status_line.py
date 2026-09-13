@@ -822,6 +822,96 @@ def test_the_two_groups_never_crowd_closer_than_their_own_separator() -> None:
         assert max(gaps) >= _MIN_GROUP_GAP, f"width {width}: seam {max(gaps)} < {_MIN_GROUP_GAP}"
 
 
+def test_the_connection_row_never_asks_for_more_cells_than_the_band(monkeypatch) -> None:
+    """D1 on #1040: the connection row reserved a literal 3 for the group seam.
+
+    ``_compose`` pads with ``max(_MIN_GROUP_GAP, …)`` — 4 cells — while this row
+    cut the name to ``width - left - 3``, the width of the ` · ` separator that
+    lives INSIDE a group. So the row it asked for came out exactly one cell
+    wider than its own box, and Textual word-wraps the overflow: the last word
+    of the conversation name moved onto a row the 1-row band cannot show, and
+    the name painted short with no ellipsis. At the operator's own width
+    (100x30, sidebar docked, band content 62) the failed row asked 63 and
+    painted 55, and the name read ``Fix``.
+
+    Pinned as ARITHMETIC rather than as pixels: the ask (``render_text``) must
+    fit the budget, because a row that fits is never wrapped. The glyph-on
+    variant is the one that tipped over — it spends the two cells the
+    animation-off row does not — so both are swept, at the three widths the app
+    actually docks a sidebar at as well as across the whole narrow range.
+    """
+    failed = "Saved · Reconnect failed · Select again to retry"
+    connecting = "Saved · Connecting…"
+    name = "Fix sidebar reconnect on session switch"
+    # 62 is the band's own ``content_region`` at 100x30 with the sidebar
+    # docked — the operator's worst case, because the tighter budget sits at the
+    # WIDER terminal; 75 at 80x24, where the sidebar is an overlay and the band
+    # keeps its width; 55 at 60x20, the narrowest a sidebar is docked at.
+    measured = (62, 75, 55)
+
+    for glyph in (True, False):
+        if glyph:
+            monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        else:
+            # The suite's autouse fixture already pins this; re-stating it keeps
+            # the pair explicit and survives that fixture moving.
+            monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        for connection in (connecting, failed):
+            status = StatusLine(_dock(200))
+            status.update(connection=connection, conversation_name=name)
+            status.set_connecting(glyph)
+            status._spinner_index = 2
+
+            for width in (*measured, *range(24, 101)):
+                row = status.render_text(width).plain
+                cells = cell_len(row)
+                assert cells <= width, (
+                    f"width {width}, glyph={glyph}, {connection!r}: the row asks "
+                    f"{cells} cells, so Textual wraps the overflow onto a row the "
+                    f"1-row band cannot show and the name paints short: {row!r}"
+                )
+
+            for width in measured:
+                row = status.render_text(width).plain
+                # The name is what this row exists to spend, and an ELISION is
+                # the honest outcome — a name the user can see is there and was
+                # cut, where the wrap hid the tail while the row still read as
+                # complete. So the row ends in either the whole name or a
+                # visible ellipsis run, never in nothing.
+                assert row.endswith("…") or row.endswith(name), f"width {width}: {row!r}"
+                # …separated from the left group by the real group seam, never
+                # the 3-cell separator that belongs inside a group.
+                assert re.search(rf" {{{_MIN_GROUP_GAP},}}", row), f"width {width}: {row!r}"
+
+    # The operator's own frame, verbatim: 100x30 with the sidebar docked leaves
+    # the band a 62-cell content box, and the failed row is the one whose name
+    # read `Fix`. Stated as the exact elision so a later change cannot quietly
+    # return to a name that is wrapped away rather than cut.
+    for glyph, expected in ((True, "Fix sid…"), (False, "Fix sideb…")):
+        if glyph:
+            monkeypatch.delenv("LOCAL_OPERATOR_NO_SHIMMER", raising=False)
+        else:
+            monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+        status = StatusLine(_dock(200))
+        status.update(connection=failed, conversation_name=name)
+        status.set_connecting(glyph)
+        status._spinner_index = 2
+        row = status.render_text(62).plain
+        assert cell_len(row) == 62, f"glyph={glyph}: the row must fill its box: {row!r}"
+        assert row.endswith(expected), f"glyph={glyph}: {row!r}"
+
+    # No name, no right group: with nothing to align there is no seam to
+    # reserve, and ``_compose`` emits no filler at all. Asserted so a later
+    # change cannot start charging the gap against a row that has no group to
+    # separate it from.
+    nameless = StatusLine(_dock(200))
+    nameless.update(connection=failed, conversation_name="")
+    for width in measured:
+        row = nameless.render_text(width).plain
+        assert cell_len(row) == cell_len(failed), f"width {width}: {row!r}"
+        assert "  " not in row, f"width {width}: a filler was emitted: {row!r}"
+
+
 def test_a_terminal_too_narrow_for_anything_still_names_the_model() -> None:
     """The ladder's old final rung DROPPED the model, leaving a bare glyph on an
     empty tinted strip — which reads as broken rather than compressed, and
