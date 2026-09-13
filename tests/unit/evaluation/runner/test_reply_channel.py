@@ -23,6 +23,7 @@ import pytest
 from local_operator.evaluation.protocol import ActionBatch
 from local_operator.evaluation.runner.model import DecisionRejected
 from local_operator.evaluation.runner.public_reply import (
+    decode_public_reply,
     public_reply_contract,
     public_reply_schema,
 )
@@ -45,7 +46,7 @@ from tests.unit.evaluation.runner.test_provider_client import (
     finish_payload,
     observation,
 )
-from tests.unit.evaluation.runner.test_public_reply import envelope
+from tests.unit.evaluation.runner.test_public_reply import _wrapped, envelope
 
 
 class ChannelStream:
@@ -181,6 +182,39 @@ async def test_both_channels_produce_the_identical_validated_envelope() -> None:
     assert channel.action_batch.to_canonical_json() == prose.action_batch.to_canonical_json()
     assert channel.public_reply == prose.public_reply
     channel.action_batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "variant", ["tool_name-parameters", "tool_call-input-string", "input-object"]
+)
+async def test_a_wrapped_call_on_the_channel_decodes_like_the_unwrapped_one(
+    variant: str,
+) -> None:
+    """The channel MOVED the refusals, so it has to carry the wrapped ones too.
+
+    65 of the canary arm's 104 refusals arrived on the tool channel, and the
+    class it recorded as ``batch-shape`` is exactly this: a complete envelope
+    serialized as one generic tool call, handed to a decoder that wanted the
+    envelope itself. The channel supplies the bytes and the same decoder judges
+    them, so a wrapped call must reach the batch the unwrapped call reaches.
+    """
+
+    current = observation()
+    body = envelope(finish_payload(current), "Visible status: ready")
+
+    plain = await _client(ChannelStream(body), model_spec=_spec(supports_tools=True)).decide(
+        current, _turns(current)
+    )
+    wrapped = await _client(
+        ChannelStream(_wrapped(variant, body)), model_spec=_spec(supports_tools=True)
+    ).decide(current, _turns(current))
+
+    assert wrapped.action_batch.to_canonical_json() == plain.action_batch.to_canonical_json()
+    assert decode_public_reply(wrapped.public_reply or "")["public_observations"] == (
+        "Visible status: ready"
+    )
+    wrapped.action_batch.validate_for(current)
 
 
 @pytest.mark.asyncio
@@ -536,7 +570,7 @@ def test_the_flattened_schema_admits_exactly_what_the_validator_admits() -> None
 
     import jsonschema
 
-    items = public_reply_schema()["properties"]["action_batch"]["properties"]["actions"]["items"]
+    items = public_reply_schema()["properties"]["actions"]["items"]
     base = {
         "protocol_version": "1.0",
         "task_id": "t",
