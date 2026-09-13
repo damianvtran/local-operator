@@ -141,11 +141,21 @@ class FetchFailure:
     def escalatable(self) -> bool:
         """Whether a browser-shaped retry (§4) is the right next attempt.
 
-        ``blocked`` is the obvious case. ``stall`` is the measured one: on
-        ``canadiantire.ca`` the honest profile never gets headers back (read
-        timeout at 20 s) while a browser-shaped profile gets a 403 in
-        0.07-0.25 s — so a stall is frequently a SILENT block, and the remedy is
-        the same escalation rather than more waiting.
+        ``blocked`` is the obvious case, and the one the measured win rests on:
+        the origin answered FAST (a 403), so almost the whole call budget is
+        still unspent when the probe runs, and on medium.com that probe gets 200
+        and 53 KB of the real page.
+
+        ``stall`` is subtler now, and worth stating plainly. A read timeout
+        consumes the WHOLE slice it was granted, so a genuine black-hole spends
+        the call's budget on the first, honest attempt and there is nothing left
+        to fund a probe — which is the intended behaviour, not a gap: the probe
+        would have to be paid for out of a budget the origin already burned, and
+        capping the first attempt to reserve it is exactly the change that was
+        reverted (see the note at the top of ``service.py``). The escalation is
+        therefore OPPORTUNISTIC: it runs whenever a stall left budget behind,
+        which happens when the stall was truncated by a later hop's short
+        remainder rather than by the full call timeout.
         """
         return self.kind in ("blocked", "stall")
 
@@ -249,8 +259,14 @@ def _is_stock_block_page(body_head: str) -> bool:
     Both halves are required, and so is the size bound: a real article that
     quotes "Access Denied" in its text must not be classified as a block, and
     an article is never 2 KB of nothing but that phrase twice.
+
+    The bound is compared against the ENCODED length because ``body_head`` is
+    decoded text, and a character count over a str is not the "2 KB" the
+    constant claims: the same 2 048 characters can be up to ~8 KB of UTF-8 on the
+    wire. The unit in the name is the unit the comparison must use, or a reader
+    tunes this against the wrong quantity.
     """
-    if len(body_head) > _STOCK_PAGE_MAX_BYTES:
+    if len(body_head.encode("utf-8", errors="replace")) > _STOCK_PAGE_MAX_BYTES:
         return False
     return bool(_ACCESS_DENIED_TITLE.search(body_head)) and bool(
         _ACCESS_DENIED_HEADING.search(body_head)
@@ -355,16 +371,16 @@ def classify_response(
 #: through an auto-approved call (design §8.1). The agent takes this step
 #: itself, through the tool's own approval prompt.
 #:
-#: Pre-wrapped, and that is deliberate rather than cosmetic: the TUI card paints
-#: one body row per LINE and truncates the overflow with an ellipsis (visible on
-#: any long row, not a regression this text introduced), so a single 150-column
-#: sentence would lose its own point — the name of the tool to use — off the
-#: right edge. Each line here fits a standard card width, so the human reading
-#: the card sees the whole instruction and the model reads ordinary prose.
+#: A single unwrapped sentence on purpose. It used to be hard-wrapped to 76
+#: cells "so a 150-column sentence would not lose its own point off the right
+#: edge" — but the wrap was the thing losing it: at 80 columns the 76-cell line
+#: was clipped mid-word by the card's own painter, and at 150 the block stopped
+#: half-way across. The card now fits these lines to its real width at paint
+#: time (``tool_card.py::_append_fetch_body``), which is right at every width.
 _BROWSER_NEXT_STEP = (
-    "Next step: use the `browser` tool on this URL. It drives the real\n"
-    "browser (a write-tier, approval-gated action), which is the only\n"
-    "path that clears an interactive challenge."
+    "Next step: use the `browser` tool on this URL. It drives the real browser "
+    "(a write-tier, approval-gated action), which is the only path that clears "
+    "an interactive challenge."
 )
 
 #: Vendor label for prose. Kept separate from the enum so the enum stays a
@@ -391,18 +407,54 @@ def vendor_label(vendor: str | None) -> str | None:
     return _VENDOR_LABELS.get(vendor, vendor)
 
 
-def block_lead(failure: FetchFailure) -> str:
-    """The one-line reason that leads a blocked result's header.
+def block_lead(vendor: str | None) -> str:
+    """The one line that states WHY a refusal happened, shared by every surface.
+
+    This is the single source for a sentence that otherwise exists three times —
+    the tool preview's warning lead (``tool.py``), the TUI card's danger row, and
+    the tests that assert both. It took a review round to notice that the copy had
+    already drifted between two of those copies, which is the whole argument for
+    not hand-rolling it a third time.
 
     Two shapes, and the difference is the whole point (§2.2): a SIGNED refusal
     names the vendor and says "bot protection"; an unsigned one says only that
     the origin refused, and explicitly raises the possibility that this is an
-    access restriction. The word "bot" never appears in the unsigned form.
+    access restriction. The unsigned form never claims a bot wall — claiming one
+    on a 403 that really means "you are not a subscriber" would send the agent to
+    ``browser`` when it should be asking the user for credentials.
+
+    Takes the VENDOR rather than a :class:`FetchFailure` because both callers
+    hold the vendor (from ``details["block_vendor"]``) and not the classification
+    — the tool and the card rebuild their text from the persisted ``details``
+    shape, which is what lets a stored transcript render a year later.
     """
-    if failure.vendor is not None:
-        label = _VENDOR_LABELS.get(failure.vendor, failure.vendor)
+    label = vendor_label(vendor)
+    if label:
         return f"blocked by {label} bot protection, not page content"
-    return "the origin refused this request"
+    return (
+        "the origin refused this request, which may be bot protection or an " "access restriction"
+    )
+
+
+#: The §3.4 sentence for a ``Retry-After`` the call would not sleep on. Named
+#: because BOTH surfaces need it and they disagree about nothing: the model-facing
+#: text for a response-bearing 429 is built by ``tool.py::_header_line`` (never by
+#: :func:`describe`, which needs a failure with no response), so a single shared
+#: sentence is the only way the number reaches the agent in both shapes.
+#:
+#: `describe` says the same thing in its own words for the terminal case; this is
+#: the response-bearing one.
+def retry_after_note(retry_after_s: float) -> str:
+    """``The origin asked us to wait 600s before retrying; …``
+
+    The number is the one the call already returned in ``details``. Stating it in
+    the text is what makes §3.4's "do not sleep, tell the agent" useful rather
+    than a silent one-attempt stop.
+    """
+    return (
+        f"The origin asked us to wait {retry_after_s:.0f}s before retrying; the "
+        "wait was not spent inside this call."
+    )
 
 
 def describe(
@@ -423,29 +475,37 @@ def describe(
     tell "we asked three times and it kept failing" from "we asked twice, the
     second time wearing a browser's headers, and it still refused" — which are
     different facts with different next steps.
+
+    **The prose is deliberately NOT pre-wrapped.** It used to be hand-wrapped to
+    76 cells, which is a width that is wrong at 80 columns (the sentence was cut
+    mid-word) and wrong at 150 (the block stopped half-way across the card) — and
+    a constant cannot be right at both. The TUI card re-wraps these lines to the
+    card's own width at paint time (``tool_card.py::_append_fetch_body``), so the
+    text is a paragraph here and a fitted block on screen. One consequence worth
+    naming: the model-facing preview now carries long lines rather than 76-cell
+    ones, which costs no tokens and loses no characters.
     """
     lines: list[str] = []
     used_browser = "browser" in tuple(profiles)
 
     if failure.kind == "blocked":
-        # Wrapped to card width for the reason given on ``_BROWSER_NEXT_STEP``.
         if failure.vendor is not None:
             first = "The origin's bot protection refused this request."
             if used_browser:
                 first += (
-                    " A browser-shaped retry was\nalso refused, so no headless "
+                    " A browser-shaped retry was also refused, so no headless "
                     "fetch of this URL will succeed."
                 )
         else:
             # No signature: state the refusal and the ambiguity, and let the
             # agent decide between `browser` and asking the user for access.
             first = (
-                "The origin refused this request. No anti-bot vendor\n"
-                "signature was found, so this may be an access restriction\n"
-                "(login, region, or policy) rather than bot protection."
+                "The origin refused this request. No anti-bot vendor signature was "
+                "found, so this may be an access restriction (login, region, or "
+                "policy) rather than bot protection."
             )
             if used_browser:
-                first += "\nA browser-shaped retry was refused the same way."
+                first += " A browser-shaped retry was refused the same way."
         lines.append(first)
         if failure.reference:
             lines.append(f"Origin reference: {failure.reference}")
@@ -454,8 +514,8 @@ def describe(
         lines.append(_with_attempts(failure.detail or "the request timed out", attempts, profiles))
         if used_browser:
             lines.append(
-                "A browser-shaped retry was tried as well, since a stalled\n"
-                "request is frequently a silent block."
+                "A browser-shaped retry was tried as well, since a stalled request "
+                "is frequently a silent block."
             )
             lines.append(_BROWSER_NEXT_STEP)
     elif failure.kind == "transport":
@@ -466,10 +526,7 @@ def describe(
             text += f" and asked us to wait {failure.retry_after_s:.0f}s"
         lines.append(_with_attempts(text, attempts, profiles))
         if failure.retry_after_s:
-            lines.append(
-                "Retry after that interval rather than immediately; the wait\n"
-                "was not spent inside this call."
-            )
+            lines.append(retry_after_note(failure.retry_after_s))
     elif failure.kind == "server":
         status = failure.status or 500
         lines.append(_with_attempts(f"the origin returned HTTP {status}", attempts, profiles))
@@ -479,6 +536,14 @@ def describe(
 
     if url:
         lines.append(url)
+    # Sentence case on the lead, uniformly. These sentences were written to be
+    # CHAINED after the tool's own error prefix, so they opened lowercase — but a
+    # card paints this text as its own body, where the first line is read with
+    # nothing in front of it and a lowercase opening reads as a fragment (design
+    # review round 1, DN3). Doing it once here rather than per-branch keeps every
+    # terminal class in one voice.
+    if lines and lines[0][:1].islower():
+        lines[0] = lines[0][:1].upper() + lines[0][1:]
     return "\n".join(lines)
 
 
@@ -488,7 +553,7 @@ def _with_attempts(text: str, attempts: int, profiles: Sequence[str]) -> str:
     information once it is not 1."""
     if attempts <= 1:
         return text
-    names = ", ".join(_profile_label(p) for p in profiles) if profiles else ""
+    names = ", ".join(_profile_label(p) for p in _collapsed(profiles)) if profiles else ""
     suffix = f" ({attempts} attempts: {names})" if names else f" ({attempts} attempts)"
     return text + suffix
 
@@ -497,12 +562,27 @@ def _profile_label(profile: str) -> str:
     return "browser-profile" if profile == "browser" else profile
 
 
+def _collapsed(profiles: Sequence[str]) -> list[str]:
+    """Consecutive duplicate identities collapsed to one.
+
+    ``2 attempts (default, default)`` is accurate and reads like a bug: the
+    sequence exists to show a CHANGE of identity, and repeating the only identity
+    there was adds nothing to it. ``(default, browser-profile)`` — the shape that
+    matters — is untouched, because those two entries differ.
+    """
+    out: list[str] = []
+    for profile in profiles:
+        if not out or out[-1] != profile:
+            out.append(profile)
+    return out
+
+
 def attempt_summary(attempts: int, profiles: Sequence[str]) -> str:
     """``2 attempts (default, browser-profile)`` for the header's meta line, or
     ``""`` when a single attempt makes the count uninformative."""
     if attempts <= 1:
         return ""
     if profiles:
-        names = ", ".join(_profile_label(p) for p in profiles)
+        names = ", ".join(_profile_label(p) for p in _collapsed(profiles))
         return f"{attempts} attempts ({names})"
     return f"{attempts} attempts"

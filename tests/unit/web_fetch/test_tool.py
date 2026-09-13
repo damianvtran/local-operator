@@ -614,6 +614,66 @@ def _cache_files() -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_terminal_failure_details_agree_with_its_own_preview(
+    context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, Q1: the terminal path dropped ``attempts``/``profiles``.
+
+    The preview said "3 attempts" while ``details`` carried only ``failure_kind``,
+    so the structured contract §5.3 defines (``attempts`` is a key, excluded only
+    for a cache hit) was broken on exactly the failures that need it most. The
+    facts now ride the exception from the engine, so the two cannot disagree.
+    """
+    monkeypatch.setattr(service, "_backoff_sleep", lambda delay: asyncio.sleep(0))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("no route", request=request)
+
+    transport = _CountingTransport(handler)
+    preview, details, is_error = await run_fetch(
+        "https://dead.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    assert details["failure_kind"] == "transport"
+    assert details["attempts"] == 3
+    assert details["profiles"] == ["default", "default", "default"]
+    assert "3 attempts" in preview
+
+
+@pytest.mark.asyncio
+async def test_a_large_retry_after_reaches_the_model_text(context: ToolContext) -> None:
+    """Review round 1, Q2: §3.4 requires the interval in the TEXT and in details.
+
+    A 429 bears a response, so its preview is built by ``_header_line`` and never
+    by ``describe`` — which meant the number reached ``details`` and stopped
+    there, leaving the agent to be silently refused after one attempt with no
+    reason given. Reproduced before the fix: ``error: ⚠ HTTP 429 Too Many
+    Requests — this is an error/block page …`` with no mention of 600.
+    """
+    transport = _CountingTransport(
+        lambda req: httpx.Response(
+            429,
+            text="slow down",
+            headers={"content-type": "text/plain", "retry-after": "600"},
+        )
+    )
+    preview, details, is_error = await run_fetch(
+        "https://busy.example/x", tool_name="web_fetch", context=context, transport=transport
+    )
+
+    assert is_error is True
+    assert details["retry_after_s"] == 600.0
+    assert "600" in preview
+    assert "asked us to wait" in preview
+    # Not slept on, and not retried either: one attempt, reported. ``attempts`` is
+    # the structured form of that claim (a second try would read 2), and it is the
+    # one that cannot be confused by an enrichment probe also reaching the
+    # transport.
+    assert details["attempts"] == 1
+
+
+@pytest.mark.asyncio
 async def test_repeated_5xx_is_never_cached_and_a_retried_200_is(
     context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -697,6 +757,11 @@ async def test_cache_hit_reports_zero_attempts(context: ToolContext) -> None:
     )
     assert details["cache"] == "hit"
     assert details["attempts"] == 0
+    # …and no identity either. ``profiles`` names the clients that made the
+    # requests, and a hit made none: ``attempts: 0`` beside
+    # ``profiles: ["default"]`` reported a request identity for a call that never
+    # opened a socket (review round 1, N3).
+    assert details["profiles"] == []
 
 
 @pytest.mark.asyncio

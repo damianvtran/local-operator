@@ -11,11 +11,15 @@ the blocked body text has to be judged against the shapes it must NOT alter:
     blocked   (default)  a confirmed Akamai refusal — the case whose body text
                          changes (challenge markup replaced by the origin
                          statement, the reference id and the `browser` next
-                         step)
+                         step). Carries the two-attempt/escalated shape, so the
+                         ``Rendered:`` row's attempt summary is in the frame.
     missing              a 404, which keeps inlining its body verbatim: the
                          §5.2 narrowing applies to the ``blocked`` class only,
                          and a frame is what proves the other classes are
                          untouched
+    stall                a TERMINAL failure (no response ever arrived), which
+                         carries no render_method/final_url — the shape that
+                         used to fall through to the generic output body
     ok                   a plain 200, the regression baseline
 
 Why a script rather than an assertion: the card's structured rows are unchanged
@@ -60,6 +64,11 @@ from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 BLOCKED_URL = "https://www.shoppersdrugmart.ca/?lang=en&query=power+bar"
+
+#: The terminal-failure fixture's URL. A host that accepts the connection and
+#: then never answers — the case whose card used to be indistinguishable from a
+#: bash error (design review round 1, D5).
+STALL_URL = "https://www.canadiantire.ca/en/pdp/some-product.html"
 
 #: What the card painted BEFORE this change: the Akamai interstitial rendered as
 #: if it were content, under the warning lead. Captured verbatim from the live
@@ -126,19 +135,59 @@ def _blocked_details() -> dict[str, object]:
         "final_url": BLOCKED_URL,
         "status": 403,
         "content_type": "text/html",
-        "render_method": "markdownify",
+        # NOT "markdownify": the body below the error row is OUR statement, not
+        # a rendering of the origin's markup (``service.py`` sets this to the
+        # rendered-content method, and the replacement body is plain text). The
+        # card prints this field, so a wrong value here is a frame that lies.
+        "render_method": "text",
         "cache": "miss",
         "bytes": 382,
         "lines": 9,
         "ok": False,
         "http_error": True,
         "attempts": 2,
+        # The escalation took a refusal to a 200 on medium.com; on this origin it
+        # was refused too. Either way the count and the identity happen to be the
+        # facts a reader cannot get from the row without them (review round 1,
+        # D1).
+        "profiles": ["default", "browser"],
         "failure_kind": "blocked",
         "block_vendor": "akamai",
         "block_reference": "18.4b182117.1789250183.345ea6ea",
         "profile": "browser",
         "suggested_tool": "browser",
     }
+
+
+def _stall_details() -> dict[str, object]:
+    """``details`` for a TERMINAL stall: no response, so no render/final_url.
+
+    This is the shape ``tool.py``'s ``except FetchError`` branch builds, and the
+    one the card used to mistake for a bash row (design review round 1, D5).
+    """
+    return {
+        "url": STALL_URL,
+        "cache": "miss",
+        "failure_kind": "stall",
+        "attempts": 2,
+        "profiles": ["default", "browser"],
+        "suggested_tool": "browser",
+    }
+
+
+def _stall_text() -> str:
+    """The terminal stall preview, composed by the engine's own ``describe``."""
+    from local_operator.web_fetch.failure import FetchFailure, describe
+
+    failure = FetchFailure(
+        kind="stall",
+        retryable=False,
+        detail=(
+            "read timed out after 20.0s — the origin accepted the connection but "
+            "never sent a response"
+        ),
+    )
+    return describe(failure, attempts=2, profiles=("default", "browser"), url=STALL_URL)
 
 
 def _seed(app: OperatorApp, case: str) -> ToolCard:
@@ -184,6 +233,10 @@ def _seed(app: OperatorApp, case: str) -> ToolCard:
             "http_error": False,
             "attempts": 1,
         }
+    elif case == "stall":
+        url = STALL_URL
+        text = _stall_text()
+        details = _stall_details()
     else:
         url = BLOCKED_URL
         text = _blocked_after_text()
@@ -191,7 +244,21 @@ def _seed(app: OperatorApp, case: str) -> ToolCard:
 
     card = ToolCard("t1", "web_fetch", {"url": url})
     app._append_block(card)
-    card.mark_done(text, details)
+    # Settle the way the APP settles it, which is the whole point of this
+    # script: a non-2xx fetch returns ``is_error=True`` and the session settles
+    # the card as an ERROR (``session_presentation.py`` → ``restore(state=
+    # "error", error=_first_line(result_text))``). Capturing a 403 with
+    # ``mark_done`` painted ``✓ <0.1s`` over a refusal — a frame that showed the
+    # opposite of what the app does.
+    if details.get("http_error") or details.get("failure_kind"):
+        card.mark_failed(
+            text.splitlines()[0] if text else "error",
+            result_text=text,
+            details=details,
+            measured_s=0.4,
+        )
+    else:
+        card.mark_done(text, details, measured_s=0.4)
 
     app._append_block(_answer("The origin refused the request; here is what it said."))
     return card
@@ -200,14 +267,19 @@ def _seed(app: OperatorApp, case: str) -> ToolCard:
 def _blocked_after_text() -> str:
     """The blocked preview as this tree builds it, or the pre-change capture.
 
-    Imported from the engine when the module exposes it, so the frame is the
-    text the code actually produces rather than a copy that can drift. A
-    checkout predating the change has no such module, and falls back to the
-    verbatim BEFORE capture — which is exactly what makes one script able to
+    Composed from the engine's OWN ``_header_line`` and ``describe``, not
+    re-typed here: the previous revision hand-wrote the lead and got it wrong in
+    two ways a reader could see — it printed the ``(The body below is the error
+    response…)`` note that the blocked class deliberately no longer emits, and it
+    kept ``markdownify`` as the render method. A capture script whose fixture
+    disagrees with the shipped code produces a frame that argues for a shape the
+    app does not have. A checkout predating the change has no such module, and
+    falls back to the verbatim BEFORE capture — which is what lets one script
     take both frames.
     """
     try:
         from local_operator.web_fetch.failure import FetchFailure, describe
+        from local_operator.web_fetch.tool import _header_line
     except ImportError:
         return BEFORE_BLOCKED_TEXT
     failure = FetchFailure(
@@ -217,13 +289,13 @@ def _blocked_after_text() -> str:
         reference="18.4b182117.1789250183.345ea6ea",
         status=403,
     )
-    lead = (
-        "⚠ HTTP 403 Forbidden — blocked by Akamai bot protection, not page content. "
-        f"{BLOCKED_URL}\n"
-        "markdownify · text/html · cache miss · 2 attempts (default, browser-profile)\n"
-        "(The body below is the error response, not the requested page.)\n\n"
+    details = _blocked_details()
+    lead = _header_line(dict(details))
+    return (
+        lead
+        + "\n\n"
+        + describe(failure, attempts=2, profiles=("default", "browser"), url=BLOCKED_URL)
     )
-    return lead + describe(failure, attempts=2, profiles=("default", "browser"))
 
 
 async def main() -> None:

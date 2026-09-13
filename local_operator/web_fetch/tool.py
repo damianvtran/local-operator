@@ -37,7 +37,11 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import spill_truncate, validation_error_result
 from local_operator.tools.spill import get_store
-from local_operator.web_fetch.failure import attempt_summary, vendor_label
+from local_operator.web_fetch.failure import (
+    attempt_summary,
+    block_lead,
+    retry_after_note,
+)
 from local_operator.web_fetch.models import FetchResult
 from local_operator.web_fetch.service import (
     CacheEntry,
@@ -198,16 +202,11 @@ def _header_line(result_like: dict[str, Any]) -> str:
         quality = " · sparse/JS-gated (try `browser`)" if result_like.get("low_quality") else ""
         return f"[{status}] {final}\n{tail}{quality}"
     if result_like.get("failure_kind") == "blocked":
-        label = vendor_label(
-            str(result_like["block_vendor"]) if result_like.get("block_vendor") else None
-        )
-        reason = (
-            f"blocked by {label} bot protection, not page content"
-            if label
-            else "the origin refused this request, which may be bot protection or an "
-            "access restriction"
-        )
-        warn = f"⚠ HTTP {status} {_status_reason(status)} — {reason}. {final}"
+        # The reason clause is IMPORTED, not re-typed: this line, the TUI card's
+        # danger row and the tests that pin both must not be able to drift into
+        # three opinions about the same refusal (review round 1, R5).
+        vendor = str(result_like["block_vendor"]) if result_like.get("block_vendor") else None
+        warn = f"⚠ HTTP {status} {_status_reason(status)} — {block_lead(vendor)}. {final}"
         # NO "the body below is the error response" note for this class: the
         # body below is no longer the origin's response at all, it is our own
         # statement of what happened plus the next step (the challenge markup is
@@ -217,6 +216,20 @@ def _header_line(result_like: dict[str, Any]) -> str:
         f"⚠ HTTP {status} {_status_reason(status)} — this is an error/block page, "
         f"not page content. {final}"
     )
+    # §3.4: a Retry-After too long to sleep on is REPORTED, not obeyed — and
+    # reporting it only in ``details`` reaches nothing, because the agent reads
+    # this text. ``describe`` would say the same thing, but it is only reached
+    # for a class with no response at all; a 429 HAS a response, so its lead is
+    # built here and this is where the number has to land.
+    retry_after = result_like.get("retry_after_s")
+    if result_like.get("failure_kind") == "ratelimit" and isinstance(retry_after, (int, float)):
+        # AFTER the parenthetical, so the card's header strip still recognises the
+        # header block it removes (lead + meta + note) and leaves this sentence
+        # where a reader looks for it: in the body, as the reason the call stopped.
+        return (
+            f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)\n"
+            f"{retry_after_note(float(retry_after))}"
+        )
     return f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)"
 
 
@@ -321,6 +334,11 @@ def _cache_hit_result(
         # diagnostic keys are absent rather than zero/None because a cached entry
         # records no failure to describe.
         "attempts": 0,
+        # …and for the same reason NO profiles: ``profiles`` names the identities
+        # that made the requests, and a hit made none. Leaving the model's default
+        # (``["default"]``) in place would report a request identity for a call
+        # that never opened a socket (review round 1, N3).
+        "profiles": [],
     }
     # Same declared supersede key as a fresh fetch: a cached re-read describes
     # the same resource, so it must group with the fresh ones rather than
@@ -489,6 +507,16 @@ async def run_fetch(
         # transcript show a bare sentence for exactly the failures that most
         # need explaining.
         details: dict[str, Any] = {"url": normalized, "cache": "miss"}
+        # The retry facts ride the exception (``FetchError.attempts/profiles``)
+        # precisely so this branch can carry them too: the preview states "2
+        # attempts" in prose, and a structured payload that omits what its own
+        # text says is the contract gap §5.3 exists to close (review round 1,
+        # Q1). ``profiles`` is reported only when there was more than one
+        # identity to report, matching the fresh-fetch path exactly.
+        if error.attempts:
+            details["attempts"] = error.attempts
+            if error.attempts > 1 and error.profiles:
+                details["profiles"] = list(error.profiles)
         if error.failure is not None:
             details["failure_kind"] = error.failure.kind
             if error.failure.vendor:
