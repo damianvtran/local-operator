@@ -27,15 +27,14 @@
  * the duplication of both is the price of running before the module system.
  */
 (function () {
-  // Keep in sync with PIN_HINT_KEY, PIN_CONNECTED/PIN_PAIRING and show() in
+  // Keep in sync with PIN_HINT_KEY, the three PIN_* constants and show() in
   // popup.ts.
   //
   // A PIN PER STATE, not a boolean: popup.ts writes the pin for the card it
   // just rendered and this script reproduces that height before the module
   // runs. Pins are held only for states that are DURABLE properties of the
   // browser, because a pin is a bet that the next open repeats this state —
-  // see popup.ts's PIN_BY_STATE block for the measurements behind that rule.
-  var KEY = "lop:pin-hint";
+  // see popup.ts's PIN_BY_STATE block for the measurements behind that rule.  var KEY = "lop:pin-hint";
   // The boolean key the previous revision wrote. Read once as a fallback so the
   // rename does not cost an existing paired browser a resize; "1" meant the
   // connected card. Mirrors the same fallback in popup.ts.
@@ -43,9 +42,10 @@
   var PIN_CONNECTED = "86px";
   var PIN_PAIRING = "219px";
   // Only the DURABLE states are pinned — see popup.ts's PIN_BY_STATE for why
-  // the transient wedged card is deliberately absent.
-  var PINS = [PIN_CONNECTED, PIN_PAIRING];
-  var pin = null;
+  // the transient wedged card is deliberately absent, and why the standby card
+  // (a durable role between two installed builds) is present.
+  var PIN_STANDBY = "193px";
+  var PINS = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];  var pin = null;
   try {
     var stored = localStorage.getItem(KEY);
     if (stored !== null && PINS.indexOf(stored) !== -1) pin = stored;

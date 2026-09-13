@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Build the store-ready extension with no dev server or runtime framework. */
 import { build } from "esbuild";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -28,6 +28,33 @@ await build({
   sourcemap: !isStore,
 });
 await cp(resolve(root, "manifest.json"), resolve(dist, "manifest.json"));
+// A DEV-ONLY manifest overlay, merged into the plain (non-store) build.
+//
+// Why it exists: a Chromium unpacked extension's id is derived from its
+// DIRECTORY PATH, so one build loaded from two worktrees is two identities —
+// three worktrees, three ids, and the operator re-pairs on every switch. A
+// manifest `key` pins the id to a keypair instead, so every local build is ONE
+// identity (manifest.dev.json holds the public half).
+//
+// Why it is NOT in manifest.json: that file is the STORE artifact's identity.
+// The Web Store assigns the published id, so a `key` there would either
+// conflict with it or silently change which id ships to users.
+//
+// Why a committed PUBLIC key is not a secret: `key` is base64 of an RSA public
+// key. The private half is not in this repository (it was generated once and
+// deliberately discarded — it only signs a .crx, which this project never
+// distributes) and is not needed to Load unpacked. Anyone may copy it and build
+// an extension claiming the dev id, and it buys them nothing: pairing still
+// requires the 6-digit code that only the operator's terminal prints
+// (docs/design/browser-extension.md §6.2). NEVER auto-trust this id daemon-side
+// — a well-known id accepted without pairing is what would turn a public
+// identity into a credential. AGENTS.md carries the same note.
+if (!isStore) {
+  const overlay = JSON.parse(await readFile(resolve(root, "manifest.dev.json"), "utf8"));
+  const target = resolve(dist, "manifest.json");
+  const manifest = JSON.parse(await readFile(target, "utf8"));
+  await writeFile(target, `${JSON.stringify({ ...manifest, ...overlay }, null, 2)}\n`);
+}
 await cp(resolve(root, "src/popup/popup.html"), resolve(dist, "popup/popup.html"));
 // Copied, never bundled: esbuild would emit it as a module entry and the
 // deferral is exactly what it exists to avoid. See src/popup/first-paint.js.

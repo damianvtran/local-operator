@@ -31,6 +31,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * than one that fails when an id is renamed. */
 const IDS = [
   "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
+  "standby", "standby-driver",
   "origin", "origin-ack",
   "origin-host", "origin-again", "origin-scope", "origin-scope-detail", "origin-position",
   "origin-waiting", "origin-allow", "origin-deny", "origin-previous", "origin-next",
@@ -237,6 +238,32 @@ function installFetchStub(pendingOrigin) {
       pending_origin: pendingOrigin(),
     }),
   });
+}
+
+/** A localStorage double, so the pin a render WRITES is observable.
+ *
+ * popup.ts guards every access in a try/catch, so without this the writes are
+ * silently swallowed and a wrong pin is indistinguishable from a right one. */
+function installLocalStorageStub() {
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+  return store;
+}
+
+/** Which card is on screen, by the sections the stub tracks. */
+function visibleState(nodes) {
+  // #pending is deliberately absent: the stub does not model the placeholder
+  // (it ships visible and every render replaces it), and a state list that
+  // asked for it would fail rather than report.
+  const states = [
+    "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
+    "standby", "origin", "origin-ack",
+  ];
+  return states.filter((id) => !nodes.get(id).classList.contains("hidden"));
 }
 
 test("the re-ask card survives a second render and a queue move (U9/U10)", async () => {
@@ -701,8 +728,7 @@ test("the wedged-worker card offers a one-click reload, and a healthy one never 
 
     nodes.get("reload-extension").click();
     await tick(20);
-    assert.equal(reloads.length, 1, "the wedge card's primary action must reload the extension exactly once");
-  } finally {
+    assert.equal(reloads.length, 1, "the wedge card's primary action must reload the extension exactly once");  } finally {
     await bundle.close();
   }
 });
@@ -890,8 +916,7 @@ test("the unreachable-worker notice carries no granted value", async () => {
       "",
       "the granted trough must be cleared, not merely hidden — a later ack would reveal the stale host",
     );
-    assert.equal(nodes.get("origin-ack-check").classList.contains("hidden"), true, "no check on an unapplied decision");
-  } finally {
+    assert.equal(nodes.get("origin-ack-check").classList.contains("hidden"), true, "no check on an unapplied decision");  } finally {
     await bundle.close();
   }
 });
@@ -1071,7 +1096,135 @@ test("a fresh prompt opens at the top of its card, not scrolled past its banner 
     );
     assert.ok(
       scope._focusCalls.some((options) => options && options.preventScroll === true),
-      "focus must opt out of scrolling rather than rely on the card being short enough",
+      "focus must opt out of scrolling rather than rely on the card being short enough",    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * The standby card (design note §9.2 row E4, §8.4).
+ *
+ * A standby install is paired and connected and is deliberately receiving no
+ * commands, because another authorised identity holds the wheel. It is neither
+ * the connected card (which would claim the agent can drive THIS browser) nor a
+ * fault the user must fix. These rows pin the card choice, the name of the
+ * OTHER install the daemon reported, the pin (so the card does not resize on
+ * reopen), and the negatives that keep it honest: a driver render must not take
+ * the standby card, and a revoked pairing must not keep showing it from a stale
+ * session value.
+ *
+ * Uses `installHealth`, the helper the stale-worker rows introduced, rather than
+ * a second way of overriding /health.
+ * ------------------------------------------------------------------------- */
+
+test("E4: a standby render shows the standby card, names the driver, and is pinned", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  const pins = installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    // The worker records the daemon's own role statement in session storage.
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "a standby install must show the standby card and nothing else",
+    );
+    assert.match(
+      nodes.get("standby-driver").textContent,
+      /Chrome 0\.1\.10/,
+      "the card must NAME the other install when the daemon reported a label",
+    );
+    // The card states the failover cost rather than hiding it (design §5.3):
+    // the session loses the tab it was using and a fresh one appears.
+    assert.equal(
+      pins.get("lop:pin-hint"),
+      "317.3",
+      "the standby card must pin the height it was measured at, or it resizes on reopen",
+    );
+
+    // RENDER N+1 — the recomputation half of every defect in this class: a
+    // second render off a storage event must not fall through to another card.
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.deepEqual(visibleState(nodes), ["standby"], "render N+1 drifted off the standby card");
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("E4: a driver render does NOT take the standby card", async () => {
+  // The negative that stops the card from being a function of "a daemon said
+  // someone is driving". A connected install is the driver, and the two must
+  // never be confused: one means the agent can drive this browser, the other
+  // means it explicitly cannot.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+    assert.equal(
+      nodes.get("standby-driver").textContent,
+      "",
+      "the connected card must not carry the standby line",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("E4: a revoked pairing does not keep showing the standby card", async () => {
+  // `connState` lives in SESSION storage and survives until the worker
+  // overwrites it, so a revoke can leave "standby" behind. /health is the
+  // authority on whether any pairing exists, and the card is gated on it —
+  // otherwise a revoked install would sit on "paired … standing by" forever.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installLocalStorageStub();
+  installHealth(() => ({ paired: false, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.ok(
+      !visibleState(nodes).includes("standby"),
+      "a stale standby connState must not claim a pairing that is gone",
     );
   } finally {
     await bundle.close();

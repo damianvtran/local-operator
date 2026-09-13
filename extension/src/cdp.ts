@@ -192,6 +192,37 @@ export async function detach(tabId: number): Promise<void> {
   attached.delete(tabId);
 }
 
+/**
+ * Stand down from driving: release every debugger session and forget every
+ * surface this install holds.
+ *
+ * Called when the daemon answers `role: "standby"` (or sends the live `role`
+ * frame for it). A standby link receives no Request at all, so every handle in
+ * this install's surface map has become undrivable: nothing can navigate,
+ * read or CLOSE it. Keeping them would leave the user with "Local Operator is
+ * debugging this browser" banners on tabs no command can ever reach, and a
+ * `close` that silently never arrives — which is the failure the user would
+ * report as "the agent left my tabs open" (design §2.3).
+ *
+ * Deliberately reuses `pruneSurface` (the ONE dead-surface cleanup) rather than
+ * adding a second teardown path: three divergent prune sites are how log
+ * buffers and debugger attachments leaked before (finding m1), and a standby
+ * sweep that forgot `dropLogCapture` would leak every tab's ring buffer until
+ * the worker dies.
+ */
+export async function releaseAllSurfaces(): Promise<void> {
+  // Snapshot first: `pruneSurface` mutates the map while we iterate.
+  const surfaces = await getSurfaces();
+  for (const token of Object.keys(surfaces)) {
+    const surface = surfaces[token];
+    if (surface) await pruneSurface(token, surface.tabId);
+  }
+  // A tab we attached to but never minted a surface for is still ours to hand
+  // back (an attach whose deadline fired can complete in Chrome afterwards —
+  // see `attach`), and `pruneSurface` cannot reach it: it is pruned by TOKEN.
+  for (const tabId of [...attached]) await detach(tabId);
+}
+
 export async function cdp<T>(
   tabId: number,
   method: string,

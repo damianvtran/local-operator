@@ -28,6 +28,12 @@ type State =
   | "disconnected"
   | "incompatible"
   | "unresponsive"
+  // Paired and connected, but deliberately not taking commands because another
+  // authorised install holds the wheel. Its own card, because neither
+  // "connected" (the agent cannot drive THIS browser) nor a fault state (the
+  // user has nothing to fix) is the truth, and the user needs the one fact only
+  // this surface can tell them: which install IS driving.
+  | "standby"
   | "origin"
   | "origin-ack"
   // The neutral pre-render placeholder. Never shown BY render() — it is the
@@ -40,6 +46,7 @@ const sections = [
   "disconnected",
   "incompatible",
   "unresponsive",
+  "standby",
   "origin",
   "origin-ack",
   "pending",
@@ -131,6 +138,13 @@ interface Health {
   link_attached?: boolean;
   paired: boolean;
   browser: string;
+  /** Which install is driving, and what to call it. Optional because a daemon
+   * predating multi-identity does not send either — and a driver we cannot name
+   * is still a driver, which is why the standby card words itself either way. */
+  driver_extension_id?: string;
+  driver_label?: string;
+  /** Identities the daemon has ACCEPTED but is not routing commands to. */
+  standby_extension_ids?: string[];
   current_url?: string;
   current_title?: string;
   pending_origin?: string;
@@ -151,6 +165,11 @@ const TONE: Record<State, string> = {
   // agent cannot do it for them. It is emphatically NOT success — a green card
   // over a mute worker is the symptom the incident was made of.
   unresponsive: "var(--danger)",
+  // Neutral, NOT success and NOT danger. Nothing is broken and nothing needs
+  // recovering — this browser is paired and healthy and simply not the one
+  // holding the wheel — so the card takes the same hairline as the other
+  // transitional states rather than claiming an achievement or an error.
+  standby: "var(--hairline-strong)",
   origin: "var(--hairline-strong)",
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
@@ -227,13 +246,21 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 //   connected card      207.16px  ->  86px
 //   pairing form        339.52px  -> 219px
+//   standby card        317.3px  -> 193px
 //
 // The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
 // cards, i.e. sub-pixel rounding on one shared value), so `card = pin + 121`.
 // Measured by sweeping the pin in a real headless Chrome at 300x600 dpr=2 and
 // reading the card back; that invariant is what makes the sweep a solve rather
 // than a guess. Re-measure the same way if either card's copy or controls
-// change: an eyeballed pin IS the reflow this block exists to prevent.
+// change: an eyeballed pin IS the reflow this block exists to prevent.//
+// THE STANDBY CARD IS DURABLE TOO, and it is the reason this branch exists at
+// all: an install that is paired while ANOTHER install drives stays exactly that
+// way across every open — the roles do not flicker between popup opens the way
+// a wedge does — so the bet the pin makes pays there as much as it does for
+// `connected`. Its height is measured with the driver line FILLED, because
+// render() always fills it (the daemon's label or the generic sentence) and both
+// spellings stay on one line at 300px.
 //
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and
@@ -287,11 +314,12 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // measurement correction on this branch, not a second card.)
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
-const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING];
+const PIN_STANDBY = "193px";
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
   pairing: PIN_PAIRING,
-};
+  standby: PIN_STANDBY,};
 
 /** The pinned height this browser last settled on, or null for "no hint". */
 function readPinHint(): string | null {
@@ -645,6 +673,29 @@ async function renderOnce(): Promise<void> {
   // the link's own copy of `paired`.
   if (health.extension_unresponsive === true) {
     show("unresponsive");
+    return;
+  }
+  // ------------------ standby -----
+  //
+  // A STANDBY install is paired, connected and healthy, and is deliberately
+  // receiving no commands: another authorised identity holds the wheel. It is
+  // neither the connected card (the agent cannot drive THIS browser) nor a
+  // fault to recover, and the user's real question here - "then which browser
+  // is it driving?" - is answerable only from this card, so it names the other
+  // install whenever the daemon reported a label for it.
+  //
+  // Read from `connState`, which the worker writes from the daemon's own `role`
+  // statement, and gated on /health's `paired` so a stale session-storage value
+  // cannot claim a pairing that has since been revoked.
+  if (connState === "standby" && health.paired) {
+    const other = document.getElementById("standby-driver");
+    if (other) {
+      const label = health.driver_label;
+      other.textContent = label
+        ? `${label} is driving right now.`
+        : "The other install is driving right now.";
+    }
+    show("standby");
     return;
   }
   if (health.paired) {

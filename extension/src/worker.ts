@@ -6,7 +6,7 @@ import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
-import { BridgeCommandError } from "./cdp";
+import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
@@ -65,6 +65,15 @@ const DIAL_TIMEOUT_MS = 10_000;
 
 let socket: WebSocket | undefined;
 let paired = false;
+//: The daemon's statement about THIS link's role: "driver" (commands come here)
+//: or "standby" (a paired peer that is deliberately sent none, because another
+//: authorised install is driving).
+//:
+//: An absent `role` on the wire means DRIVER. The released daemon never sent the
+//: field, and reading "absent" as standby would make a new extension hand its
+//: tabs to nobody on every already-installed daemon — the half of the compat
+//: matrix that has to keep working without a PROTO_VERSION bump.
+let standby = false;
 let attempt = 0;
 let connected = false;
 let connecting = false;
@@ -268,6 +277,24 @@ async function respond(response: Response, generation: number): Promise<void> {
   console.warn(`dropped response for ${response.id}: the extension socket is not open`);
 }
 
+function applyRole(role: "driver" | "standby", pairedNow: boolean): void {
+  const demoted = role === "standby" && !standby;
+  standby = role === "standby";
+  if (demoted) {
+    // ON THE TRANSITION only: the demotion is the event that has to hand the
+    // tabs back, and re-running the sweep on every repeated `hello_ack` (the
+    // popup opens its own socket, so acks are not rare) would rebuild the
+    // surface map's storage on every render for no change in state.
+    fireAndForget(releaseAllSurfaces(), "standby surface release");
+  }
+  fireAndForget(
+    chrome.storage.session.set({
+      connState: standby ? "standby" : pairedNow ? "connected" : "pairing",
+    }),
+    "connState write",
+  );
+}
+
 async function dispatch(
   request: { id: string; method: string; params: Record<string, unknown> },
   generation: number,
@@ -468,10 +495,15 @@ async function connect(): Promise<void> {
     else if (frame.event === "ping") guarded(() => wire.send(JSON.stringify({ event: "pong" })), "pong");
     else if (frame.event === "hello_ack") {
       paired = frame.paired;
-      fireAndForget(
-        chrome.storage.session.set({ connState: frame.paired ? "connected" : "pairing" }),
-        "connState write",
-      );
+      // `role`/`authorized_count` are additive: an absent role means this link
+      // is the driver, which is what the released daemon always implicitly said.
+      applyRole(frame.role ?? "driver", frame.paired);
+    } else if (frame.event === "role") {
+      // A live change while this socket stayed connected: a failover promoted
+      // us, or `lop browser drive` handed the wheel to the other install.
+      // Handled here rather than by reconnecting, so the promoted install
+      // starts serving immediately instead of after a dial.
+      applyRole(frame.role ?? "driver", paired);
     } else if (frame.event === "pair_result" && frame.ok) {
       fireAndForget(chrome.storage.local.set({ token: frame.token }), "token write");
     }
@@ -489,6 +521,10 @@ async function connect(): Promise<void> {
     connecting = false;
     paired = false;
     socket = undefined;
+    // The role belief is NOT reset here. A standby keeps holding nothing (its
+    // surfaces were released on the demotion), and a re-dial re-learns the role
+    // from its own ack — whereas clearing it would make the next demotion
+    // "not a transition" and skip the release the daemon is asking for.
     // Preserve the close code so the popup can distinguish a protocol mismatch
     // (4001 — "update needed", which pairing cannot fix) from an ordinary
     // disconnect (finding D2). 4003 is an unpair/revoke.
