@@ -550,8 +550,12 @@ async def _search_perplexity(
         sources=sources,
         answer=_perplexity_answer(payload),
         request_id=str(payload.get("uuid") or request_id),
-        # Anonymous mode is free; the Sonar key path (below) is token-billed and
-        # leaves this unset so the estimate uses the Sonar rate instead.
+        # ``keyless=True`` is what makes this the free tier, and it is the only
+        # thing that does: the keyed path above reports its tokens and its
+        # ``keyless=False``, so the estimator routes each to its own rate. (This
+        # comment used to say the keyed path left ``usage`` unset; it has reported
+        # usage since round-1 review MAJOR-1, and the stale wording described the
+        # opposite of the code -- round-2 review NIT-3.)
         usage=SearchUsage(keyless=True),
     )
 

@@ -856,17 +856,6 @@ def build_session_report(
     return body.to_text()
 
 
-def _search_activity(runtime: SessionDiagnostics) -> bool:
-    """Whether this session has any search spend to name at all.
-
-    The Est. cost row asks this before mentioning the search half: a session that
-    never searched must not read ``incl. $0.0000 search``, which is a claim about
-    retrieval rather than a report of none.
-    """
-    snapshot = runtime.search_spend
-    return snapshot is not None and bool(snapshot.count)
-
-
 def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
     """This session's search spend, as its own attributed block.
 
@@ -896,7 +885,7 @@ def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
             # dollars, and on a row where the two point in opposite directions --
             # twenty free searches beside one paid one -- the reader has to infer
             # the scale (design review D3).
-            meta="this session · live · bars: operations",
+            meta="this session · live",
             note=(
                 # Rewritten with the combined headline: the old note told the reader
                 # this screen kept the two apart, which stopped being true the moment
@@ -1074,7 +1063,18 @@ def _draw_recorded_usage(
             # Appended rather than always present: a session that never searched
             # must not carry a search clause, which reads as a claim about
             # retrieval that did not happen.
-            ladder = tuple(f"{rung} · {search_note}" for rung in ladder) + (search_note,)
+            #
+            # The clause drops its own ``incl.`` on a rung that already opens with
+            # one (round-2 design D12): ``incl. subagents · incl. $0.0049 search``
+            # read as a repetition rather than a scope list, where the widest rung
+            # already sounds right (``$0.39 own · $0.98 subagents · incl. …``).
+            def _joined(rung: str) -> str:
+                clause = (
+                    search_note.removeprefix("incl. ") if rung.startswith("incl.") else search_note
+                )
+                return f"{rung} · {clause}"
+
+            ladder = tuple(_joined(rung) for rung in ladder) + (search_note,)
         body.kv(
             cost_label(bool(search_note)),
             format_cost(MoneyFigure.of(spend)),

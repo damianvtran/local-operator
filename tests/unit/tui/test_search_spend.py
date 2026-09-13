@@ -854,3 +854,103 @@ async def test_a_narrow_frame_drops_the_note_column_rather_than_cropping_it(
     # Nothing HALF-written: no fragment of the note survives into the frame.
     assert "incl" not in text.split("Est. cost")[1].split("\n")[0]
     assert "≈ list price × tokens" not in flowed(text)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 findings: the label, the bar policy, unpriced-is-not-free, D9
+# ---------------------------------------------------------------------------
+
+
+def _ledger(rows):
+    from local_operator.tui.costs import SearchSpendSnapshot
+
+    SEARCH_SPEND.reset()
+    for provider, cost, *rest in rows:
+        SEARCH_SPEND.record("sess", provider, cost, kind=(rest[0] if rest else "search"))
+    return SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+
+
+def test_unpriced_searches_are_not_called_free() -> None:
+    """R2-MAJOR-1: the headline branched on money, and ``usd`` is zero when unpriced.
+
+    The ledger counts free/paid/unpriced AT THE WRITE precisely because a summed
+    ``usd`` cannot tell them apart; inferring "free" from "no money" at render time
+    put two contradicting claims on one screen.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_component_text
+
+    unpriced_only = _ledger([("future-engine", None), ("future-engine", None)])
+    assert search_component_text(unpriced_only) == "incl. 2 unpriced searches"
+
+    # Free AND unpriced: the unpriced part is what cannot be claimed, so it is
+    # what the headline names.
+    mixed = _ledger([("duckduckgo", SearchCost(usd=0.0, basis="free")), ("future-engine", None)])
+    assert "free" not in search_component_text(mixed)
+
+    assert search_component_text(_ledger([("duckduckgo", SearchCost(usd=0.0, basis="free"))])) == (
+        "incl. 1 free search"
+    )
+    # R2-MINOR-2: a page read is not a search.
+    assert search_component_text(
+        _ledger([("deepseek:read", SearchCost(usd=0.0, basis="free"), "read")])
+    ) == ("incl. 1 free read")
+
+
+def test_the_bar_is_drawn_only_where_this_ledgers_note_still_fits() -> None:
+    """R2-MAJOR-2: a fixed threshold drew the bar where it CAUSED the orphan.
+
+    Whether the bar pays for itself depends on the note it shares the row with,
+    so the decision is taken from this ledger's own widest note: at 81 cells the
+    30-cell note fits beside it, at 70 it does not and there is no bar. Pin both
+    ends, and that the count never lands on a line of its own.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_spend_section
+
+    snapshot = _ledger([("future-engine", None), ("future-engine", None)])
+
+    def render(width: int) -> str:
+        return "\n".join(
+            line.plain if hasattr(line, "plain") else str(line)
+            for line in search_spend_section(snapshot, width, meta="this session · live")
+        )
+
+    narrow, wide = render(70), render(90)
+    assert "█" not in narrow and "bars:" not in narrow, "no bar, and nothing promising one"
+    assert "2 searches · no published price" in narrow
+    assert "█" in wide and "bars: operations" in wide
+    # The count is never orphaned onto its own line, at either end.
+    for text in (narrow, wide):
+        assert not any(
+            line.strip().startswith(("1 search", "2 searches")) and line.startswith("    ")
+            for line in text.splitlines()
+        )
+
+
+@pytest.mark.asyncio
+async def test_analytics_never_paints_a_cropped_money_fragment(tmp_path, monkeypatch) -> None:
+    """R2-MAJOR-3 / D9: the shortest rung was drawn anyway, then cropped.
+
+    At 60 columns that painted ``incl. $0.0`` -- a well-formed FALSE figure, two
+    rows above a block showing the real total on the same frame.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.0069, basis="per-rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(60, 44)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [line.plain for line in app.screen._report_lines() if "Est. cost" in line.plain]
+
+    assert rows, "the headline row is on screen"
+    row = rows[0]
+    assert "Est. cost · search" in row
+    # No fragment of any width: the row ends at the FIGURE, with nothing but
+    # padding after it, so no half-token can be mistaken for money.
+    assert "incl" not in row
+    assert row.split()[-1].startswith("$"), f"something follows the figure: {row!r}"
