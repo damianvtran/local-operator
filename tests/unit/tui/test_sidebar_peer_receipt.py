@@ -80,8 +80,12 @@ async def live_owners(
     """
     from local_operator.session.runtime import registry
 
-    def publish(record: Any, root: Path | None = None) -> Path:
-        directory = registry.run_dir(root)
+    def publish(record: Any, root: Path | None = None, dirname: str = registry.RUN_DIRNAME) -> Path:
+        # ``dirname`` is the shared registry's namespace parameter (session
+        # records and the serve daemon's are one implementation now): accepted
+        # and passed through so this stub keeps the real signature, while the
+        # re-keying below — the reason the stub exists at all — is unchanged.
+        directory = registry.run_dir(root, dirname)
         record.heartbeat_at = time.time()
         handle, path = tempfile.mkstemp(dir=directory, prefix=".x.", suffix=".tmp")
         with os.fdopen(handle, "w") as stream:
@@ -91,7 +95,9 @@ async def live_owners(
         return target
 
     monkeypatch.setattr(registry, "publish", publish)
-    monkeypatch.setattr(registry, "unpublish", lambda pid, root=None: None)
+    monkeypatch.setattr(
+        registry, "unpublish", lambda pid, root=None, dirname=registry.RUN_DIRNAME: None
+    )
 
     servers: dict[str, RuntimeServer] = {}
     handles: list[ServingSessionHandle] = []
