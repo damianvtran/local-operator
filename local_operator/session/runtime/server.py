@@ -173,6 +173,34 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
 _MAX_LINE_BYTES = 1 << 20
 
 
+def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
+    """Encoded bytes this frame occupies on the wire, with the delimiter counted.
+
+    ONE definition, deliberately: the same arithmetic decides what a producer
+    may emit, what the relay guard must degrade, and what compaction may merge.
+    Two spellings of it is how a producer's "sendable" drifts from a reader's
+    "readable", which is the failure this whole family of guards exists to
+    prevent.
+
+    Counting the newline is CONSERVATIVE, not a requirement of the readers. The
+    boundary was probed against asyncio's ``readline(limit=L)``: a payload of
+    exactly ``L`` bytes plus its ``\\n`` is RETURNED, and only a payload longer
+    than ``L`` raises ``ValueError("Separator is found, but chunk is longer than
+    limit")``. Keeping the delimiter in the count buys one byte of margin on a
+    boundary where being wrong costs the whole connection, which is worth more
+    than the byte; it is not a claim about where the limit sits.
+
+    ``payload`` is for a caller that has ALREADY encoded the frame: ``_send_to``
+    serializes to write, so measuring it here would serialize every frame twice
+    on the per-client repaint path — measured at 2.3 ms for a 188 KB frame on
+    this host, against 1.3 us for a small one. Reusing the bytes keeps the rule
+    in ONE place without paying for it twice.
+    """
+    if payload is None:
+        payload = json.dumps(frame).encode()
+    return len(payload) + 1
+
+
 def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     """Encoded size of ``frame`` counting its ``delta`` as empty (plus the "\\n").
 
@@ -190,11 +218,11 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     """
     data = frame.get("data")
     if not isinstance(data, dict) or "delta" not in data:
-        return len(json.dumps(frame).encode()) + 1
+        return _frame_line_bytes(frame)
     probe = {**frame, "data": {**data, "delta": ""}}
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
-    return len(json.dumps(probe).encode()) + 1 - 2
+    return _frame_line_bytes(probe) - 2
 
 
 def _compose_reuses_key(retained: dict[str, Any], incoming: dict[str, Any]) -> bool:
@@ -274,7 +302,7 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
     is accepted deliberately: the alternative is a frame the viewer cannot read
     at all, which costs the connection.
     """
-    encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
+    encoded = _frame_line_bytes(frame)
     if encoded <= cap_bytes:
         return frame
     op = frame.get("op", "frame")
@@ -487,6 +515,14 @@ class _ClientConn:
     #: to a viewer that did not negotiate would do.
     audit_history: bool = False
     frontend_ready: bool = False
+    #: True only while ``_push_to`` is writing THIS connection's welcome. It is
+    #: what tells ``_readable_frame`` whether an unreadable projection has a
+    #: canonical sync coming behind it on the same connection (the welcome does;
+    #: a mid-stream repaint does not), because the frame itself cannot say —
+    #: "projection" is the op for both. Scoped to the send rather than latched
+    #: afterwards so it can never be read as "this connection has had a welcome
+    #: at some point".
+    sending_welcome: bool = False
     # Updates can be scheduled back to this loop while the owner-loop
     # subscription call is returning. Hold them until the sync frame is queued;
     # dropping them creates an immediate sequence hole at every busy join.
@@ -1041,12 +1077,13 @@ class RuntimeServer:
         (round-4 NIT-2: the guarantee belongs to the call site, not the
         method, and saying so is what stops the next reuse from breaking it).
 
-        This is the ONE write that does not go through :meth:`_send_to`, and
-        it may only stay that way because the frames it carries
-        (``stopping``/``retiring``) are constant-size by construction — a few
-        hundred bytes regardless of session state. Reusing it for anything
-        that can grow would put an unreadable line on the wire with no ceiling
-        in front of it; route a new frame through ``_send_to`` instead.
+        This is the ONE write that does not go through :meth:`_send_to`, and it
+        may only stay that way because ``stopping`` is constant-size by
+        construction — a few hundred bytes regardless of session state.
+        ``retiring`` does NOT come through here: it carries free-text fields and
+        is sent via :meth:`_send_to`, under the ceiling, like everything else.
+        Reusing this for anything that can grow would put an unreadable line on
+        the wire with no ceiling in front of it.
         """
         for conn in list(self._clients.values()):
             try:
@@ -3391,7 +3428,11 @@ class RuntimeServer:
 
     async def _push_to(self, conn: _ClientConn) -> None:
         """The welcome form of a push: one full projection to one connection."""
-        await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+        conn.sending_welcome = True
+        try:
+            await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+        finally:
+            conn.sending_welcome = False
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating
@@ -3415,27 +3456,27 @@ class RuntimeServer:
         (measured at 1,254,249 B against this limit on a 256-sibling roster),
         so the hard bound has to live at the write.
 
-        The check is free: the frame is serialized here anyway, so it reuses
-        those bytes instead of dumping them a second time on the ~30/s repaint
-        path. What replaces an oversized frame depends on what the frame IS —
-        see :meth:`_readable_frame`.
+        The check costs one length comparison, not a second serialization: the
+        frame is encoded here to be written, and ``_frame_line_bytes`` is handed
+        those bytes so the ONE definition of the wire-size rule is used without
+        dumping the frame twice on the ~30/s repaint path. What replaces an
+        oversized frame depends on what the frame IS — see
+        :meth:`_readable_frame`.
         """
         timeout = (
             _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
         )
         async with conn.send_lock:
             try:
-                # ``+ 1`` for the delimiter: it lands in the peer's read buffer
-                # and its limit is checked against the buffer, so a payload of
-                # exactly the limit still overruns.
                 payload = json.dumps(frame).encode()
                 close_reason: str | None = None
-                if len(payload) + 1 > _MAX_LINE_BYTES:
-                    replacement, close_reason = self._readable_frame(frame, len(payload) + 1)
+                size = _frame_line_bytes(frame, payload=payload)
+                if size > _MAX_LINE_BYTES:
+                    replacement, close_reason = self._readable_frame(conn, frame, size)
                     if replacement is None:
                         return
                     payload = json.dumps(replacement).encode()
-                    if len(payload) + 1 > _MAX_LINE_BYTES:
+                    if _frame_line_bytes(replacement, payload=payload) > _MAX_LINE_BYTES:
                         # Not reachable for the substitutions this file builds
                         # (all are constant-size), but a frame that cannot be
                         # read must never be written, so the guarantee is kept
@@ -3446,7 +3487,7 @@ class RuntimeServer:
                             "replacement does not fit either",
                             replacement.get("op"),
                             self._record.session_id,
-                            len(payload) + 1,
+                            _frame_line_bytes(replacement, payload=payload),
                             _MAX_LINE_BYTES,
                         )
                         return
@@ -3462,7 +3503,7 @@ class RuntimeServer:
                 self._drop_client(conn, reason=f"send failed: {type(exc).__name__}")
 
     def _readable_frame(
-        self, frame: dict[str, Any], size: int
+        self, conn: _ClientConn, frame: dict[str, Any], size: int
     ) -> tuple[dict[str, Any] | None, str | None]:
         """What to write instead of an unreadable frame: ``(frame, close_reason)``.
 
@@ -3483,11 +3524,37 @@ class RuntimeServer:
         """
         op = frame.get("op")
         if op in ("projection", "welcome"):
-            # Only the mobile renderer consumes a projection at all, and for
-            # every other client the identity fields are the whole payload. The
-            # canonical state arrives on the ``frontend_sync`` the connect path
-            # sends next, so this loses nothing a viewer needs and leaves the
-            # session openable — which is the point.
+            if not conn.sending_welcome:
+                # A REPAINT, not a welcome, so there is no canonical sync behind
+                # it to restore what a blank would cost. Dropping it is the
+                # outcome this frame already had before the ceiling existed (the
+                # daemon's own reader drops an over-limit line) and it is the
+                # safe one: pushes are repaints, so the next one — 30 of them a
+                # second while a session streams — supersedes it, and the phone
+                # keeps rendering its last good state meanwhile. Substituting an
+                # identity-only payload here would instead REPLACE that state
+                # with an empty session, and the only thing standing between the
+                # phone and that blank would be the daemon's version fence (a
+                # lower ``version`` is fenced out: see ``mobile/daemon.py``'s
+                # staleness check and ``mobile/web/src/store.ts``), which is not
+                # ours to lean on here.
+                logger.error(
+                    "session runtime: dropped an unreadable %s repaint for session %s "
+                    "(%d bytes, over the %d-byte line limit) — the next repaint "
+                    "supersedes it; a blank one would not be restorable",
+                    op,
+                    self._record.session_id,
+                    size,
+                    _MAX_LINE_BYTES,
+                )
+                return None, None
+            # The WELCOME. Only the mobile renderer consumes a projection at all,
+            # and for every other client the identity fields are the whole
+            # payload — and the canonical state genuinely follows on the
+            # ``frontend_sync`` this same connect path sends next, which is what
+            # makes blanking the collections here lossless for the terminal and
+            # one lost repaint for the phone (a daemon already holding a
+            # projection fences the lower version out entirely).
             logger.error(
                 "session runtime: refusing to write an unreadable %s frame for session %s "
                 "(%d bytes, over the %d-byte line limit) — sending the identity-only "

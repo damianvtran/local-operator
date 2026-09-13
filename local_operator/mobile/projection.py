@@ -194,8 +194,9 @@ FRAME_CAP_DERIVED_ROSTER_FIELDS = ("peer_ids", "child_ids", "ancestor_ids", "anc
 #: What a roster row keeps in the LAST tier, when even the derived graph is not
 #: enough. Only identity and the parent edge stay: a viewer can still render one
 #: row per child, its label, its lifecycle state, and the hierarchy it belongs
-#: to — which is what makes the shed tiers above lossless in kind rather than
-#: merely smaller.
+#: to, and the list is its own count. Per-child detail is fetched on demand —
+#: except ``error_text``, which exists nowhere else and is lost here (see the
+#: tier's own comment in ``cap_projection_frame``).
 FRAME_CAP_ROSTER_IDENTITY_FIELDS = ("job_id", "label", "parent_job_id", "status")
 
 
@@ -504,10 +505,10 @@ def cap_projection_frame(
        O(n^2) across a flat sibling group (see
        ``FRAME_CAP_DERIVED_ROSTER_FIELDS``). ``parent_job_id`` stays on every
        row, so the same graph is rebuildable by the reader.
-    6. The roster drops to identity rows plus a count
-       (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``). A viewer renders one row per
-       child with its label, lifecycle state and parent; per-child detail is
-       fetched on demand, the same trade the transcript already makes.
+    6. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
+       A viewer renders one row per child with its label, lifecycle state and
+       parent; per-child detail is fetched on demand, the same trade the
+       transcript already makes.
 
     A frame still over ``cap_bytes`` after every tier is logged at WARNING
     rather than returned silently: the caller cannot fix it, but a dropped
@@ -635,17 +636,26 @@ def cap_projection_frame(
     if _frame_bytes(data) <= cap_bytes:
         return data, True
 
-    # Tier 6: identity rows plus a count. ``subagent_count`` is what keeps this
-    # degradation self-describing — a roster that reads as empty would be a
-    # worse lie than one that says how many children there are — and it is the
-    # only fact here that a row cannot carry.
+    # Tier 6: identity rows. What stays is what a reader can neither derive nor
+    # fetch per child: the job id, the label, the parent edge and the lifecycle
+    # state. What goes is recoverable through the per-child fetch the transcript
+    # already relies on — with ONE exception, named rather than glossed:
+    # ``error_text`` is ``str(exc)`` from the parent runner and is never written
+    # to the child's transcript, so the lazy /history fetch cannot bring it back
+    # (see ``test_live_fold_keeps_failed_child_error_text_generous``). Losing it
+    # is the price of a frame this size; the alternative is a frame no viewer can
+    # read at all.
+    #
+    # The rows themselves are the count, so no ``subagent_count`` key is added:
+    # the client rebuild filters to ``SessionProjection``'s own fields and would
+    # drop an unknown key on the floor, which would make it a number nobody
+    # reads.
     rows = data.get("subagents")
     if rows:
         data["subagents"] = [
             {key: row[key] for key in FRAME_CAP_ROSTER_IDENTITY_FIELDS if key in row}
             for row in rows
         ]
-        data["subagent_count"] = len(rows)
     if _frame_bytes(data) <= cap_bytes:
         return data, True
 
