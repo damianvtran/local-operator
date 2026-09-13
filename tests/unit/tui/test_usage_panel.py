@@ -2626,6 +2626,42 @@ async def test_a_scoped_panel_keeps_the_stale_count_over_the_provider_name() -> 
     assert "anthropic" in wide and "1 stale" in wide, wide
 
 
+def _single_currency_split() -> list[UsageReport]:
+    """One balance carrying a split — the smallest body an annotation can grow."""
+    return [
+        _report(
+            _balance(
+                "deepseek:balance:usd",
+                "Balance (USD)",
+                120.0,
+                status="ok",
+                detail="100.00 USD paid · 20.00 USD granted",
+            ),
+            provider="deepseek",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(120, 34), (100, 19), (100, 18), (80, 14), (60, 12)])
+async def test_the_scroll_chrome_is_keyed_to_the_meters_not_the_annotations(size) -> None:
+    """The scroll chrome is a statement about the NUMBERS.
+
+    An annotation is decoration the window may drop, so a card whose meters all
+    fit is not a scrolled card — and must not raise a marker, a bar or an
+    `↑↓ scroll` hint that cannot move, which is chrome the detail-free tree did
+    not have and which the hint's own rule (a key that does nothing teaches the
+    user to distrust the others) exists to prevent.
+    """
+    async with _panel_app(size=size) as panel:
+        panel.show_reports(_single_currency_split())
+        body = panel._body()
+        framed = "\n".join(panel.render_lines_for_test())
+    chrome = "showing" in framed or "↑↓" in framed
+    assert chrome == (len(body.skeleton().lines) > panel._body_budget()), (size, framed)
+    assert ("█" in framed) == chrome, (size, framed)
+
+
 @pytest.mark.asyncio
 async def test_the_scrolled_panel_never_leads_with_an_annotation() -> None:
     """R1 by witness, on the REAL panel and its real budget.

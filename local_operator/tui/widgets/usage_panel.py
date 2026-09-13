@@ -1193,7 +1193,7 @@ class UsagePanel(Static):
         """
         body = self._body()
         budget = self._body_budget()
-        total = len(body.lines)
+        total = self._scrolling_rows(body)
         if total <= budget:
             return None
         offset = self._content_offset(event)
@@ -1241,7 +1241,7 @@ class UsagePanel(Static):
         """Move the offset so the thumb's top lands at ``thumb_top`` and repaint."""
         body = self._body()
         budget = self._body_budget()
-        target = self._offset_from_thumb_top(thumb_top, len(body.lines), budget)
+        target = self._offset_from_thumb_top(thumb_top, self._scrolling_rows(body), budget)
         self._offset = max(0, min(self._max_offset(), target))
         self._repaint()
 
@@ -1373,6 +1373,17 @@ class UsagePanel(Static):
         blank (the pinned-height tests read it).
         """
         return 2 + (1 if self._note_shown() else 0), budget
+
+    def _scrolling_rows(self, body: UsageBody) -> int:
+        """How many rows the scroll chrome counts: the METERS, not the annotations.
+
+        ONE source of truth for the three consumers — the painter, the hit test
+        and the drag — for the reason the bar's own comment gives: a bar drawn
+        from one total and dragged by another sits under the pointer in one place
+        and moves from another. Annotations are droppable decoration, so they are
+        not part of the list the reader is scrolling.
+        """
+        return len(body.skeleton().lines)
 
     def _scrollbar_thumb(self, total: int, budget: int) -> tuple[int, int]:
         """``(thumb_top, thumb_len)`` inside a ``budget``-tall track.
@@ -1625,10 +1636,18 @@ class UsagePanel(Static):
 
     def _compose_rows(self) -> list[Text]:
         body = self._body()
+        content = body.skeleton()
         lines = body.lines
         budget = self._body_budget()
         self._offset = max(0, min(self._offset, self._max_offset()))
-        scrolled = len(lines) > budget
+        # "Scrolled" is about the METERS, not the annotations. The card's scroll
+        # chrome — the position marker, the `↑↓ scroll` hint, the bar — is a
+        # statement about the numbers, and an annotation the window chose to drop
+        # is decoration the reader was never promised. Keyed off the composed
+        # body instead, a card whose meters ALL fit would raise a marker and a
+        # scroll hint that cannot move the moment a split had to be dropped,
+        # which is the dead key the hint's own rule exists to avoid.
+        scrolled = len(content.lines) > budget
         window, shown_end = self._window_rows(body, budget)
         # ``edge`` is tuned against the app ground; the raised overlay ground
         # needs one raised step to preserve the same intentionally quiet ratio.
@@ -1681,7 +1700,7 @@ class UsagePanel(Static):
         # `scrolled`. It adds no row and changes no width, so `_repaint`'s pinned
         # height and `_body_budget` are untouched.
         if scrolled:
-            self._paint_scrollbar(rows, budget, len(lines))
+            self._paint_scrollbar(rows, budget, len(content.lines))
         return rows
 
     def _window_rows(self, body: UsageBody, budget: int) -> tuple[list[Text], int]:
