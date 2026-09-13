@@ -498,7 +498,7 @@ def _session_sweep_candidates(basetemp: Path | None) -> list[Path]:
 
 
 def _sweep_session_leftovers(basetemp: Path | None) -> int:
-    """Stop every leftover broker under ``basetemp``; return how many were live.
+    """Stop every leftover broker under ``basetemp``; return how many it stopped.
 
     **Belt and braces, not the primary mechanism.** The call-phase reap is what
     stops brokers in practice, and the per-test teardown sweep covers a
@@ -574,14 +574,18 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
 def _broker_is_still_up(candidate: Path) -> bool:
     """Is ``candidate``'s broker still answering, after a stop was attempted?
 
-    Used by the session-end net's count and by `_stop_brokers_in`'s post-SIGTERM
-    wait loop, so both ask the question the same way.
+    This is the post-SIGTERM probe inside `_stop_brokers_in`'s wait loop, and it
+    is that loop's only caller: a False answer here is what puts the candidate
+    into the set `_stop_brokers_in` returns. The session-end net does not call
+    this helper — it counts the set that function returns, and reports that.
 
     Conservative in the only direction that is honest: any failure to get an
-    answer counts as STILL UP, so the net never claims a reclaim it could not
-    observe and the wait loop never lets a refusal escape cleanup. `is_running`
-    deliberately re-raises `BrokerIncompatible`, and a skewed daemon that survived
-    the stop is not a reclaim either.
+    answer counts as STILL UP, so a broker enters the returned set only when a
+    probe actually observed it gone. The net, which reports that set, therefore
+    never claims a reclaim it could not observe, and the wait loop never lets a
+    refusal escape cleanup. `is_running` deliberately re-raises
+    `BrokerIncompatible`, and a skewed daemon that survived the stop is not a
+    reclaim either.
     """
     from local_operator.secrets import client
 
