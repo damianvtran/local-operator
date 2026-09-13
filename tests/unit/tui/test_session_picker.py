@@ -38,8 +38,12 @@ from local_operator.tui.widgets.session_picker import (
     CARD_PADDING_ROWS,
     EXEC_MARKER,
     GUTTER_CELLS,
+    LIST_MIN,
     NAME_MIN_CELLS,
+    OUTER_INSET_COLS,
+    OUTER_INSET_ROWS,
     PICKER_MIN_WIDTH,
+    STACK_BELOW_COLS,
     SessionPickerScreen,
     _clocks_row,
     _footer_hints,
@@ -2498,7 +2502,15 @@ async def test_the_panes_fit_the_terminal_at_every_height_on_the_real_stylesheet
             results = screen.query_one("#session-picker-results")
             preview = screen.query_one("#session-picker-preview")
             assert len(screen.render_lines_for_test()) <= results.size.height, height
-            assert len(screen.render_preview_for_test()) <= preview.size.height, height
+            # A HIDDEN PANE HAS NO REGION TO OVERFLOW, so there is nothing to
+            # check at the heights where the plan gives it none (the deliberately
+            # short terminal, which the next test pins as `display is False`).
+            # `render_preview_for_test` is the WIDGET's own text, not the
+            # compositor's, so it composes rows for a pane that is not drawn —
+            # which is exactly what makes this assertion meaningful only while
+            # the pane is up.
+            if preview.display:
+                assert len(screen.render_preview_for_test()) <= preview.size.height, height
 
 
 @pytest.mark.asyncio
@@ -2744,7 +2756,7 @@ async def test_the_painted_name_field_equals_the_plan_across_the_id_gap_band() -
     name = ("alpha tenant " * 6).strip()
     rows = [_row(f"aa{index:010d}", name) for index in range(4)]
     painted: list[tuple[int, int]] = []
-    for width in (44, 48, 52, 56, 60, 64, 68, 71, 72, 80, 100):
+    for width in (44, 48, 52, 56, 60, 64, 68, 75, 76, 80, 100):
         app = OperatorApp(lambda: _factory(FakeSession()))
         async with app.run_test(size=(width, 30)) as pilot:
             await pilot.pause()
@@ -2770,10 +2782,14 @@ async def test_the_painted_name_field_equals_the_plan_across_the_id_gap_band() -
             assert cell_len(row0) <= screen._usable(), (width, cell_len(row0), screen._usable())
 
     # THE INVARIANT, AT THE PAINTED LEVEL: the name field never narrows as the
-    # terminal grows, with the id flip as the one pinned exception.
+    # terminal grows, with the id flip as the one pinned exception. The pair is
+    # 75/76 rather than 71/72 because the picker's outer inset takes four cells
+    # off the pane at a given terminal width, so the width at which the id fits
+    # moves out by four — pinned here rather than left to a floor, because a flip
+    # outside the sampled range would make this loop assert nothing at all.
     for (width, cells), (next_width, next_cells) in zip(painted, painted[1:]):
         if next_cells < cells:
-            assert width == 71 and next_width == 72, (width, next_width, cells, next_cells)
+            assert width == 75 and next_width == 76, (width, next_width, cells, next_cells)
 
 
 def test_no_word_on_the_filter_row_is_painted_at_faint() -> None:
@@ -2922,15 +2938,25 @@ def test_a_short_terminal_drops_the_preview_and_gives_the_rows_to_the_list() -> 
     draw a header and one body line, the preview is not drawn at all and the
     list takes the rows.
     """
-    from local_operator.tui.widgets.session_picker import PREVIEW_DRAW_MIN
+    from local_operator.tui.widgets.session_picker import (
+        FILTER_ROWS,
+        OUTER_INSET_ROWS,
+        PREVIEW_DRAW_MIN,
+    )
 
     assert PREVIEW_DRAW_MIN == 5
     short = plan_layout(30, 12)
     assert short.preview_rows == 0
     # The rows the preview would have taken are the LIST's: chrome is still
     # reserved first, so the list gets everything above the filter row.
-    assert short.list_rows == 12 - 3
-    assert plan_layout(40, 14).preview_rows == PREVIEW_DRAW_MIN
+    assert short.list_rows == 12 - FILTER_ROWS - 2 * OUTER_INSET_ROWS
+    # ...and the boundary is the pane's floor, not a height: the pane draws for
+    # the first time at the height whose content rows equal it, which the inset
+    # moves out by its own two rows. Stated through the constants so the bound
+    # cannot drift from the arithmetic it describes.
+    boundary = FILTER_ROWS + 2 * OUTER_INSET_ROWS + PREVIEW_DRAW_MIN + LIST_MIN
+    assert plan_layout(40, boundary - 1).preview_rows == 0
+    assert plan_layout(40, boundary).preview_rows == PREVIEW_DRAW_MIN
 
 
 @pytest.mark.asyncio
@@ -3064,7 +3090,7 @@ def _long_transcript(root: Path, session_id: str, turns: int = 40) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 14), (100, 16), (40, 15), (40, 16), (45, 17), (60, 20)])
+@pytest.mark.parametrize("size", [(100, 16), (100, 18), (40, 17), (40, 18), (45, 19), (60, 22)])
 async def test_the_pane_never_paints_without_a_line_of_conversation(
     tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -3169,7 +3195,7 @@ async def test_the_status_row_is_spent_only_where_there_is_one_to_spare(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 16), (100, 20), (100, 30), (120, 36)])
+@pytest.mark.parametrize("size", [(100, 18), (100, 20), (100, 30), (120, 36)])
 async def test_the_stacked_pane_spends_every_content_row_it_reserves(
     tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -3317,7 +3343,7 @@ def _checkpoint_entry(model: str, cwd: str, ts: float = 0.0) -> dict[str, object
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(100, 14), (100, 15), (40, 15), (100, 16)])
+@pytest.mark.parametrize("size", [(100, 16), (100, 17), (40, 17), (100, 18)])
 async def test_the_optional_header_row_is_shed_before_the_conversation_line(
     tmp_path: Path, size: tuple[int, int]
 ) -> None:
@@ -3398,18 +3424,29 @@ CKPT_CWD = "/Users/example/workspace"
 #: plan's floor (4 content rows), every content height between, and a tall pane.
 #: `body` is what the pane has left for the window after its header and (where
 #: there is room) the counter row — 1 through 6 here.
+#:
+#: EVERY HEIGHT HERE IS THE PRE-INSET VALUE PLUS THE PICKER'S TWO INSET ROWS,
+#: and that is what keeps the band the same band rather than a shorter one: the
+#: pane budget is ``height - FILTER_ROWS - 2 * OUTER_INSET_ROWS``, so adding the
+#: inset back to each height leaves ``cols_h`` — and therefore every content-row
+#: comment below — EXACTLY as it was. Left unshifted, the first four entries
+#: would have fallen under the plan's floor and the sweep would have asserted
+#: ``preview_rows == 0`` against a pane that is not drawn: green, and covering
+#: nothing. The last entry's width comment is re-measured below, because the
+#: WIDTH is the one axis the shift does not restore.
 BAND_SIZES: tuple[tuple[int, int], ...] = (
-    (100, 14),  # content 4 -> body 1
-    (40, 15),  # content 5 -> body 1 (2 with a checkpoint' shed row)
-    (40, 16),  # content 6 -> body 2 (1 with a checkpoint)
-    (100, 16),  # content 6 -> body 2
-    (45, 17),  # content 7 -> body 3 (2 with a checkpoint)
-    (100, 30),  # content 8 -> body 4 (3 with a checkpoint)
-    (120, 36),  # content 10 -> body 6 (5 with a checkpoint)
-    # The narrowest pane the plan draws: 16 cells of text on a 20-column
-    # terminal, where a width model that claims more than the widget has makes
-    # every line and the rule wrap and spend rows the budget never counted.
-    (20, 20),
+    (100, 16),  # content 4 -> body 1
+    (40, 17),  # content 5 -> body 1 (2 with a checkpoint' shed row)
+    (40, 18),  # content 6 -> body 2 (1 with a checkpoint)
+    (100, 18),  # content 6 -> body 2
+    (45, 19),  # content 7 -> body 3 (2 with a checkpoint)
+    (100, 32),  # content 8 -> body 4 (3 with a checkpoint)
+    (120, 38),  # content 10 -> body 6 (5 with a checkpoint)
+    # The narrowest pane the plan draws: 12 cells of text on a 20-column
+    # terminal (16 cells before the picker's inset took two cells a side),
+    # where a width model that claims more than the widget has makes every line
+    # and the rule wrap and spend rows the budget never counted.
+    (20, 22),
 )
 
 
@@ -3635,9 +3672,9 @@ async def test_every_body_budget_the_plan_draws_paints_a_line_and_counts_it(
 @pytest.mark.parametrize(
     "size,expect_meta,expect_counter",
     [
-        ((100, 14), False, False),  # content 4: room for the line of conversation only
-        ((40, 15), False, True),  # content 5: the counter outranks the model row
-        ((100, 16), True, True),  # content 6: room for all three claims
+        ((100, 16), False, False),  # content 4: room for the line of conversation only
+        ((40, 17), False, True),  # content 5: the counter outranks the model row
+        ((100, 18), True, True),  # content 6: room for all three claims
     ],
 )
 async def test_the_panes_rows_are_claimed_in_precedence_order(
@@ -3718,15 +3755,24 @@ def test_the_clock_row_keeps_every_value_with_its_unit() -> None:
         (5.0, 1033 * 86_400.0, "last worked 1033d"),
     ],
 )
-async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
+async def test_the_painted_clock_row_keeps_its_units_at_a_narrow_pane(
     tmp_path: Path, started_s: float, worked_s: float, expected: str
 ) -> None:
     """The same defect, on the frame the designer measured it on.
 
-    40 columns is a 34-cell pane text width, and the row is painted by the real
+    44 columns is a 34-cell pane text width, and the row is painted by the real
     app under the production stylesheet — the unit-level test above cannot see a
     row that wraps, which is how this row was broken in the first place (the
     wrapped clock row took the pane's last line with it).
+
+    THE WIDTH MOVED FROM 40 TO 44 WITH THE PICKER'S OUTER INSET, and it is the
+    same frame either way: the inset takes two cells a side, and the pane's text
+    budget is MEASURED off the box those two cells left
+    (:meth:`SessionPickerScreen._pane_width`), so a given pane text width now
+    lands four columns further out. Left at 40, this pins the SHED rung
+    (``last worked 1033d``) rather than the row the repro is about. The height
+    moved for the same reason — the pane draws from 16 rows — so 44x17 is the
+    pre-inset 40x15 with the two rows added back.
 
     BOTH halves are pinned by writing the session's own ``created_at.json``.
     That is the canonical creation time the store prefers on every platform, and
@@ -3747,7 +3793,7 @@ async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
         json.dumps(clock - started_s), encoding="utf-8"
     )
     app = _real_app()
-    async with app.run_test(size=(40, 15)) as pilot:
+    async with app.run_test(size=(44, 17)) as pilot:
         await pilot.pause()
         screen = SessionPickerScreen(
             [
@@ -3778,3 +3824,96 @@ async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
         assert "ago" not in clock[0], clock
         assert "…" not in clock[0], clock
         assert frame.conversation, frame
+
+
+#: The sizes the picker's outer inset is asserted at, and each entry earns its
+#: place: both sides of the stacked/side-by-side breakpoint, the sizes the
+#: before/after frames were rendered at, one terminal just under the picker's
+#: own floor, and one at the narrowest width a pane still draws in.
+INSET_SIZES: tuple[tuple[int, int], ...] = (
+    (100, 30),
+    (120, 36),
+    (60, 20),
+    (40, 15),
+    (STACK_BELOW_COLS, 40),
+    (STACK_BELOW_COLS - 1, 40),
+    (29, 20),
+    (20, 20),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", INSET_SIZES)
+async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> None:
+    """The inset, read off what the terminal was SENT rather than off the sheet.
+
+    THE ONE THING THIS SLICE CAN GET WRONG SILENTLY. The inset is stated twice —
+    ``padding: 1 2`` on ``.session-picker`` in ``local_operator.tcss``, and
+    ``PICKER_INSET_ROWS``/``PICKER_INSET_COLS`` in ``session_picker.py`` —
+    because the sheet moves the box and ``plan_layout`` has to know how large it
+    is. Textual CLIPS SILENTLY: a plan one cell optimistic paints a row that
+    wraps onto a second line and pushes a row off the bottom, and nothing reads
+    back that it happened. The sheet is therefore not allowed to be the only
+    witness, and this is the test that reads the frame instead:
+
+    * NOTHING IS PAINTED IN THE OUTER BAND. ``OUTER_INSET_ROWS``/``_COLS`` are
+      the whole frame, the app-wide ``Screen { padding: 1 }`` included, so a
+      non-space cell anywhere in it means either the sheet lost its padding or
+      something is drawing outside the panel.
+    * THE PLAN'S NUMBERS ARE THE PANES' BOXES. ``screen_width``, ``list_width``,
+      ``preview_width`` and both row budgets are compared against the resolved
+      widget boxes — the equality every other guard in this file rests on.
+    * THE FRAME IS EXACTLY THE INSET, not more. The topmost painted row is the
+      first content row and the bottommost is the last one (the filter row,
+      always drawn). An inset LARGER than the constants would leave the list
+      starting lower than the plan claims while nothing clipped at all — a
+      failure that reads to a user as "a bit too much padding here" and is
+      therefore never reported.
+    """
+    app = _real_app()
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(12)]
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen(rows, NOW)
+        app.push_screen(screen)
+        for _ in range(3):
+            await pilot.pause()
+
+        plan = screen._layout()
+        results = screen.query_one("#session-picker-results")
+        preview = screen.query_one("#session-picker-preview")
+        filt = screen.query_one("#session-picker-filter")
+
+        # What the plan claims IS what the panes resolved to.
+        assert plan.screen_width == filt.size.width, size
+        assert plan.list_width == results.size.width, size
+        assert plan.list_rows == results.region.height, size
+        if plan.preview_rows:
+            assert plan.preview_width == preview.size.width, size
+            assert plan.preview_rows == preview.region.height, size
+
+        strips = [strip.text for strip in app.screen._compositor.render_strips()]
+        width, height = size
+        ink = [
+            (x, y) for y, text in enumerate(strips) for x, char in enumerate(text) if char != " "
+        ]
+        # Every cell of the outer band is ground, and only ground.
+        assert ink, size
+        outside = [
+            (x, y)
+            for x, y in ink
+            if x < OUTER_INSET_COLS
+            or x >= width - OUTER_INSET_COLS
+            or y < OUTER_INSET_ROWS
+            or y >= height - OUTER_INSET_ROWS
+        ]
+        assert not outside, (size, outside[:6])
+        # ...and the frame is exactly the inset: the picker starts on the first
+        # content row and its filter row is the last one.
+        assert min(y for _, y in ink) == OUTER_INSET_ROWS, size
+        assert max(y for _, y in ink) == height - 1 - OUTER_INSET_ROWS, size
+        assert min(x for x, _ in ink) >= OUTER_INSET_COLS, size
+        # The picker still draws at the sizes that draw it at all: the list and
+        # the row that says how to leave survive the inset.
+        assert len(screen.render_lines_for_test()) >= 1, size
+        assert screen.render_footer_for_test().strip(), size

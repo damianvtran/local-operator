@@ -162,7 +162,18 @@ RESUME_EMPTY_NOTICE = "no conversations of yours to resume — subagent runs are
 #: reviewer found the previous pairing — gutter reserved, constant left at 159
 #: — as a 64 -> 63 name shrink at the flip on the query path, which is exactly
 #: the D16 BLOCKER reappearing from the constant and the layout disagreeing.
-STACK_BELOW_COLS = 161
+#:
+#: 165, re-swept for the picker's own outer inset. The inset takes
+#: ``2 * PICKER_INSET_COLS`` cells off both layouts at a given terminal width,
+#: so the width at which the side-by-side field reaches the cap moves out by
+#: four and the switch has to follow it: left at 161 it re-created the 64 -> 62
+#: shrink at the flip on BOTH query paths — the constant and the layout
+#: disagreeing again, this time by four columns instead of one. The inset is
+#: symmetric between the two layouts, so this is the whole of what it moves
+#: here; the SWEEP is what says so rather than the argument (measured: the
+#: smallest side-by-side width with ``name_width == NAME_MAX`` is 165, and 166
+#: onwards is flat at 64).
+STACK_BELOW_COLS = 165
 
 #: Cells the name column is capped at: the longest of the 141 real session
 #: names (p95 48, p99 53, max 64), measured in CELLS rather than characters.
@@ -259,15 +270,75 @@ PREVIEW_HEADER_BASE = 3
 #: smallest row it is given, not a licence to give it fewer.
 PREVIEW_DRAW_MIN = 5
 
-#: Rows the picker's container costs on top of the lines its panes draw.
+#: Cells/rows the app-wide ``Screen { padding: 1 }`` takes off every screen's
+#: content box, PER SIDE, and the one Python-side statement of it.
 #:
-#: A survivor of the card era, kept because it still has a reader: the
-#: real-stylesheet height test adds it to the composed line count to check
-#: nothing is clipped (``test_the_panes_fit_the_terminal_at_every_height_on_
-#: the_real_stylesheet``). Textual clips SILENTLY — rows past the region are
-#: simply not drawn and nothing reads back that it happened — so that test is
-#: the only thing standing between a layout change and an invisible clip.
-CARD_PADDING_ROWS = 2
+#: Stated rather than left as the literals this arithmetic used to carry,
+#: because an inset that drifts from the sheet is INVISIBLE: Textual clips
+#: silently, so a plan one cell optimistic paints a row that wraps onto a second
+#: line and pushes a row off the bottom, and nothing reads back that it
+#: happened. ``test_the_inset_matches_the_painted_frame`` is what reads the sheet
+#: back and fails when the two disagree.
+SCREEN_INSET = 1
+
+#: The picker's OWN outer inset, per side: the Python side of the stylesheet's
+#: ``padding: 1 2`` on ``.session-picker``. ONE ROW, TWO CELLS, and the
+#: horizontal figure is the app's existing unit for a floating read surface
+#: rather than a new one — ``/copy``'s card carries ``padding: 1 2`` on this same
+#: overlay ground, and ``/move``, this picker's declared twin, already does too.
+#: Matching them keeps the read surfaces the same distance from the terminal's
+#: edge instead of inventing a fourth inset. Together with ``SCREEN_INSET`` the
+#: frame the user sees is 2 rows and 3 cells on every side.
+#:
+#: WHY THE PANEL CARRIES IT RATHER THAN THE PANES: the picker is FULL-SCREEN
+#: (``width: 100%; height: 100%``, deliberately no cap of its own), so without
+#: this its ground, its row bands and its divider rules ran to within one cell of
+#: every edge and read as content that had run out of room. The inset is spent
+#: out of the panes' budgets in :func:`plan_layout` and never out of the filter
+#: row, which is the one row that says how to leave.
+#:
+#: AND AT THE SHORTEST HEIGHTS THE ROW COMES OUT OF THE PANE ITSELF: the preview
+#: is drawn only from ``LIST_MIN + PREVIEW_DRAW_MIN`` content rows, so at 40x15
+#: the frame paints 12 list rows and the filter row where it used to paint 6 list
+#: rows beside a 6-row preview. Measured, deliberate, and the trade this row was
+#: asked for — but it is the first thing a review of a short-terminal frame will
+#: see, so it is written down here rather than discovered there.
+PICKER_INSET_COLS = 2
+PICKER_INSET_ROWS = 1
+
+#: The whole inset per side between the TERMINAL and the box the panes are drawn
+#: into. ``plan_layout`` takes a terminal size (``STACK_BELOW_COLS`` is a
+#: terminal width, and every caller passes the app's own size), so this is what
+#: it subtracts; :meth:`SessionPickerScreen._layout` adds it back when it states
+#: a MEASURED content box in the terminal terms this arithmetic is written in.
+OUTER_INSET_COLS = SCREEN_INSET + PICKER_INSET_COLS
+OUTER_INSET_ROWS = SCREEN_INSET + PICKER_INSET_ROWS
+
+#: The filter row. It spans the container rather than either pane, so it is not
+#: part of the panes' column budget and is charged against their row budget here
+#: instead of being folded into the inset above.
+FILTER_ROWS = 1
+
+#: Rows between the bottom of the panes' text and the box the real-stylesheet
+#: height test measures (``.session-picker``'s own ``region``): the filter row
+#: plus the screen's two inset rows.
+#:
+#: The picker's OWN padding rows are deliberately NOT in here. A widget's
+#: ``region`` is its BORDER box, so those two rows are already inside the card
+#: region the test compares against, and counting them a second time would assert
+#: a clip that cannot happen — the arithmetic claiming room the paint does not
+#: have, one row the other way.
+#:
+#: It has a reader rather than a legacy: the real-stylesheet height test adds it
+#: to the composed line count to check nothing is clipped
+#: (``test_the_panes_fit_the_terminal_at_every_height_on_the_real_stylesheet``).
+#: Textual clips SILENTLY — rows past the region are simply not drawn and nothing
+#: reads back that it happened — so that test is the only thing standing between
+#: a layout change and an invisible clip. 3 is the EXACT value rather than a
+#: slack term: the panes' rows are capped at ``cols_h = height - FILTER_ROWS -
+#: 2 * OUTER_INSET_ROWS`` and the card's region is ``height - 2 * SCREEN_INSET``,
+#: so the two differ by exactly these three rows at every height.
+CARD_PADDING_ROWS = 3
 
 #: The cursor glyph, matching the command picker's. A caret plus a row ground
 #: rather than a reversed row: the transcript behind this card is dim, and a
@@ -548,11 +619,12 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
     """
     width = max(1, width)
     height = max(1, height)
-    # `Screen { padding: 1 }` insets the content box by two cells and two rows
-    # before anything below is resolved.
-    inner_w = max(1, width - 2)
-    # One filter row, plus the two screen padding rows.
-    cols_h = max(1, height - 3)
+    # The app's own `Screen { padding: 1 }` and the picker's own `padding: 1 2`,
+    # which together are everything between the terminal and the box these
+    # columns are resolved in (SCREEN_INSET / PICKER_INSET_*, and the sheet).
+    inner_w = max(1, width - 2 * OUTER_INSET_COLS)
+    # The filter row, plus the inset on both sides.
+    cols_h = max(1, height - FILTER_ROWS - 2 * OUTER_INSET_ROWS)
     mode = "side-by-side" if width >= STACK_BELOW_COLS else "stacked"
 
     if mode == "side-by-side":
@@ -1334,6 +1406,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body_matches: set[str] = set()
         self._admitted: set[str] = set()
         self._body: Static
+        #: The panel itself, kept so ``_layout`` can measure the box the panes
+        #: are actually drawn into instead of inferring it from the terminal. It
+        #: is the CONTAINER rather than a pane on purpose — see ``_layout``.
+        self._panel: Container | None = None
         #: Spinner phase for the running marker, advanced by ``_tick``.
         self._frame = 0
         #: ``time.monotonic()`` of the last liveness refresh, or ``-inf`` so the
@@ -1684,20 +1760,77 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     # -- geometry ------------------------------------------------------------
     def _layout(self) -> PickerLayout:
-        """The geometry for the CURRENT terminal size.
+        """The geometry for the box the panes are actually drawn into.
 
-        Derived from ``self.app.size`` rather than from a measured widget
-        height, because a widget height LAGS the paint: on mount it reads one
-        row ahead of the settled layout and after a resize it reads the
-        PREVIOUS geometry, which made the footer counter claim ``13 drawn``
-        over 12 rendered rows at 80x24.
+        The plan's INPUT is a TERMINAL size, because that is what its arithmetic
+        and ``STACK_BELOW_COLS`` are written in and what every caller passes.
+        What it must not do is claim cells the paint does not have, and since the
+        panel is no longer the whole terminal (``PICKER_INSET_*`` in the sheet)
+        the terminal alone no longer answers that: the box the panes are drawn
+        into is the panel's CONTENT region, inset by the sheet's padding as well.
+
+        So a resolved measurement WINS: the panel's content box, stated back as
+        the terminal size one full inset wider. The round trip is exact by
+        construction, and a sheet whose padding disagrees with
+        ``SCREEN_INSET + PICKER_INSET_*`` is precisely what
+        ``test_the_inset_matches_the_painted_frame`` reads back and fails on.
+
+        THE FALLBACK IS THE FIRST PAINT: before the panel is mounted there is no
+        resolved geometry to read, so the terminal minus the inset — which is
+        what ``plan_layout`` applies — is the only available answer, and it is
+        the same answer.
+
+        The measured box is the CONTAINER's, never a pane's. A pane's height LAGS
+        the paint — on mount a widget height reads one row ahead of the settled
+        layout and after a resize it reads the PREVIOUS geometry, which made the
+        footer counter claim ``13 drawn`` over 12 rendered rows at 80x24. A
+        container carrying ``width: 100%; height: 100%`` has no such lag: its box
+        is a function of the screen's, resolved in the same layout pass, which
+        the live-resize test pins by resizing the app under a settled picker.
+
+        AND IT IS CLAMPED TO THE TERMINAL, because the measurement can only ever
+        make the plan SMALLER, never larger. The conversion above assumes the
+        sheet's ``padding`` resolved; a host with no stylesheet at all — the
+        lightweight ``_PickerHost`` in the tests, which declares no ``CSS_PATH``
+        — has a panel as wide as its screen, so ``measured + inset`` overshoots
+        the terminal by exactly the inset and the plan would claim cells the
+        paint does not have in the one direction that clips silently. Taking the
+        smaller of the two is right in every case: with the sheet applied they
+        are equal, and with the padding absent or smaller than the constants the
+        terminal is the honest bound. Drift the other way (a sheet padding LARGER
+        than the constants) is caught by
+        ``test_the_inset_matches_the_painted_frame``.
         """
+        measured = self._panel_box()
         try:
             size = self.app.size
-            width, height = size.width, size.height
+            terminal = (max(1, size.width), max(8, size.height))
         except Exception:  # pragma: no cover - only before the app has a screen
-            width, height = 80, 24
-        return plan_layout(max(1, width), max(8, height), querying=bool(self._query.strip()))
+            terminal = (80, 24)
+        if measured is None:
+            width, height = terminal
+        else:
+            width = min(measured[0], terminal[0])
+            height = min(measured[1], terminal[1])
+        return plan_layout(width, height, querying=bool(self._query.strip()))
+
+    def _panel_box(self) -> tuple[int, int] | None:
+        """The panel's resolved content box as a TERMINAL size, or ``None``.
+
+        ``None`` means "no resolved geometry yet", which is the first paint and
+        nothing else. The conversion to terminal terms is the inverse of what
+        ``plan_layout`` subtracts, so the two agree exactly whenever the sheet's
+        ``padding`` and this module's inset constants agree.
+        """
+        panel = getattr(self, "_panel", None)
+        measured_w = _content_width(panel)
+        measured_h = _content_height(panel)
+        if not measured_w or not measured_h:
+            return None
+        return (
+            measured_w + 2 * OUTER_INSET_COLS,
+            measured_h + 2 * OUTER_INSET_ROWS,
+        )
 
     def _usable(self) -> int:
         """The results pane's REAL text width — the ONE definition.
@@ -2052,7 +2185,17 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # Two panes side by side with the filter row beneath, following
         # ``settings_view.py:894`` (``self._columns = Horizontal(...)``) — the
         # repo's existing two-pane precedent, rather than a new idiom beside it.
-        with Container(classes="session-picker"):
+        #
+        # The container is held rather than used inline because ``_layout``
+        # measures its resolved content box: the picker's outer inset lives in
+        # the sheet (``padding: 1 2`` on ``.session-picker``) and only the
+        # widget knows what the sheet's padding actually resolved to.
+        # Constructed into a local and then held: the attribute is typed
+        # Optional for the pre-compose state, and `with` on an Optional is a
+        # pyright error rather than a runtime one.
+        panel = Container(classes="session-picker")
+        self._panel = panel
+        with panel:
             self._results = Static(id="session-picker-results")
             self._preview = Static(id="session-picker-preview")
             # So arrows never silently move focus off the list.
