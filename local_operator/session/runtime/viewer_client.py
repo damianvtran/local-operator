@@ -80,11 +80,12 @@ async def _read_reply(
     """Read frames until the one answering ``req``, or give up.
 
     Frames are read and split HERE rather than with ``readline`` because
-    ``StreamReader.readline`` raises ``LimitOverrunError`` *without consuming
-    the buffer*, so one oversized line wedges every later read — the defect
-    ``session/runtime/control.py`` documents for ``lop send``. This endpoint
-    emits nothing large today, but the failure is silent and permanent if it
-    ever does, and the fix is four lines.
+    ``StreamReader.readline`` raises ``LimitOverrunError`` instead of
+    RETURNING a line past the limit, so such a frame can never be read (it
+    drains the bytes, so a later read would resume at the next line — but the
+    frame is gone, and this endpoint's replies are answers the caller is
+    waiting on). This endpoint emits nothing large today, but the failure is
+    silent and permanent if it ever does, and the fix is four lines.
     """
     buf = bytearray()
 

@@ -45,10 +45,16 @@ class _FrameReader:
     full-projection ``welcome`` serialized as one newline-terminated JSON line
     (``registrant._push_to``). A projection is unbounded in principle (a large
     transcript tail), so for a busy target that welcome line can exceed any
-    fixed ``StreamReader`` limit, and ``readline`` then raises
-    ``LimitOverrunError`` WITHOUT consuming the buffer — every subsequent
-    ``readline`` re-raises on the same bytes, so the sender cannot reach its
-    ack and crashes (U1).
+    fixed ``StreamReader`` limit — and ``readline`` then raises
+    ``LimitOverrunError`` rather than RETURNING the line, so the frame can never
+    be read at all and the sender cannot reach its ack (U1).
+
+    (It does consume those bytes: CPython's ``readline`` drains through the
+    separator when it found one and clears the buffer when it did not, so a
+    RETRY would resume at the following frame. That is not enough here — the
+    frame being discarded is the welcome, which is the identity answer this
+    reader exists to deliver — but it is the fact to know before reasoning
+    about what a skipped line costs.)
 
     We instead frame lines from our own buffer over ``reader.read(n)``, which
     has no line limit. An oversized line (more than ``_MAX_FRAME_BYTES`` with

@@ -975,9 +975,18 @@ class AttachClient:
                 except ValueError as exc:
                     # ``StreamReader.readline`` raises ValueError (via
                     # LimitOverrunError) when one frame exceeds the connection's
-                    # ``limit``. It is NOT a transport failure and it is not
-                    # recoverable by reading on: the oversized line stays in the
-                    # buffer, so every subsequent read raises the same way.
+                    # ``limit``. It is NOT a transport failure, and it is not
+                    # recoverable by SKIPPING: the raise DOES consume the
+                    # offending bytes (``readline`` drains through the
+                    # separator when it found one and clears the buffer when it
+                    # did not — CPython ``asyncio/streams.py``; the runtime's own
+                    # inbound guard relies on exactly that), so later reads would
+                    # continue, but the frame it dropped is one this client
+                    # cannot reconstruct: a projection carries the session's
+                    # identity, a sync its canonical state, and a delta its
+                    # sequence. Continuing on state known to be incomplete is
+                    # drift by this client's own contract, so the overrun is
+                    # reported and the pump ends.
                     #
                     # Before this it fell through as an unhandled task exception
                     # that killed the pump silently, and the host — which only

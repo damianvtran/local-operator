@@ -191,10 +191,14 @@ async def _read_frames_until(dial: _Dial, predicate: Any, timeout_s: float) -> A
 
     Read in bounded chunks and framed HERE rather than by ``readline``:
     a projection is unbounded in principle (a large transcript tail in one
-    line), and ``StreamReader.readline`` raises ``LimitOverrunError`` WITHOUT
-    consuming the buffer — every later read re-raises on the same bytes, so
-    one big welcome wedges the reader, the exact defect U1 fixed for `lop
-    send`. Discarding an oversized line (over ``_MAX_FRAME_BYTES`` with no
+    line), and ``StreamReader.readline`` raises ``LimitOverrunError`` instead of
+    RETURNING such a line — the frame can never be read, so one big welcome
+    leaves the ack this function waits for unreachable (the defect U1 fixed for
+    `lop send`). ``readline`` does drain the offending bytes (CPython deletes
+    through the separator when it found one), so a later read would not
+    re-raise; that is why the cost of a skip is "a frame is lost", not "the
+    reader wedges" — and a lost welcome is exactly the loss this reader exists
+    to avoid. Discarding an oversized line (over ``_MAX_FRAME_BYTES`` with no
     newline yet) keeps memory bounded while the frames AFTER it — including
     the ack this function may be waiting for — survive in the same buffer.
     """
