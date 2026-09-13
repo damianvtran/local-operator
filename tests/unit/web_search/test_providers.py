@@ -1040,3 +1040,104 @@ async def test_a_forced_provider_failure_names_only_that_provider(tmp_path, monk
     # D1: the provider's actionable sentence leads, so it survives the card's
     # single-line crop; the scope note follows it rather than preceding it.
     assert message.index("Fetch a page directly") < message.index("only provider tried")
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review: MINOR-1 (served key), NIT-1 (private key), MINOR-3 (strip)
+# ---------------------------------------------------------------------------
+
+
+def test_a_top_level_source_list_is_served_content_not_a_wall() -> None:
+    """MINOR-1: only the ``blocks`` loop marked a payload as served.
+
+    ``_perplexity_sources`` honours top-level ``sources_list`` and
+    ``search_results``, so a real answer arriving that way plus the soft sign-in
+    marker was raised away whenever the extractor rejected the entries -- the
+    entries with no URL scheme reach the parser's notice but not its source map.
+    """
+    # The answer is a REAL one, not the wall sentence: the claim being pinned is
+    # that a served answer survives, and a fixture whose text is the wall's own
+    # could not show that (round-1 review NIT-2).
+    real_answer = [
+        {"intended_usage": "ask_text", "markdown_block": {"answer": "Paris is the capital."}}
+    ]
+    for key in ("sources_list", "search_results"):
+        for row in ({"url": "https://example.com"}, {"url": "example.com"}):
+            body = _sse({"upsell_information": SOFT_UPSELL, "blocks": real_answer, key: [row]})
+            assert _wall(body) is None, f"a served top-level {key} was mistaken for a refusal"
+
+
+def test_a_top_level_row_with_no_url_is_not_served_content() -> None:
+    """MINOR-1: a dict row is not evidence of a result.
+
+    ``_perplexity_sources`` builds nothing from a row without a URL, so a
+    name-only or empty row beside a wall left the wall's own sentence as the
+    response -- the original bug, reached through the new check.
+    """
+    # Truthiness is not enough either (round-2 review MINOR-1): ``_source``
+    # strips and requires a scheme, so a blank url and a non-string url each
+    # produce zero sources while suppressing the wall.
+    for row in (
+        {"name": "x"},
+        {},
+        {"title": "x"},
+        {"url": "   "},
+        {"url": 5},
+        {"url": True},
+        {"url": {}},
+        {"url": None},
+    ):
+        for key in ("sources_list", "search_results"):
+            body = _sse(
+                {
+                    "upsell_information": WALL_UPSELL,
+                    "blocks": _ASK_ONLY_BLOCKS,
+                    key: [row],
+                }
+            )
+            assert _wall(body) is not None, f"a wall escaped behind a url-less {key} row"
+
+
+def test_a_payload_carrying_our_own_served_key_cannot_suppress_a_wall() -> None:
+    """NIT-1: the private key is the parser's, so the parser always sets it.
+
+    Left to ``merged.update``, a payload that arrived carrying the key survived
+    and suppressed the wall -- the original bug reached from the other side.
+    """
+    body = _sse(
+        {
+            "upsell_information": WALL_UPSELL,
+            "blocks": _ASK_ONLY_BLOCKS,
+            "_lo_served_blocks": ["web_result_block"],
+        }
+    )
+    assert _wall(body) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_single_candidate_message_keeps_the_provider_name_once(
+    tmp_path, monkeypatch
+) -> None:
+    """MINOR-3: the prefix strip was load-bearing and unpinned.
+
+    Reverting it left every test passing. It exists so the head of the cropped
+    line carries the remedy rather than repeating the provider the reader just
+    saw; the shape it strips is built by the same loop that formats the entry.
+    """
+    from local_operator.web_search.service import WebSearchService
+
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"], strategy="ordered")
+    service = WebSearchService(settings, _credentials(tmp_path))
+
+    async def walled(*_args: object, **_kwargs: object):
+        raise RuntimeError("Fetch a page directly, or set PERPLEXITY_API_KEY: refused")
+
+    monkeypatch.setitem(PROVIDERS, "perplexity", SimpleNamespace(search=walled))
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query", forced_provider="perplexity")
+
+    message = str(raised.value)
+    assert message.startswith("Web search failed: Fetch a page directly")
+    # The provider is named once, in the scope note -- not again as a prefix.
+    assert "perplexity: Fetch" not in message
+    assert message.count("perplexity") == 1

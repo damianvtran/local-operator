@@ -338,6 +338,35 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
             for item in event_sources:
                 if isinstance(item, dict) and item.get("url"):
                     sources_by_url[str(item["url"])] = item
+        # A top-level source list is SERVED CONTENT even when the extractor
+        # rejects every entry (an entry with no URL scheme reaches here but not
+        # into ``sources_by_url``). Round-2 review MINOR-1: without this, a real
+        # answer plus a top-level source list, carrying the soft sign-in marker,
+        # was raised away -- the call site ANDs the verdict with ``not sources``,
+        # which protects only the shape the extractor ACCEPTED.
+        # A row counts as SERVED only when it carries a URL, which is what makes
+        # it a search result at all: ``_perplexity_sources`` builds nothing from a
+        # row without one, so a name-only or empty dict row beside a wall would
+        # leave the wall's own sentence as the response -- the original bug,
+        # through this door (round-1 review MINOR-1, whose own repro shows a
+        # name-only row being served). A row WITHOUT a scheme still counts: it is
+        # a result the extractor rejects, which is the shape this check exists for.
+        for key in ("sources_list", "search_results"):
+            rows = event.get(key)
+            if isinstance(rows, list) and any(
+                # ``isinstance`` AND a non-blank string, not truthiness: ``_source``
+                # strips the url and requires a scheme, so ``{"url": 5}``,
+                # ``{"url": True}``, ``{"url": {}}`` and ``{"url": "   "}`` each
+                # produce zero sources while suppressing the wall -- the same hole
+                # one type-check narrower (round-2 review MINOR-1). A blank url is
+                # no url; a non-string is not one either.
+                isinstance(row, dict)
+                and isinstance(row.get("url"), str)
+                and bool(row["url"].strip())
+                for row in rows
+            ):
+                served_blocks.add(f"top_level_{key}")
+                break
         for block in event.get("blocks") or []:
             if not isinstance(block, dict):
                 continue
@@ -358,11 +387,15 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
             answer = str(event["text"])
     if sources_by_url:
         merged["sources_list"] = list(sources_by_url.values())
-    if served_blocks:
-        # Private key: read by ``_perplexity_authwall`` and by nothing else. It
-        # is not a source list -- it is the answer to "did the endpoint serve
-        # anything at all", which is what separates a refusal from a thin result.
-        merged["_result_blocks"] = sorted(served_blocks)
+    # Written UNCONDITIONALLY, and namespaced. Round-2 review NIT-1: a payload
+    # that arrives carrying our own key -- the endpoint echoing a field name, or
+    # anything else on the wire -- used to survive ``merged.update`` and suppress
+    # the wall, which is the original bug reached from the other direction. The
+    # parser owns this key, so the parser always sets it, empty included.
+    #
+    # It is not a source list: it is the answer to "did the endpoint serve
+    # anything at all", which is what separates a refusal from a thin result.
+    merged["_lo_served_blocks"] = sorted(served_blocks)
     if answer:
         merged["text"] = answer
     return merged
@@ -390,10 +423,11 @@ def _perplexity_authwall(payload: dict[str, Any]) -> str | None:
     Returns the reason to record, or ``None``. Structural only: no wording is
     matched, so a change to the sentence cannot silently un-fix this.
     """
-    if payload.get("_result_blocks"):
-        # Something WAS served: a shopping, hotels, maps, media or web-result
-        # block came through, so this is a result carrying a sign-in nudge, not
-        # a refusal. Only "the endpoint served nothing" is a wall.
+    if payload.get("_lo_served_blocks"):
+        # Something WAS served -- a shopping, hotels, maps, media or web-result
+        # block, or a top-level source list -- so this is a result carrying a
+        # sign-in nudge, not a refusal. Only "the endpoint served nothing" is a
+        # wall.
         return None
     upsell = payload.get("upsell_information")
     # Unwrap however many JSON-string layers the stream used. The SSE carries it
