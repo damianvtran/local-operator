@@ -22,12 +22,14 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from local_operator.credentials import CredentialManager
+from local_operator.web_search.cost import estimate_search_cost
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     ProviderStatus,
     SearchProviderId,
     SearchResponse,
     SearchSource,
+    SearchUsage,
     WebSearchSettings,
 )
 
@@ -207,6 +209,10 @@ def tavily_response_from_payload(
         sources=sources[:limit],
         answer=str(payload.get("answer") or "").strip() or None,
         request_id=str(payload.get("request_id") or "").strip() or None,
+        # Keyless is a FREE TIER, not a missing price: without this flag the
+        # ledger would charge the paid per-credit rate for searches that the
+        # free tier served.
+        usage=SearchUsage(keyless=auth_mode == "keyless"),
     )
 
 
@@ -403,6 +409,9 @@ async def _search_perplexity(
         sources=_perplexity_sources(payload, limit),
         answer=_perplexity_answer(payload),
         request_id=str(payload.get("uuid") or request_id),
+        # Anonymous mode is free; the Sonar key path (below) is token-billed and
+        # leaves this unset so the estimate uses the Sonar rate instead.
+        usage=SearchUsage(keyless=True),
     )
 
 
@@ -762,7 +771,7 @@ async def _deepseek_evidence_pass(
     key: str,
     assistant_blocks: list[Any],
     prompt: str,
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], SearchUsage]:
     """Replay the search turn and ask for per-page evidence, in one extra turn.
 
     The assistant blocks are sent back EXACTLY as received, including each
@@ -801,12 +810,45 @@ async def _deepseek_evidence_pass(
     )
     _ensure_success("DeepSeek evidence", response)
     payload = response.json()
+    usage = _deepseek_usage(payload)
     text = "\n".join(
         str(block.get("text") or "")
         for block in (payload.get("content") or [])
         if isinstance(block, dict) and block.get("type") == "text"
     )
-    return parse_deepseek_evidence(text)
+    return parse_deepseek_evidence(text), usage
+
+
+def _deepseek_usage(payload: object) -> SearchUsage:
+    """DeepSeek's billed tokens for one Messages call.
+
+    Token counts are what the vendor reports, which makes the DeepSeek cost an
+    estimate from a real measurement rather than a guess at a per-query rate.
+    The server-side search count comes from `server_tool_use` because that is the
+    work the turn actually did.
+    """
+    if not isinstance(payload, dict):
+        return SearchUsage()
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return SearchUsage()
+    server = usage.get("server_tool_use")
+    server_searches = None
+    if isinstance(server, dict):
+        value = server.get("web_search_requests")
+        if isinstance(value, int):
+            server_searches = value
+
+    def as_int(key: str) -> int | None:
+        value = usage.get(key)
+        return value if isinstance(value, int) else None
+
+    return SearchUsage(
+        input_tokens=as_int("input_tokens"),
+        output_tokens=as_int("output_tokens"),
+        cache_read_tokens=as_int("cache_read_input_tokens"),
+        server_searches=server_searches,
+    )
 
 
 async def _search_deepseek(
@@ -886,6 +928,7 @@ async def _search_deepseek(
     _ensure_success("DeepSeek", response)
     payload = response.json()
     sources, answer = parse_deepseek_search(payload, limit)
+    usage = _deepseek_usage(payload)
     if settings.deepseek_evidence:
         # Enrichment only. A failed, truncated or unparseable evidence pass must
         # leave the sources exactly as the search returned them, because the
@@ -894,13 +937,16 @@ async def _search_deepseek(
         # swallowed -- an unenriched result that says why is diagnosable, and one
         # that silently looks like "this provider has no snippets" is not.
         try:
-            evidence = await _deepseek_evidence_pass(
+            evidence, evidence_usage = await _deepseek_evidence_pass(
                 client, key, payload.get("content") or [], prompt
             )
         except Exception as error:  # noqa: BLE001 -- see comment above
             evidence = {}
             evidence_failure = f"deepseek evidence pass: {error}"
         else:
+            # Both legs of an enriched search are billed tokens on the same
+            # account, so one search's cost is the sum of the two calls.
+            usage = usage.merge(evidence_usage)
             evidence_failure = (
                 None if evidence else "deepseek evidence pass: returned no usable rows"
             )
@@ -914,6 +960,8 @@ async def _search_deepseek(
         answer=answer,
         request_id=str(response.headers.get("x-request-id") or "").strip() or None,
         failures=[evidence_failure] if evidence_failure else [],
+        usage=usage,
+        cost=estimate_search_cost("deepseek", usage),
     )
 
 
