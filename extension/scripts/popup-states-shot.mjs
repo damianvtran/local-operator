@@ -137,6 +137,33 @@ const STATES = {
     pending_origin: "https://contested.example",
     protocol_version: 1,
   },
+  // Paired, and deliberately receiving no commands because ANOTHER authorised
+  // install holds the wheel. The secondary install's card, and the reason this
+  // repo can have two builds installed at once; the shape is the store build's
+  // when a locally loaded build is driving.
+  standby: {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+  },
+};
+
+/** Session-storage fixtures, keyed like STATES.
+ *
+ * `connState` is what the worker writes from the daemon's role statement, and it
+ * lives in `chrome.storage.session` — so unlike /health it cannot be stubbed
+ * before the page loads. It is set and the page reloaded, which is also what a
+ * real user's second open looks like for a durable role.
+ */
+const SESSION_FIXTURES = {
+  standby: { connState: "standby" },
 };
 
 async function main() {
@@ -187,7 +214,12 @@ async function main() {
     const report = { chrome: version.Browser, extensionId: id, states: {} };
 
     for (const [name, health] of Object.entries(STATES)) {
-      const page = await openPage(browser, `chrome-extension://${id}/popup/popup.html`, health);
+      const page = await openPage(
+        browser,
+        `chrome-extension://${id}/popup/popup.html`,
+        health,
+        SESSION_FIXTURES[name],
+      );
       // 300x600 is the popup's real geometry, and it MUST come from the CDP
       // override: --window-size clamps to a 500px floor on Chrome 152, so a
       // frame sized by the flag is not evidence of anything.
@@ -243,7 +275,7 @@ async function main() {
 
 /** Open the popup as a page with /health stubbed BEFORE any script runs, so the
  * first render already sees the state under test. */
-async function openPage(browser, url, health) {
+async function openPage(browser, url, health, session) {
   const { targetId } = await browser.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
   const page = browser.session(sessionId, targetId);
@@ -260,6 +292,11 @@ async function openPage(browser, url, health) {
   });
   await page.send("Page.navigate", { url });
   await sleep(800);
+  if (session) {
+    await page.eval(`chrome.storage.session.set(${JSON.stringify(session)}).then(() => "ok")`);
+    await page.send("Page.reload");
+    await sleep(800);
+  }
   return page;
 }
 

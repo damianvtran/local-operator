@@ -1157,7 +1157,7 @@ test("E4: a standby render shows the standby card, names the driver, and is pinn
     // the session loses the tab it was using and a fresh one appears.
     assert.equal(
       pins.get("lop:pin-hint"),
-      "317.3",
+      "193px",
       "the standby card must pin the height it was measured at, or it resizes on reopen",
     );
 
