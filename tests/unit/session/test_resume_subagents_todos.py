@@ -79,6 +79,19 @@ def _status(session, job_id: str) -> str | None:
     return None if job is None else job.status
 
 
+#: The unbounded child fields the roster projection must never carry, shared by
+#: the transcript-entry and sidecar assertions so the two surfaces cannot drift
+#: apart. ``latest_details`` is the live progress tail, ``trajectory`` the whole
+#: tool history, and ``result_text``/``prompt`` the child's verbatim text.
+_UNBOUNDED_ROSTER_FIELDS = (
+    "result_text",
+    "prompt",
+    "trajectory",
+    "output_tail",
+    "latest_details",
+)
+
+
 async def wait_for_settled_delivery(session, stream) -> None:
     """Block until the auto-delivered parent turn a settled child triggers has
     both STARTED and finished.
@@ -847,7 +860,14 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     await parent.async_init()
     job_id = parent._launch_subagent(label="x", prompt="p")
     await wait_for(lambda: _status(parent, job_id) == "completed")
-    await asyncio.sleep(0.05)
+    # The settle that paints the child's terminal row is what schedules the
+    # roster persist carrying it, and ``AsyncJobManager._run_job`` flips the
+    # status BEFORE notifying — so the write can still be pending here. Drain the
+    # one writer instead of spending a sleep on it: a fixed budget is a bet on
+    # machine load, and this baseline is the bet's stake. When it lost on CI the
+    # baseline was the RUNNING roster (no ``settled_at``, no record ``outcome``)
+    # and the settle write landing later read as the sidecar growing 53 B.
+    await parent._await_subagent_roster_writer()
     entries = [
         e
         for e in parent._transcript.entries()
@@ -856,15 +876,33 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     assert entries
     sidecar = parent._transcript.directory / SUBAGENT_ROSTER_SIDECAR
     assert sidecar.exists()
-    first_size = sidecar.stat().st_size
-    transcript_size = parent._transcript.path.stat().st_size
+    # The durable invariant, stated structurally rather than as a byte window:
+    # the sidecar is ONE atomically replaced JSON document — a second roster
+    # appended into it would not parse — holding this child's row and no other.
+    sidecar_text = sidecar.read_text(encoding="utf-8")
+    document = json.loads(sidecar_text)
+    assert document["version"] == 1
+    assert [job_row["id"] for job_row in document["jobs"]] == [job_id]
+    for heavy in _UNBOUNDED_ROSTER_FIELDS:
+        assert heavy not in document["jobs"][0], f"{heavy} must not be in the roster sidecar"
+    roster_entry_ids = [entry.id for entry in entries]
     for _ in range(25):
         parent._schedule_subagent_persist()
-    await asyncio.sleep(0.1)
-    # Generation digits may add a byte, but repeated transitions replace one
-    # bounded file and never append another full roster to the transcript.
-    assert sidecar.stat().st_size <= first_size + 4
-    assert parent._transcript.path.stat().st_size == transcript_size
+    await parent._await_subagent_roster_writer()
+    # Repeated transitions replace that one bounded file and never append another
+    # full roster to the transcript. The window is asserted on the ROSTER's own
+    # footprint — the sidecar bytes and the transcript's roster-entry ids — not
+    # on the transcript's total size, which was never a roster fact: the
+    # auto-delivered child-result turn (job_result / assistant / attention
+    # entries) lands in the same window and is legitimate, which is how this test
+    # flaked with ``2379 == 2072``.
+    assert sidecar.read_text(encoding="utf-8") == sidecar_text
+    assert [
+        entry.id
+        for entry in parent._transcript.entries()
+        if entry.type == "custom"
+        and entry.payload.get("custom_type") == SUBAGENT_ROSTER_CUSTOM_TYPE
+    ] == roster_entry_ids
     latest = entries[-1].payload["details"]
     # Job rows carry the manager's own ``id`` key; comms records carry job_id.
     row = next(r for r in latest["jobs"] if r["id"] == job_id)
@@ -882,7 +920,7 @@ async def test_snapshot_entry_is_written_for_a_launched_child(tmp_path, monkeypa
     # output tail) must not be written — they are recoverable from the child's
     # own transcript, and re-appending them on every roster move is the
     # O(children^2) footprint the projection exists to prevent (review R1 M1).
-    for heavy in ("result_text", "prompt", "trajectory", "output_tail", "latest_details"):
+    for heavy in _UNBOUNDED_ROSTER_FIELDS:
         assert heavy not in row, f"{heavy} must not be in the roster snapshot"
     # But the fields the panel actually paints ARE kept.
     for kept in ("id", "label", "status", "start_time"):
