@@ -553,6 +553,55 @@ async def test_the_task_result_names_the_model_each_child_will_run_on(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_a_resume_in_operator_mode_restamps_the_recorded_tier_on_the_new_row(
+    tmp_path, monkeypatch
+):
+    """The LAST place a recorded tier is honoured, driven end to end.
+
+    Pinning the resolver directly (above) proves the resolution; it does not
+    prove the ROW. A resume is the one path that re-launches a child from a
+    RECORDED tier under a policy that refuses new pins, so a refactor that
+    re-resolved on another line, or dropped the tier from the record, would
+    leave the resolver's unit test green while the resumed child ran on the
+    session's model under a row that said otherwise. Asserted on the row's
+    ``model_label`` because that is what the panel, the cost accounting and the
+    parent's launch line read.
+    """
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents",
+        {"model_choice": "operator", "models": {"hi": "anthropic/claude-opus-5"}},
+    )
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(label="rev", prompt="review it", effort="hi")
+
+    def settled() -> bool:
+        row = session.jobs.get(job_id)
+        return row is not None and row.status == "completed"
+
+    await wait_for(settled)
+
+    first = session.jobs.get(job_id)
+    assert first is not None
+    assert first.model_label == "anthropic/claude-opus-5"
+    assert first.owns_model is True
+
+    new_id, error = session.subagent_comms.resume(job_id, "carry on")
+
+    assert error is None and new_id is not None
+    resumed = session.jobs.get(new_id)
+    assert resumed is not None
+    # Honoured, not re-chosen by the model: the recorded tier still decides, and
+    # the new row says so rather than defaulting to the session's model.
+    assert resumed.model_label == "anthropic/claude-opus-5"
+    assert resumed.owns_model is True
+    assert resumed.effort == "hi"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp_path, monkeypatch):
     """A host that keeps no job rows must not get an invented model.
 

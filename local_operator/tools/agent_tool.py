@@ -1238,10 +1238,16 @@ def _effort_pin_description(model_choice: bool) -> str:
     ``configured_effort_tiers()`` for its zero-tier arm.
     """
     if not model_choice:
+        # Names the OPERATOR's route as well as the model's, in place of the
+        # older "the operator sets tier pins": that sentence said the operator
+        # owns pins without saying where one is written, which is the half of
+        # this finding that is not a budget question. The key spelling drops the
+        # ``values.`` prefix for the same reason the tier rows' help does — it
+        # is the spelling the `/settings` page shows and `lop config edit`
+        # takes, so a reader can act on it without translating.
         return (
             "create/update: no effort tiers are yours to choose "
-            "(values.subagents.model_choice=operator); 'inherit' clears a pin, and the "
-            "operator sets tier pins."
+            "(subagents.model_choice=operator); 'inherit' clears a pin."
         )
     tiers = configured_effort_tiers()
     if not tiers:

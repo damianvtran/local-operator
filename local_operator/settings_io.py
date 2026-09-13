@@ -1551,18 +1551,46 @@ SETTINGS: tuple[Setting, ...] = (
         # guards that pair — which is what stops this literal and the reader's
         # fallback drifting apart into a page that lies about the default.
         default="operator",
-        help="Lets a delegating model swap a child onto a configured model tier.",
+        # Says what the ROW decides, never what a capability would do: the help
+        # line is one string for both values, and the first version ("Lets a
+        # delegating model swap a child onto a configured model tier") described
+        # the capability, so at the default it read as the opposite of the
+        # stored value — the resting state of the row claimed the picker was
+        # open. Length matters twice: the detail line sheds the WHOLE help once
+        # the key path stops fitting beside it (settings_view._detail_clause),
+        # so this is 65 cells against a 69-cell budget at 100 columns, and the
+        # key path keeps its place beside it.
+        #
+        # It also carries the operator's own route to a deliberate pin, which is
+        # the half this row was missing: the model-side pin is refused on
+        # purpose (a pin is how the incident stayed invisible), so an operator
+        # who wants one strong reviewer must be told there is a place to put it
+        # — the ROLE's own profile — rather than handed the picker back.
+        help="Who picks a subagent's tier; the operator pins one in its profile.",
+        # Both descriptions are sized to the EXPANDED choice row, which is the
+        # only place they render, and they are measured on a RENDERED FRAME at
+        # 100 columns — the frame, not the row-text painter, because the
+        # expansion's own cursor marker and indent cost cells the row-text
+        # arithmetic does not charge: the operator row renders 26 cells of
+        # description there (its `(default)` marker takes 11 of the column) and
+        # the model row 40. The previous pair measured 93 and 120 painted cells,
+        # so "role pins still apply" and "different, costlier model" — the two
+        # consequences this row exists to state — were clipped at every width the
+        # page is measured at. The pins half now lives in the help above; the
+        # money half is here.
+        #
+        # "inherits the session model" is 26 exactly, which is why it is not
+        # "inherits this session's model" (29, and clipped to "…session's mo…").
         choices=(
             Choice(
                 "operator",
                 "the operator",
-                "children inherit this session's model; role pins still apply",
+                "inherits the session model",
             ),
             Choice(
                 "model",
                 "the model",
-                "a delegating model may pick a configured tier — the child can then run "
-                "on a different, costlier model",
+                "may run the subagent on a costlier model",
             ),
         ),
     ),
@@ -1577,11 +1605,22 @@ SETTINGS: tuple[Setting, ...] = (
         # was missing, and the incident is why: a deliberate tier pin read as
         # harmless because nothing said a child on it RUNS, and is billed, at
         # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it. Length is budgeted, not styled: the detail
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
-        # (settings_view._detail_clause), so this is 73 cells against the 63 it
-        # replaces and still renders with `subagents.models.lo` at 100 columns.
-        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     Setting(
@@ -1595,11 +1634,22 @@ SETTINGS: tuple[Setting, ...] = (
         # was missing, and the incident is why: a deliberate tier pin read as
         # harmless because nothing said a child on it RUNS, and is billed, at
         # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it. Length is budgeted, not styled: the detail
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
-        # (settings_view._detail_clause), so this is 73 cells against the 63 it
-        # replaces and still renders with `subagents.models.lo` at 100 columns.
-        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     Setting(
@@ -1613,11 +1663,22 @@ SETTINGS: tuple[Setting, ...] = (
         # was missing, and the incident is why: a deliberate tier pin read as
         # harmless because nothing said a child on it RUNS, and is billed, at
         # that model's rates, or that "Who picks a subagent's model" is what
-        # decides who may choose it. Length is budgeted, not styled: the detail
+        # decides who may choose it.
+        #
+        # Length is budgeted, not styled, and the budget is TIGHT: the detail
         # line sheds the WHOLE help once the key path no longer fits beside it
-        # (settings_view._detail_clause), so this is 73 cells against the 63 it
-        # replaces and still renders with `subagents.models.lo` at 100 columns.
-        help="Bills at that model's rates; empty keeps the parent's. Picker: row above.",
+        # (settings_view._detail_clause), and at 100 columns that row is 94 cells
+        # with `subagents.models.hi` (19) plus its separator taking 22 — 72 cells
+        # of help. An earlier version measured 73 and shed the key path, which
+        # the comment beside it wrongly claimed it did not; this is 71 and was
+        # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        #
+        # The pointer names the row (by the key the page greppable from, which is
+        # also the spelling `lop config edit` takes) instead of saying "row
+        # above": registry order is max_running, model_choice, lo, med, hi, so
+        # "above" would point med at lo and hi at med — and `hi` is the row this
+        # incident ran through.
+        help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
     # -- fork ---------------------------------------------------------------
