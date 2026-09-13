@@ -618,6 +618,11 @@ async def test_no_provider_configured_skips_the_mount_engage(tmp_path: Path, mon
             assert engaged is False, "an unconfigured viewer must not spawn a runtime"
             assert app._warm_engage_started is False
             assert app._starting_runtime is False, "no spinner on the onboarding screen"
+            # And the honesty rule does not fire here either: the skip happens
+            # BEFORE the worker, so there is no failed engage to report. An
+            # unconfigured first run must not open with a warning about a
+            # runtime it was never going to start.
+            assert _failure_notices(app) == [], "a deliberate skip must stay silent"
     finally:
         await viewer.dispose()
 
@@ -766,3 +771,344 @@ async def test_a_viewer_attaching_during_the_announcement_keeps_the_runtime() ->
 
     assert sent[-1]["detail"] == "kept: 1 viewer(s) attached while stopping was announced"
     assert handle.stopped is False
+
+
+# --- the failure the band cannot explain (mount engage honesty) ----------------
+#
+# The mount/draft engage is silent on failure BY DESIGN — a warm-up nobody asked
+# for must not print an error at a user who has not sent anything. That design
+# assumed the failure would be quick. When it is not, the band is the whole of
+# what the user was told, and clearing it without a word renders "a runtime is
+# coming up" identically to "the runtime never came up". These tests pin the
+# three gates that decide which case is which, and the per-binding rule that
+# keeps a machine which cannot start a runtime from growing a notice per
+# keystroke.
+
+
+async def _pump_until(pilot, predicate, timeout: float = DEADLOCK_GUARD_S) -> bool:
+    """Pump the app's loop until ``predicate`` holds, or the guard expires.
+
+    A predicate poll rather than a sleep of a fixed length: the engage runs in
+    a worker, and the number of loop turns before its ``except`` arm runs is not
+    something a test should assume.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        await pilot.pause()
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
+
+
+def _failure_notices(app) -> list[str]:  # noqa: ANN001 — a Textual app, untyped here
+    """Every transcript notice that names the runtime-start failure."""
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    return [
+        str(block._text)
+        for block in app.query(NoticeBlock)
+        if "no runtime came up for this session" in str(block._text)
+    ]
+
+
+async def _app_with_engage(tmp_path: Path, monkeypatch, engage) -> Any:  # noqa: ANN001
+    """A real app over a cold viewer whose engage is ``engage``.
+
+    Shared by the tests below because they differ only in what the engage does
+    and how long it takes — which is exactly the axis the patience gate reads.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True, exist_ok=True)
+    _configure_provider(tmp_path)
+
+    from local_operator.session.attached import AttachedSession
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+
+    async def factory():
+        return viewer
+
+    return OperatorApp(factory), viewer
+
+
+@pytest.mark.asyncio
+async def test_a_watched_mount_failure_is_reported_once_with_the_next_step(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Past the patience threshold the transcript owes the user a sentence.
+
+    The copy half is asserted too, and deliberately: this notice exists because
+    the band clearing silently is unreadable, so a notice that does not name
+    what to do next would leave the user exactly where they started — staring at
+    a splash with no runtime. The measured next step is a prompt (a later bind
+    lands in ~0.7 s once the child has finished constructing).
+    """
+    # Patience is POLICY, so the test sets its own value and drives the engage
+    # past it. Pinning the production number here would test the constant rather
+    # than the comparison.
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    async def slow_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        await asyncio.sleep(0.2)  # over the patched patience above
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, slow_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(
+                pilot, lambda: bool(_failure_notices(app))
+            ), "a mount engage that failed after the patience threshold said nothing"
+            (notice,) = _failure_notices(app)
+            assert "send a message" in notice, (
+                "the notice must name the next step; it was the only account of "
+                f"what happened: {notice!r}"
+            )
+            assert app._start_engage_notice_shown is True
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quick_mount_failure_stays_silent(tmp_path: Path, monkeypatch) -> None:
+    """The existing contract, kept: a blip nobody watched reports nothing.
+
+    A refused socket fails in milliseconds, the latch is cleared, and the
+    message the user sends next engages again and owns the report. Announcing
+    this case would put a warning on screen for a start the user never asked
+    for and that cost them nothing.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 5.0)
+
+    async def fast_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, fast_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            # Wait for the failure to have definitely run: the latch is cleared
+            # by the same `except` arm that would have reported it.
+            assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+            for _ in range(20):
+                await pilot.pause()
+            assert _failure_notices(app) == [], "a sub-patience failure must stay quiet"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_vetted_configuration_failure_is_left_to_the_prompt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``ActionableConnectionError`` carries a sentence the PROMPT relays.
+
+    The type is the permission slip for echoing the message verbatim, and the
+    prompt already does that with its own reporting path. Predicting it here
+    would either duplicate the sentence or paraphrase a vetted one, which is how
+    "it is running in the background" got shipped over three cases where it was
+    false.
+    """
+    from local_operator.session.runtime.launch import ActionableConnectionError
+
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    async def actionable_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        await asyncio.sleep(0.2)
+        raise ActionableConnectionError("no API key is stored for this provider")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, actionable_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+            for _ in range(20):
+                await pilot.pause()
+            assert _failure_notices(app) == [], "a vetted configuration sentence is the prompt's"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_notice_is_per_binding_not_per_keystroke(tmp_path: Path, monkeypatch) -> None:
+    """One notice per binding, however many times the engage is re-armed.
+
+    A failed engage clears the latch by design, so the first keystroke retries
+    (``_warm_runtime_for_draft``). Without the per-binding record a machine that
+    cannot start a runtime would answer every letter typed with another copy of
+    the same sentence — the retry loop the operator described as "stuck
+    forever", now with a transcript full of duplicates.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+    attempts: list[int] = []
+
+    async def slow_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        attempts.append(1)
+        await asyncio.sleep(0.2)
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, slow_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: len(attempts) == 1)
+            assert await _pump_until(pilot, lambda: bool(_failure_notices(app)))
+            assert len(_failure_notices(app)) == 1
+
+            # The keystroke path, for real: the same trigger the user has.
+            from local_operator.tui.widgets.editor import Editor
+
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.press("h")
+            assert await _pump_until(
+                pilot, lambda: len(attempts) == 2
+            ), "the keystroke must still retry the engage"
+            for _ in range(20):
+                await pilot.pause()
+            assert (
+                len(_failure_notices(app)) == 1
+            ), "a second failure on the SAME binding repeated the notice"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_new_binding_reports_again(tmp_path: Path, monkeypatch) -> None:
+    """Per BINDING, not per app: `/new` and `/resume` are cold again and owe it.
+
+    The flag is reset on the one edge that changes the binding
+    (``_adopt_session``), which is what keeps the suppression from outliving the
+    session whose failure it described.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+    attempts: list[str] = []
+
+    async def slow_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        from local_operator.session.attached import RuntimeUnresponsiveError
+
+        attempts.append(str(session_id))
+        await asyncio.sleep(0.2)
+        if str(session_id) == "s2":
+            # A DIFFERENT failure class on the second binding, so the assertion
+            # below can tell the new binding's notice from the old one's rather
+            # than counting rows: the two ceilings get two sentences, and a
+            # stale suppression flag would leave only the first on screen.
+            raise RuntimeUnresponsiveError("the runtime is not responding")
+        raise ConnectionError("the runtime is reconnecting")
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sessions" / "s2").mkdir(parents=True, exist_ok=True)
+    _configure_provider(tmp_path)
+
+    from local_operator.session.attached import AttachedSession
+    from local_operator.tui.app import OperatorApp
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", slow_failure)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    async def make(session_id: str):
+        return await AttachedSession.cold(
+            session_id, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+
+    first = await make("s1")
+
+    app = OperatorApp(lambda: _make_coro(first))
+    second = None
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(
+                pilot,
+                lambda: any(
+                    "no runtime came up for this session" in text for text in _notice_texts(app)
+                ),
+            )
+
+            second = await make("s2")
+            app._session_factory = lambda: _make_coro(second)
+            await app._reload_session()
+            assert await _pump_until(
+                pilot,
+                lambda: any("did not answer in " in text for text in _notice_texts(app)),
+            ), (
+                "the swapped-in binding's own failure was suppressed by the old " "binding's notice"
+            )
+    finally:
+        await first.dispose()
+        if second is not None:
+            await second.dispose()
+
+
+async def _make_coro(viewer: Any) -> Any:
+    """An awaited-once factory that returns an already-built viewer."""
+    return viewer
+
+
+def _notice_texts(app) -> list[str]:  # noqa: ANN001 — a Textual app, untyped here
+    """Every transcript notice, whatever it says."""
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    return [str(block._text) for block in app.query(NoticeBlock)]
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_in_flight_owns_the_failure_not_the_band(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A preempted background engage is a bound, not a failure, and says nothing.
+
+    The mount engage yields its place the moment a prompt arrives — that is what
+    ``_BACKGROUND_YIELD_BUDGET_S`` is for — so a user who sends a message into a
+    slow start makes this engage give up by design. Reporting that gave the
+    measured result: submit at t+20.1 s, band cleared 1.5 s later with "no
+    runtime came up for this session in 17s — send a message to start one", and
+    the session then bound on the prompt's own engage at t+47.0 s and ran the
+    turn. The prompt's bind reports what it finds; the band must not answer the
+    message the user just sent with an instruction to send one.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    async def preempted_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        # The state `_bind_lock_for` publishes BEFORE a foreground caller waits on
+        # the bind lock: it is what makes the background holder cut its own
+        # deadline, and it is STILL SET when that holder raises — the foreground
+        # caller only clears it in its own `finally`, one task later. Deliberately
+        # left set here for the same reason; the counter is per-facade state on a
+        # viewer this test disposes.
+        app._session._foreground_waiting += 1
+        await asyncio.sleep(0.2)
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, preempted_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+            for _ in range(20):
+                await pilot.pause()
+            assert (
+                _failure_notices(app) == []
+            ), "a prompt in flight owns the outcome; the band must stay quiet"
+    finally:
+        await viewer.dispose()
