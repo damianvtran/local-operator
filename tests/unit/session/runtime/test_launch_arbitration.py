@@ -728,6 +728,13 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     a clean merge can drop either half independently: the flag must sit at index
     1 (interpreter options are only recognised BEFORE `-m`), and argv[0] carries
     the process label whenever a branded image exists.
+
+    `start_new_session` is asserted here for the same reason and one stronger
+    one: it is the DETACHMENT contract. It is what makes the runtime a separate
+    session and group leader, so a terminal teardown cannot reach it — the
+    invariant ``test_runtime_detachment`` pins on a real process. Dropping the
+    kwarg is a one-word diff that no other test would catch, and its symptom
+    (sessions dying with the interface) is exactly the operator's report.
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
@@ -749,6 +756,9 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
         # No `cwd=` is the whole reason the flag is required: the child would
         # otherwise inherit the viewer's directory and import a checkout there.
         recorded["cwd"] = kwargs.get("cwd", _MISSING)
+        # The detachment contract: see the docstring. Recorded as-is (not
+        # defaulted) so its ABSENCE is a recorded fact too.
+        recorded["start_new_session"] = kwargs.get("start_new_session")
         return _Popen()
 
     monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
@@ -769,6 +779,11 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     # Still no `cwd=`: if one is ever added the flag stops being the thing that
     # protects the import, and this assertion should be revisited deliberately.
     assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"
+    assert recorded["start_new_session"] is True, (
+        "the spawn in launch.py lost `start_new_session=True`, so the runtime "
+        "is no longer its own session/group leader and an interface teardown "
+        f"can signal it; kwargs={recorded!r}"
+    )
 
     # argv[0] is the process LABEL when a branded image exists (`executable=`
     # then carries the real image), and the bare interpreter when it does not.
