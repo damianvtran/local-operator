@@ -39,7 +39,7 @@ const IDS = [
   "origin-ack-title", "origin-ack-sub", "origin-ack-check", "origin-ack-granted", "card", "retry",
   "retry-incompatible", "retry-unresponsive", "reload-extension",
   "origin-wedge", "origin-wedge-reload", "unresponsive-outcome",
-  "connected-all-sites", "connected-all-sites-off",
+  "connected-all-sites", "connected-all-sites-off", "connected-advisory",
   "pair-form", "pair-unpaired",
   "pair-code", "pair-error", "port", "port-row",
 ];
@@ -67,7 +67,20 @@ function installDomStub() {
           return on;
         },
       },
-      style: { setProperty: () => {}, removeProperty: () => {} },
+      // A real property map rather than a no-op, so a test can read back a
+      // custom property the render set (`--tone` is the card's semantic rule).
+      style: {
+        _props: new Map(),
+        setProperty(name, value) {
+          node.style._props.set(name, String(value));
+        },
+        removeProperty(name) {
+          node.style._props.delete(name);
+        },
+        getPropertyValue(name) {
+          return node.style._props.get(name) ?? "";
+        },
+      },
       setAttribute: () => {},
       removeAttribute: () => {},
       addEventListener: (event, handler) => {
@@ -2215,6 +2228,65 @@ test("U5 control: a never-paired install's form says nothing about a revoke", as
 
     assert.deepEqual(visibleState(nodes), ["pairing"]);
     assert.equal(nodes.get("pair-unpaired").classList.contains("hidden"), true);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("the update advisory fills the Connected card's reserved slot, and only when /health says so", async () => {
+  // The slot is RESERVED whether or not there is anything to say (popup.css),
+  // so the assertions here are about the CONTENT and the hidden class: a slot
+  // that renders text while still carrying `hidden` is invisible (the CSS
+  // overrides `display` but not `visibility`), and one that shows without the
+  // class would be blank space on every card.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  const health = {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    pending_origin: undefined,
+    extension_version: "0.1.10",
+    extension_expected_version: "0.1.14",
+    extension_update_available: true,
+  };
+  globalThis.fetch = async () => ({ ok: true, json: async () => health });
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+    const slot = nodes.get("connected-advisory");
+    assert.equal(
+      nodes.get("connected").classList.contains("hidden"),
+      false,
+      "precondition: the connected card is what is showing",
+    );
+    assert.equal(slot.classList.contains("hidden"), false, "an older extension must be called out");
+    // The sentence is the GENERATED template with the live versions in it, so
+    // this pins the one-spelling rule: a second, hand-written string here would
+    // pass only if it happened to match.
+    assert.equal(
+      slot.textContent,
+      "Browser extension 0.1.10 < 0.1.14 — update it in Chrome when a newer version is offered; nothing is blocked.",
+    );
+    assert.doesNotMatch(slot.textContent, /requir|must/i, "an older extension is never a requirement");
+
+    // Up to date: the slot empties and the reservation alone remains.
+    health.extension_version = "0.1.14";
+    health.extension_update_available = false;
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(20);
+    assert.equal(slot.textContent, "", "an up-to-date extension must leave the slot empty");
+    assert.equal(slot.classList.contains("hidden"), true, "and must leave it hidden");
+
+    // No state of the card may report an unavailable update as a fault tone:
+    // the slot is a note, and the card's own tone is unaffected.
+    assert.equal(
+      nodes.get("card").style.getPropertyValue("--tone"),
+      "var(--success)",
+      "the connected card keeps its success tone with an advisory showing",
+    );
   } finally {
     await bundle.close();
   }

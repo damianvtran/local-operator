@@ -15,6 +15,143 @@ from pydantic import BaseModel, ConfigDict, Field
 
 PROTO_VERSION = 1
 
+#: The oldest protocol version this daemon still drives.
+#:
+#: ``PROTO_VERSION`` and ``MIN_SUPPORTED_PROTO`` are a WINDOW, not an equality,
+#: because the two release lines move at different speeds and the extension's
+#: half can be stuck in Chrome Web Store review for days (the 0.1.8 review took
+#: ~4.5 days). An equality test means a daemon release strands every installed
+#: browser until Google approves the matching extension, and the failure the
+#: user sees tells them to update an extension the store will not serve yet.
+#: That is not hypothetical: it is the defect this window removes.
+#:
+#: Raising this floor is a real compatibility decision, not a version bump. The
+#: rule is stated in docs/design/browser-extension.md section 11 and repeated
+#: here because it is the thing most likely to be violated by accident, in BOTH
+#: directions:
+#:
+#: * ``MIN_SUPPORTED_PROTO`` may be raised ONLY by a commit that changes the
+#:   meaning of an existing frame shape or an existing method's semantics, and
+#:   that commit must state, for the proto it drops, that a peer at that proto
+#:   either behaves correctly or receives a typed refusal on exactly the affected
+#:   commands — never a silently wrong answer.
+#: * …and such a commit MUST raise it (and bump ``PROTO_VERSION``, which is the
+#:   same act from the other side) in that same commit. Stated as a permission
+#:   alone, a future bumper can follow the rule verbatim, leave the floor at the
+#:   proto it just broke, and reach the silently-wrong-answer case the rule
+#:   forbids — by obeying the rule. Additive optional fields, new
+#:   ``ErrorCode``s the peer only emits, and new events an old peer harmlessly
+#:   drops are what keep the floor where it is.
+MIN_SUPPORTED_PROTO = 1
+
+
+def proto_supported(
+    proto: int, *, low: int = MIN_SUPPORTED_PROTO, high: int = PROTO_VERSION
+) -> bool:
+    """Whether ``proto`` falls inside the supported window, inclusive.
+
+    The bounds are parameters rather than a closed-over pair so the acceptance
+    rule can be asserted on a SYNTHETIC window: at today's width
+    (``MIN_SUPPORTED_PROTO == PROTO_VERSION == 1``) the window and an equality
+    test accept exactly the same set, so nothing behavioural can distinguish
+    them, and a future revert to ``!=`` would pass every handshake test that
+    only ever sends proto 1 (review R1-6). Callers that want the live window
+    pass the constants explicitly; ``daemon.py`` does, so monkeypatching the
+    module's own names still moves the bound.
+    """
+    return low <= proto <= high
+
+
+#: The extension version this runtime was developed and released alongside.
+#:
+#: Hand-written rather than generated, and pinned to ``extension/manifest.json``
+#: by a unit test, so a drift between the two fails CI instead of surfacing as a
+#: mystery skew at a user's desk. It is ADVISORY ONLY: nothing is refused for
+#: being older, and nothing is forced by it. Its one use is the update advisory
+#: below, which says a newer version exists without claiming the build is
+#: unusable — the store decides when a newer version is actually offered.
+EXPECTED_EXTENSION_VERSION = "0.1.14"
+
+#: The first extension TREE that carried the ``owner_*`` ownership lifecycle
+#: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
+#: ``git show ee146fb73:extension/manifest.json``, and note that the same commit
+#: already lists ``owner_recover``/``owner_finish``/``owner_retain``/
+#: ``owner_release`` in ``extension/src/protocol.gen.ts``.
+#:
+#: It is a TREE, not a store release: 0.1.9 was never submitted (the release
+#: record says so, and the manifest stopped naming one tree — the reason 0.1.10
+#: exists), but it is not a fiction either: an unpacked/sideload build of that
+#: tree is a peer this runtime can meet, and the design doc treats that path as
+#: supported. So the floor is the first build that SHIPS the lifecycle, and a
+#: 0.1.9 peer is ownership-CAPABLE: it must reach the wedge arm, not the silent
+#: degradation, because a bare ``internal`` from it means its worker stopped
+#: answering — not that it has no verbs. Getting this wrong is not cosmetic:
+#: the degraded path is the one place the session stops using ``owner_*``, so
+#: misclassifying a capable peer both hides a real wedge and (before R1-2) left
+#: its tab unclosable.
+#:
+#: Used to tell two identical-looking failures apart. ``owner_recover``
+#: answering with a bare ``internal`` and empty ``data`` means either "this
+#: extension predates ownership" or "this extension is current but its worker
+#: stopped answering"; the two need opposite remedies, and only the reported
+#: version separates them. Below this floor we degrade to the capability-only
+#: path and keep working; at or above it we report a wedge honestly.
+OWNERSHIP_MIN_EXTENSION_VERSION = "0.1.9"
+
+#: The ONE spelling of the "a newer extension exists" advisory.
+#:
+#: Deliberately a template over two version strings, never a sentence with a
+#: number baked in, so the daemon, the CLI, the popup and the agent-facing line
+#: cannot drift and a version bump cannot leave a stale figure in copy. The
+#: contingency is on the STORE ("when a newer version is offered") because
+#: Python cannot know the store's live version and must not pretend to — and the
+#: register is deliberately not the old "requires"/"must" one: nothing here
+#: blocks anything, which is the whole point of the change that introduced it.
+EXTENSION_UPDATE_NOTE = (
+    "Browser extension {have} < {want} — update it in Chrome when a newer version is "
+    "offered; nothing is blocked."
+)
+
+
+def parse_extension_version(value: str) -> tuple[int, ...] | None:
+    """Parse a dotted numeric version, or ``None`` when it is not one.
+
+    Chrome version strings are digits and dots (``"0.1.10"``), so anything else
+    — an empty string from a peer that never stamped one, a placeholder, a user
+    agent — is UNKNOWN rather than "older". Every caller must read ``None`` as
+    "cannot tell": an unknown version must not trigger the update advisory and
+    must not be treated as a pre-ownership extension, because both would be a
+    claim the evidence does not support.
+    """
+    value = value.strip()
+    if not value:
+        return None
+    parts = value.split(".")
+    if any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def extension_older(have: str, want: str) -> bool:
+    """Whether ``have`` is a KNOWN version strictly older than ``want``.
+
+    ``False`` whenever either side is unparseable, so "unknown" is never
+    silently promoted to "older". Component-wise, and a shorter version is a
+    prefix of a longer one rather than an error: ``0.1.9 < 0.1.10`` and
+    ``0.1 < 0.1.13``, both of which a string comparison gets wrong.
+    """
+    parsed_have = parse_extension_version(have)
+    parsed_want = parse_extension_version(want)
+    if parsed_have is None or parsed_want is None:
+        return False
+    return parsed_have < parsed_want
+
+
+def extension_update_note(have: str, want: str = EXPECTED_EXTENSION_VERSION) -> str:
+    """The advisory sentence, generated from the constants (never hardcoded)."""
+    return EXTENSION_UPDATE_NOTE.format(have=have, want=want)
+
+
 #: Every RPC method the extension answers, in a stable order. This is the ONE
 #: source of truth: the daemon's timeout table, the tool's action list, and the
 #: generated TypeScript ``Method`` union all derive from it, so a method added

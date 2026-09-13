@@ -52,6 +52,53 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.13 and v0.1.14 — two trees landed on `main`, NEITHER submitted
+
+Two numbers, two trees, one story, recorded together so neither reads as an
+unexplained footnote to the other: 0.1.13 is #1038's tree, 0.1.14 is the
+version-skew tree, and **neither has ever been sent to the store.**
+
+| Field | Value |
+| --- | --- |
+| Extension versions | **0.1.13** — #1038's tree (`ced1828f4`, `feat(bridge): pair several extension identities at once`); **0.1.14** — the version-skew tree (`fix/extension-version-skew-does-not-break-bridge`) |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (one item; the versions are revisions of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | 0.1.13: `ced1828f4`. 0.1.14: the bump commit on `fix/extension-version-skew-does-not-break-bridge` (SHA in that PR's thread — recording it inside the commit that creates it is impossible, which is why the tree hash below is the field that actually pins the input) |
+| `extension/` tree hash | 0.1.13: `8c351b2525b97da9bdd3075e3e2359886c3a8596` (`git rev-parse ced1828f4:extension`). 0.1.14: `d44560d35d98d05b6e7bb8f3f89261bd45468962` (`git rev-parse <0.1.14 bump commit>:extension`, computed from the staged tree) |
+| Artifact SHA-256 | *not applicable — neither was uploaded* |
+| Artifact size | *not applicable — neither was built for upload* |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged); the runtime now accepts the WINDOW `MIN_SUPPORTED_PROTO..PROTO_VERSION` |
+| Submission routes | **None for either number.** Deliberately NOT dispatched — see below |
+| Promotion routes | **None.** Deliberately NOT dispatched |
+| Store state | **Neither submitted.** The live listing is still `v0.1.10`; `v0.1.12` is `PENDING_REVIEW` |
+| State last checked | 2026-09-13 |
+| Approval timestamp | *not applicable* |
+| Previously published | v0.1.10 (0.1.12 still in review) |
+
+**Why two entries became one.** Both numbers moved on `main` without a
+submission, and they moved for the same reason: `extension/manifest.json` and
+`extension/package.json` track the extension CODE, not the review queue
+(AGENTS.md), so a behaviour change has to carry a bump in the same commit or the
+version stops pinning exactly one tree (the 0.1.9 lesson). #1038 bumped to 0.1.13
+for the multi-identity worker, popup and pairing work; the version-skew change
+then had to bump again rather than share the number, because two different trees
+reading `0.1.13` is exactly the ambiguity that lesson forbids. So: **`0.1.13`
+means #1038's tree (`ced1828f4`), `0.1.14` means the version-skew tree**, and the
+two tree hashes above are how a reader tells them apart without a rebuild.
+
+**The store dispatch is deliberately withheld for both.** The store refuses
+uploads while an item is in review (`HTTP 400 FAILED_PRECONDITION /
+NOT_UPDATEABLE`), and the recorded rule is never to cancel a pending review to
+force a submission. Whichever of the two trees is promoted next — the one the
+next submission window picks, after 0.1.12 clears — needs its own workflow run,
+API response and tree hash appended here before promotion; until then this
+section claims nothing is live.
+
+**Nothing about either version is required for the version-skew fix to work.**
+That defect was fixed on the RUNTIME side (an older extension is driven, not
+refused), and the advisory only reads the version the extension reports — so the
+live 0.1.10 build benefits without any upload at all.
+
 ## v0.1.12 — submitted 2026-09-13, pending review as of 2026-09-13
 
 | Field | Value |

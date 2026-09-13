@@ -539,6 +539,32 @@ async def test_teardown_closes_with_4000_and_clears_pending(
 # --- D9 -------------------------------------------------------------------
 
 
+def _publish_peer(monkeypatch: pytest.MonkeyPatch, version: str) -> None:
+    """Publish a live peer identity without a daemon.
+
+    ``resources`` reads the extension's version and proto from the discovery
+    file to decide whether a bare ``internal`` means "this build predates
+    ownership" or "this worker has stopped answering". A test of that branch
+    must therefore control the file — and must NOT let it read the developer's
+    own live daemon, whose answer would vary by machine (the same isolation
+    hazard the suite closes elsewhere for the config root).
+    """
+    from local_operator.browser_bridge import state as state_store
+
+    def read(root: Path | None = None) -> state_store.BridgeState:
+        return state_store.BridgeState(
+            pid=1,
+            port=4099,
+            session_key="k" * 32,
+            proto=PROTO_VERSION,
+            extension_connected=True,
+            extension_version=version,
+            extension_proto=PROTO_VERSION,
+        )
+
+    monkeypatch.setattr(resources.state_store, "read", read)
+
+
 @pytest.mark.asyncio
 async def test_recover_timeout_is_not_reported_as_a_version_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -553,6 +579,19 @@ async def test_recover_timeout_is_not_reported_as_a_version_mismatch(
     to "requires an updated Local Operator extension", which is a wrong
     diagnosis that costs real time: the reporting session was told to replace a
     current extension while a wedged worker went unmentioned.
+
+    The bare shape is ALSO not proof of an old build — a wedged current worker
+    produces it too — so the version the peer reports is now what decides, and
+    this test pins the two arms that need no obligation:
+
+      * a pre-ownership peer (0.1.8) with nothing to reconcile DEGRADES instead
+        of raising, which is the change that stops the store-unsatisfiable
+        update demand;
+      * with no version readable at all, nothing is proven, so the answer is the
+        wedge remedy rather than a version claim.
+
+    The version BELOW the floor WITH a durable obligation still keeps the update
+    demand, and that arm is pinned in test_extension_version_skew.py.
     """
 
     class _FailingBridge:
@@ -572,11 +611,24 @@ async def test_recover_timeout_is_not_reported_as_a_version_mismatch(
     assert "updated Local Operator extension" not in str(raised.value)
     assert raised.value.data["timeout_s"] == 20.0
 
+    # A PROVEN pre-ownership build, and nothing outstanding to reconcile.
+    _publish_peer(monkeypatch, "0.1.8")
     legacy_error = BridgeError(ErrorCode.INTERNAL, "unknown method owner_recover")
     monkeypatch.setattr(resources, "BridgeClient", lambda: _FailingBridge(legacy_error))
-    with pytest.raises(resources.BrowserOwnershipError) as legacy:
-        await resource.recover()
-    assert "requires an updated Local Operator extension" in str(legacy.value)
+    degraded = await resource.recover()
+    assert degraded["ownership_version"] == 0
+    assert resource.ownership is False
+    assert resource.record["ownership"] == "unavailable"
+
+    # An UNKNOWN version is not an old one: nothing here may claim a version
+    # skew, so the honest answer names the remedy that clears a wedge.
+    resource2 = resources.BrowserResource(tmp_path / "unknown", (tmp_path / "unknown").name)
+    resource2.initialize()
+    monkeypatch.setattr(resources.state_store, "read", lambda root=None: None)
+    with pytest.raises(resources.BrowserOwnershipError) as unproven:
+        await resource2.recover()
+    assert "stopped answering" in str(unproven.value)
+    assert "requires an updated Local Operator extension" not in str(unproven.value)
 
 
 # --- D10 ------------------------------------------------------------------
@@ -765,12 +817,18 @@ async def test_stalled_owner_recover_is_not_reported_as_a_version_mismatch(
     assert "updated Local Operator extension" not in str(raised.value)
     assert raised.value.data["stalled"] == "chrome.storage.session.set(ownerScopes)"
 
-    # And the genuine legacy case is still mapped: no discriminator at all.
+    # And the genuine legacy SHAPE — no discriminator at all — is still mapped,
+    # but the version decides to what: with no identity readable here, nothing
+    # proves the peer is old, so it is reported as the wedge it equally could be
+    # (the pre-ownership and obligation arms are pinned in
+    # test_extension_version_skew.py, and the degrade arm above).
     legacy = BridgeError(ErrorCode.INTERNAL, "unknown method owner_recover")
+    monkeypatch.setattr(resources.state_store, "read", lambda root=None: None)
     monkeypatch.setattr(resources, "BridgeClient", lambda: _FailingBridge(legacy))
     with pytest.raises(resources.BrowserOwnershipError) as mapped:
         await resource.recover()
-    assert "requires an updated Local Operator extension" in str(mapped.value)
+    assert "stopped answering" in str(mapped.value)
+    assert "requires an updated Local Operator extension" not in str(mapped.value)
 
 
 # --- R1-2 ------------------------------------------------------------------

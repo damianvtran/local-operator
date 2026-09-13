@@ -6,6 +6,7 @@ import {
 } from "../access-queue";
 import type { BroadGrant } from "../origin-policy";
 import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
+import { EXTENSION_UPDATE_NOTE, PROTO_VERSION } from "../protocol.gen";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
@@ -264,6 +265,18 @@ interface Health {
   current_url?: string;
   current_title?: string;
   pending_origin?: string;
+  /** The extension's OWN reported version, as the daemon last saw it in
+   * `hello`, and the version this runtime ships with. Optional because an
+   * older daemon does not send either. */
+  extension_version?: string;
+  extension_expected_version?: string;
+  /** Whether the daemon has concluded that a KNOWN extension version is older
+   * than the one the running Local Operator ships with. A NOTE, never a fault:
+   * nothing is refused for being older, which is the whole point of the change
+   * that added this — the store can hold a version in review for days and the
+   * old "update needed" card was an instruction users could not act on.
+   * Optional for the same reason as above, and false-ish when absent. */
+  extension_update_available?: boolean;
 }
 
 // The card's 2px top rule is the design system's ONE spend of colour, and it is
@@ -367,7 +380,8 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // (padding, the driven-URL trough, the actions row) is the constant between
 // them, so a pin is the state's total card height minus that chrome:
 //
-//   connected card      207.16px  ->  86px
+// (connected card      207.16px  ->  86px  before the update advisory;
+//  connected card      269.16px  -> 148px with its reserved slot — see below)
 //   pairing form        339.52px  -> 219px
 //   standby card        314.27px  -> 193px
 //
@@ -414,6 +428,19 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // with both spellings of the handle before changing the constant; do not
 // re-derive it from this paragraph.)
 //
+// THE `connected` PIN MOVED BY EXACTLY ONE RESERVED SLOT'S WORTH, and that is
+// the whole cost of the update advisory. `#connected-advisory` is a permanent
+// reserved 8+54px line (see popup.css), so the Connected card is taller for
+// EVERY user whether or not an update exists — which is the point: it is the
+// reservation, not the sentence, that keeps the popup from resizing when the
+// sentence appears. Re-measured with `extension/scripts/popup-states-shot.mjs`
+// (the committed harness: real Chrome, the dist loaded unpacked, 300x600 dpr=2,
+// /health stubbed per state) on both heads: the connected card is 207.16px
+// before and 269.16px after — a 62.00px delta, exactly the slot's 54px box plus
+// its 8px margin — and the SAME 269.16px whether or not the advisory is
+// showing. `pairing` is untouched (the pairing form has no such slot), so
+// PIN_PAIRING stays where it was.
+//
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and
 // `pairing` are durable properties of the browser — a paired browser is still
@@ -423,8 +450,15 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // precisely the one most likely to be a DIFFERENT card.
 //
 // THIS IS A TRADE, AND THESE ARE ITS NUMBERS. Measured from the seed a real
-// browser carries (`86px` — paired for weeks), two consecutive opens per
-// sequence, /health delayed so #pending is genuinely the first frame:
+// browser carried when this block was written (`86px`; it reads `148px` now
+// that the update advisory reserves a slot in the Connected card — see above),
+// two consecutive opens per sequence, /health delayed so #pending is genuinely
+// the first frame. The figures are left as measured rather than shifted by the
+// 62px the seed moved: which path pays, and by how much relative to its own
+// base, is the property this block exists to record, and re-measuring every row
+// is a separate exercise. What the pin still guarantees is the one the sweep
+// solves for — the recorded pin EQUALS the durable card it names (86.16px then,
+// 148.16px now) — so a repeated open of the same durable state stays exact:
 //
 //   recovery open (wedged -> connected)   167.84px -> 0.16px   <- instructed
 //   arrival (working browser wedges)      168.77px -> 257.77px
@@ -464,7 +498,7 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // this table. (#996 quoted its own empty-trough figure as 211.2px; this table
 // carries the re-measured 207.2px for the same card, so the ~4px is a
 // measurement correction on this branch, not a second card.)
-const PIN_CONNECTED = "86px";
+const PIN_CONNECTED = "148px";
 const PIN_PAIRING = "219px";
 const PIN_STANDBY = "193px";
 const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
@@ -1015,6 +1049,7 @@ async function renderOnce(): Promise<void> {
       }
     }
     show("connected");
+    renderUpdateAdvisory(health);
     return;
   }
   // This install is not paired (or is, but /health does not say so yet: the
@@ -1032,6 +1067,30 @@ async function renderOnce(): Promise<void> {
     .getElementById("pair-unpaired")
     ?.classList.toggle("hidden", revoked !== true);
   show(viewForHealth(false, locallyPaired));
+}
+
+function renderUpdateAdvisory(health: Health): void {
+  const slot = document.getElementById("connected-advisory");
+  if (!slot) return;
+  // The predicate is the DAEMON's (see protocol.EXTENSION_UPDATE_NOTE /
+  // `extension_older`): proven link AND a known version strictly below the one
+  // this runtime ships with. Recomputed here would be a second spelling of a
+  // rule that must have exactly one, so this only renders what /health says.
+  if (health.extension_update_available !== true) {
+    slot.textContent = "";
+    slot.classList.add("hidden");
+    return;
+  }
+  // The sentence comes from the generated template, which is generated from
+  // the ONE Python constant, so the popup cannot drift from the CLI and the
+  // agent-facing line. The version numbers are the live ones, never a literal.
+  slot.textContent = EXTENSION_UPDATE_NOTE.replace(
+    "{have}",
+    health.extension_version || "?",
+  ).replace("{want}", health.extension_expected_version || "?");
+  // Never a DANGER tone and never a new card: an older extension is driven
+  // normally, and the reserved slot exists so saying so costs no layout.
+  slot.classList.remove("hidden");
 }
 
 function hostnameOf(origin: string | undefined): string {
@@ -1133,7 +1192,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     wire.send(
       JSON.stringify({
         event: "hello",
-        proto: 1,
+        proto: PROTO_VERSION,
         token: token ?? "",
         extension_version: chrome.runtime.getManifest().version,
         browser: navigator.userAgent,

@@ -7431,6 +7431,52 @@ def cmux_browser_available() -> bool:
         return False
 
 
+def _browser_update_note(state: BrowserSurfaceProtocol, result: ToolResult) -> ToolResult:
+    """Append the extension-update advisory to the FIRST browser result of a session.
+
+    The LAST-resort of the three advisory surfaces, and the only one that costs
+    tokens: a tool result is re-billed on every later turn, so the line is
+    emitted AT MOST ONCE per session. The flag lives on the host-owned
+    ``BrowserSurface`` — the ``ToolContext`` is rebuilt each turn, so a flag
+    stored there would reset — and is read through ``getattr`` because a host
+    that injects its own holder should simply never see the line rather than
+    fail on the missing slot.
+
+    Read from the DISCOVERY FILE, not a socket: this runs on every browser
+    result and the session side may not open one. The daemon publishes the
+    predicate there (``BridgeState.extension_update_available``), so the answer
+    is the same one ``/health`` would give without the round-trip.
+
+    Skipped on an ERROR result: "nothing is blocked" printed beside a failure
+    reads as a contradiction, and the failure copy is already the thing the
+    agent needs to act on.
+    """
+    if getattr(state, "extension_update_notified", False) or result.is_error:
+        return result
+    from local_operator.browser_bridge import state as state_store
+    from local_operator.browser_bridge.protocol import extension_update_note
+
+    try:
+        current = state_store.read()
+    except Exception:  # noqa: BLE001 - an advisory may never break a tool result
+        return result
+    if current is None or not current.extension_update_available:
+        return result
+    note = extension_update_note(current.extension_version)
+    try:
+        state.extension_update_notified = True  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover - a holder with __slots__
+        return result
+    # Appended to the first TEXT block, which is the caption on an image result
+    # (`_image`) and the whole body otherwise — never a new `details` key, which
+    # would ride the renderer and compaction-pruning paths it has no business in.
+    for block in result.content:
+        if isinstance(block, TextContent):
+            block.text = f"{block.text}\n\n{note}" if block.text else note
+            return result
+    return result
+
+
 def _browser_state(context: ToolContext | None) -> BrowserSurfaceProtocol:
     """The session's browser surface holder.
 
@@ -9257,9 +9303,13 @@ async def execute_browser(
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
-        return await _execute_browser(tool_call_id, args, signal, on_update, context)
+        return _browser_update_note(
+            state, await _execute_browser(tool_call_id, args, signal, on_update, context)
+        )
     if not resource.generation and not await bridge_browser_reachable():
-        return await _execute_browser(tool_call_id, args, signal, on_update, context)
+        return _browser_update_note(
+            state, await _execute_browser(tool_call_id, args, signal, on_update, context)
+        )
     try:
         validated = BrowserParams(**args)
     except ValidationError as exc:
@@ -9317,6 +9367,54 @@ async def execute_browser(
                         "'retain' needs a reason: pass text='pending login' (or similar) "
                         "describing why this tab must stay open past your turn.",
                     )
+                if resource.ownership_mode() is False:
+                    # A peer with no `owner_*` lifecycle cannot be ASKED to hold a
+                    # tab, so both verbs become LOCAL record writes and the copy
+                    # says so plainly. Issuing the RPC anyway is a guaranteed
+                    # failure on a link that otherwise works — the class of
+                    # dead-end this change removes.
+                    #
+                    # The record is still written, but as a STATEMENT OF INTENT
+                    # rather than an obligation: the extension never accepted it
+                    # and cannot enforce it, which is exactly what the copy says.
+                    # `finish_degraded` clears it the moment the scope settles, so
+                    # a closed tab can never keep reading as "retained: the owning
+                    # session must release it" — a row that is neither cleanable
+                    # nor true (review R1-4).
+                    resource.record["retention"] = reason if action == "retain" else ""
+                    if action == "release" and resource.record.get("terminal"):
+                        # A release that also settles a terminal scope must still
+                        # close the tab, or the fallback strands the very surface
+                        # it opened. `finish_degraded` is the lock-free close.
+                        closed = await resource.finish_degraded()
+                        if closed.state == "closed":
+                            state.surface_id = ""
+                        resource.record["surface_id"] = state.surface_id
+                        resource.record["state"] = closed.state
+                        resource.assert_current()
+                        resource._save()
+                        return _text(
+                            tool_call_id,
+                            "browser",
+                            "Retention cleared locally; this extension cannot enforce retention, "
+                            f"so the tab was closed directly ({closed.state}).",
+                        )
+                    resource.record["surface_id"] = state.surface_id
+                    resource.assert_current()
+                    resource._save()
+                    return _text(
+                        tool_call_id,
+                        "browser",
+                        (
+                            "Retention recorded locally only: this browser extension runs "
+                            "without the ownership lifecycle, so it cannot enforce that this "
+                            "tab stays open past your turn. The intent is cleared when this "
+                            "scope finishes."
+                            if action == "retain"
+                            else "Retention cleared locally only; this extension cannot "
+                            "enforce retention."
+                        ),
+                    )
                 result = await BridgeClient().call(
                     f"owner_{action}", {**resource.params(), "reason": reason}
                 )
@@ -9368,7 +9466,7 @@ async def execute_browser(
 
                     await BridgeClient().call("owner_release", resource.params())
                     resource.record["retention"] = ""
-            return result
+            return _browser_update_note(state, result)
         finally:
             # Lost responses retain the allocation intent. A retry/recover asks
             # the extension for that exact allocation instead of opening twice.

@@ -475,7 +475,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
 
   // An already-paired browser. The hint is synchronous (localStorage), because
   // chrome.storage cannot inform a first paint.
-  globalThis.localStorage.setItem("lop:pin-hint", "86px");
+  globalThis.localStorage.setItem("lop:pin-hint", "148px");
   installFetchStub(() => true);
   let bundle = await loadPopup();
   try {
@@ -484,7 +484,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
     await tick(30);
     assert.equal(
       nodes.get("pending").style.minHeight,
-      "86px",
+      "148px",
       "a paired browser's first paint must be pinned to the connected card's height",
     );
     assert.equal(
@@ -637,7 +637,7 @@ test("the pin follows the card that was rendered, in both directions (D1/D3-1)",
     await tick(30);
     assert.equal(
       globalThis.localStorage.getItem("lop:pin-hint"),
-      "86px",
+      "148px",
       "the connected card must record its own pin",
     );
 

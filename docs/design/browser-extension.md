@@ -227,13 +227,45 @@ the mobile install path already solved with launchd. The error string for
 plus:
 
 ```python
-PROTO_VERSION = 1            # bump = breaking; daemon refuses mismatched hellos
+PROTO_VERSION = 1            # the newest proto this daemon speaks
+MIN_SUPPORTED_PROTO = 1      # the oldest it will still drive — a WINDOW, not equality
+EXPECTED_EXTENSION_VERSION = "0.1.14"   # advisory only; pinned to extension/manifest.json by a test
+OWNERSHIP_MIN_EXTENSION_VERSION = "0.1.9"  # the first TREE carrying owner_* (PR #798, `ee146fb73`)
 class ErrorCode(StrEnum): ...
 ```
 
+The handshake accepts any proto in `MIN_SUPPORTED_PROTO..PROTO_VERSION` and
+closes `4001` outside it, with `reason="proto_too_old"` / `"proto_too_new"`.
+**That window is the whole compatibility policy**, and it exists because the two
+release lines move at different speeds: the extension's half can sit in Chrome
+Web Store review for days (0.1.8 took ~4.5 days), so an equality test means a
+runtime release strands every installed browser until Google approves the
+matching extension — and the failure the user sees tells them to update an
+extension the store is not serving yet. That is the defect the window removes.
+
+`EXPECTED_EXTENSION_VERSION` is NOT a compatibility requirement. It drives a
+single advisory line (below) whose whole content is that a newer version exists
+and nothing is blocked. `OWNERSHIP_MIN_EXTENSION_VERSION` is a diagnostic
+discriminator, not a gate: a bare `internal` from `owner_recover` means "this
+extension predates ownership" below it and "this worker has stopped answering"
+at or above it, and the two need opposite remedies.
+
+Its value is the first extension TREE that ships the lifecycle, not the first
+store RELEASE: `git show ee146fb73:extension/manifest.json` reads `0.1.9` while
+the same commit already declares `owner_recover`/`owner_finish`/`owner_retain`/
+`owner_release` in `extension/src/protocol.gen.ts`. 0.1.9 was never submitted to
+the store (see `docs/store/release-record.md` — the manifest stopped naming one
+tree, which is why 0.1.10 exists), but an unpacked build of that tree is a peer
+the runtime can still meet on the sideload path this document treats as
+supported. Classifying it as PRE-ownership would be the worst of both: it would
+hide a real wedge behind a silent degradation AND take its tab off the
+``owner_*`` path. So a `0.1.9` peer is ownership-CAPABLE, and the boundary is
+tested from both sides.
+
 A generator, `python -m local_operator.browser_bridge.gen_ts`, emits
 `extension/src/protocol.gen.ts` (discriminated unions + the ErrorCode enum +
-`PROTO_VERSION`) from the Pydantic models' JSON schema. `--check` mode diffs
+`PROTO_VERSION`, `EXPECTED_EXTENSION_VERSION` and the advisory template) from
+the Python constants. `--check` mode diffs
 the would-be output against the checked-in file and exits non-zero when stale
 — the exact contract `generate-theme-css.mjs --check` already implements for
 the mobile SPA (mobile/web/scripts/generate-theme-css.mjs:6-9), and CI runs it
@@ -266,10 +298,19 @@ Handshake, first frame after WS connect, extension→daemon:
  "extension_version": "0.1.0", "browser": "Chrome/126"}
 ```
 
-Daemon replies `{"event": "hello_ack", "proto": 1, "paired": true}` or closes
-with a WS close code from a small reserved range (4001 proto mismatch, 4003
-unpaired, 4004 bad origin) so the extension can render the right popup state
-without parsing a close reason string.
+Daemon replies `{"event": "hello_ack", "proto": 1, "paired": true}` — with
+`proto` the NEGOTIATED value (`min(hello.proto, PROTO_VERSION)`), not the
+daemon's ceiling — or closes with a WS close code from a small reserved range
+(4001 proto outside the window, 4003 unpaired, 4004 bad origin) so the extension
+can render the right popup state without parsing a close reason string.
+
+**4001 carries a `reason` (`proto_too_old` / `proto_too_new`) and today's
+peer ignores it.** The code is kept rather than replaced with something more
+specific, because `extension/src/worker.ts` maps 4001 to the popup's
+`#incompatible` card and a NEW code would be interpreted only by a future
+extension — anything unknown renders as a plain "disconnected", which is a
+strictly worse answer for the user. The reason is a hint for that future peer
+and for a debug log; nothing may gate on it being parsed.
 
 ### 4.3 Command catalog (daemon→extension = the session-leg methods, relayed)
 
@@ -1114,10 +1155,11 @@ Out of scope v1, and why:
   through consent/SSO domains). The standing-grant affordances plus gating
   navigations only (not subresources) should keep it to one prompt per new
   site.
-- **Two release lines**: extension and Python versions drift by design;
-  `PROTO_VERSION` mismatches must show up as the popup's "update needed"
-  state and the daemon's 4001 close, not as mystery timeouts. Test the
-  mismatch path explicitly before the first protocol bump, not after.
+- **Two release lines**: extension and Python versions drift by design, so the
+  compatibility contract is a WINDOW (`MIN_SUPPORTED_PROTO..PROTO_VERSION`), not
+  a version match. A proto inside the window must behave correctly, and the
+  runtime must never refuse a peer merely for being older than the extension it
+  was built alongside.
 - **What may change WITHOUT a `PROTO_VERSION` bump** — the rule, because it is
   not obvious and gets violated by accident: a change is free when the other
   side's degraded behaviour is "ignores it". That covers additive OPTIONAL
@@ -1129,6 +1171,31 @@ Out of scope v1, and why:
   anything invisible on the wire (bounding a send). It excludes a new WS
   **frame type** the peer must act on, and any close code the peer must
   INTERPRET.
+- **`MIN_SUPPORTED_PROTO` may be raised only by a commit that changes the
+  meaning of an existing frame shape or an existing method's semantics, and that
+  commit must state, for the proto it drops, that a peer at that proto either
+  behaves correctly or receives a typed refusal on exactly the affected commands
+  — never a silently wrong answer. AND that commit MUST raise the floor above the
+  proto it breaks, in the same commit, together with the `PROTO_VERSION` bump
+  that expresses the same act from the other side.** The second half is not
+  pedantry: permission alone is a rule a future bumper can follow verbatim —
+  change a frame, bump `PROTO_VERSION` to 2, leave the floor at 1 — and then the
+  window admits a proto-1 peer that receives the changed frame and misreads it,
+  which is the silently-wrong-answer case the rule forbids, reached by obeying
+  the rule. Nothing in code or CI can detect that today; the sentence is the
+  guard. Additive optional fields, new `ErrorCode`s the peer only emits, and new
+  events an old peer harmlessly drops keep the floor where it is. The floor is
+  the ONLY thing that may make an older peer stop being driven;
+  `EXPECTED_EXTENSION_VERSION` and every version-comparison advisory are notes
+  and must never be promoted into a refusal.
+- **`HelloAck(proto=min(hello.proto, PROTO_VERSION))` is a HOOK, not a
+  guarantee.** It tells a peer which proto the pair will speak, and nothing
+  gates on it yet: no daemon→extension frame is restricted by `peer_proto`, so
+  once the window is wider than one the ack names a proto this daemon does not
+  hold itself to. That is deliberate — a width-1 window needs no gating, and
+  inventing a gate nothing exercises would be a promise with no test — but a
+  future frame that must not reach a proto-1 peer has to add that gate here, at
+  the send site, rather than assuming the ack did it.
 - **The trap that decides which of those applies**: the daemon is STRICT about
   frames — `WireModel` is `extra="forbid"` — and a `Response.model_validate`
   failure is a silent `continue` in the receive loop. So an extension that adds
