@@ -669,12 +669,18 @@ def context_spelling(tokens: int, window: int, *, form: str = "full") -> str:
 
 
 def format_cost(cost: float) -> str:
-    """Compact dollar cost: ``$0.0021`` under a cent, ``$0.12`` above."""
-    if cost < 0.01:
-        return f"${cost:.4f}"
-    if cost < 1.0:
-        return f"${cost:.3f}"
-    return f"${cost:.2f}"
+    """Compact dollar cost: ``$0.0021`` under a cent, ``$0.12`` above.
+
+    The DIGITS come from :func:`local_operator.tui.costs.format_usd`, which is
+    the one ladder every money surface shares; this wrapper only adapts the
+    float the band's accounting holds. That indirection is the point: a change
+    to the ladder (the ``<$0.0001`` spelling for a nonzero sub-half-micro-cent
+    figure) must reach ``/analytics`` and ``/session`` by construction, not by
+    three edits that can drift.
+    """
+    from local_operator.tui.costs import format_usd
+
+    return format_usd(int(round(cost * 1_000_000)))
 
 
 def format_agents(count: int) -> str:

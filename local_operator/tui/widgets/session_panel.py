@@ -55,12 +55,14 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
+from local_operator.session.spend import SessionSpend
 from local_operator.tui.costs import (
     MoneyFigure,
     SearchSpendSnapshot,
     combined_spend,
     cost_label,
     cost_note_rungs,
+    format_usd_exact,
 )
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
@@ -158,6 +160,17 @@ class SessionDiagnostics:
     #: transcript-restoration concept it has no way to know about (and which the
     #: desktop HTTP route that also consumes it has no notion of).
     spend_is_floor: bool = False
+    #: The session's OWN durable spend, exactly as the ``session_spend.v1``
+    #: record carries it, or ``None`` when the session has no record (a
+    #: pre-ledger conversation). The band rounds this by design — the figure is
+    #: 4-6 cells wide there — so ``/session`` is where the EXACT micro-USD is
+    #: readable, which is what makes a rounded reading honest rather than
+    #: lossy: the reader can always ask for the whole number.
+    spend_micro: int | None = None
+    #: The record's knowledge state as a word (``exact``/``partial``/``floor``/
+    #: ``unknown``), so the reconciliation row can say WHICH deficit it is
+    #: describing rather than re-deriving one from the band's mark.
+    spend_knowledge: str = ""
     #: This session's web-search spend, frozen, or ``None`` when the host has no
     #: search ledger to read (a test double, a reduced facade). App state read
     #: from the process-wide ledger rather than session state, which is why it
@@ -179,6 +192,17 @@ class SessionDiagnostics:
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)
         model = session.effective_model
+        # ``restored_spend`` is the durable record recalled in O(1); absent it,
+        # the session's live accumulator is the same number once it has any
+        # calls, so an in-flight session shows its exact total too. A host with
+        # neither (a reduced facade) reports ``None`` and the panel simply omits
+        # the exact row rather than inventing a figure.
+        restored_spend = getattr(session, "restored_spend", None)
+        spend: SessionSpend | None = restored_spend() if callable(restored_spend) else None
+        if spend is None:
+            live = getattr(session, "spend", None)
+            if isinstance(live, SessionSpend) and live.calls:
+                spend = live
         return cls(
             session_id=session.session_id,
             name=session.conversation_name,
@@ -191,6 +215,8 @@ class SessionDiagnostics:
             context_is_estimate=getattr(state, "context_is_estimate", None),
             generation=getattr(state, "generation", None),
             epoch=getattr(state, "epoch", None),
+            spend_micro=(spend.micro if spend is not None else None),
+            spend_knowledge=(spend.knowledge().value if spend is not None else ""),
         )
 
 
@@ -1113,6 +1139,35 @@ def _draw_recorded_usage(
             f"{report.missing_usage_calls:,} requests missing usage · "
             f"{report.unknown_usage_calls:,} unknown"
         )
+    # THE EXACT FIGURE, on demand. The band has 4-6 cells and must round; this
+    # screen has room, so the ledger's own integer micro-USD is readable here to
+    # the micro-dollar -- which is what makes the band's rounding a convenience
+    # rather than a loss. ``μ$`` in the note says the unit outright, because
+    # ``$1.897843`` invites the reader to wonder whether the last digits are
+    # cents or noise.
+    if runtime.spend_micro is not None:
+        body.kv(
+            "Ledger total",
+            format_usd_exact(runtime.spend_micro),
+            notes=(
+                f"{runtime.spend_micro:,} μ$ · this session",
+                "this session",
+            ),
+        )
+        # RECONCILIATION, as a row rather than a prose apology. The record and
+        # the ledger count different events: the ledger sees naming calls,
+        # asides and failed attempts the turn rows never carry, and it is the
+        # only observer that can see a call whose persist was lost. Naming the
+        # difference is the honest move -- quietly switching either figure for
+        # the other would hide the one signal that says a write was dropped.
+        ledger = report.aggregate
+        if ledger is not None and ledger.cost_is_known:
+            delta = runtime.spend_micro / 1_000_000.0 - float(ledger.cost_usd)
+            body.note(
+                f"Ledger (all calls) {format_cost(ledger)} · "
+                f"record {format_usd_exact(runtime.spend_micro)} · "
+                f"Δ {delta:+.4f}"
+            )
     if runtime.spend_is_floor:
         # Reconcile the band's ≥ against this screen's figure instead of copying
         # the mark over. They measure different deficits (see

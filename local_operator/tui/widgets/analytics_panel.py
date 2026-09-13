@@ -74,6 +74,8 @@ from local_operator.tui.costs import (
     combined_spend,
     cost_label,
     cost_note_rungs,
+    format_usd,
+    micro_from_usd,
 )
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
@@ -154,21 +156,24 @@ def format_cost(aggregate: "_CostLike") -> str:
     - **Complete**: the plain figure.
 
     Small sums keep more precision (``$0.0042``) because a fresh install's spend
-    is fractions of a cent and rounding it to ``$0.00`` would read as free;
-    large sums abbreviate (``$1.2k``) for the same glanceability as the tokens.
+    is fractions of a cent and rounding it to ``$0.00`` would read as free. The
+    ladder itself lives in :func:`local_operator.tui.costs.format_usd` so every
+    money surface (this panel, the status band, ``/session``) spells the same
+    amount identically, and a nonzero figure below the ladder's resolution
+    renders ``<$0.0001`` rather than a confident ``$0.0000``.
     """
     if not aggregate.cost_is_known:
         return "$—"
-    usd = aggregate.cost_usd
-    if usd >= 1000:
-        body = f"${usd / 1000:.1f}k".replace(".0k", "k")
-    elif usd >= 1:
-        body = f"${usd:.2f}"
-    elif usd >= 0.01:
-        body = f"${usd:.3f}"
-    else:
-        # Sub-cent: show enough digits that a real spend is not rounded to $0.
-        body = f"${usd:.4f}"
+    # The digits come from the ONE ladder (``tui.costs.format_usd``), so the
+    # figure here and the band's cannot be different magnitudes for the same
+    # money. The ``$1.2k`` abbreviation that used to live in this function is
+    # gone: it made ``/analytics`` print ``$1.2k`` where ``/session`` printed
+    # ``$1234.56``, and the panel has no chart axis to move it to — a table
+    # cell and a headline are exactly where a rounded magnitude lies most.
+    micro = getattr(aggregate, "cost_micro", None)
+    body = format_usd(
+        int(micro) if isinstance(micro, int) else int(round(aggregate.cost_usd * 1_000_000))
+    )
     return body + ("+" if aggregate.cost_is_partial else "")
 
 
