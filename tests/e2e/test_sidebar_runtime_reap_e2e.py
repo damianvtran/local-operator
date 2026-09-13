@@ -92,7 +92,7 @@ async def test_visited_conversations_do_not_hold_their_runtimes_open(
     servers = await _stand_up(config, ids)
     _compress_idle_clock(monkeypatch)
 
-    def find(_directory, sid):
+    def find(_directory, sid, **_probe):
         server = servers.get(sid)
         return (server._record, server._record.pid) if server else (None, None)
 
@@ -176,7 +176,7 @@ async def test_an_empty_conversation_visited_and_left_retires_its_runtime(
 
     assert handle.is_pristine(), "the fixture must actually be an empty session"
 
-    def find(_directory, sid):
+    def find(_directory, sid, **_probe):
         server = servers.get(sid)
         return (server._record, server._record.pid) if server else (None, None)
 

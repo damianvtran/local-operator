@@ -35,6 +35,13 @@ class CatalogEntry:
     #: that build entries positionally, keep working unchanged.
     completion_token: str = ""
     anchor_id: str = ""
+    #: WHY the outcome is an error, when the store carries a reason — the
+    #: harness-authored cause sentence for a cut-off, or the provider's own
+    #: message for a provider error. Appended to the sidebar's two error
+    #: spellings so a row reports a cause instead of only a class. Additive and
+    #: defaulted, so every existing construction site (including the positional
+    #: ones in the sidebar tests) keeps working unchanged.
+    completion_reason: str = ""
 
     @property
     def id(self) -> str:
@@ -253,7 +260,9 @@ class CatalogEntry:
         if self.row.live_state == "busy":
             return "Working"
         if self.shows_completion_mark:
-            return {"error": "Unseen error", "interrupted": "Unseen interruption"}.get(
+            if self.completion_kind == "error":
+                return self._error_label("Unseen error")
+            return {"interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
             )
         # Follows ``row_state_mark``'s precedence EXACTLY, so the tooltip can
@@ -294,10 +303,34 @@ class CatalogEntry:
             count = self.row.wakes
             return f"Stopped ({count} wake{'s' if count != 1 else ''} dormant)"
         if self.completion_token:
-            return {"error": "Error", "interrupted": "Interrupted"}.get(
-                self.completion_kind, "Complete"
-            )
+            if self.completion_kind == "error":
+                return self._error_label("Error")
+            return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
         return "Recent"
+
+    def _error_label(self, base: str) -> str:
+        """``Error``/``Unseen error`` plus the reason, when there is one.
+
+        The tooltip is ONE line, so only the first line of the reason is used
+        and the parenthetical DETAIL is dropped (``runtime-retired`` carries a
+        build pair — ``(0.54.11@b133eba → 0.54.12@402af7f)`` — which is useful
+        in the incident card the model reads and noise in a sidebar row). An
+        empty reason leaves the spelling BYTE-IDENTICAL to today's, which is
+        what keeps every pre-taxonomy record and every completion unchanged.
+        """
+        reason = (
+            self.completion_reason.strip().splitlines()[0].strip()
+            if self.completion_reason.strip()
+            else ""
+        )
+        if not reason:
+            return base
+        sentence = reason.split(" (", 1)[0].rstrip()
+        if len(sentence) > 160:
+            # A provider's own message can be a paragraph; the tooltip cannot
+            # grow a second line for it.
+            sentence = sentence[:157].rstrip() + "…"
+        return f"{base} — {sentence}"
 
 
 def rank_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
@@ -623,6 +656,7 @@ def load_catalog(directory: Path, limit: int = CATALOG_SCAN_LIMIT) -> list[Catal
                     str(attention.get(identities[row.id], {}).get("kind") or ""),
                     str(attention.get(identities[row.id], {}).get("completion_token") or ""),
                     str(attention.get(identities[row.id], {}).get("anchor_id") or ""),
+                    str(attention.get(identities[row.id], {}).get("reason") or ""),
                 )
                 for row in rows
             ]

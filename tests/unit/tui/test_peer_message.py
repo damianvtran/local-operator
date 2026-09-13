@@ -31,6 +31,8 @@ from local_operator.tui.widgets.tool_card import (
     COLLAPSE_HINT,
     EXPAND_HINT,
     OUTPUT_INDENT,
+    ROW_INDENT,
+    ToolCard,
 )
 from local_operator.tui.widgets.transcript import (
     ExpandableActionBlock,
@@ -679,7 +681,10 @@ async def test_dragging_over_a_peer_message_copies_no_app_chrome() -> None:
         block.toggle_expanded()
         await pilot.pause()
 
-        assert block.copy_gutter(0) == 2  # the icon field, like ToolCard
+        # The summary's gutter is the icon field PLUS the row's left inset:
+        # the shared ledger spine, so it leaves with the copy for the same
+        # reason the icon does.
+        assert block.copy_gutter(0) == ROW_INDENT + ToolCard.ICON_COLS
         assert block.copy_gutter(1) == OUTPUT_INDENT
         assert block._chrome_rows > 1, "the identity line is chrome too"
 
@@ -1005,7 +1010,7 @@ async def test_a_repaint_does_not_rescan_the_whole_body() -> None:
     """The snippet is sanitized once at construction, not per repaint.
 
     `_refresh_row` runs on hover, focus, expand, retheme, resize and — through
-    `_invalidate_name_col` — on every ledger block when the shared name column
+    the name-column resync — on every ledger block when the shared name column
     moves. The strip is a regex plus a per-character `unicodedata.category`
     scan; run over a body at the 256 KiB wire cap it measured 23.9 ms of
     loop-thread CPU *per repaint*, so one card taxed the whole ledger.

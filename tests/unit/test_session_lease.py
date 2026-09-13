@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import threading
 from pathlib import Path
+
+import pytest
 
 from local_operator import session_lease as lease_mod
 from local_operator.session_lease import (
@@ -159,6 +162,68 @@ def test_daemon_reap_never_removes_live_successor(tmp_path: Path) -> None:
     assert not reap_proven_dead_session_claim(session_dir, dead_pid)
     assert (session_dir / LEASE_NAME).exists()
     successor.release()
+
+
+def test_a_zombie_owner_does_not_hold_the_claim(tmp_path: Path) -> None:
+    """An exited-but-unreaped owner is a dead owner, and its claim is takeable.
+
+    ``os.kill(pid, 0)`` succeeds against a zombie, so a liveness probe built on
+    it alone reported the corpse of a killed runtime as a working owner — and
+    because both acquisition and the recovery helper require a holder to be
+    PROVEN dead, nothing could ever move that claim. The operator's session was
+    then un-attachable from every interface while its transcript sat intact.
+    """
+    from tests.unreaped import unreaped_child
+
+    session_dir = tmp_path / "sessions" / "zombie-owner"
+    with unreaped_child() as zombie_pid:
+        _write_stale_claim(session_dir, pid=zombie_pid)
+        # Must not raise: the claim is recovered, not respected.
+        lease = acquire_session_lease(session_dir)
+        try:
+            assert lease.pid == os.getpid()
+            claim = json.loads((session_dir / LEASE_NAME).read_text(encoding="utf-8"))
+            assert claim["pid"] == os.getpid()
+            assert claim["generation"] == lease.generation
+            assert (session_dir / ".session.pid").read_text(encoding="utf-8") == str(os.getpid())
+        finally:
+            lease.release()
+
+
+def test_daemon_reap_removes_a_zombie_owners_claim(tmp_path: Path) -> None:
+    """The reaper's own gate: it removes a claim only for a proven-dead owner.
+
+    A zombie is that proof — the process has exited — so the same discovery
+    pass that reaps the record must be able to reap the claim it was holding.
+    """
+    from tests.unreaped import unreaped_child
+
+    session_dir = tmp_path / "sessions" / "zombie-reap"
+    with unreaped_child() as zombie_pid:
+        _write_stale_claim(session_dir, pid=zombie_pid)
+        assert reap_proven_dead_session_claim(session_dir, zombie_pid)
+        assert not (session_dir / LEASE_NAME).exists()
+        assert not (session_dir / ".session.pid").exists()
+
+
+def test_a_live_owner_still_holds_its_claim_against_a_zombie_probe(
+    tmp_path: Path,
+) -> None:
+    """The other half of the rule: the zombie probe must not free a LIVE claim.
+
+    Asking the process table a new question is exactly the kind of change that
+    can turn a refusal into a takeover, so this pins the refusal that must
+    survive it: a holder that is running is not stealable, by acquisition or by
+    the reaper.
+    """
+    session_dir = tmp_path / "sessions" / "live-owner"
+    session_dir.mkdir(parents=True)
+    live_pid = os.getppid()  # a running process that is not this one
+    _write_stale_claim(session_dir, pid=live_pid)
+    with pytest.raises(SessionLeaseHeldError):
+        acquire_session_lease(session_dir)
+    assert not reap_proven_dead_session_claim(session_dir, live_pid)
+    assert json.loads((session_dir / LEASE_NAME).read_text(encoding="utf-8"))["pid"] == live_pid
 
 
 def test_stale_release_cannot_unlink_successor_claim(tmp_path: Path) -> None:

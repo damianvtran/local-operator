@@ -34,6 +34,9 @@ from typing import Any
 
 import pytest
 
+from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.harness.types import Message, TextContent
+from local_operator.incidents import format_model_switch_message
 from local_operator.session import naming
 from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.terminal_title import TerminalTitle
@@ -325,6 +328,42 @@ async def test_the_band_is_named_from_the_opener_before_any_provider_call() -> N
         assert app._status._conversation_name == "Fix the login flow"
         assert app._provisional_name == ""
         session.gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_harness_injected_row_does_not_become_the_provisional_title() -> None:
+    """The provisional label is read from the conversation's first USER row.
+
+    A session resumed from a transcript an older build wrote can begin with a
+    leaked failover notice — the rendered copy of a live-only ``CustomMessage``,
+    stamped ``harness_injected``. Titling the tab "[model switch] You are now
+    running as …" is the user-visible form of that leak. The scan keys on the
+    stamp through the shared decision in ``harness/rows.py``, the same one
+    ``history_window.opener_text`` makes, so the tab and the picker row agree.
+    """
+    app, session = await _boot()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        session._history = [
+            Message(
+                role="user",
+                content=[
+                    TextContent(
+                        text=format_model_switch_message(
+                            "zai/glm-5.3", "anthropic/claude-opus-5", transient=True
+                        )
+                    )
+                ],
+                provider_payload={RENDERED_INJECTION_KEY: True},
+            ),
+            Message.user("why does the resume picker show an empty conversation?"),
+        ]
+        app._restore_resumed_name(session)
+
+        assert app._provisional_name == naming.provisional_title(
+            "why does the resume picker show an empty conversation?"
+        )
+        assert "[model switch]" not in app._provisional_name
 
 
 @pytest.mark.asyncio

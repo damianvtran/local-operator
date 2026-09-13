@@ -444,6 +444,16 @@ class AsyncJob(BaseModel):
     # missing task because a reader must be able to tell "this session started
     # it" from "a previous session did" without consulting the task table.
     restored: bool = False
+    #: Why a RESTORED row reads the way it does — ``"owner-lost"`` for a child
+    #: whose parent's process ended under it. Derived on every restore from the
+    #: roster records and the child's own journal (see
+    #: ``session/restored_rows.py``), never read from disk.
+    #:
+    #: DELIBERATELY ABSENT from ``_ROSTER_ROW_FIELDS``: the sidecar's rows are
+    #: validated by STRICT ``extra="forbid"`` models, so persisting a field an
+    #: older owner does not know would make it drop the whole row at resume — a
+    #: worse degradation than losing the cause. It costs nothing to re-derive.
+    cut_off_cause: str = ""
     # The subagent ROLE this job runs ("task", "scout", ...) and the effort
     # TIER it was launched with ("lo"/"med"/"hi"), stamped at REGISTRATION
     # beside ``prompt`` — a queued job that never starts must still be able to
