@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import secrets
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -1097,3 +1098,242 @@ def test_u25_a_long_dead_pending_record_is_dropped(tmp_path: Path) -> None:
     # And an identity with no record simply asks again: no authority is inherited.
     service = BridgeService(root=tmp_path)
     assert service._valid_saved_token(UNPACKED_ID, UNPACKED_TOKEN) is False
+
+
+# --- U26-U33: remediation round 2 — the durable driver-record invariant ------
+#
+# The property under test, stated once and asserted after every transition:
+#
+#   the legacy trio names a LISTED identity, and whenever a PAIRED driver is
+#   attached it names THAT driver — i.e. the file agrees with
+#   /health.driver_extension_id in every state an operator can be served from.
+#
+# Round 2 found the property falsified on two transitions the round-1 fix did
+# not cover: a cold-start dial after a daemon restart (review R2-1) and a
+# promotion during graceful shutdown (QA R2-1/the same major), the second of
+# which writes the STANDBY into the downgrade record and makes a rollback refuse
+# the install in use.
+
+
+def _record(root: Path) -> str:
+    """The identity the legacy trio names right now."""
+    return str(json.loads(_pairing_file(root).read_text(encoding="utf-8")).get("extension_id", ""))
+
+
+def _assert_invariant(service: BridgeService, root: Path, where: str) -> None:
+    """The file names a listed identity, and the live paired driver when there is one."""
+    named = _record(root)
+    listed = {entry["extension_id"] for entry in pairing_status(root)["identities"]}
+    assert named in listed, f"{where}: the trio names {named!r}, which is not authorised"
+    driver = service.link
+    if driver.websocket is not None and driver.paired:
+        assert named == driver.extension_id, (
+            f"{where}: the file names {named!r} while {driver.extension_id!r} drives"
+        )
+
+
+@pytest.mark.asyncio
+async def test_u26_a_cold_start_after_a_restart_moves_the_record_to_the_driver(
+    tmp_path: Path,
+) -> None:
+    """R2-1: the handshake moves the wheel, so it must move the record too.
+
+    The state is the one QA's round-1 evidence calls load-bearing: after a
+    restart whichever worker re-dials first takes the idle wheel. The file,
+    meanwhile, still names whoever drove BEFORE the restart — so a rollback on it
+    authorises an install that is not the one running, which is the harm M2/Q2
+    was filed for.
+    """
+    # The file names the DEV build; the STORE build is the one that dials first.
+    _schema_two(tmp_path, driver=UNPACKED_ID)
+    assert _record(tmp_path) == UNPACKED_ID
+    service = BridgeService(root=tmp_path)
+    store = _FakePeer(STORE_ID)
+    task = _connect(service, store, STORE_TOKEN)
+    assert await _settles(lambda: bool(store.acks()))
+    assert store.acks()[0]["role"] == "driver"
+    assert _record(tmp_path) == STORE_ID, "the cold-start dial did not move the durable record"
+    _assert_invariant(service, tmp_path, "after a cold-start dial")
+    await _shutdown(task)
+
+
+@pytest.mark.asyncio
+async def test_u27_a_paired_install_taking_the_wheel_records_itself(tmp_path: Path) -> None:
+    """M1's demotion branch is a wheel move too, so it records as well.
+
+    An unlisted, token-less dial holds the cold-start wheel (that is how a second
+    install pairs). When the AUTHORISED, paired install dials next and takes the
+    wheel, the record has to follow — otherwise a rollback authorises the
+    stranger's predecessor rather than the install the operator is using.
+    """
+    _schema_two(tmp_path, driver=UNPACKED_ID)
+    service = BridgeService(root=tmp_path)
+    stranger = _FakePeer(THIRD_ID)
+    stranger_task = _connect(service, stranger, "")
+    assert await _settles(lambda: bool(stranger.acks()))
+    assert stranger.acks()[0]["role"] == "driver" and stranger.acks()[0]["paired"] is False
+    # A token-less dial cannot be recorded (no hash to write) and must not be:
+    # the file keeps naming the last listed driver.
+    assert _record(tmp_path) == UNPACKED_ID
+    _assert_invariant(service, tmp_path, "with an unpaired incumbent driving")
+
+    store = _FakePeer(STORE_ID)
+    store_task = _connect(service, store, STORE_TOKEN)
+    assert await _settles(lambda: bool(store.acks()))
+    assert store.acks()[0]["role"] == "driver"
+    assert _record(tmp_path) == STORE_ID, "the paired install took the wheel without recording it"
+    _assert_invariant(service, tmp_path, "after a paired install took the wheel")
+    await _shutdown(stranger_task, store_task)
+
+
+@pytest.mark.asyncio
+async def test_u28_drive_and_a_promoting_revoke_record_the_new_driver(tmp_path: Path) -> None:
+    """The two explicit wheel moves QA exercised, asserted against the file."""
+    _schema_two(tmp_path, driver=STORE_ID)
+    service = BridgeService(root=tmp_path)
+    store = _FakePeer(STORE_ID)
+    unpacked = _FakePeer(UNPACKED_ID)
+    tasks = [_connect(service, store, STORE_TOKEN), _connect(service, unpacked, UNPACKED_TOKEN)]
+    assert await _settles(lambda: len(service.links) == 3)
+    _assert_invariant(service, tmp_path, "paired and driving")
+
+    # The promote-on-revoke path, at socket level: revoking the DRIVER hands the
+    # wheel to the standby, and the durable record has to follow it.
+    await service._sever_identity(STORE_ID)  # type: ignore[attr-defined]
+    assert await _settles(lambda: service.link.extension_id == UNPACKED_ID)
+    assert _record(tmp_path) == UNPACKED_ID, "a promoting revoke left the record on the revoked id"
+    _assert_invariant(service, tmp_path, "after revoking the driver")
+    await _shutdown(*tasks)
+
+
+def test_u28b_drive_pins_the_driver_and_the_record_follows(tmp_path: Path) -> None:
+    """`POST /driver` is a wheel move, so it is a record move (QA exercised this)."""
+    _schema_two(tmp_path, driver=STORE_ID)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        key = app.state.bridge.state.session_key
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{STORE_ID}"}
+        ) as store:
+            store.send_json(_hello_frame(STORE_TOKEN))
+            assert store.receive_json()["role"] == "driver"
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{UNPACKED_ID}"}
+            ) as unpacked:
+                unpacked.send_json(_hello_frame(UNPACKED_TOKEN))
+                assert unpacked.receive_json()["role"] == "standby"
+                assert _record(tmp_path) == STORE_ID
+                pinned = client.post(
+                    "/driver", headers={"X-Bridge-Key": key}, json={"target": UNPACKED_ID[:12]}
+                )
+                assert pinned.status_code == 200, pinned.text
+                assert _record(tmp_path) == UNPACKED_ID, (
+                    "POST /driver moved the wheel without moving the record"
+                )
+                _assert_invariant(app.state.bridge, tmp_path, "after POST /driver")
+
+
+@pytest.mark.asyncio
+async def test_u29_shutdown_does_not_move_the_durable_record(tmp_path: Path) -> None:
+    """QA R2-1: a graceful stop must not write the STANDBY into the downgrade record.
+
+    `_retire_link` promotes on a driver loss, and during teardown the driver's
+    socket ends like any other — so the round-1 fix dutifully PERSISTED a
+    handover that serves nobody, and a rollback then refused the install the
+    operator uses with 4004. Measured on the pre-fix head as flaky (2/6 SIGTERM
+    runs), which is worse than deterministic.
+    """
+    for attempt in range(5):
+        root = tmp_path / f"attempt-{attempt}"
+        _schema_two(root, driver=STORE_ID)
+        service = BridgeService(root=root)
+        store = _FakePeer(STORE_ID)
+        unpacked = _FakePeer(UNPACKED_ID)
+        tasks = [_connect(service, store, STORE_TOKEN), _connect(service, unpacked, UNPACKED_TOKEN)]
+        assert await _settles(lambda: len(service.links) == 3)
+        assert _record(root) == STORE_ID
+
+        service.begin_shutdown()  # what `shutdown()` and uvicorn's should_exit do
+        store.push(None)  # the driver's socket ends during teardown
+        assert await _settles(lambda: service.link.websocket is None)
+        assert _record(root) == STORE_ID, (
+            f"attempt {attempt}: teardown promoted the standby into the durable record"
+        )
+        # And the old daemon's own rule still authorises the store build's token.
+        assert _valid_saved_token_for(root, STORE_ID, STORE_TOKEN) is True
+        assert _valid_saved_token_for(root, UNPACKED_ID, UNPACKED_TOKEN) is False
+        await _shutdown(*tasks)
+
+
+def _valid_saved_token_for(root: Path, extension_id: str, token: str) -> bool:
+    """The PRE-CHANGE daemon's rule, verbatim (`102195106:daemon.py:1018-1023`).
+
+    The downgrade contract is exactly this predicate, so it is the honest oracle
+    for "would a rollback work": the trio's id must match the dial and the
+    trio's hash must match the token.
+    """
+    saved = json.loads(_pairing_file(root).read_text(encoding="utf-8"))
+    if saved.get("extension_id") != extension_id or not token:
+        return False
+    return secrets.compare_digest(str(saved.get("token_sha256", "")), _digest(token))
+
+
+@pytest.mark.asyncio
+async def test_u30_a_server_going_down_is_not_a_driver_loss(tmp_path: Path) -> None:
+    """The signal the fix keys on is explicit, and it is the earliest one available.
+
+    uvicorn sets `Server.should_exit` when a stop signal arrives and only THEN
+    closes listeners and connection sockets (uvicorn 0.52 `Server.shutdown`), so
+    the service can tell teardown from a live driver loss without guessing from
+    socket state. This row drives that path directly.
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    service = BridgeService(root=tmp_path)
+    store = _FakePeer(STORE_ID)
+    unpacked = _FakePeer(UNPACKED_ID)
+    tasks = [_connect(service, store, STORE_TOKEN), _connect(service, unpacked, UNPACKED_TOKEN)]
+    assert await _settles(lambda: len(service.links) == 3)
+
+    class _Stopping:
+        should_exit = True
+
+    service.watch_server_exit(_Stopping())
+    assert service._daemon_leaving() is True  # type: ignore[attr-defined]
+    store.push(None)
+    assert await _settles(lambda: service.link.websocket is None)
+    assert _record(tmp_path) == STORE_ID
+    assert unpacked.roles() == [], "a teardown handed the wheel over on the wire"
+    _assert_invariant(service, tmp_path, "after a teardown-driven socket end")
+    await _shutdown(*tasks)
+
+
+def test_u31_startup_reconciles_a_record_that_names_nobody_authorised(tmp_path: Path) -> None:
+    """Startup repairs a stale trio instead of assuming it.
+
+    Reachable with no attacker: `lop browser pair --revoke <the identity the trio
+    names>` runs in ANOTHER process while the daemon is down, so the file is left
+    naming somebody who is no longer authorised — and a rollback would then
+    authorise nobody at all. The repair uses the same order as every other write,
+    and an ordinary file is left byte-identical.
+    """
+    _schema_two(tmp_path, driver=UNPACKED_ID)
+    # The stale shape, written as FILE STATE rather than through the writers
+    # (which by design repair the trio): an out-of-process revoke removed the
+    # identity the trio names, while this daemon was down. Constructing it
+    # directly is the only way to test the repair, and it is what an older CLI
+    # leaves behind.
+    saved = json.loads(_pairing_file(tmp_path).read_text(encoding="utf-8"))
+    saved["identities"] = [
+        entry for entry in saved["identities"] if entry["extension_id"] != UNPACKED_ID
+    ]
+    _pairing_file(tmp_path).write_text(json.dumps(saved), encoding="utf-8")
+    assert _record(tmp_path) == UNPACKED_ID, "precondition: the file names the revoked id"
+
+    service = BridgeService(root=tmp_path)
+    service._reconcile_driver_record()  # type: ignore[attr-defined]
+    assert _record(tmp_path) == STORE_ID, "startup left the downgrade record pointing at nobody"
+
+    # An already-coherent file is NOT rewritten: a restart must not churn it.
+    before = _pairing_file(tmp_path).read_bytes()
+    service._reconcile_driver_record()  # type: ignore[attr-defined]
+    assert _pairing_file(tmp_path).read_bytes() == before
