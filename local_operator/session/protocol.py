@@ -560,7 +560,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 110 public members and a POSITIVE
+    than stylistic. This protocol carries 111 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -571,8 +571,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``test_viewer_protocol.py`` pins; the two answer different questions and
     must not be reconciled. It read 84 for some time while the protocol grew
     past it (106 before the warm members were added, 108 with them, 109 once
-    ``restored_search_spend`` joined ``restored_usage``), so recompute
-    it rather than adjusting it by the size of your own change.
+    ``restored_search_spend`` joined ``restored_usage``, 111 once
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract),
+    so recompute it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
