@@ -302,8 +302,11 @@ def _wait_for_landing(directory: Path, *, timeout: float) -> str:
 
 
 def _runtime_log(config_dir: Path) -> str:
+    # The runtime children keep their own file, apart from the daemon's
+    # launchd-owned `mobile.log` (see `paths.runtime_log_path`): a child that
+    # rotated the daemon's file would rename it out from under the daemon's fd.
     try:
-        return (config_dir / "logs" / "mobile.log").read_text(encoding="utf-8", errors="replace")
+        return (config_dir / "logs" / "runtime.log").read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
 

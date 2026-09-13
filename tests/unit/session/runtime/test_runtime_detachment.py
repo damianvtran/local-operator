@@ -136,12 +136,14 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, config_dir: Path) -> None:
 def _log_text(config_dir: Path) -> str:
     """The child's own log, or "" before it exists.
 
-    ``main()`` points logging at ``log_dir()/mobile.log``, and ``log_dir()``
-    honours ``LOCAL_OPERATOR_CONFIG_DIR`` first — which is what makes the
-    child's exit reason readable without touching the operator's real log.
+    ``main()`` points logging at ``log_dir()/runtime.log`` — the runtimes' own
+    file, deliberately not the daemon's launchd-owned ``mobile.log`` (see
+    ``paths.runtime_log_path``) — and ``log_dir()`` honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` first, which is what makes the child's exit
+    reason readable without touching the operator's real log.
     """
     try:
-        return (config_dir / "logs" / "mobile.log").read_text(encoding="utf-8", errors="replace")
+        return (config_dir / "logs" / "runtime.log").read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
 

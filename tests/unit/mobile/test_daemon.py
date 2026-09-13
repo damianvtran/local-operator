@@ -1469,3 +1469,47 @@ def test_slash_catalogue_excludes_terminal_chrome() -> None:
     assert "exit" not in names
     assert "quit" not in names
     assert "clear" not in names
+
+
+def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeypatch) -> None:
+    """One line per skipped frame buried the relay log; the RATE is the signal.
+
+    Field measurement on the operator's machine: 6,104,351
+    ``oversized control frame`` records were 78% of a 420 MB ``mobile.log``, and
+    the records that mattered (a stalled runtime, the MCP client, the schedule)
+    were unreadable past them. Every skipped frame does cost a session its live
+    projection, so the count must not be lost — only its per-frame line.
+
+    A single frame is still reported on its own, because a one-off is a real
+    event and a reader should see it immediately. A flood collapses to one line
+    per window carrying the window count and a monotonic total, so a producer
+    that regresses and then stops is still accounted for by the next line.
+    """
+    import logging
+
+    from local_operator.mobile import daemon as daemon_module
+
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(daemon_module.time, "monotonic", lambda: clock["now"])
+    counter = daemon_module._OversizedControlFrames()
+
+    with caplog.at_level(logging.WARNING, logger=daemon_module.logger.name):
+        counter.note(7742)
+        assert "first oversized control frame from pid 7742" in caplog.text
+
+        caplog.clear()
+        for _ in range(5_000):
+            counter.note(7742)
+        assert caplog.text == "", "a flood must not be one log line per frame"
+
+        clock["now"] += daemon_module.OVERSIZED_CONTROL_WINDOW_S + 0.1
+        counter.note(7742)
+        assert caplog.text.count("oversized control frame") == 1, caplog.text
+        assert "5001 oversized control frames from pid 7742" in caplog.text
+        assert "5002 this process" in caplog.text
+
+        # A different session's flood is accounted for separately, so one noisy
+        # child cannot hide another's count.
+        caplog.clear()
+        counter.note(9911)
+        assert "first oversized control frame from pid 9911" in caplog.text

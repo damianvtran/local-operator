@@ -755,6 +755,88 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
 # ---------------------------------------------------------------------------
 
 
+#: How long the daemon accumulates unreadable-control-frame reports before it
+#: emits one aggregated line.
+OVERSIZED_CONTROL_WINDOW_S = 30.0
+
+
+class _OversizedControlFrames:
+    """Report the RATE of unreadable control frames, not each frame.
+
+    Every one of these costs a session its live projection — a skipped frame
+    leaves ``entry.projection`` stale, so the phone falls back to the durable
+    disk fold and stops updating live — which makes the rate the signal worth an
+    operator's attention. One line per frame is not a stronger signal, it is a
+    buried one: measured on the operator's machine, 6,104,351 of these records
+    were 78% of a 420 MB log file, and the other records in that file (the
+    schedule, the MCP client, a stalled runtime) could not be read past them.
+
+    The first sighting is always reported on its own, so a one-off is never lost;
+    after that a run collapses into one line per window carrying the window count
+    and a monotonic total.
+
+    A flood that stops mid-window states neither figure by itself: the counts sit
+    in memory until that pid queues another frame. That is the trade this makes,
+    and it is worth naming rather than papering over — the stopped flood has
+    already been seen once (its first sighting is unconditional) and its
+    unreported residue is bounded by a single window, while the behaviour it
+    replaces buried the file 6,104,351 times over. Flushing a stopped window would
+    need a timer task inside the daemon, which is more machinery than the
+    diagnostic is worth.
+    """
+
+    #: Ceiling on tracked pids. A long-lived daemon sees one entry per session it
+    #: has ever dialled — ~32 MB at 100k pids — so the oldest is forgotten rather
+    #: than kept forever. It is dropped by insertion order: the pid that has been
+    #: known longest is the least likely to still be speaking, and a pid that
+    #: speaks again is re-counted from its next first sighting.
+    MAX_TRACKED_PIDS = 1024
+
+    def __init__(self) -> None:
+        self._windows: dict[int | None, tuple[float, int]] = {}
+        self._totals: dict[int | None, int] = {}
+
+    def note(self, pid: int | None) -> None:
+        now = time.monotonic()
+        started, count = self._windows.get(pid, (now, 0))
+        total = self._totals.get(pid, 0) + 1
+        self._totals[pid] = total
+        if total == 1:
+            self._windows[pid] = (now, 0)
+            logger.warning(
+                "mobile daemon: first oversized control frame from pid %s; each skipped "
+                "frame leaves that session's projection stale",
+                pid,
+            )
+            self._forget_oldest()
+            return
+        if now - started < OVERSIZED_CONTROL_WINDOW_S:
+            self._windows[pid] = (started, count + 1)
+            return
+        self._windows[pid] = (now, 0)
+        logger.warning(
+            "mobile daemon: %d oversized control frame%s from pid %s over %.0fs "
+            "(%d this process); each skipped frame leaves that session's projection stale",
+            count + 1,
+            "" if count + 1 == 1 else "s",
+            pid,
+            now - started,
+            total,
+        )
+
+    def _forget_oldest(self) -> None:
+        """Keep the tracked-pid map bounded when a daemon has seen many sessions."""
+        while len(self._totals) > self.MAX_TRACKED_PIDS:
+            oldest = next(iter(self._totals))
+            self._totals.pop(oldest, None)
+            self._windows.pop(oldest, None)
+
+
+#: One instance per daemon process; the reader loop is single-threaded on one
+#: event loop, so the counters need no lock.
+_OVERSIZED_CONTROL_FRAMES = _OversizedControlFrames()
+
+
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
@@ -809,7 +891,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 # is pushing oversized frames again — every skipped frame leaves
                 # ``entry.projection`` stale, so the phone falls back to the
                 # durable disk fold and stops updating live.
-                logger.warning("mobile daemon: oversized control frame from pid %s", record.pid)
+                _OVERSIZED_CONTROL_FRAMES.note(record.pid)
                 continue
             if not line:
                 break

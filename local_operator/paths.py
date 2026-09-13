@@ -158,6 +158,26 @@ def log_dir() -> Path:
     return base / APP_DIRNAME / LOG_DIRNAME
 
 
+#: The session runtimes' own log, beside the mobile daemon's ``mobile.log``.
+RUNTIME_LOG_FILENAME = "runtime.log"
+
+
+def runtime_log_path() -> Path:
+    """The session runtimes' shared log file, deliberately NOT the daemon's.
+
+    ``mobile.log`` is a launchd ``StandardOutPath``: the daemon appends through an
+    fd it never reopens, while a ``RotatingFileHandler`` bounds a file by
+    RENAMING it. One shared path therefore means a runtime's rotation moves the
+    daemon's stream — and every other runtime's — into ``mobile.log.1``, out of
+    what ``lop mobile logs`` reads. Measured on the operator's machine after a
+    single rename: nine runtime children held the renamed inode while only the
+    daemon held the fresh ``mobile.log``, so the command showed one writer and
+    the flood lived in a backup. One file per writer class, one command to read
+    both (see the ``logs`` subcommand in :mod:`local_operator.cli`).
+    """
+    return log_dir() / RUNTIME_LOG_FILENAME
+
+
 def ensure_log_dir() -> Path | None:
     """Create and return :func:`log_dir`, or ``None`` if it cannot be created.
 

@@ -674,7 +674,7 @@ retrieve). If you would rather do it by hand:
 lop mobile install      # generate/keep the portal password, install the daemon, verify health
 lop mobile status       # install state, health probe, and registered sessions
 lop mobile password     # show or rotate the portal password
-lop mobile logs -f      # follow the daemon log
+lop mobile logs -f      # follow the daemon's and the runtimes' logs
 ```
 
 Once the daemon is up, every interactive `lop` you start publishes itself and

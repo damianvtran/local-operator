@@ -120,7 +120,7 @@ session is shown as ended (its history stays resumable).
 | `lop mobile install` | Write the LaunchAgent, generate/keep the Keychain password, load, verify health |
 | `lop mobile status` | Install state, health probe, registered sessions, log paths |
 | `lop mobile start` / `stop` / `restart` | launchd control |
-| `lop mobile logs` | Tail the daemon log (`--lines`, `--follow`) |
+| `lop mobile logs` | Tail the daemon's and the session runtimes' logs (`--lines` applies to each file; `--follow` follows by name, so a log created or rotated mid-session is picked up) |
 | `lop mobile password` | Set or rotate the password (interactive prompt; restarts the daemon) |
 | `lop mobile uninstall` | Unload and delete the LaunchAgent (`--purge` also deletes the password) |
 | `lop mobile serve` | Run the daemon in the foreground (what the LaunchAgent runs) |
