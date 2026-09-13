@@ -539,7 +539,7 @@ input:disabled {
  * The pin is therefore chosen per state, from a synchronous localStorage hint
  * holding the pin show() recorded for the card it last rendered:
  *
- *   86px  -> the connected card (207.2px)
+ *  148px  -> the connected card (269.2px)
  *   219px -> the pairing form (340.2px)
  *   193px -> the standby card (314.27px)
  * A value per state rather than a paired/unpaired boolean (design D3-1), and
@@ -559,8 +559,10 @@ input:disabled {
  *
  * All four numbers are measured at 300x600 and move together — the card's
  * height depends on the pairing form, which depends on the reserved error slot
- * below. Re-measure BOTH pins if any of them changes; a stale pin is a
- * resize, which is the defect this whole block exists to prevent. */
+ * below, and the Connected card gained a second reserved slot of its own for the
+ * extension-update advisory (popup.css). Re-measure BOTH pins if any of them
+ * changes; a stale pin is a resize, which is the defect this whole block exists
+ * to prevent. */
 #pending {
   min-height: 219px;
 }
@@ -589,6 +591,41 @@ input:disabled {
 #pair-error.hidden {
   display: block !important;
   visibility: hidden;
+}
+
+/* The extension-update advisory, inside the Connected card. A RESERVED slot for
+ * exactly the reason #pair-error is one: an un-hiding line grew the connected
+ * card and the popup WINDOW resized under the user's cursor. Reserving it keeps
+ * the card at ONE height whether or not there is anything to say, which is also
+ * what keeps the pin (see PIN_CONNECTED in popup.ts) a single number rather than
+ * a bet on which advisory happens to be showing.
+ *
+ * 54px is THREE lines at this size (12px / 1.5, the same line-height the
+ * pairing error slot uses), which is what the longest advisory occupies at
+ * 300px: the generated sentence wraps to three lines for any realistic version
+ * pair, measured in a real headless Chrome at 300x600 dpr=2 rather than
+ * estimated. Every string this slot can hold is generated from the SAME
+ * template (`protocol.EXTENSION_UPDATE_NOTE`), so the wrap depends only on the
+ * digit count of the two versions and not on which versions they are. A version
+ * component long enough to push it to a fourth line would resize the card,
+ * which is why the test pins the wrap and not just the reserve. */
+#connected-advisory {
+  min-height: 54px;
+}
+#connected-advisory.hidden {
+  display: block !important;
+  visibility: hidden;
+}
+
+/* Muted, smaller than the card's own `.sub`: this is a note ABOUT the
+ * extension, not the status of the browser, and it must not compete with the
+ * two lines above it. */
+.advisory {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  text-wrap: pretty;
 }
 
 /* Footer link in the muted-dim register, above a hairline. */

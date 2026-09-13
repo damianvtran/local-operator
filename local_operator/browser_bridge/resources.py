@@ -16,14 +16,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.backend import BridgeClient, BridgeError
-from local_operator.browser_bridge.protocol import ErrorCode
+from local_operator.browser_bridge.protocol import (
+    OWNERSHIP_MIN_EXTENSION_VERSION,
+    ErrorCode,
+    extension_older,
+)
 
 RESOURCE_NAME = ".browser-resource.json"
 
 
 class BrowserOwnershipError(RuntimeError):
     """An expected ownership/compatibility refusal, safe to show without a stack."""
+
+
+#: The refusal a peer that cannot RECONCILE ownership gets, in the two cases
+#: where that is the honest answer: a genuine protocol incompatibility, and a
+#: pre-ownership extension that is nonetheless being asked to reconcile a durable
+#: obligation it has no verbs for. Verbatim what this path said before the change,
+#: because in both cases updating really is the remedy.
+_OWNERSHIP_REQUIRES_UPDATE_MESSAGE = (
+    "Browser ownership recovery requires an updated Local Operator extension. "
+    "Update the extension, reconnect it, then retry; no new tab was allocated."
+)
+
+#: The refusal a CURRENT extension gets when `owner_recover` answers with the
+#: bare `internal` shape. That shape has two producers and the version tells them
+#: apart: below the ownership floor it is a pre-ownership release, and above it
+#: the worker has stopped answering. Telling the second one to update was the
+#: defect — the live 0.1.10 ships `owner_*` and the store had nothing newer to
+#: offer — so the remedy named here is the one that actually clears a wedge.
+_EXTENSION_STOPPED_ANSWERING_MESSAGE = (
+    "the browser extension stopped answering while this session's tab ownership was "
+    "being recovered. Ask the user to toggle the Local Operator extension OFF then ON "
+    "in chrome://extensions (pairing is preserved), then retry."
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +70,22 @@ class BrowserResource:
         self.generation = ""
         self.previous_generation = ""
         self.recovered = False
+        # Whether the attached extension can reconcile ownership at all.
+        #
+        #   * None  = not learned yet (or the peer changed since it was).
+        #   * True  = `owner_recover` answered; the `owner_*` lifecycle is real
+        #     on this link and every obligation must go through it.
+        #   * False = a PROVEN pre-ownership peer; the obligation verbs do not
+        #     exist, so the record is reconciled capability-only (see
+        #     `_degraded_recover`).
+        #
+        # Sticky per peer but REFRESHABLE: `_ownership_mode` invalidates it when
+        # the daemon reports a different (version, proto), so a user who updates
+        # the extension mid-session gets ownership back without restarting.
+        self.ownership: bool | None = None
+        # The peer identity `self.ownership` was learned against. See
+        # `_peer_identity` for why the pair, not just the version.
+        self._ownership_peer: tuple[str, int] | None = None
         self._lease_at_creation = self._lease_generation()
         # Whether the execution lease DEFINES this owner's identity. Only then
         # is a lease change a resume that must fence us; an owner whose identity
@@ -216,7 +260,93 @@ class BrowserResource:
             "resumed_scope": bool(self.record.get("resumed_scope")),
         }
 
+    #: Record fields whose presence means a DURABLE obligation exists that only
+    #: the `owner_*` lifecycle can reconcile: a tab this record still holds, a
+    #: capability it could not prove, a settled scope, retention, an
+    #: unacknowledged resume, or a paused scope awaiting release.
+    #:
+    #: Deliberately FIELDS rather than "does it look allocated": `initialize`
+    #: mints `allocation_id` unconditionally, so testing that would be dead code
+    #: that always answered "yes, there is an obligation".
+    OBLIGATION_FIELDS = (
+        "surface_id",
+        "unresolved_surface_id",
+        "terminal",
+        "retention",
+        "resumed_scope",
+        "release_pause",
+    )
+
+    def has_durable_obligation(self) -> bool:
+        """Whether the record carries something only `owner_*` can reconcile.
+
+        The discriminator between the two bare-`internal` cases: with no
+        obligation in flight, a pre-ownership peer can be served by the
+        capability-only path, so the tool degrades instead of dying. With one,
+        the session genuinely owes the extension a reconciliation it cannot
+        perform, and the honest failure stays.
+        """
+        return any(self.record.get(field) for field in self.OBLIGATION_FIELDS)
+
+    def _peer_identity(self) -> tuple[str, int] | None:
+        """The attached extension's (version, proto), or None when unknown.
+
+        Read from the DISCOVERY FILE rather than a socket: the daemon publishes
+        these from the same live link state `/health` serves, and this is
+        consulted on the `finish`/`retain`/`release` paths too, which must stay
+        cheap and must not depend on a dial. `None` — no daemon, nothing
+        attached, or an unreadable file — means "cannot tell", and every caller
+        must treat it that way: unknown is never "old".
+        """
+        try:
+            current = state_store.read()
+        except Exception:  # noqa: BLE001 - discovery must never raise at a call site
+            return None
+        if current is None or not current.extension_connected:
+            return None
+        return (current.extension_version, current.extension_proto)
+
+    def ownership_mode(self) -> bool | None:
+        """The cached ownership verdict, invalidated when the PEER changed.
+
+        Sticky per peer, because re-probing on every call would re-issue
+        `owner_recover` — and, on a legacy link, re-pay a failed round-trip — on
+        every command, including the plain `close` that settles the scope.
+        Refreshable, because an extension update mid-session changes the
+        reported (version, proto) pair, which invalidates the verdict and lets
+        the next call re-probe: the user gets ownership back without restarting
+        anything.
+
+        Returns None when it has not been learned for this peer yet — callers
+        must treat that as "must ask", never as "unavailable".
+        """
+        peer = self._peer_identity()
+        if peer != self._ownership_peer:
+            self._ownership_peer = peer
+            self.ownership = None
+        return self.ownership
+
+    def _peer_is_pre_ownership(self) -> bool:
+        """Whether the peer is PROVABLY older than the ownership floor.
+
+        False when the version is unknown or unparseable, and that direction is
+        load-bearing: "cannot tell" must not be read as "old", or an
+        unreadable discovery file would silently demote a current extension to
+        the capability-only path and hide a real wedge.
+        """
+        peer = self._ownership_peer
+        if peer is None:
+            return False
+        version, _proto = peer
+        return extension_older(version, OWNERSHIP_MIN_EXTENSION_VERSION)
+
     async def recover(self) -> dict[str, Any]:
+        # Already learned that this peer has no ownership lifecycle: do NOT
+        # re-issue the verb it cannot answer. `ownership_mode` refreshes the
+        # verdict through the peer identity, so a mid-session extension update
+        # leaves this branch and probes normally.
+        if self.ownership_mode() is False:
+            return self._degraded_recover()
         try:
             result = await BridgeClient().call("owner_recover", self.params())
         except BridgeError as exc:
@@ -257,20 +387,63 @@ class BrowserResource:
             # what keeps a future third producer of `data`-carrying INTERNAL from
             # silently re-creating the misdiagnosis, and a new `data` key belongs
             # in this predicate.
-            if exc.code is ErrorCode.PROTO_MISMATCH or (
-                exc.code is ErrorCode.INTERNAL
-                and "timeout_s" not in exc.data
-                and not exc.data.get("stalled")
+            #
+            # THE BARE SHAPE HAS TWO PRODUCERS, and the peer's reported version
+            # is what tells them apart — this is the whole reason
+            # `OWNERSHIP_MIN_EXTENSION_VERSION` exists:
+            #
+            #   * a PRE-OWNERSHIP release (<= 0.1.8) does not implement
+            #     `owner_recover` at all, so the method is simply unknown and
+            #     the catch-all emits this shape. Telling that user to update is
+            #     an instruction the store may be unable to satisfy, and the
+            #     extension is otherwise perfectly usable — so with NO durable
+            #     obligation in flight we degrade to the capability-only path
+            #     and keep working.
+            #   * a CURRENT release (>= 0.1.10, which DOES ship `owner_*`) gets
+            #     here only when something inside the handler threw a bare
+            #     error — the wedged worker. It must be reported as a wedge,
+            #     naming the one remedy that clears it, NOT as a version skew.
+            #
+            # A durable obligation overrides the first case: the session owes
+            # the extension a reconciliation the peer cannot perform, so the
+            # honest failure stands rather than a silent downgrade that would
+            # leave a tab stranded.
+            if exc.code is ErrorCode.PROTO_MISMATCH:
+                # A genuine incompatibility: the peer's proto falls outside
+                # `MIN_SUPPORTED_PROTO..PROTO_VERSION`. Unchanged copy — here
+                # updating really is the remedy, and the popup's `#incompatible`
+                # card is the user-facing half of the same verdict.
+                raise BrowserOwnershipError(_OWNERSHIP_REQUIRES_UPDATE_MESSAGE) from exc
+            if exc.code is ErrorCode.INTERNAL and (
+                "timeout_s" not in exc.data and not exc.data.get("stalled")
             ):
-                raise BrowserOwnershipError(
-                    "Browser ownership recovery requires an updated Local Operator extension. "
-                    "Update the extension, reconnect it, then retry; no new tab was allocated."
-                ) from exc
+                if not self._peer_is_pre_ownership():
+                    # A CURRENT extension (or one we cannot identify, which must
+                    # not be read as old) that cannot answer a verb it ships
+                    # means its worker has stopped answering. The remedy is the
+                    # toggle, never an update the store may not be able to serve.
+                    raise BrowserOwnershipError(_EXTENSION_STOPPED_ANSWERING_MESSAGE) from exc
+                if not self.has_durable_obligation():
+                    # Nothing to reconcile, so the extension's missing
+                    # lifecycle costs this session nothing: keep working in
+                    # capability-only mode instead of demanding an update.
+                    self.ownership = False
+                    self.assert_current()
+                    return self._degraded_recover()
+                # A durable obligation exists and only `owner_*` can reconcile
+                # it, so the honest failure stands — a silent downgrade here
+                # would leave a tab stranded.
+                raise BrowserOwnershipError(_OWNERSHIP_REQUIRES_UPDATE_MESSAGE) from exc
             raise
         if result.get("ownership_version") != 1:
+            # The peer answers `owner_recover` but describes a lifecycle this
+            # runtime does not know. Not the legacy case (that one cannot answer
+            # at all), so no degradation is safe: the two sides would disagree
+            # about what an obligation is.
             raise BrowserOwnershipError(
                 "browser extension needs ownership-recovery support; update it first"
             )
+        self.ownership = True
         self.assert_current()
         if self.record.get("release_pause") and result.get("state") != "unresolved":
             await BridgeClient().call("owner_release", self.params())
@@ -297,9 +470,36 @@ class BrowserResource:
         # set would make a LATER finish's terminal clearable by a recover that
         # is no longer a resume at all.
         self.record.pop("resumed_scope", None)
+        # A successful reconcile means this link really does implement the
+        # lifecycle, so any `unavailable` marker written by an earlier degraded
+        # pass under a different peer is retired with it.
+        self.record.pop("ownership", None)
         self.recovered = True
         self._save()
         return result
+
+    def _degraded_recover(self) -> dict[str, Any]:
+        """Capability-only recovery for a link with no ownership lifecycle.
+
+        Reached when a PROVEN pre-ownership extension refuses `owner_recover`
+        and no durable obligation is in flight. It resolves whatever this record
+        already holds and writes a REDACTED ``ownership: "unavailable"`` marker
+        so diagnostics can tell "worked, in legacy mode" from "ownership
+        proven" — the distinction support needs and that a bare state string
+        cannot make.
+
+        It deliberately reconciles nothing: there is nothing the extension could
+        answer, and the record's own capability is the only thing that survives.
+        """
+        self.assert_current()
+        surface = str(self.record.get("surface_id", ""))
+        self.record["ownership"] = "unavailable"
+        self.record["state"] = (
+            "cleanup_pending" if self.record.get("terminal") else ("owned" if surface else "closed")
+        )
+        self.recovered = True
+        self._save()
+        return {"state": self.record["state"], "tab": surface, "ownership_version": 0}
 
     def remember(self, surface_id: str, *, state: str | None = None) -> None:
         self.assert_current()
@@ -343,6 +543,13 @@ class BrowserResource:
                 self.assert_current()
                 if not self.recovered:
                     await self.recover()
+                # A link with no ownership lifecycle settles through the plain
+                # `close` verb instead. Without this the fallback that keeps the
+                # tool working would strand the very tab it opened: `owner_finish`
+                # does not exist on that peer, so the read would fail and the tab
+                # would live on with nobody able to close it.
+                if self.ownership_mode() is False:
+                    return await self.finish_degraded()
                 if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
                     return BrowserCleanupResult(
                         "unresolved",
@@ -369,6 +576,42 @@ class BrowserResource:
             # failure; the class name is the fallback for a type that carries
             # no message, matching how the CLI renders its outer handler.
             return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
+
+    async def finish_degraded(self) -> BrowserCleanupResult:
+        """Settle the scope with a plain `close`, for a peer with no `owner_*`.
+
+        LOCK-FREE on purpose: `finish` reaches this while already holding
+        ``self.lock``, and the session tool's release path calls it from inside
+        the same lock. Taking the lock here would deadlock on that path.
+
+        The close names the RECORDED surface capability, never a numeric tab id
+        and never the unresolved-evidence slot (both of those are the
+        "never adopt by tab id" stance). Nothing is renamed away either: the
+        obligation verbs are forked, the identity params are not, because a
+        command that stopped carrying them would break the mid-version cases the
+        fallback exists to protect.
+        """
+        if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
+            return BrowserCleanupResult(
+                "unresolved",
+                "browser ownership could not be proven after restart; no tab adopted",
+            )
+        surface = str(self.record.get("surface_id", ""))
+        if surface:
+            try:
+                await BridgeClient().call("close", {"tab": surface})
+            except BridgeError as exc:
+                # A failed close is a result here for the same reason it is in
+                # `finish`: the tab is genuinely still out there and the record
+                # must say so instead of reporting a settled scope.
+                self.record["state"] = "pending"
+                self._save()
+                return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
+        self.assert_current()
+        self.record["surface_id"] = ""
+        self.record["state"] = "closed"
+        self._save()
+        return BrowserCleanupResult("closed")
 
 
 #: States in which a tab is stranded and an operator may recover it. Both are
@@ -419,6 +662,13 @@ def read_inventory(directory: Path) -> list[dict[str, Any]]:
                     "state": value.get("state", "unresolved"),
                     "terminal": value.get("terminal", ""),
                     "retention": value.get("retention", ""),
+                    # REDACTED, and deliberately so: this marker names the MODE,
+                    # never a capability. Published because "it worked, in
+                    # legacy mode" and "its ownership is proven" are otherwise
+                    # indistinguishable in a support conversation, and the
+                    # operator cannot ask the right question without the
+                    # difference. Empty for every record that has not degraded.
+                    "ownership": value.get("ownership", ""),
                     "cleanup_candidate": eligible,
                     "blocked_reason": reason,
                 }

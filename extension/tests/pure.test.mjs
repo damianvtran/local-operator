@@ -961,3 +961,77 @@ test("every wire method has a worker handler", async () => {
   const missing = methods.filter((method) => !handlers.has(method));
   assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
+
+// The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..
+// PROTO_VERSION), which is only worth anything if the extension can MOVE inside
+// that window. A build whose hello pins the literal 1 keeps working, so nothing
+// fails loudly — but the window becomes decorative: a daemon bump is invisible
+// until somebody edits the three literals by hand, and the release that would
+// have exercised it ships a hello that still says 1. Hence a source scan rather
+// than a behavioural test: the defect is the ABSENCE of an import.
+test("no hello send site carries a numeric proto literal", async () => {
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  assert.match(
+    generated,
+    /export const PROTO_VERSION = \d+ as const;/,
+    "protocol.gen.ts must export the numeric PROTO_VERSION the senders import",
+  );
+  // Every file that sends a `hello`. Named individually, not globbed: a new
+  // sender added in a new file must be added here deliberately, and a rename of
+  // one of these must fail this test rather than silently dropping its coverage.
+  const senders = ["../src/worker.ts", "../src/popup/popup.ts", "../src/options/options.ts"];
+  for (const file of senders) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    const hellos = [...source.matchAll(/event:\s*"hello"[\s\S]{0,400}?\}/g)].map((m) => m[0]);
+    assert.ok(hellos.length > 0, `${file} must send a hello`);
+    for (const hello of hellos) {
+      assert.doesNotMatch(
+        hello,
+        /proto:\s*\d/,
+        `${file}: a hello must send PROTO_VERSION, never a literal proto`,
+      );
+      assert.match(hello, /proto:\s*PROTO_VERSION/, `${file}: a hello must send PROTO_VERSION`);
+    }
+    assert.match(
+      source,
+      /import\s*\{[\s\S]*?PROTO_VERSION[\s\S]*?\}\s*from\s*"(\.\.?\/protocol\.gen)"/,
+      `${file} must import PROTO_VERSION from protocol.gen`,
+    );
+  }
+});
+
+// The popup's copy of the sentence is the GENERATED template, so the two cannot
+// drift; this pins that it is imported rather than re-spelled.
+test("the popup renders the shared advisory template", async () => {
+  const popup = await readFile(new URL("../src/popup/popup.ts", import.meta.url), "utf8");
+  assert.match(popup, /EXTENSION_UPDATE_NOTE/);
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  const note = generated.match(/export const EXTENSION_UPDATE_NOTE = '([^']*)'/);
+  assert.ok(note, "protocol.gen.ts must export EXTENSION_UPDATE_NOTE");
+  assert.match(note[1], /\{have\}/, "the template must take the reported version");
+  assert.match(note[1], /\{want\}/, "the template must take the expected version");
+  assert.match(note[1], /nothing is blocked\./, "the copy must say nothing is blocked");
+  assert.doesNotMatch(note[1], /requir|must /i, "the copy must not demand anything");
+});
+
+// The reserved slot is load-bearing (it is what stops the popup window resizing
+// when the advisory appears), so it needs a reserve AND the invisible-not-hidden
+// treatment: `display: none` would collapse the space this exists to hold.
+test("the advisory slot is reserved, not collapsed", async () => {
+  const css = await readFile(new URL("../src/popup/popup.css", import.meta.url), "utf8");
+  const reserve = css.match(/#connected-advisory\s*\{[^}]*min-height:\s*(\d+)px/);
+  assert.ok(reserve, "#connected-advisory must reserve a min-height");
+  const lines = Number(reserve[1]) / 18; // 12px at line-height 1.5
+  assert.equal(lines, 3, "the reserve must be the three lines the sentence wraps to at 300px");
+  assert.match(
+    css,
+    /#connected-advisory\.hidden\s*\{[^}]*display:\s*block\s*!important[^}]*visibility:\s*hidden/,
+    "the empty slot must keep its space (visibility, never display:none)",
+  );
+  const html = await readFile(new URL("../src/popup/popup.html", import.meta.url), "utf8");
+  assert.match(
+    html,
+    /<p class="advisory hidden" id="connected-advisory"><\/p>/,
+    "the slot ships empty and hidden inside the Connected card",
+  );
+});

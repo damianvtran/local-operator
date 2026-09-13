@@ -644,12 +644,22 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id", "resource")
+    __slots__ = ("surface_id", "resource", "extension_update_notified")
 
     def __init__(self, resource: Any = None) -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
+        # Whether the tool has already spent its ONE line telling the agent that
+        # a newer browser extension exists. It lives HERE, on the host-owned
+        # holder, because the ToolContext is rebuilt at the start of every turn
+        # and a flag stashed on it would reset the next turn — re-billing the
+        # same sentence forever. Read through `getattr` by the tool (see
+        # `_browser_update_note`), deliberately NOT added to
+        # `BrowserSurfaceProtocol`: that protocol is `@runtime_checkable`, so a
+        # new member would make every other implementor fail its isinstance
+        # check for a purely advisory flag.
+        self.extension_update_notified = False
 
 
 @runtime_checkable

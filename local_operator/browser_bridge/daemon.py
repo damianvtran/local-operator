@@ -33,6 +33,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
     COMMAND_TIMEOUTS,
+    EXPECTED_EXTENSION_VERSION,
+    MIN_SUPPORTED_PROTO,
     ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
     ErrorCode,
@@ -43,6 +45,7 @@ from local_operator.browser_bridge.protocol import (
     PairResult,
     Request,
     Response,
+    extension_older,
 )
 from local_operator.paths import config_dir
 
@@ -765,11 +768,30 @@ class ExtensionLink:
         self.frame_event = asyncio.Event()
         self.extension_id = ""
         self.browser = ""
-        # Reported in `hello` and kept so the pairing entry can be labelled with
-        # the build it belongs to. The label is what lets an operator tell two
-        # installs of the same browser apart in `lop browser pair --list`, which
-        # is the whole point of naming them.
-        self.extension_version = ""
+        # The peer's own protocol version and reported extension version, both
+        # stamped from its `hello` — here, on the link being CREATED, and before
+        # that link is registered or can be driving: a standby dial must stamp
+        # its own socket's identity, never the incumbent driver's (`self.link` is
+        # the DRIVING link since #1038's multi-identity handshake). Three
+        # consumers depend on them:
+        #
+        #   * `peer_proto` is what any FUTURE daemon->extension frame must be
+        #     gated on — "can this peer understand it" is a question about the
+        #     peer, never about this daemon's own PROTO_VERSION.
+        #   * `extension_version` is what tells a pre-ownership extension from a
+        #     current-but-wedged one when `owner_recover` fails identically on
+        #     both (see `OWNERSHIP_MIN_EXTENSION_VERSION`).
+        #   * …and it labels the pairing entry with the build it belongs to, which
+        #     is what lets an operator tell two installs of the same browser apart
+        #     in `lop browser pair --list`.
+        #
+        # `peer_proto`'s default matters: it is this daemon's own version, so a
+        # never-stamped link reports a value the daemon itself would speak. That
+        # is only a safety net for a link that has not handshaken; `health`
+        # reports both fields as "unknown" unless the link is PROVEN, since a
+        # stale stamp from a dead socket must not drive a decision.
+        self.peer_proto: int = PROTO_VERSION
+        self.extension_version: str = ""
         self.paired = False
         self.pending: dict[str, asyncio.Future[Response]] = {}
         # Request ids the extension has told us are blocked on a human origin
@@ -1026,6 +1048,14 @@ class ExtensionLink:
         """
         self.paired = False
         self.last_frame_at = 0.0
+        # Link-scoped like everything else here: the extension that reported
+        # them is gone, so the reported version must not outlive its socket (a
+        # stale version would drive the update advisory and the ownership
+        # split against a peer that is no longer talking). `peer_proto` returns
+        # to its declared default rather than 0 — there is no peer to describe,
+        # and the field's own contract is "the proto the peer would speak".
+        self.peer_proto = PROTO_VERSION
+        self.extension_version = ""
         for future in self.pending.values():
             if not future.done():
                 future.set_exception(RuntimeError("extension disconnected"))
@@ -1477,7 +1507,31 @@ class BridgeService:
         # and a drop writes `extension_connected=false` — without this the file
         # is indistinguishable from a host with no bridge, which is how a paired
         # running bridge got told to run `lop browser install` (design D3-2).
-        self.state.extension_unresponsive = self.drop_latched()
+        self.state.extension_unresponsive = self.link.dropped_unproven()
+        # The extension's identity, published for consumers that CANNOT open a
+        # socket: `BrowserResource` decides whether it may use the ownership
+        # lifecycle from these fields (see `resources.py`), and the session-side
+        # browser tool must not pay a round-trip on a decision the daemon has
+        # already made about the link it owns.
+        #
+        # Blanked when the link is not proven, deliberately. A version stamp
+        # outliving its socket would drive both the update advisory and the
+        # ownership split against a peer that is no longer talking — which is
+        # exactly the stale-lie class the discovery file already exists to stop
+        # (see `extension_unresponsive`'s own comment).
+        if self.link.proven:
+            self.state.extension_version = self.link.extension_version
+            self.state.extension_proto = self.link.peer_proto
+            # The ONE advisory predicate, shared with `/health`: a KNOWN version
+            # strictly below the one this runtime ships with. Unparseable is not
+            # "older" and an extension AHEAD is not behind, so neither nags.
+            self.state.extension_update_available = extension_older(
+                self.link.extension_version, EXPECTED_EXTENSION_VERSION
+            )
+        else:
+            self.state.extension_version = ""
+            self.state.extension_proto = 0
+            self.state.extension_update_available = False
         state_store.publish(self.state, self.root)
 
     def publish_safely(self) -> bool:
@@ -2169,8 +2223,24 @@ class BridgeService:
         except (asyncio.TimeoutError, ValidationError, ValueError):
             await websocket.close(code=4001)
             return
-        if hello.proto != PROTO_VERSION:
-            await websocket.close(code=4001)
+        if not (MIN_SUPPORTED_PROTO <= hello.proto <= PROTO_VERSION):
+            # A WINDOW, not an equality (see MIN_SUPPORTED_PROTO). The two
+            # release lines move independently and the extension's half sits in
+            # store review, so requiring an exact match means a daemon release
+            # refuses every installed browser until Google approves the
+            # matching extension — with a failure that tells the user to update
+            # an extension the store will not serve yet.
+            #
+            # 4001 is KEPT rather than replaced with a new code: `extension/
+            # src/worker.ts` maps it to the popup's "incompatible" card, and a
+            # new code would be interpreted only by a future extension while
+            # everything unknown renders as a plain disconnect. The reason
+            # string is a HINT for a future peer (today's extension does not
+            # read it — see docs/design/browser-extension.md 4.2); the two
+            # spellings exist so a reader of a debug log can tell which side of
+            # the window the peer fell off.
+            reason = "proto_too_old" if hello.proto < MIN_SUPPORTED_PROTO else "proto_too_new"
+            await websocket.close(code=4001, reason=reason)
             return
         # An UNLISTED identity is admitted whether or not it presents a token,
         # and no token it carries is ever consulted: `link.paired` below is
@@ -2225,6 +2295,10 @@ class BridgeService:
         link.extension_id = extension_id
         link.browser = hello.browser
         link.extension_version = hello.extension_version
+        # Stamped HERE, with the rest of the identity and before the link is
+        # registered, for the A1 ordering argument: a later handshake cannot leave
+        # a superseded one's proto behind for a future frame gate to read.
+        link.peer_proto = hello.proto
         previous = next(
             (entry for entry in self.links.values() if entry.extension_id == extension_id), None
         )
@@ -2376,6 +2450,12 @@ class BridgeService:
             await asyncio.wait_for(
                 link.send(
                     HelloAck(
+                        # The NEGOTIATED value, not this daemon's own ceiling: a peer
+                        # inside the window is told what the pair will actually
+                        # speak, which is the hook a future extension needs before it
+                        # gates anything on the daemon's proto. Nothing reads this
+                        # today, so it is free.
+                        proto=min(hello.proto, PROTO_VERSION),
                         paired=link.paired,
                         role=link.role,
                         authorized_count=len(_identity_ids(self.root)),
@@ -3429,6 +3509,26 @@ class BridgeService:
                 "extension_unresponsive": (self.link.websocket is not None and not connected)
                 or self.link.dropped_unproven()
                 or (self.drop_latched() and not connected),
+                # Additive OPTIONAL fields (HTTP, so an old client ignores them)
+                # reporting the EXTENSION's identity as this daemon last saw it
+                # in `hello`. `proto` above is deliberately NOT reused: that is
+                # the daemon's OWN version, and conflating the two is what made
+                # a skew undiagnosable.
+                #
+                # Empty/0 while the link is not proven, so a stale stamp from a
+                # dead socket cannot be read as a live one.
+                "extension_version": self.link.extension_version if connected else "",
+                "extension_proto": self.link.peer_proto if connected else 0,
+                # The version this runtime ships with, so a reader never has to
+                # know the constant to render the advisory.
+                "extension_expected_version": EXPECTED_EXTENSION_VERSION,
+                # The ONE update predicate: proven AND a KNOWN version strictly
+                # below what this runtime expects. Unparseable is not "older",
+                # and an extension ahead is not behind, so neither produces a
+                # nag. The advisory this drives never blocks anything — it is a
+                # hint the store cannot be asked about, not a requirement.
+                "extension_update_available": connected
+                and extension_older(self.link.extension_version, EXPECTED_EXTENSION_VERSION),
                 # Whether a link is attached RIGHT NOW, which is not the same as
                 # healthy (`extension_connected` owns that). It exists so the
                 # status line can word the same observation truthfully in both

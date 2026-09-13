@@ -217,6 +217,25 @@ const STATES = {
       "omibaecbjdhgbbcedbnnnmjpmopfheof",
     ],
   },
+
+  // An extension BEHIND the runtime — the live-store case the version-skew
+  // change exists for. The runtime must keep driving it (no refusal anywhere),
+  // and the popup must say a newer version exists as a NOTE, in the Connected
+  // card's permanently reserved slot.
+  //
+  // Its partner is `connected` above, whose /health carries no extension
+  // fields: same card, no advisory. The pair is the measurement that makes the
+  // reservation load-bearing rather than decorative — the two cards must be
+  // the SAME height, because the reservation is paid whether or not the
+  // sentence is there.
+  "connected-update": {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    extension_version: "0.1.10",
+    extension_expected_version: "0.1.13",
+    extension_update_available: true,
+  },
 };
 
 /** Session-storage fixtures, keyed like STATES.
@@ -316,6 +335,7 @@ async function main() {
       await sleep(600);
       const measured = await page.eval(`(() => {
         const card = document.getElementById("card");
+        const slot = document.getElementById("connected-advisory");
         const wedge = document.getElementById("origin-wedge");
         const wedgeReload = document.getElementById("origin-wedge-reload");
         const shown = [...document.querySelectorAll("section.state")].find(
@@ -326,6 +346,23 @@ async function main() {
           shown: shown ? shown.id : null,
           cardHeight: card ? card.getBoundingClientRect().height : null,
           pendingPin: pending ? getComputedStyle(pending).minHeight : null,
+          // The advisory slot. advisoryLines counts the WRAPPED TEXT's line
+          // boxes via a Range: an element's own client rects are one rect for a
+          // block, so they cannot see a wrap, and a wrap that lands past the
+          // reserve with no slack is exactly what the reserve exists to absorb.
+          // Null on a build that predates the slot (the before-frame).
+          advisoryText: slot ? slot.textContent.trim() : null,
+          advisoryHeight: slot ? slot.getBoundingClientRect().height : null,
+          advisoryReserve: slot ? getComputedStyle(slot).minHeight : null,
+          advisoryVisible: !!slot && !slot.classList.contains("hidden") &&
+            slot.getBoundingClientRect().height > 0,
+          advisoryLines: slot
+            ? (() => {
+                const range = document.createRange();
+                range.selectNodeContents(slot);
+                return range.getClientRects().length;
+              })()
+            : null,
           pinHint: localStorage.getItem("lop:pin-hint"),
           reloadOffered: !!document.getElementById("reload-extension") &&
             !!shown && shown.contains(document.getElementById("reload-extension")),
