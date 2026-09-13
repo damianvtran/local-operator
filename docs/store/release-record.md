@@ -52,6 +52,55 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.12 — submitted 2026-09-13, pending review as of 2026-09-13
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.12 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `7c78b6eda` (merge commit of PR #1026 on `main`) |
+| `extension/` tree hash | `3069532b9f2ac82fb6603f2ec5e2f453639ac008` (the deterministic input pin — see the audit note above) |
+| Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.10, v0.1.8 and earlier* |
+| Artifact size | 13 files, no source maps (size as reported by the store listing once published) |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 34731860480](https://github.com/damianvtran/local-operator/actions/runs/34731860480), dispatched with `ref=7c78b6eda` `version=0.1.12` |
+| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.12` once the store reports the revision `STAGED` |
+| Store state | `PENDING_REVIEW` (submitted with `STAGED_PUBLISH`); nothing on the listing has changed yet |
+| State last checked | 2026-09-13 |
+| Approval timestamp | *pending — append when the review completes and the promoted revision is live* |
+| Previously published | v0.1.10, live during this review |
+
+**First submitted revision carrying both halves of the stale-worker defect.** The
+store queued exactly one version for the whole defect area, deliberately:
+
+- **#996** (`99e81a1c5`, merged 2026-09-12T23:48:28Z) — the daemon/extension
+  wedge work: an unresponsive extension no longer wedges every session, and the
+  popup's `#unresponsive` card states the manual OFF/ON remedy.
+- **#1026** (`7c78b6eda`) — the operator-reported follow-up from this defect's
+  own symptom ("clicking the extension icon sometimes does nothing, 2-3 tries"):
+  the MV3 worker's remaining uncaught throws are contained, the popup's
+  `decide()` is bounded and failure-safe so a dead worker can never leave
+  Allow/Deny disabled, the reload remedy is reachable from the consent card, and
+  the first-paint pins are state-aware.
+
+**`0.1.11` was never submitted.** #996 carried a `0.1.11` bump on its branch, but
+both PRs agreed to hold the store dispatch so the operator paid one review wait
+rather than two for the same defect. That version therefore never existed on the
+store, and reading it as a skipped release is correct.
+
+**Review queue expectations.** Google publishes no SLA for review, and an
+extension using `debugger` with `<all_urls>` routinely draws extended manual
+review: 0.1.8 took ~4.5 days, 0.1.10 cleared the next day. Do not cancel the
+pending review to force a resubmission — cancelling forfeits the accrued queue
+position with no visibility into how close it was.
+
+**Until this publishes**, the live store build stays `0.1.10`, where a stale
+worker still leaves the popup's Allow/Deny permanently disabled. Anyone
+exercising the fix before publication must load `main` unpacked **and patch the
+built port constant off `4099` first**, or the harness will dial the operator's
+real daemon (documented on PR #1026; the committed capture script guards it).
+
 ## v0.1.10 — submitted 2026-09-10, published 2026-09-11
 
 | Field | Value |
