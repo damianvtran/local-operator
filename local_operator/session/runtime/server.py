@@ -233,8 +233,12 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
     WHY A FRAME THIS BIG IS NOT MERELY LARGE. The attach client dials with
     ``limit=_READ_LIMIT_BYTES`` (the same 1 MiB as ``cap_bytes``), so an
     oversized line makes its ``readline`` raise ``LimitOverrunError``. That is
-    unrecoverable rather than lossy: the overrun does NOT consume the buffer,
-    so every later read re-raises on the same bytes. The client's pump
+    unrecoverable rather than lossy — not because the bytes stay in the buffer
+    (``readline`` DRAINS them: it deletes through the separator when it found
+    one and clears the buffer when it did not, the same fact ``_on_connection``'s
+    INBOUND prose below depends on), but because a frame the client never sees whole is
+    one it cannot apply: a relay frame is a delta carrying a sequence, and the
+    client's own contract says resuming after a silent gap is drift. The pump
     therefore dies, and the viewer paints "owner sent a frame too large to
     read" — the message the operator hit — losing the whole connection over one
     delta. ``frontend_sync`` has been guarded since it caused exactly this
@@ -1036,6 +1040,13 @@ class RuntimeServer:
         Called from any other thread the lock-free write would be unsafe
         (round-4 NIT-2: the guarantee belongs to the call site, not the
         method, and saying so is what stops the next reuse from breaking it).
+
+        This is the ONE write that does not go through :meth:`_send_to`, and
+        it may only stay that way because the frames it carries
+        (``stopping``/``retiring``) are constant-size by construction — a few
+        hundred bytes regardless of session state. Reusing it for anything
+        that can grow would put an unreadable line on the wire with no ceiling
+        in front of it; route a new frame through ``_send_to`` instead.
         """
         for conn in list(self._clients.values()):
             try:
@@ -1494,7 +1505,27 @@ class RuntimeServer:
                 )
                 oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
             if oversize is not None:
-                logger.error("session runtime: frontend_sync will not fit — %s", oversize)
+                # Still over the line limit even with the display window
+                # reduced. Nothing more can be shed HERE, and the guarantee the
+                # socket needs lives in ``_send_to``'s ceiling: it substitutes an
+                # ``error`` frame naming the size instead of writing a line this
+                # client cannot read (which used to kill its pump and cost the
+                # user the whole session). Reported here as well because this is
+                # where the field responsible is known — the next unbounded list
+                # should cost one log line to find, not a profiling session.
+                #
+                # What follows is deliberately unchanged and deliberately not
+                # prettier: the deltas queued below are applied against a base
+                # that never arrived, so the client refuses the first one by its
+                # own sequence rule (``attach_client`` raises "frontend state
+                # gap") and goes cold at once. That is the honest end for
+                # canonical state too large to send — fast, named, and no
+                # different in effect from the dead socket it replaces.
+                logger.error(
+                    "session runtime: frontend_sync does not fit — %s — and will be "
+                    "replaced by an error frame at the write",
+                    oversize,
+                )
             await self._send_to(conn, sync_frame)
             conn.frontend_ready = True
             for pending in conn.frontend_pending:
@@ -3370,18 +3401,184 @@ class RuntimeServer:
     async def _send_to(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
         """One frame to one connection. A failed send drops ONLY that client
         from the registry (never retried — the reader loop will observe the
-        close and its finally is a no-op second removal)."""
+        close and its finally is a no-op second removal).
+
+        THE CEILING. Every frame the runtime emits reaches the socket through
+        here (``_write_now``'s ``stopping``/``retiring`` announcements are the
+        one exception, and they are constant-size), so the line limit is
+        enforced here rather than trusted to each family's own guard. A frame
+        past ``_MAX_LINE_BYTES`` is not merely large: the peer dials with the
+        SAME limit, its ``readline`` raises, and its pump dies — the viewer
+        then paints "owner sent a frame too large to read" and the session
+        cannot be opened at all. ``cap_projection_frame`` is a SOFT cap that
+        degrades optional tiers and can still return an over-limit payload
+        (measured at 1,254,249 B against this limit on a 256-sibling roster),
+        so the hard bound has to live at the write.
+
+        The check is free: the frame is serialized here anyway, so it reuses
+        those bytes instead of dumping them a second time on the ~30/s repaint
+        path. What replaces an oversized frame depends on what the frame IS —
+        see :meth:`_readable_frame`.
+        """
         timeout = (
             _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
         )
         async with conn.send_lock:
             try:
-                conn.writer.write(json.dumps(frame).encode() + b"\n")
+                # ``+ 1`` for the delimiter: it lands in the peer's read buffer
+                # and its limit is checked against the buffer, so a payload of
+                # exactly the limit still overruns.
+                payload = json.dumps(frame).encode()
+                close_reason: str | None = None
+                if len(payload) + 1 > _MAX_LINE_BYTES:
+                    replacement, close_reason = self._readable_frame(frame, len(payload) + 1)
+                    if replacement is None:
+                        return
+                    payload = json.dumps(replacement).encode()
+                    if len(payload) + 1 > _MAX_LINE_BYTES:
+                        # Not reachable for the substitutions this file builds
+                        # (all are constant-size), but a frame that cannot be
+                        # read must never be written, so the guarantee is kept
+                        # by construction rather than by arithmetic.
+                        logger.error(
+                            "session runtime: dropped an unsendable %s frame for session %s "
+                            "(%d bytes, over the %d-byte line limit) — its degraded "
+                            "replacement does not fit either",
+                            replacement.get("op"),
+                            self._record.session_id,
+                            len(payload) + 1,
+                            _MAX_LINE_BYTES,
+                        )
+                        return
+                conn.writer.write(payload + b"\n")
                 await asyncio.wait_for(conn.writer.drain(), timeout=timeout)
+                if close_reason is not None:
+                    # AFTER the drain, so the substitute frame — the peer's only
+                    # trace of why — is actually on the wire before the close.
+                    self._drop_client(conn, reason=close_reason)
             except TimeoutError:
                 self._drop_client(conn, reason=f"send timeout ({timeout:.1f}s)")
             except (ConnectionResetError, BrokenPipeError, OSError) as exc:
                 self._drop_client(conn, reason=f"send failed: {type(exc).__name__}")
+
+    def _readable_frame(
+        self, frame: dict[str, Any], size: int
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """What to write instead of an unreadable frame: ``(frame, close_reason)``.
+
+        By op family, because the honest answer depends on what the frame MEANS
+        to the peer — and on whether there is anybody waiting for it:
+
+        * replaceable state the peer re-receives anyway → substitute it;
+        * an answer to a request → tell the requester it cannot be sent;
+        * a frame that is the BASE of a stream the peer cannot be told about →
+          substitute, then close, because a peer waiting on a frame that is
+          never coming reports the owner as slow/unresponsive 15 s later, which
+          is exactly the misdiagnosis this whole class of bug is made of;
+        * already-degraded relay traffic → degrade again (a belt);
+        * anything else → drop the frame and keep the connection.
+
+        ``None`` as the frame means "write nothing"; the connection survives
+        unless ``close_reason`` is set.
+        """
+        op = frame.get("op")
+        if op in ("projection", "welcome"):
+            # Only the mobile renderer consumes a projection at all, and for
+            # every other client the identity fields are the whole payload. The
+            # canonical state arrives on the ``frontend_sync`` the connect path
+            # sends next, so this loses nothing a viewer needs and leaves the
+            # session openable — which is the point.
+            logger.error(
+                "session runtime: refusing to write an unreadable %s frame for session %s "
+                "(%d bytes, over the %d-byte line limit) — sending the identity-only "
+                "welcome instead; the canonical state follows on frontend_sync",
+                op,
+                self._record.session_id,
+                size,
+                _MAX_LINE_BYTES,
+            )
+            return {"op": "projection", "data": self._identity_projection()}, None
+        if op in ("result", "frontend_sync") or "req" in frame:
+            # An answer the requester is waiting for. Telling it the answer
+            # cannot be sent is the same contract the ``frontend_sync`` RPC
+            # already keeps by raising (see ``_dispatch_client``), and the
+            # requester learns instead of the socket dying under it.
+            #
+            # The connect-time PUSH form of ``frontend_sync`` (no ``req``) has
+            # nobody to tell, and that is the one case where substituting the
+            # answer is not enough: the viewer sits on a base that never comes,
+            # applies no delta (its first one would be refused as a sequence
+            # gap) and reports "the runtime is not responding" when its envelope
+            # expires — the exact misdiagnosis of a hard bug this code base
+            # spent two rounds removing. So THIS one closes: the peer fails at
+            # once with a disconnect instead of blaming the owner's liveness,
+            # and the ERROR lines here and at the connect path (where the field
+            # responsible is known) carry the diagnosis.
+            logger.error(
+                "session runtime: refusing to write an unreadable %s reply for session %s "
+                "(%d bytes, over the %d-byte line limit) — replying with an error frame",
+                op,
+                self._record.session_id,
+                size,
+                _MAX_LINE_BYTES,
+            )
+            replacement = {
+                "op": "error",
+                "req": frame.get("req"),
+                "message": (
+                    f"{op or 'frame'} is {size:,} bytes, over the "
+                    f"{_MAX_LINE_BYTES:,}-byte socket line limit; the owner cannot send it"
+                ),
+            }
+            if "req" in frame:
+                return replacement, None
+            return replacement, f"unsendable {op} ({size} bytes)"
+        if op in ("event", "frontend_update"):
+            # Already degraded at enqueue (``_enqueue_client_frame`` routes both
+            # relay families through ``relay_frame_or_degraded``), so this is a
+            # belt rather than the guard — but the same rule holds: never write
+            # what the peer cannot read.
+            return relay_frame_or_degraded(frame, _MAX_LINE_BYTES), None
+        logger.error(
+            "session runtime: dropped an unsendable %s frame for session %s "
+            "(%d bytes, over the %d-byte line limit) with no readable substitute",
+            op,
+            self._record.session_id,
+            size,
+            _MAX_LINE_BYTES,
+        )
+        return None, None
+
+    def _identity_projection(self) -> dict[str, Any]:
+        """The smallest projection that still identifies the session.
+
+        A welcome's non-negotiable job is the client's identity check: the
+        projection names the conversation the owner is REALLY hosting, and
+        ``AttachClient.connect`` refuses anything else or anything malformed.
+        The rest of a projection is render payload — no terminal client
+        consumes it (``_projection_frame`` returns it untouched and the TUI's
+        projection callback is a no-op) and every other viewer receives the
+        canonical snapshot on the ``frontend_sync`` that follows immediately.
+        Empty collections rather than omitted keys, so the frame stays a valid
+        projection of its own op for a client that rebuilds it field by field.
+        """
+        seed = self._handle.session_projection_seed
+
+        def identity(field: str, fallback: str = "") -> str:
+            return str(getattr(seed, field, "") or fallback)
+
+        return {
+            "session_id": self._record.session_id,
+            "pid": self._record.pid,
+            "kind": identity("kind", self._record.kind),
+            "conversation_name": identity("conversation_name", self._record.conversation_name),
+            "cwd": identity("cwd", self._record.cwd),
+            "model_label": identity("model_label", self._record.model_label),
+            "transcript": [],
+            "todos": [],
+            "subagents": [],
+            "pending": None,
+        }
 
     async def _send(self, frame: dict[str, Any]) -> None:
         """Broadcast alias kept for the pre-v2 call shape (tests, hosts that

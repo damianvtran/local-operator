@@ -26,7 +26,7 @@ import re
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -43,6 +43,7 @@ from local_operator.mobile.attach_client import (
     _RefitReport,
     _text_is_the_bulk_refusal,
 )
+from local_operator.mobile.types import SessionProjection, SubagentRow
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attention import AttentionStore
 from local_operator.session.frontend_state import (
@@ -950,6 +951,264 @@ async def test_attach_succeeds_against_a_session_that_exceeded_the_old_limit(
         registrant.close()
 
 
+# ---------------------------------------------------------------------------
+# The WELCOME projection: the one frame with a SOFT cap and no check downstream.
+#
+# Everything above bounds what a session SHOULD send. This block covers the
+# family that could not: ``cap_projection_frame`` spends its text tiers and
+# returns the over-limit dict anyway, and ``_send_to`` used to write it raw. A
+# wide enough sibling group therefore produced a line no viewer could read, and
+# the session could not be opened at all (production: 113 frames over the hard
+# limit for one session, max 1,254,516 B, five sidebar latches).
+# ---------------------------------------------------------------------------
+
+#: Production-shaped job ids: 12 hex chars, as ``uuid4().hex[:12]`` builds them.
+#: The LENGTH is load-bearing, not decoration. ``peer_ids`` costs ~16 bytes per
+#: sibling id on the wire, so a 256-wide group of THIS shape crosses the 1 MiB
+#: limit while the same group with ``child-0``-style ids lands ~100 KB lower and
+#: never crosses it — a fixture that quietly stopped reproducing the failing
+#: frame would make the tests below pass for the wrong reason.
+_SIBLING_ID_HEX = 12
+
+
+def _wide_roster_projection(width: int) -> SessionProjection:
+    """A flat sibling group folded by the REAL roster path.
+
+    Built through ``SubagentComms`` + ``ProjectionFold`` rather than by hand:
+    ``peer_ids`` is assigned by the fold from the comms registry, so hand-built
+    rows would carry empty lists and a fixture that no longer reproduces the
+    O(n^2) term at all.
+
+    256 parallel eval children with ``parent_job_id: null`` is the production
+    shape — each row lists the other 255 ids, measured at 1,044,480 B of a
+    1,254,249-byte frame.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.session.session import Session
+
+    session = SimpleNamespace(jobs=SimpleNamespace(get=lambda job_id: None))
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    for index in range(width):
+        comms.record_launch(
+            f"{index:0{_SIBLING_ID_HEX}x}",
+            f"osworld-eval-{index}",
+            prompt="Analyse the episode and click the correct element " * 4,
+        )
+    fold = ProjectionFold(SessionProjection(session_id="s1", pid=1))
+    fold.set_subagent_details(comms)
+    projection = fold.projection
+    # Realistic outcome text: the shape that measured multi-MB payloads on the
+    # real session, so the fixture's non-derived part has production weight and
+    # the derived term has to fight for its share of the limit.
+    for row in projection.subagents:
+        row.result_text = "observed the agent fail to click the correct element " * 4
+        row.elapsed_s = 12.5
+    return projection
+
+
+def _derived_graph_bytes(rows: Sequence[SubagentRow]) -> int:
+    """What the O(n^2) roster term costs on the wire, exactly as serialized."""
+    return sum(len(json.dumps(row.peer_ids).encode()) for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_flat_sibling_group_is_no_longer_an_unopenable_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The end-to-end claim: this session could not be attached to at all.
+
+    The welcome ``projection`` frame was the one family with a SOFT cap — it
+    spent its text tiers and returned the over-limit dict anyway — and nothing
+    downstream checked it, so this roster wrote a line past the limit. The
+    client's ``readline`` raised over it, its pump died, and every retry died
+    the same way; the operator's report was "it keeps timing out no matter how
+    much I switch back and forth".
+
+    Driven against the REAL server over a REAL socket through the REAL
+    ``AttachedSession.connect`` — the sidebar's own attach path — with every
+    frame the server is about to write recorded, so "no unreadable frame" is
+    asserted on what actually left the handoff point rather than on a size
+    computed here.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    handle._projection = _wide_roster_projection(256)
+
+    # The fixture must still reproduce the fatal frame. Two structural facts do
+    # it: the whole frame is over the limit before any text is counted, and the
+    # derived graph ALONE is ~1 MB — no text tier could have rescued it, which
+    # is why the tier that sheds the graph is the fix. (Measured on the pre-fix
+    # tree for this shape: naive 1,351,271 B, and 1,178,727 B after every text
+    # tier, against a 1,048,576 B limit.)
+    naive = _line_bytes({"op": "projection", "data": handle._projection.to_json()})
+    derived = _derived_graph_bytes(handle._projection.subagents)
+    assert naive > _MAX_LINE_BYTES, (
+        f"the fixture no longer reproduces the unreadable welcome: {naive:,} B is "
+        f"inside the {_MAX_LINE_BYTES:,} B limit"
+    )
+    assert derived > 1_000_000, (
+        "the fixture no longer reproduces WHY this was fatal: without an O(n^2) "
+        f"derived graph ({derived:,} B here) the text tiers could have fitted it"
+    )
+
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    written: list[dict[str, Any]] = []
+    original_send = registrant._send_to
+
+    async def recording_send(conn, frame):  # noqa: ANN001, ANN202
+        written.append(frame)
+        return await original_send(conn, frame)
+
+    registrant._send_to = recording_send  # type: ignore[assignment]
+    viewer = None
+    try:
+        viewer = await AttachedSession.connect(
+            await _record(tmp_path), "s1", config_dir=tmp_path, takeover_factory=_never
+        )
+        # The attach IS the assertion: before the fix this raised "owner sent a
+        # frame too large to read" on every attempt.
+        assert not viewer.is_cold
+
+        oversize = [
+            (frame.get("op"), _line_bytes(frame))
+            for frame in written
+            if _line_bytes(frame) > _MAX_LINE_BYTES
+        ]
+        assert not oversize, f"the owner offered the wire an unreadable frame: {oversize}"
+
+        # The roster survived as a roster — the shed tier, not the identity-row
+        # tier, is what should have fitted this frame, and every row keeps the
+        # parent edge the shed fields are derived from.
+        welcome = next(frame for frame in written if frame.get("op") == "projection")
+        rows = welcome["data"]["subagents"]
+        assert len(rows) == 256
+        assert all(row.get("peer_ids") == [] for row in rows)
+        assert all("parent_job_id" in row for row in rows)
+        assert all(row["label"] for row in rows)
+    finally:
+        if viewer is not None:
+            await viewer.dispose()
+        registrant.close()
+
+
+@pytest.mark.asyncio
+async def test_the_send_ceiling_never_writes_an_unreadable_frame(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``_send_to`` is the single choke point, so the limit is enforced THERE.
+
+    A cap that is a contract for one family, plus a downstream check for two
+    others, still leaves the next unbounded field free to kill the socket — and
+    the failure presents as a slow owner rather than a bug, which is what made
+    the original defect expensive. So this feeds a synthetic ~2 MiB frame of
+    every family through the real ``_send_to`` over a real socket and asserts on
+    the WIRE, read with a bare reader: whatever the server decided to send, no
+    line may exceed the limit, and each family's decision is the documented one.
+
+    Nothing here depends on a roster shape or a session snapshot: this is the
+    regression guard that survives whatever grows next.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES as limit
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = FakeHandle()
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    reader = writer = None
+    try:
+        record = await _record(tmp_path)
+        # A reader limit far above the server's, so a line the peer could not
+        # read is still readable HERE and can be asserted on instead of
+        # raising inside the test.
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", record.control_port, limit=8 * limit
+        )
+        writer.write(json.dumps({"key": record.control_key, "client": "daemon"}).encode() + b"\n")
+        await writer.drain()
+        runtime_loop = registrant._loop
+        assert runtime_loop is not None
+
+        async def _send(frame: dict[str, Any]) -> None:
+            # ``start()`` hosts the runtime on its own thread, so the test hops
+            # to that loop the way every other caller of a server coroutine
+            # does.
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(registrant._send_to(conn, frame), runtime_loop)
+            )
+
+        async def _read_line() -> dict[str, Any] | None:
+            raw = await asyncio.wait_for(reader.readline(), timeout=5)
+            if not raw:
+                return None
+            assert len(raw) <= limit, (
+                f"the owner wrote a {len(raw):,}-byte line; the peer's readline raises "
+                f"past {limit:,} B, and the raise killed its pump"
+            )
+            return json.loads(raw.decode())
+
+        welcome = await _read_line()
+        assert welcome is not None and welcome.get("op") in ("projection", "welcome")
+        # The welcome above is the proof the connection is REGISTERED; taking
+        # the server-side handle before it would race the auth frame.
+        conn = next(iter(registrant._clients.values()))
+
+        filler = "x" * (limit + 1_000_000)
+
+        # 1. The welcome/broadcast family: replaceable state, so it degrades to
+        #    the identity-only projection rather than killing the socket. The
+        #    identity is what the client's connect actually needs.
+        await _send({"op": "projection", "data": {"session_id": "s1", "subagents": [filler]}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "projection"
+        assert line["data"]["subagents"] == []
+        assert line["data"]["transcript"] == []
+        assert line["data"]["session_id"] == "s1"
+
+        # 2. A reply: somebody is waiting for it, so it arrives as the error
+        #    frame that names the oversize instead of as silence.
+        await _send({"op": "result", "req": 77, "data": {"blob": filler}})
+        line = await _read_line()
+        assert line is not None and line.get("op") == "error"
+        assert line.get("req") == 77
+        assert "socket line limit" in str(line.get("message"))
+
+        # 3. Relay traffic: degraded by its own belt at enqueue, degraded again
+        #    here if a future caller bypasses it.
+        await _send(
+            {
+                "op": "frontend_update",
+                "data": {"epoch": "e", "sequence": 1, "changes": {"cwd": filler}},
+            }
+        )
+        line = await _read_line()
+        assert line is not None and line.get("op") == "frontend_update"
+        assert line["data"].get("degraded") is True
+
+        # 4. The connect-time ``frontend_sync`` PUSH has no ``req``, so there is
+        #    nobody to answer — and a viewer left waiting on a base that never
+        #    comes reports the owner as unresponsive 15 s later, which is the
+        #    misdiagnosis this class of bug is made of. So it closes: the peer
+        #    fails at once, and the ERROR log carries the field-level diagnosis.
+        await _send(
+            {"op": "frontend_sync", "data": {"epoch": "e", "sequence": 0, "snapshot": filler}}
+        )
+        line = await _read_line()
+        assert line is not None and line.get("op") == "error"
+        assert (
+            await _read_line() is None
+        ), "the connection must end rather than leave the viewer waiting out its sync envelope"
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        registrant.close()
+
+
 @pytest.mark.parametrize("invalidate", ["", "epoch", "removed", "identity"])
 @pytest.mark.asyncio
 async def test_watched_todo_fetch_cannot_roll_back_newer_state(tmp_path, monkeypatch, invalidate):
@@ -1240,7 +1499,7 @@ def test_folding_malformed_receipts_still_prices_identically(
 
 @pytest.mark.asyncio
 async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     """The user must not sit through 15 s of silence for a frame we cannot read.
 
@@ -1254,6 +1513,19 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
 
     Driven against the REAL server over a REAL socket with a genuinely
     oversized frame, because the bug is in how the two halves interact.
+
+    REWRITTEN when ``_send_to`` grew its ceiling. The owner no longer writes the
+    unreadable line at all, so the client's ``OVERSIZED_FRAME_REASON`` is not
+    reachable here any more — and an unfittable connect-time ``frontend_sync``
+    has no ``req``, so there is no requester to answer with an error frame
+    either. The server therefore closes, and the peer's reason is its own
+    disconnect (``attach_client``'s pump default). Both properties this test
+    exists for still hold: the wait ends at once, and it does NOT end in the
+    15 s "owner did not send its state" misdiagnosis that made a hard bug look
+    like a slow owner. The field-level diagnosis moved to the server's ERROR
+    log, so this asserts that line too — losing the copy without gaining the
+    log line would be a net loss of diagnosis, which is what the rewrite must
+    not become.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
@@ -1267,10 +1539,11 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
     try:
         record = await _record(tmp_path)
         started = asyncio.get_running_loop().time()
-        with pytest.raises(ConnectionError) as caught:
-            await AttachedSession.connect(
-                record, "s1", config_dir=tmp_path, takeover_factory=_never
-            )
+        with caplog.at_level(logging.ERROR, logger="local_operator.session.runtime.server"):
+            with pytest.raises(ConnectionError) as caught:
+                await AttachedSession.connect(
+                    record, "s1", config_dir=tmp_path, takeover_factory=_never
+                )
         elapsed = asyncio.get_running_loop().time() - started
 
         # The 15 s sync timeout is the backstop for a silent owner, not the
@@ -1280,11 +1553,19 @@ async def test_an_unreadable_frame_fails_fast_instead_of_waiting_out_the_timeout
             f"an unreadable frame took {elapsed:.1f}s to report; the connection died "
             "immediately and the wait should have ended with it"
         )
-        # And the reason names what actually happened.
-        assert "too large" in str(caught.value), (
-            f"the failure reported {caught.value!r}, which does not tell the user "
-            "the frame could not be read"
+        # The owner refuses the frame, so this side never sees an overrun — and
+        # what it does see must be the disconnect, not the owner blamed for
+        # being slow.
+        assert str(caught.value) == "owner exited", (
+            f"the failure reported {caught.value!r}; the owner closed the connection "
+            "rather than write an unreadable frame, and that is what the viewer "
+            "must report"
         )
+        # The diagnosis the client can no longer produce.
+        logged = caplog.text
+        assert "frontend_sync does not fit" in logged
+        assert "cwd=1,049" in logged, "the ERROR must name the field that grew"
+        assert f"{_MAX_LINE_BYTES:,}-byte socket line limit" in logged
     finally:
         registrant.close()
 
