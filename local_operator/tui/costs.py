@@ -22,14 +22,34 @@ ledger. Settled jobs are swept out of it after a retention window, so the app
 keeps its own dict of last-observed figures and sums that instead — a spend
 counter that falls when a finished child is evicted is worse than none.
 
+One kind of money here is NOT token usage and is not priced by this module:
+search spend. ``web_search`` bills per query or per provider-reported turn and
+records it in its own process-wide ledger
+(:data:`~local_operator.web_search.cost.SEARCH_SPEND`), keyed by session. What
+this module adds for it is the same adaptation -- a frozen
+:class:`SearchSpendSnapshot`/``SearchSpendRow`` pair that carries the
+``_CostLike`` members the panels' one money formatter reads, so search dollars
+and model dollars are spelled the same way (``$—`` unknown, ``+`` lower bound)
+without a second formatter or a ledger import in the panels.
+
 Nothing here raises. A price is never worth a broken frame.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["turn_cost", "job_cost", "cost_summary"]
+if TYPE_CHECKING:  # pragma: no cover - typing only, see ``SearchSpendSnapshot.of``
+    from local_operator.web_search.cost import SearchSpendTotals
+
+__all__ = [
+    "SearchSpendRow",
+    "SearchSpendSnapshot",
+    "turn_cost",
+    "job_cost",
+    "cost_summary",
+]
 
 
 def _resolve_for_paint(provider: str, model_id: str):
@@ -163,6 +183,125 @@ def cost_summary(
         else:
             total = (total or 0.0) + cost
     return total, unknown
+
+
+@dataclass(frozen=True)
+class SearchSpendRow:
+    """One provider's search spend, frozen.
+
+    A copy rather than the ledger's own ``ProviderSearchSpend``, and frozen for
+    the reason the whole snapshot exists: see :class:`SearchSpendSnapshot`.
+
+    Carries the three members ``analytics_panel._CostLike`` names --
+    ``cost_usd``/``cost_is_known``/``cost_is_partial`` -- so the panels render
+    this money through the ONE formatter (``format_cost``) that already
+    distinguishes an unknown price from a free one and marks a lower bound. A
+    second money formatter for search spend would be a second honesty
+    vocabulary on the same screen.
+    """
+
+    provider: str
+    searches: int = 0
+    usd: float = 0.0
+    #: Searches whose provider publishes no rate. Counted, never rendered as
+    #: $0: unknown and free are different facts (see ``format_cost``).
+    unpriced_searches: int = 0
+
+    @property
+    def priced_searches(self) -> int:
+        return self.searches - self.unpriced_searches
+
+    @property
+    def cost_usd(self) -> float:
+        return self.usd
+
+    @property
+    def cost_is_known(self) -> bool:
+        # A provider with nothing priceable is ``$—``, not ``$0.0000``, even
+        # when it served searches: the money is unknown, not measured at zero.
+        return self.priced_searches > 0
+
+    @property
+    def cost_is_partial(self) -> bool:
+        # A lower bound: some of this provider's searches are unpriced.
+        return self.unpriced_searches > 0
+
+
+@dataclass(frozen=True)
+class SearchSpendSnapshot:
+    """A search-spend total frozen for display, session or process-wide.
+
+    The panels take THIS rather than the live ``SearchSpendTotals`` for two
+    reasons, one of them a crash: ``SEARCH_SPEND.session()`` hands back the
+    ledger's OWN mutable total, and a search finishing while a panel iterates
+    ``by_provider`` mutates that dict mid-render (``RuntimeError: dictionary
+    changed size during iteration``). The other is the promise ``/session``
+    already makes -- a snapshot, not a live bill -- which a panel holding the
+    ledger object would quietly break.
+
+    ``rows`` is sorted biggest-first (spend, then search count) because that is
+    the order every other per-entity table on these two screens reads in, and
+    an unpriced provider sorts last on the strength of its zero spend: its
+    ``$—`` is the honest cell, not a big number.
+
+    Structurally satisfies ``_CostLike``, so ``format_cost``/``append_cost``
+    price it without a ``web_search`` import reaching the formatter.
+
+    NOT the place for the ledger's own session keys: this is one scope, already
+    resolved by the caller, and the process-wide view is merged by the ledger
+    (``overall()``).
+    """
+
+    searches: int = 0
+    usd: float = 0.0
+    unpriced_searches: int = 0
+    rows: tuple[SearchSpendRow, ...] = ()
+
+    @classmethod
+    def of(cls, totals: "SearchSpendTotals | None") -> "SearchSpendSnapshot":
+        """Freeze one ``SearchSpendTotals`` (or ``None``) into a snapshot.
+
+        Duck-typed on the four ledger members rather than annotated with the
+        ledger's own type at runtime: ``tui.costs`` is imported by
+        ``session.frontend_state`` and ``harness.subagent``, and pulling the
+        web-search package into those import graphs for a display copy is not
+        worth it. ``None`` freezes to the empty snapshot, which is what a
+        session with no ledger row and a host with no ledger both mean.
+        """
+        if totals is None:
+            return cls()
+        by_provider = getattr(totals, "by_provider", None) or {}
+        rows = tuple(
+            SearchSpendRow(
+                provider=str(getattr(entry, "provider", key) or key),
+                searches=int(getattr(entry, "searches", 0) or 0),
+                usd=float(getattr(entry, "usd", 0.0) or 0.0),
+                unpriced_searches=int(getattr(entry, "unpriced_searches", 0) or 0),
+            )
+            for key, entry in by_provider.items()
+        )
+        return cls(
+            searches=int(getattr(totals, "searches", 0) or 0),
+            usd=float(getattr(totals, "usd", 0.0) or 0.0),
+            unpriced_searches=int(getattr(totals, "unpriced_searches", 0) or 0),
+            rows=tuple(sorted(rows, key=lambda row: (-row.usd, -row.searches, row.provider))),
+        )
+
+    @property
+    def priced_searches(self) -> int:
+        return self.searches - self.unpriced_searches
+
+    @property
+    def cost_usd(self) -> float:
+        return self.usd
+
+    @property
+    def cost_is_known(self) -> bool:
+        return self.priced_searches > 0
+
+    @property
+    def cost_is_partial(self) -> bool:
+        return self.unpriced_searches > 0
 
 
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:

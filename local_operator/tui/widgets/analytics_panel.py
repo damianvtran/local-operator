@@ -45,6 +45,7 @@ see :func:`_session_row_line` for why that is load-bearing rather than tidy.
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass, field
 from typing import Collection, Mapping, NamedTuple, Protocol, Sequence
 
@@ -67,6 +68,7 @@ from local_operator.analytics.model import (
     session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.costs import SearchSpendSnapshot
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -238,6 +240,151 @@ def _iter_nodes(forest: list["SessionNode"]):
     for node in forest:
         yield node
         yield from _iter_nodes(list(node.children))
+
+
+#: Name/value geometry of the search-spend block, matching the Totals ``kv``
+#: rows on both diagnostics screens (``_VALUE_CELL``) so search dollars line up
+#: with the model dollars above them instead of starting a second gutter.
+_SEARCH_NAME_COL = 22
+_SEARCH_VALUE_CELL = 11
+
+
+def _money_run(scope: "_CostLike", cell: int) -> Text:
+    """A left-aligned cost cell, with the lower-bound ``+`` dimmed.
+
+    ``append_cost`` cannot be reused directly: it RIGHT-aligns into a table
+    column, while every row this block draws is a Totals ``kv`` row whose value
+    sits at a fixed left offset. The honesty vocabulary is still the one
+    ``format_cost`` owns -- ``$—`` unknown, ``+`` lower bound, sub-cent
+    precision -- and the ``+`` is dimmed here for the reason ``append_cost``
+    dims it: a status flag must not read as a digit.
+    """
+    text = format_cost(scope)
+    run = Text()
+    if text.endswith("+"):
+        run.append(text[:-1], style=semantic_style("fg"))
+        run.append("+", style=semantic_style("dim"))
+        run.append(" " * max(0, cell - len(text)))
+    else:
+        run.append(text, style=semantic_style("fg"))
+        run.append(" " * max(0, cell - len(text)))
+    return run
+
+
+def search_spend_section(
+    snapshot: SearchSpendSnapshot,
+    width: int,
+    *,
+    meta: str = "",
+    session: SearchSpendSnapshot | None = None,
+    note: str = "",
+) -> list[Text]:
+    """Search spend as its own block: total, per-provider rows, session share.
+
+    Shared by ``/session`` and ``/analytics`` on purpose, and on the rule
+    ``session_panel`` already states in its docstring: two diagnostics screens
+    with two money vocabularies or two bar styles would be a defect. Money goes
+    through ``format_cost`` -- the ONE cost formatter -- so a provider with no
+    published rate renders ``$—`` (unknown, never a confident ``$0.0000``), a
+    provider whose searches are only partly priced renders a lower-bound ``+``
+    with the count of unpriced searches beside it in words, and one session
+    cannot read as ``$0.0031`` on one screen and a bare ``$0.00`` on the other.
+
+    WHY ITS OWN SECTION RATHER THAN ROWS IN TOTALS: none of this money is in the
+    analytics ledger Totals is read from. ``web_search`` bills separately and
+    keeps its own process-wide ledger (see ``local_operator.web_search.cost``),
+    so a row spliced into the model totals would silently mix a persisted model
+    figure with an in-memory search one and there would be no way to say which
+    was which. ``meta`` carries that scope in words.
+
+    ``session`` is the CURRENT session's snapshot, passed only by ``/analytics``
+    (whose ``snapshot`` is the process-wide merge) to print the session's share.
+    ``/session`` passes its own total as ``snapshot`` and no ``session``: there
+    the two are the same number, and a row restating it is noise.
+
+    ``width`` is the measured content box the caller already computes; every row
+    is cropped to it here, for the same reason the bar tables are cropped at
+    build time (``_render_rows``). Empty input -- no searches -- returns no
+    lines at all, so a caller can splice the result in unconditionally and a
+    session that never searched carries no empty heading.
+    """
+    lines: list[Text] = []
+    if not snapshot.searches:
+        return lines
+
+    def row(name: str, scope: "_CostLike", notes: Sequence[str] = ()) -> None:
+        line = Text()
+        line.append(f"  {name:<{_SEARCH_NAME_COL}}", style=semantic_style("dim"))
+        line.append_text(_money_run(scope, _SEARCH_VALUE_CELL))
+        # Same ladder semantics as ``session_panel._Body.kv``: the first rung
+        # that fits uncropped wins, and none fitting means the qualifier sheds
+        # rather than being cut mid-word. Every rung here still carries the
+        # search COUNT, which is the part that must not be lost -- the unpriced
+        # tally is the refinement the narrow rungs trade away.
+        budget = width - line.cell_len - 2
+        for candidate in notes:
+            if len(candidate) <= budget:
+                line.append(f"  {candidate}", style=semantic_style("dim"))
+                break
+        line.truncate(width, overflow="crop")
+        lines.append(line)
+
+    def search_notes(n: int, unpriced: int) -> tuple[str, ...]:
+        plural = "" if n == 1 else "s"
+        if not unpriced:
+            return (f"{n} search{plural}",)
+        if unpriced == n:
+            return (
+                f"{n} search{plural} · no published price",
+                f"{n} search{plural} · unpriced",
+            )
+        return (
+            f"{n} search{plural} · {unpriced} unpriced",
+            f"{n} search{plural} · {unpriced} ?",
+        )
+
+    lines.append(section_header("Search spend", meta))
+    row("Total spend", snapshot, search_notes(snapshot.searches, snapshot.unpriced_searches))
+    if session is not None and session.searches:
+        # The share is of the PRICED total, and says ``—`` when there is no
+        # priced total to take a share of: a process whose searches are all
+        # unpriced has no denominator, and "0%" would read as "this session
+        # spent nothing" -- the empty-context lie in a different currency.
+        share = (
+            format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
+        )
+        row(
+            "This session",
+            session,
+            (
+                f"{session.searches} searches · {share} of search spend",
+                f"{session.searches} searches · {share}",
+                f"{session.searches} searches",
+            ),
+        )
+    # A dim sub-label rather than a section header: the rows under it PARTITION
+    # the total above, which is the same relationship the Totals block's tree
+    # rows (`` ├ Fresh (uncached)``) already express with one level less chrome.
+    if snapshot.rows:
+        label = Text()
+        label.append("  By provider", style=semantic_style("dim"))
+        label.truncate(width, overflow="crop")
+        lines.append(label)
+        for index, entry in enumerate(snapshot.rows):
+            glyph = " └ " if index == len(snapshot.rows) - 1 else " ├ "
+            row(glyph + entry.provider, entry, search_notes(entry.searches, entry.unpriced_searches))
+    if note:
+        # Wrapped with the continuation indented, for the reason
+        # ``session_panel._Body.note`` documents: handed to the container's
+        # ``fold`` instead, a continuation lands at column 0 and reads as a new
+        # record in the middle of the block (design D2).
+        for visual in textwrap.wrap(note, max(1, width - 2)) or [""]:
+            para = Text(no_wrap=True, overflow="crop")
+            para.append(f"  {visual}", style=semantic_style("dim"))
+            lines.append(para)
+    lines.append(Text())
+    return lines
+
 
 
 def proportion_bar(fraction: float, width: int) -> str:
