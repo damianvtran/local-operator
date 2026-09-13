@@ -1741,3 +1741,39 @@ def test_two_probe_loops_sharing_one_variable_keep_both_sets() -> None:
         "planted_loop_a",
         "planted_unpack_b",
     }
+
+
+def test_the_quoted_isinstance_member_count_is_still_true() -> None:
+    """The figure two docstrings cite beside their timing must not rot.
+
+    ``ViewerSessionProtocol`` and ``tui/app.py::_is_viewer`` both justify NOT
+    dispatching on ``isinstance`` by naming how many members a positive check
+    walks. That number had drifted to 84 while the protocol grew to 106, which
+    nothing noticed because a stale comment fails no test (review round 1,
+    NIT-4). It is now derived here so a member added or removed without
+    updating the prose is a failure rather than a slow lie.
+
+    ``_get_protocol_attrs`` is exactly the set ``isinstance`` walks, which is
+    why it -- and not the viewer-only population pinned above -- is the right
+    quantity beside the measurement. The two differ because this one counts
+    inherited members; they answer different questions and must not be
+    reconciled.
+    """
+    import re
+    from typing import _get_protocol_attrs  # type: ignore[attr-defined]
+
+    from local_operator.session.protocol import ViewerSessionProtocol
+    from local_operator.tui.app import _is_viewer
+
+    walked = len(_get_protocol_attrs(ViewerSessionProtocol))
+    for doc, where in (
+        (ViewerSessionProtocol.__doc__ or "", "session/protocol.py"),
+        (_is_viewer.__doc__ or "", "tui/app.py::_is_viewer"),
+    ):
+        quoted = {int(n) for n in re.findall(r"(\d+)\s+public\s*\n?\s*members", doc)}
+        assert quoted == {walked}, (
+            f"{where} quotes {sorted(quoted) or 'no'} public members beside its "
+            f"isinstance timing; a positive check now walks {walked}. Recompute "
+            "with len(typing._get_protocol_attrs(ViewerSessionProtocol)) rather "
+            "than adjusting the old figure by the size of your change."
+        )

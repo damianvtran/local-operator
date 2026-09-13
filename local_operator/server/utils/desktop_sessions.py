@@ -168,6 +168,20 @@ class DesktopSessionBridge:
         # landing afterwards kept the old runtime up for the process's life),
         # and a bridge detaching mid-warm is the same shape by a different
         # route.
+        #
+        # KNOWN COST, not fixable from here (review round 1, MINOR-2). A
+        # cancel that lands mid-engage leaks the spawn's capture tempfile
+        # (``lop-runtime-*.log``): ``engage_runtime`` unlinks it on every
+        # normal exit but has no ``finally``, and the path is a local of that
+        # function -- nothing outside it can see, let alone unlink, the file.
+        # The mechanism is pre-existing and its own docstring names it ("a
+        # cancelled task would leak that tempfile"); the TUI's engage cancel
+        # is the other trigger. Closing it means a ``try/finally`` inside the
+        # shared launch loop, which would fix both surfaces at once -- and is
+        # deliberately NOT done from this PR's new path, because a partial fix
+        # here would be a second unlink site that disagrees with the first.
+        # Bounded to one small file per navigate-away-during-warm, never a
+        # live process (the spawned child is left to the residency drain).
         if self.warm_task is not None:
             self.warm_task.cancel()
             with contextlib.suppress(BaseException):
@@ -590,7 +604,19 @@ class DesktopSessionBridge:
         assert remote is not None
         if not remote.is_cold:
             return "warm"
-        if remote.engage_in_flight:
+        # TWO conditions, because they answer different questions and the
+        # second is not implied by the first. `engage_in_flight` samples the
+        # facade's bind lock; this one asks whether THIS BRIDGE already owns a
+        # live warm task. A second warm arriving while the first task exists
+        # but has not yet taken the lock -- a second HTTP request resumed out
+        # of `acquire()` ahead of the first task's first step, which two tabs
+        # make ordinary -- passes the predicate, and overwriting `warm_task`
+        # would orphan the first: it escapes `_detach()`'s cancel and is left
+        # to the weak-reference hazard the field's own comment names. Keeping
+        # exactly one referenced task is the point; `done()` lets a settled
+        # warm be retried, which matters because a failed engage leaves the
+        # viewer cold and the next keystroke should be free to try again.
+        if remote.engage_in_flight or (self.warm_task is not None and not self.warm_task.done()):
             return "warming"
         self.warm_task = asyncio.create_task(remote.warm_runtime())
         return "warming"
