@@ -373,10 +373,20 @@ def _panel_width_in(box: int) -> int:
 def _lane_width(app: OperatorApp, terminal_width: int) -> int:
     """Cells the composer is laid out in: the content box minus a DOCKED sidebar.
 
-    Stated here from the same two inputs the app reads — the sidebar's resolved
-    stylesheet width and the workspace's overlay class — so the expectation is an
-    independent statement of the rule rather than a copy of the app's own return
-    value. An overlay drawer displaces nothing, so it is not subtracted.
+    A RESTATEMENT of the app's rule, not an independent check of it — it reads the
+    same two inputs ``OperatorApp._boot_lane_width`` reads (the sidebar's resolved
+    stylesheet width and the workspace's overlay class) and so cannot disagree with
+    that function on its own. What carries the weight in the tests below is the
+    assertion that uses this number against a REAL widget — ``lane ==
+    dock.width``, read off ``#input-dock``'s own region — which is the layout
+    engine's answer, not a second copy of the app's arithmetic. This helper exists
+    to state the rule once where the tests can read it, not to be a second opinion.
+
+    The stylesheet width rather than ``#session-sidebar``'s region width, and that
+    is deliberate rather than convenient: region is the PREVIOUS frame's geometry
+    until layout settles (QA round 1, Q2), which is the stale read the app's own
+    comment on this pass rejects. An overlay drawer displaces nothing, so it is
+    not subtracted — the one branch the tests' real-region check does pin.
     """
     box = terminal_width - 2
     sidebar = app._session_sidebar
@@ -976,20 +986,25 @@ async def test_the_docked_composer_band_is_measured_against_its_lane(
         )
         assert band.x + band.width <= terminal_width, (band, terminal_width)
 
-        # And the row the band holds LANDS ON THE SCREEN. This is the claim the
-        # geometry above exists to make, stated the way the symptom appears: the
-        # band right-aligns the name's ink to the right edge of the box it was
-        # fitted to, so a box that runs past the screen edge clips the name
-        # mid-word — on the base, `... retry    Fix sidebar reconnec…` fitted to a
-        # 72-cell box at x=35 could only land 65 of its cells, and the painted row
-        # read `... retry    Fix sidebar  ` with no ellipsis anywhere.
+        # And the row the band holds LANDS IN ITS LANE, which is the sufficient
+        # form of the claim this geometry exists to make, and the one the symptom
+        # needs: the band right-aligns the name's ink to the right edge of the box
+        # it was fitted to, so a box that runs past the LANE edge is cropped
+        # mid-word by the compositor — on the base, `... retry    Fix sidebar
+        # reconnec…` fitted to a 72-cell box at x=35 could only land 65 of its
+        # cells, and the painted row read `... retry    Fix sidebar  ` with no
+        # ellipsis anywhere. The bound is the LANE and not the screen edge on
+        # purpose (QA round 1, Q1): with the drawer docked on the right, every
+        # cell of that row was inside the 100-cell terminal — `content.x + held <=
+        # terminal_width` is SATISFIED by a row that is already cropped — because
+        # the crop happens at the main lane, not at the screen.
         status = app._status
         assert status is not None
         held = cell_len(status.render_text(band_widget.content_region.width).plain.rstrip())
-        assert band_widget.content_region.x + held <= terminal_width, (
+        assert band_widget.content_region.x + held <= dock.x + dock.width, (
             band_widget.content_region,
             held,
-            terminal_width,
+            dock,
         )
 
 
@@ -1038,10 +1053,16 @@ async def test_a_docked_cold_session_paints_the_connection_row_whole() -> None:
         assert content.width == lane - 3, content
         assert band.x + band.width <= 100, band
 
-        # The row the band holds for its own box must land inside the screen —
-        # 35 + 72 cells did not on the base, which is the whole defect.
+        # The row the band holds for its own box must land inside its LANE, not
+        # merely inside the screen — 35 + 72 cells did not fit the lane on the
+        # base, which is the whole defect, and a screen-edge bound is satisfied by
+        # exactly that row whenever the drawer is docked on the right (QA round 1,
+        # Q1). `#input-dock` is the lane's own widget, so this is the bound the
+        # compositor enforces.
+        dock = app.query_one("#input-dock").region
         held = status.render_text(content.width).plain
-        assert content.x + cell_len(held.rstrip()) <= 100, (content, held)
+        ink_right = content.x + cell_len(held.rstrip())
+        assert ink_right <= dock.x + dock.width, (content, held, ink_right, dock)
 
         # And the row the terminal is actually sent still carries the sentence:
         # this is the surface the session has been fixing, and it must not be

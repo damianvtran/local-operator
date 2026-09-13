@@ -265,6 +265,7 @@ from local_operator.tui.widgets.session_picker import (
     SessionPickerScreen,
 )
 from local_operator.tui.widgets.session_sidebar import (
+    APP_SCREEN_INSET,
     SIDEBAR_GUTTER,
     SIDEBAR_MAIN_MIN_WIDTH,
     SIDEBAR_MIN_CONTENT_WIDTH,
@@ -2288,7 +2289,15 @@ BOOT_COMPOSITION_MIN_SPARE = 2
 #: taken inside it — the card's width and the composition's row budget alike —
 #: because the percentage the sheet resolves and the rows the layout has to
 #: spend are both properties of the CONTENT box, not of the terminal.
-SCREEN_INSET = 2
+#:
+#: ALIASED to ``session_sidebar.APP_SCREEN_INSET`` rather than restated: that
+#: module already names the same inset for the growth rule that divides the lanes,
+#: and a second literal here is a second thing to keep in step. The two constants
+#: are the difference between "terminal width" and "width the lanes divide up",
+#: so if they ever drifted, the lane this file computes would stop being the box
+#: the sidebar's own width rule assumes — silently, and in the direction that
+#: clips (code review round 1, M3).
+SCREEN_INSET = APP_SCREEN_INSET
 
 
 def boot_card_width(box: int) -> int:
@@ -7659,8 +7668,9 @@ class OperatorApp(App[None]):
         workspace.set_class(narrow, "sidebar-overlay")
         sidebar.styles.dock = position
         # Squeezed terminals give the gutter back before the list: separation
-        # is worthless once there is no room left to read a title in.
-        available = max(16, size.width - 2)
+        # is worthless once there is no room left to read a title in. Measured
+        # inside the screen's own inset, like every other lane in the app.
+        available = max(16, size.width - SCREEN_INSET)
         width = min(total_width, available)
         gutter = max(0, min(SIDEBAR_GUTTER, width - SIDEBAR_MIN_CONTENT_WIDTH))
         sidebar.styles.width = width
@@ -15984,7 +15994,16 @@ class OperatorApp(App[None]):
             and box - card >= BOOT_CARD_MIN_INSET
         )
         self.screen.set_class(card_up, BOOT_CARD_CLASS)
-        self._sync_boot_column_width()
+        # The SAME width this pass was handed, not a fresh read of `self.size`: the
+        # caller's is the Resize event's (the frame the terminal is about to be)
+        # and the widget's is the previous frame's until layout settles, so reading
+        # the widget re-derives the lane one frame behind. Measured on a live
+        # 190x40 -> 100x30 resize with a boot notice up, the notice was re-wrapped
+        # twice — once at the old terminal's card, then again at the new one — where
+        # taking the caller's width needs one. Which of the two a pass happens to
+        # observe is a race, and a race is exactly what "measure the box you were
+        # given" removes (the same discipline the whole lane fix is about).
+        self._sync_boot_column_width(terminal_width)
 
     def _prompt_is_live(self) -> bool:
         """Is the dock holding a question the user still has to answer?
@@ -16007,8 +16026,14 @@ class OperatorApp(App[None]):
             return False
         return bool(host.display) and bool(host.children)
 
-    def _sync_boot_column_width(self) -> None:
+    def _sync_boot_column_width(self, terminal_width: int) -> None:
         """Reconcile every boot notice against the card it shares an axis with.
+
+        ``terminal_width`` comes from the caller — the Resize event's size on the
+        resize path, this app's size on the splash-retirement path — rather than
+        being re-read here, because ``self.size`` is still the PREVIOUS frame's
+        during a resize (see ``on_resize``). Two passes disagreeing about which
+        frame they measured is how a block gets authored twice for one resize.
 
         A notice under the splash (an MCP server that failed to connect) is part
         of the centred boot composition only WHILE the card is up: left at
@@ -16033,7 +16058,7 @@ class OperatorApp(App[None]):
         # copy of that subtraction and then re-add the 75-cell floor on top, which
         # is how a notice kept a 75-cell width inside a 65-cell lane after the
         # class had been withheld — the two measurements agreeing on a phantom.
-        box = self._boot_lane_width(self.size.width)
+        box = self._boot_lane_width(terminal_width)
         card = boot_card_width(box)
         card_up = self.screen.has_class(BOOT_CARD_CLASS) and box - card >= BOOT_CARD_MIN_INSET
         # The card is centred by the stylesheet in `box` — the main lane's
@@ -19879,7 +19904,7 @@ class OperatorApp(App[None]):
             # the next resize — `_sync_boot_card`, the other reconciliation
             # point, does not run on this transition.
             self.screen.remove_class(BOOT_CARD_CLASS)
-            self._sync_boot_column_width()
+            self._sync_boot_column_width(self.size.width)
         self._sync_boot_layout()
 
     def _ensure_welcome_view(self) -> WelcomeView | None:
