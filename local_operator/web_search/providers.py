@@ -81,6 +81,18 @@ def _bounded_text(value: object, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+#: Longest url a source may carry, in characters, measured on the stripped url.
+#:
+#: ONE constant for two callers that must agree: ``_source`` drops a longer url,
+#: and ``_parse_perplexity_sse``'s served-content predicate refuses to count such
+#: a row as served content. Spelled twice they drift, and the drift is silent in
+#: the worst direction -- the predicate accepts the row, the extractor builds no
+#: source from it, and the refusal sentence is handed back as the answer because
+#: the wall was suppressed for a payload with zero sources (#1070, the #1061
+#: shape one rule further out).
+_MAX_URL_CHARS = 4_096
+
+
 def _source(
     *,
     title: object,
@@ -89,7 +101,7 @@ def _source(
     published_date: object = None,
 ) -> SearchSource | None:
     target = str(url or "").strip()
-    if len(target) > 4_096:
+    if len(target) > _MAX_URL_CHARS:
         return None
     if not target.startswith(("http://", "https://")):
         return None
@@ -360,9 +372,17 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
                 # produce zero sources while suppressing the wall -- the same hole
                 # one type-check narrower (round-2 review MINOR-1). A blank url is
                 # no url; a non-string is not one either.
+                #
+                # ``_MAX_URL_CHARS`` caps it for the same reason: ``_source`` drops
+                # a url past the cap, so counting the row as served would suppress
+                # the wall for a payload the extractor builds nothing from -- #1070,
+                # where the refusal sentence went back as the answer. The length is
+                # taken on the STRIPPED url, as ``_source`` takes it: a url that is
+                # over the cap only because of surrounding whitespace is one the
+                # extractor accepts, so it is one this must accept too.
                 isinstance(row, dict)
                 and isinstance(row.get("url"), str)
-                and bool(row["url"].strip())
+                and 0 < len(row["url"].strip()) <= _MAX_URL_CHARS
                 for row in rows
             ):
                 served_blocks.add(f"top_level_{key}")
