@@ -1,10 +1,6 @@
 collapsed at 80 columns, case=stdout
   body_rows=1
     [ 0] cells= 73 ' \uf120 bash     curl -s https://api.example.com/hook | jq -c .        ✓  0.4s'
-  probe 'Fetch a page directly': rows=ABSENT joined=NO
-  probe 'keyed Sonar': rows=ABSENT joined=NO
-  probe 'refused this search': rows=ABSENT joined=NO
-  probe 'only provider tried': rows=ABSENT joined=NO
 expanded at 80 columns, case=stdout
   size=Size(width=78, height=28) virtual=Size(width=78, height=28) vscroll=False card_size=Size(width=76, height=42) indent=2
   body_rows=42
@@ -50,7 +46,3 @@ expanded at 80 columns, case=stdout
     [39] cells= 74 '  payload={"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",…'
     [40] cells= 74 '  payload={"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",…'
     [41] cells= 74 '  payload={"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",{"k":"v",…'
-  probe 'Fetch a page directly': rows=ABSENT joined=NO
-  probe 'keyed Sonar': rows=ABSENT joined=NO
-  probe 'refused this search': rows=ABSENT joined=NO
-  probe 'only provider tried': rows=ABSENT joined=NO
