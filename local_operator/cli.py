@@ -1725,18 +1725,37 @@ def _seen_line(entry: dict[str, Any]) -> str:
 
     Design §8.1 asks `pair --list` to carry both, and they are the only fields
     that still tell two installs apart when every other one collides (UX U2).
-    Epoch floats from the pairing file; anything missing or malformed prints as
-    "unknown" rather than as a 1970 date.
+    Epoch floats from the pairing file. A half that is absent or meaningless is
+    OMITTED rather than rendered as a 1970 date (review round 4, finding 2: a
+    schema-1 record, whose timestamps `pairing_status` coerces to 0.0, printed
+    "last seen 20709d ago"), and a record that carries neither says so in words.
     """
-    return f"paired {_ago(entry.get('paired_at'))}, last seen {_ago(entry.get('last_seen_at'))}"
+    parts = []
+    paired = _ago(entry.get("paired_at"))
+    seen = _ago(entry.get("last_seen_at"))
+    if paired:
+        parts.append(f"paired {paired}")
+    if seen:
+        parts.append(f"last seen {seen}")
+    return ", ".join(parts) if parts else "no timestamps on this record"
+
+
+#: A Unix timestamp below this is not a date this file could plausibly contain —
+#: the project is younger than the epoch, and `pairing_status` coerces a missing
+#: field to 0.0. Used to refuse the 1970 rendering rather than to be clever about
+#: calendars.
+_PLAUSIBLE_EPOCH_FLOOR = 1_500_000_000.0
 
 
 def _ago(stamp: object) -> str:
-    """A compact "how long ago" for a unix timestamp, or "unknown"."""
+    """A compact "how long ago" for a unix timestamp, or "" when unknowable."""
     try:
-        seconds = max(0.0, time.time() - float(stamp))  # type: ignore[arg-type]
+        value = float(stamp)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return "unknown"
+        return ""
+    if value < _PLAUSIBLE_EPOCH_FLOOR:
+        return ""
+    seconds = max(0.0, time.time() - value)
     if seconds < 90:
         return f"{int(seconds)}s ago"
     if seconds < 5400:
@@ -1765,9 +1784,10 @@ def _short_extension_id(extension_id: str) -> str:
     """The 8-character prefix of an extension id, with an ellipsis.
 
     Enough to tell two coexisting installs apart in a terminal line, which is
-    all a human ever needs one for; the full 32 characters are still what
-    `--revoke` and `drive` accept, and `pair --list` never hides an id the
-    operator might have to paste elsewhere.
+    all a human ever needs one for. The full 32 characters are still accepted by
+    `--revoke` and `drive`, and so is THIS printed form: both resolvers strip a
+    trailing ellipsis before matching (`normalise_target`), because copying what
+    the screen shows is the most likely user action (UX round 2, U8).
     """
     return f"{extension_id[:8]}…" if len(extension_id) > 8 else extension_id
 
@@ -1781,7 +1801,13 @@ def _resolve_pairing_target(target: str, identities: list[dict[str, Any]]) -> di
     id always wins, so a label that happens to contain another install's id
     cannot shadow it.
     """
-    wanted = target.strip().lower()
+    # Imported here rather than at module scope: `lop` must not pay the daemon's
+    # import cost to print a list, and this is the only module-level helper that
+    # needs the daemon's normaliser. Same echo of `_short_extension_id`'s contract
+    # as the daemon-side resolver, so a printed handle resolves on both sides.
+    from local_operator.browser_bridge.daemon import normalise_target
+
+    wanted = normalise_target(target).lower()
     if not wanted:
         return None
     for entry in identities:
@@ -1823,8 +1849,14 @@ def _print_identities(
     for entry in identities:
         extension_id = str(entry.get("extension_id", ""))
         label = str(entry.get("label", "")) or "unnamed install"
+        # The timestamps come from the FILE, so they print whether or not a daemon
+        # answers (review round 4, finding 2): skipping them with `health is None`
+        # hid the one field that distinguishes two identically-labelled installs
+        # in exactly the state where a daemon is not running to name the roles.
         if health is None:
             print(f"                     - {label} ({_short_extension_id(extension_id)})")
+            if verbose:
+                print(f"                       {_seen_line(entry)}")
             continue
         if extension_id == driver:
             role = "driving"
@@ -1838,10 +1870,23 @@ def _print_identities(
     if len(identities) > 1:
         # The lever for "the wrong one is driving" (UX U7): with two installs up
         # this panel is exactly where the operator notices, and the command that
-        # fixes it was discoverable only from `--help` or the docs.
+        # fixes it was discoverable only from `--help` or the docs. No
+        # parenthetical about approvals any more — the line below says it
+        # (copy review C13: the tip restated it word for word).
         print(
             "                     tip: 'lop browser drive <id|label>' chooses which"
-            " install drives (approvals stay per install)."
+            " install drives."
+        )
+        # The per-install nature of approvals is the one thing a handover can cost
+        # that the user cannot see anywhere else (UX U6), so it belongs in this
+        # panel whenever the wheel can move — not only while a standby happens to
+        # be ATTACHED, which is how it was gated and why it went missing right
+        # after a wheel move that left the demoted install merely authorised (UX
+        # round 2's residual). Two or more authorised installs is the condition
+        # the disclosure is for.
+        print(
+            "                     approvals:           per install; they do not follow the"
+            " browser that takes over."
         )
     if standby:
         # The rollout cost, stated where it is felt (design §10 risk 2, review
@@ -1879,17 +1924,6 @@ def _print_identities(
                     " that build, or 'Local Operator is debugging this browser' bars stay on"
                     " them"
                 )
-        # U6, with the cost stated rather than hidden: site approvals are
-        # per-install by design (§6) and do NOT move with the wheel, so a
-        # handover can ask again for a site the previous driver already had. A
-        # pending request is visible only in the NEW driver's popup, which is the
-        # one surface the operator has no reason to look at — hence the line
-        # here, in the panel that just told them the wheel moved.
-        if len(identities) > 1:
-            print(
-                "                     approvals:           per install; they do not move with"
-                " the wheel"
-            )
 
 
 def browser_command(args: argparse.Namespace) -> int:
@@ -2081,6 +2115,7 @@ def browser_command(args: argparse.Namespace) -> int:
 
     from local_operator.browser_bridge import install as browser_install
     from local_operator.browser_bridge.daemon import (
+        normalise_target,
         pairing_status,
         reset_pairing,
         revoke_identity,
@@ -2326,12 +2361,13 @@ def browser_command(args: argparse.Namespace) -> int:
             # (UX round 3, U3): a second install whose popup is showing the
             # pairing form reaches here too, and `--reset` — which revokes the
             # WORKING install as well — is not the answer the user wants. The
-            # code for that install appears here once its worker dials, so the
-            # honest line points at its popup first.
+            # code for that install appears here once it connects, so the honest
+            # line points at its popup first. "Connects" rather than "its worker
+            # dials" (copy review C9): a compliance analyst has no worker.
             print(
                 "a browser is already paired. To pair another, open ITS popup and enter the"
-                " code that appears here (that install's code is minted when its worker"
-                " dials). 'lop browser pair --list' lists every authorised install;"
+                " code that appears here (the code appears once that install's extension"
+                " connects). 'lop browser pair --list' lists every authorised install;"
                 " '--reset' revokes them all."
             )
             return 0
@@ -2340,16 +2376,35 @@ def browser_command(args: argparse.Namespace) -> int:
     if command == "drive":
         result = browser_install.pin_driver(args.target)
         if not result.get("ok"):
-            print(f"\033[1;31m{result.get('error', 'could not pin the driver')}\033[0m")
+            # Distinguish "nothing matched" from "several matched" when the
+            # daemon told us how many did (copy review C8): one 404 shape used to
+            # carry both readings, so an unknown id was reported with the word
+            # "matches" and two unrelated installs under it. `matches` is absent
+            # on a daemon predating this field, and the old sentence stands.
+            matches = result.get("matches")
+            message = str(result.get("error", "could not pin the driver"))
+            if isinstance(matches, int):
+                message = (
+                    f"no connected extension matches '{normalise_target(args.target)}'."
+                    if matches == 0
+                    else f"no single connected extension matches '{normalise_target(args.target)}'."
+                )
+            print(f"\033[1;31m{message}\033[0m")
             # Candidates arrive as ids; the LABEL is what makes a list of ids
             # actionable when two installs share one (copy review C1), and it is
             # the string `status` itself printed a moment earlier. Read from the
             # pairing file, so an id with no label still lists as a bare id.
+            candidates = result.get("authorized_extension_ids") or []
+            if candidates:
+                # A lead-in that is true whether or not anything matched, because
+                # these rows are the AUTHORISED set rather than the matches (copy
+                # review C8).
+                print("authorised installs:")
             labels = {
                 str(entry.get("extension_id", "")): str(entry.get("label", ""))
                 for entry in (pairing_status().get("identities") or [])
             }
-            for extension_id in result.get("authorized_extension_ids") or []:
+            for extension_id in candidates:
                 label = labels.get(str(extension_id), "")
                 suffix = f"  {label}" if label else ""
                 print(f"  {_short_extension_id(str(extension_id))}{suffix}")

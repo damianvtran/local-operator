@@ -443,10 +443,15 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
                 # saying "nothing matched" about a target two installs matched
                 # sends the user to re-check an id that is not the problem. Same
                 # formulation `pair --revoke` already uses for the same refusal.
+                #
+                # `matches` lets the CALLER say which of the two happened (copy
+                # review C8); absent on a daemon that predates the field, which is
+                # why the sentence above stays as the default.
                 return {
                     "ok": False,
                     "error": f"no single connected extension matches '{target}'.",
                     "authorized_extension_ids": named,
+                    "matches": _int_from_payload(body_text, "matches"),
                 }
             # An older daemon answers /health but has no /driver. Saying so beats
             # reporting a generic failure the user would read as "my id is wrong".
@@ -506,6 +511,23 @@ def _message_from_payload(body_text: str) -> str:
             if isinstance(message, str):
                 return message.strip()
     return ""
+
+
+def _int_from_payload(body_text: str, key: str) -> int | None:
+    """One integer field from a failed response body, or None if it is not there.
+
+    Best-effort like `_ids_from_payload`: a missing or non-integer field means the
+    caller keeps its default wording rather than reporting a guess.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        if isinstance(parsed, dict):
+            value = parsed.get(key)
+            if isinstance(value, bool):  # bool is an int subclass; not a count
+                return None
+            if isinstance(value, int):
+                return value
+    return None
 
 
 def _ids_from_payload(body_text: str) -> list[str]:

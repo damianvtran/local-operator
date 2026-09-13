@@ -125,15 +125,27 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 
 #: WebSocket close codes that mean "the SERVER is going down", as opposed to
-#: "this peer went away". uvicorn's websocket protocols put 1012 ("service
-#: restart") on every live connection while the server shuts down; 1001 ("going
-#: away") is the same signal from other ASGI servers. Neither is ever sent by a
-#: peer here — the extension's own closes carry no code, so they arrive as 1000 —
-#: which is what makes the code safe to read as "we are the ones closing".
-#: Recognising it in the receive loop is how a daemon served straight from
-#: `create_app()` learns it is leaving before the lifespan fires (QA round 3,
-#: Q3-1); see `_daemon_leaving`.
-SERVER_GOING_DOWN_CODES = frozenset({1001, 1012})
+#: The ONE WebSocket close code that means "the SERVER is going down", as opposed
+#: to "this peer went away". uvicorn's websocket protocols put 1012 ("service
+#: restart") on every live connection while the server shuts down, and it is
+#: delivered before the lifespan shutdown event — which is how a daemon served
+#: straight from `create_app()` learns it is leaving in time (QA round 3, Q3-1;
+#: see `_daemon_leaving`).
+#:
+#: 1012 ALONE, deliberately (review round 4, finding 1). The first version also
+#: accepted 1001 ("going away") on the theory that other ASGI servers use it — but
+#: in this position a disconnect only carries a code the PEER sent it: uvicorn's
+#: `asgi_receive` returns its own code solely from `self.close_code`, i.e. the
+#: client's frame, while its shutdown path is 1012. 1001 is therefore a browser
+#: navigating away or tearing a socket down, and latching the daemon's permanent
+#: "we are leaving" flag on it froze the durable driver record and disabled
+#: failover for the life of the process — the R2-1 harm, silently and forever,
+#: from one client close. Two further facts make the single code sufficient:
+#: a close frame with NO status code (what a browser's `close()` sends) arrives as
+#: 1005, not 1000, on the installed uvicorn (`websockets_impl.py:377`, `:386`), and
+#: the extension's own four `wire.close()` calls send no code either — so neither
+#: can be confused with 1012, and no runner needs to be trusted for it.
+SERVER_GOING_DOWN_CLOSE_CODE = 1012
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
 
@@ -264,6 +276,20 @@ def _driver_record_id(identities: list[dict[str, Any]], *, driver_id: str, previ
     return str(newest.get("extension_id", ""))
 
 
+def normalise_target(target: str) -> str:
+    """A user-supplied target with the display ellipsis stripped.
+
+    `status` and `pair --list` print handles as `ohcmfhja…`, and copying what the
+    screen shows is the single most likely user action — so the printed form has
+    to resolve as printed (UX round 2, U8 / copy review C8). Only a TRAILING
+    ellipsis is removed: no extension id contains one, so a target ending in one is
+    either a pasted handle or a typo, and a prefix search is the right reading in
+    both cases. Lives here rather than in `cli.py` because the daemon resolves
+    targets too (`POST /driver`), and the two must not drift.
+    """
+    return target.strip().rstrip("\u2026").strip()
+
+
 def _write_pairing(
     root: Path | None, identities: list[dict[str, Any]], *, driver_id: str = ""
 ) -> None:
@@ -309,6 +335,48 @@ def _write_pairing(
     _private_write(_pairing_path(root), payload)
 
 
+#: How stale a recorded ``last_seen_at`` may get before a handshake refreshes it.
+#: The field is what `lop browser pair --list` prints as "last seen", i.e. the one
+#: line that tells an operator which of two identically-labelled installs is
+#: actually in use — so it has to be a liveness signal rather than a copy of
+#: `paired_at` (review round 4, finding 2). Refreshing on EVERY dial would put a
+#: synchronous rewrite of the pairing record on the handshake path that every
+#: install's every reconnect pays, for a line nobody reads at that rate; one
+#: write per identity per minute is the compromise, and it is bounded by this
+#: constant rather than by traffic.
+LAST_SEEN_REFRESH_S = 60.0
+
+
+def note_identity_seen(root: Path | None, extension_id: str) -> None:
+    """Refresh one identity's ``last_seen_at`` once it has gone stale.
+
+    Called from the handshake. Deliberately routed through ``_write_pairing``, the
+    single writer, so the legacy trio keeps naming the DRIVER (rule 2 of
+    ``_driver_record_id``) rather than the install that just dialled: this file is
+    also the rollback contract, and a cosmetic refresh must not move it. A no-op
+    for an unlisted id (no entry) and while the stamp is fresh.
+    """
+    entries = _identities(root)
+    now = time.time()
+    refreshed: list[dict[str, Any]] = []
+    changed = False
+    for entry in entries:
+        if str(entry.get("extension_id", "")) != extension_id:
+            refreshed.append(entry)
+            continue
+        try:
+            age = now - float(entry.get("last_seen_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            age = float("inf")
+        if age < LAST_SEEN_REFRESH_S:
+            refreshed.append(entry)
+            continue
+        refreshed.append({**entry, "last_seen_at": now})
+        changed = True
+    if changed:
+        _write_pairing(root, refreshed)
+
+
 def add_identity(
     root: Path | None,
     extension_id: str,
@@ -341,11 +409,11 @@ def add_identity(
             "token_sha256": token_sha256,
             "paired_at": time.time(),
             "label": label,
-            # Seeded from the pairing time: the daemon reports a LIVE last-seen
-            # over /health while it is running, so the file only ever needs the
-            # value it last had a reason to write. Refreshing this on every
-            # reconnect would put an atomic write on the handshake path for a
-            # purely cosmetic field.
+            # Seeded at pairing time and refreshed by `note_identity_seen` on a
+            # handshake once it is more than LAST_SEEN_REFRESH_S stale. It is NOT
+            # read from /health: this field lives in the file, and the CLI reads
+            # the file, so a claim that the daemon reports a live value over
+            # HTTP was simply wrong (review round 4, finding 2).
             "last_seen_at": time.time(),
         }
     )
@@ -2021,9 +2089,25 @@ class BridgeService:
         # and no token it carries is ever consulted: `link.paired` below is
         # `_valid_saved_token`, which selects the entry for THIS id and can only
         # answer for a listed one. So an unlisted dial is an ASKER in every case
-        # — it cannot drive, cannot answer a command, and still needs the
-        # terminal code, which is the property decision 3 keeps for every
-        # identity.
+        # — and still needs the terminal code, which is the property decision 3
+        # keeps for every identity.
+        #
+        # What an unlisted dial CANNOT do, stated precisely rather than as
+        # shorthand (review round 4, finding 3 — this comment used to say it
+        # "cannot drive", which is not what the code does): it takes the driver
+        # role on a FREE wheel like any other dial, and `/health` may name it as
+        # `driver_extension_id` while nothing else is attached. What it cannot do
+        # is anything that requires a pairing — it cannot serve a single RPC
+        # (`_dispatch_serialized` refuses an unpaired link), it cannot be pinned
+        # (`POST /driver` answers 409 `not_paired`), it cannot be promoted
+        # (`standby_links()` is paired-only, so `_promote_standby` never sees a
+        # candidate in it), and it cannot hold the wheel over a paired install
+        # (the M1 branch below demotes it on that install's dial, and
+        # `_take_free_wheel` takes it as soon as one pairs). It also never
+        # appears in `authorized_extension_ids`, which is the file. So the worst
+        # it achieves is a transient driver LABEL while nothing else is attached,
+        # and the sentence here is the security property a future auditor will
+        # trust — which is why it must not overstate it.
         #
         # A pre-attach 4004 for the token-bearing case was here, and it was a
         # dead end rather than a defence (design D1 / UX U3): a revoked install
@@ -2130,6 +2214,13 @@ class BridgeService:
         # call is a no-op when the name would not change, so an ordinary
         # reconnect that leaves the wheel where it was writes nothing.
         self._record_driver()
+        # `last_seen_at` is refreshed here, inside the same no-await block, for the
+        # same reason `_record_driver` is: both are synchronous file writes that
+        # describe this handshake, and a caller that awaits before them could
+        # write a later handshake's truth. Bounded inside the helper (one write
+        # per identity per LAST_SEEN_REFRESH_S), so the hot path stays a read on
+        # every ordinary reconnect.
+        note_identity_seen(self.root, extension_id)
         if demoted is not None:
             # The demoted incumbent holds a live socket and still believes it is
             # driving. The daemon already refuses it commands (it is `self.link`
@@ -2337,11 +2428,11 @@ class BridgeService:
             # for the measurement and for why detecting it here is what makes the
             # no-handover-during-teardown rule hold for embedders too.
             #
-            # 1001 ("going away") is accepted as the same signal: it is what
-            # other ASGI servers use for the same situation, and no peer in this
-            # system sends either — the extension's own closes carry no code, so
-            # they arrive as 1000.
-            if exc.code in SERVER_GOING_DOWN_CODES:
+            # 1012 is the single discriminator; see
+            # `SERVER_GOING_DOWN_CLOSE_CODE` for why 1001 is deliberately NOT
+            # accepted here (a peer's "going away" frame would latch this flag
+            # permanently, freezing the record and disabling failover).
+            if exc.code == SERVER_GOING_DOWN_CLOSE_CODE:
                 self.begin_shutdown()
         finally:
             if link.websocket is websocket:
@@ -2400,8 +2491,8 @@ class BridgeService:
                     {
                         "error": "not_connected",
                         "message": (
-                            "that install is authorised but not connected right now — "
-                            "open its browser, then retry"
+                            "that install is authorised but not connected right now. "
+                            "Open its browser, then retry."
                         ),
                         "extension_id": str(authorised.get("extension_id", "")),
                     },
@@ -2410,6 +2501,11 @@ class BridgeService:
             return JSONResponse(
                 {
                     "error": "unknown_extension",
+                    # How many attached installs the target matched, so the caller
+                    # can word "nothing matched" and "several matched"
+                    # differently (copy review C8) instead of listing every
+                    # authorised install under the word "matches".
+                    "matches": len(self._matching_extensions(target)),
                     "authorized_extension_ids": sorted(_identity_ids(self.root)),
                     "standby_extension_ids": [entry.extension_id for entry in self.standby_links()],
                 },
@@ -2470,28 +2566,32 @@ class BridgeService:
         self._role_tasks.add(task)
         task.add_done_callback(self._role_tasks.discard)
 
-    def _resolve_extension(self, target: str) -> ExtensionLink | None:
-        """Resolve ``<id-or-label>`` to an attached link, or None.
+    def _matching_extensions(self, target: str) -> list[ExtensionLink]:
+        """Every attached link the target could mean, most specific rule first.
 
-        Accepts an exact id, an unambiguous id PREFIX (the operator copies 32
-        opaque characters; matching the first few is the difference between one
-        command and a copy-paste exercise), or a case-insensitive label
-        SUBSTRING. An ambiguous target resolves to nothing rather than to a
-        guess: silently moving the wheel to the wrong browser is worse than
-        asking for one more character.
+        Split out of `_resolve_extension` so a refusal can say HOW MANY matched:
+        the CLI words "no connected extension matches" and "no single connected
+        extension matches" differently, and the same 404 shape used to carry both
+        readings, which is how an unknown id came to be listed under the word
+        "matches" with two unrelated installs beneath it (copy review C8).
+
+        Exact id wins outright; otherwise an id-prefix search; otherwise a
+        case-insensitive label substring. Every candidate is an ATTACHED link:
+        resolving against the file would let a target name an install that cannot
+        answer.
         """
-        wanted = target.strip().lower()
+        wanted = normalise_target(target).lower()
         if not wanted:
-            return None
+            return []
         candidates = [entry for entry in self.links.values() if entry.websocket is not None]
         exact = [entry for entry in candidates if entry.extension_id.lower() == wanted]
         if exact:
-            return exact[0]
+            return exact
+        prefixed = [entry for entry in candidates if entry.extension_id.lower().startswith(wanted)]
+        if prefixed:
+            return prefixed
         labels = _identities(self.root)
-        by_prefix = [entry for entry in candidates if entry.extension_id.lower().startswith(wanted)]
-        if len(by_prefix) == 1:
-            return by_prefix[0]
-        by_label = []
+        matched: list[ExtensionLink] = []
         for entry in candidates:
             label = next(
                 (
@@ -2502,11 +2602,20 @@ class BridgeService:
                 "",
             )
             if label and wanted in label.lower():
-                by_label.append(entry)
-        unique = {entry.generation: entry for entry in by_label}
-        if len(unique) == 1:
-            return next(iter(unique.values()))
-        return None
+                matched.append(entry)
+        return matched
+
+    def _resolve_extension(self, target: str) -> ExtensionLink | None:
+        """Resolve ``<id-or-label>`` to an attached link, or None.
+
+        Accepts an exact id, an unambiguous id PREFIX (the operator copies 32
+        opaque characters, and now also the printed `ohcmfhja…` form — see
+        `normalise_target`), or a case-insensitive label SUBSTRING. An ambiguous
+        target resolves to nothing rather than to a guess: silently moving the
+        wheel to the wrong browser is worse than asking for one more character.
+        """
+        matches = self._matching_extensions(target)
+        return matches[0] if len(matches) == 1 else None
 
     async def rpc(self, http_request: HttpRequest) -> JSONResponse:
         supplied = http_request.headers.get("x-bridge-key", "")
@@ -3177,8 +3286,32 @@ class BridgeService:
                 # who runs `lop browser status` afterwards, as the guide tells
                 # them to, reads "browser not currently attached" about a browser
                 # that is open (design D2/R1-5, QA Q1).
+                #
+                # The MIRROR half is reported only while NO link is serving
+                # (review round 4 / UX U1: `and not connected`). The latch is a fact
+                # about the link that was severed, and the TTL window exists for the
+                # case where nothing has taken over — which is the case the paragraph
+                # above is about, and where `self.link` is the idle link and
+                # `connected` is false. Once a different, PROVEN link holds the wheel,
+                # reporting it made this payload contradict itself in adjacent fields
+                # (measured: `extension_connected: true` with `link_silent_s: 0.0016`
+                # next to `extension_unresponsive: true`), and the popup painted its
+                # red wedge card on the install that was answering commands in 7 ms —
+                # with a Reload button that would have reloaded the serving install.
+                # Scoping the REPORT, not clearing the state, leaves the latch
+                # available for the window it was written for and touches none of the
+                # drop/promotion machinery #996 fenced.
+                #
+                # The CURRENT link's own memory of a drop is a separate clause, and
+                # deliberately NOT gated: `dropped_unproven()` records "this link was
+                # measured silent for longer than the deadline and severed", which
+                # outlives the socket it describes by design — including in the window
+                # where the same peer has re-dialled and looks proven again
+                # (`test_a_peer_that_closes_its_own_socket_is_absent_not_unresponsive`
+                # pins exactly that reading).
                 "extension_unresponsive": (self.link.websocket is not None and not connected)
-                or self.drop_latched(),
+                or self.link.dropped_unproven()
+                or (self.drop_latched() and not connected),
                 # Whether a link is attached RIGHT NOW, which is not the same as
                 # healthy (`extension_connected` owns that). It exists so the
                 # status line can word the same observation truthfully in both
