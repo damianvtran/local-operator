@@ -809,15 +809,32 @@ async def amain() -> int:
 def main() -> int:
     # A child has no terminal and no inherited log stream — without this its
     # warnings (a failed prompt, a dead provider) vanish, which is how a
-    # silently-dropped turn went undiagnosed. The daemon's own log file is
-    # the natural place: `lop mobile logs` covers both.
-    from local_operator.paths import log_dir
+    # silently-dropped turn went undiagnosed. It writes a file of its own; why
+    # that is not the daemon's is the paragraph below.
+    #
+    # BOUNDED and quiet, unlike the `logging.basicConfig(level=INFO,
+    # filename=...)` this replaces, which wrote an UNBOUNDED file and handed the
+    # root level to INFO so every wire client logged one record per request.
+    # `configure_file_logging` pins those clients to WARNING and bounds the file
+    # at LOG_TOTAL_MAX_BYTES, so a chatty or wedged runtime costs a fixed
+    # ceiling per writer instead of the disk.
+    #
+    # The file is the runtimes' OWN (`runtime.log`), not the daemon's
+    # `mobile.log`: the daemon's log is a launchd StandardOutPath whose fd can
+    # never be reopened, and bounding a file means RENAMING it, so a runtime
+    # rotating the daemon's log would move the daemon's stream out of what
+    # `lop mobile logs` reads. `lop mobile logs` reads both.
+    from local_operator.logger import configure_file_logging
+    from local_operator.paths import runtime_log_path
 
-    log_dir().mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=str(log_dir() / "mobile.log"),
-    )
+    target = runtime_log_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if configure_file_logging(path=target, level=logging.INFO) is None:
+        logger.warning("session runtime could not open a log file; records stay on stderr")
+    # One record per runtime, naming its own process: this file is shared by every
+    # runtime child, so a reader has to be able to attribute a line to the
+    # process that wrote it.
+    logger.info("session runtime started: pid %d", os.getpid())
     try:
         return asyncio.run(amain())
     except KeyboardInterrupt:

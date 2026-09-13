@@ -30,6 +30,7 @@ import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Callable, Iterator, Optional, TextIO
 
@@ -83,6 +84,15 @@ _current_log_file: Optional[Path] = None
 _file_logging_active = False
 
 
+#: Wire clients that emit one record per request at INFO. Every entry point that
+#: configures logging pins them, because a chatty HTTP client turns any log
+#: destination into a request trace: ``httpx2`` is listed alongside ``httpx``
+#: because the MCP client imports it under that distribution's own name, so
+#: pinning ``httpx`` alone left the actual emitter at the root level (measured:
+#: 6,928,291 ``INFO:httpx2`` request records in one log file).
+_CHATTY_WIRE_CLIENTS = ("requests", "urllib3", "httpx", "httpcore", "httpx2")
+
+
 def _get_log_level() -> int:
     """
     Get the log level from the LOG_LEVEL environment variable.
@@ -121,7 +131,7 @@ def configure_console_logging(
     root_logger.setLevel(resolved)
 
     # Quieten noisy HTTP client libraries used by the provider wire clients.
-    for lib_logger in ("requests", "urllib3", "httpx", "httpcore"):
+    for lib_logger in _CHATTY_WIRE_CLIENTS:
         logging.getLogger(lib_logger).setLevel(resolved)
 
 
@@ -134,6 +144,76 @@ def configure_cli_logging() -> None:
     who set ``LOG_LEVEL`` for the server.
     """
     configure_console_logging(level=logging.INFO, fmt=CLI_LOG_FORMAT)
+
+
+def quiet_wire_clients(level: Optional[int] = None) -> None:
+    """Pin the per-request wire clients so they cannot fill a log destination.
+
+    Exposed separately from both ``configure_*`` functions because the pin is not
+    a property of where records go, it is a property of the clients: they emit
+    one record per HTTP request at INFO, and every destination here is either a
+    console a human chose a level for or a file nobody reads unless something
+    broke. A daemon that configures its own stderr for a launchd log needs this
+    pin regardless of the level it picks there, which is exactly the trap of
+    spelling it only inside the console configurator (a later
+    ``configure_console_logging(level=INFO)`` would silently restore the flood).
+
+    With no level, the pin is *at least* WARNING and *never more verbose than the
+    root logger already is*: at ``LOG_LEVEL=ERROR`` a hard WARNING floor would
+    make these clients the loudest thing in the process, which is the opposite of
+    what the caller asked for.
+    """
+    if level is None:
+        root_level = logging.getLogger().level
+        level = max(root_level if root_level else logging.WARNING, logging.WARNING)
+    for lib_logger in _CHATTY_WIRE_CLIENTS:
+        logging.getLogger(lib_logger).setLevel(level)
+
+
+def configure_file_logging(
+    path: Path,
+    level: Optional[int] = None,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> Optional[Path]:
+    """Route the root logger to a BOUNDED rotating file, and quiet the wire clients.
+
+    For a process with no terminal whose log is its own: the session runtimes
+    share one file, separate from the daemon's launchd log, because a rotating
+    handler RENAMES the file it bounds — which is fine for a file only runtimes
+    rotate and wrong for one a launchd ``StandardOutPath`` fd is appending to
+    (see :func:`local_operator.paths.runtime_log_path`).
+
+    Two deliberate differences from :func:`configure_console_logging`, which this
+    otherwise mirrors:
+
+    * the file is BOUNDED at :data:`LOG_TOTAL_MAX_BYTES` **per writer process**.
+      That is the honest figure: ``RotatingFileHandler.shouldRollover`` compares
+      this handler's own stream position, never the file's size, so N runtimes on
+      one path hold N such ceilings between them. It is still the property that
+      matters here — the unbounded ``logging.basicConfig(filename=...)`` this
+      replaces had no ceiling at all, and the runtimes are the writers that grow.
+    * the wire clients are pinned to WARNING rather than to ``level``. At INFO
+      they emit one record per request, and a background child's per-request
+      trace tells a reader nothing they are not already looking for: why a turn
+      failed.
+
+    Returns the file it installed when one was opened, or ``None`` when none
+    could be — no log file is a degraded runtime, a traceback on startup is a
+    broken one, the same rule :func:`_open_rotating_handler` follows.
+    """
+    resolved = _get_log_level() if level is None else level
+    handler, opened = _open_rotating_handler(max_bytes, backup_count, path)
+    if handler is None or opened is None:
+        return None
+
+    root_logger = logging.getLogger()
+    for existing in list(root_logger.handlers):
+        root_logger.removeHandler(existing)
+    root_logger.addHandler(handler)
+    root_logger.setLevel(resolved)
+    quiet_wire_clients(max(resolved, logging.WARNING))
+    return opened
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
@@ -271,18 +351,43 @@ def _restore_console_handlers(state: _ConsoleSilence) -> None:
         logger_obj.addHandler(handler)
 
 
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A rotating handler whose files are 0o600 after every rotation, not just the first.
+
+    ``_open_rotating_handler`` chmods the file it opens, but each rotation
+    creates the next file through this same ``_open`` (and the backups are
+    renames of earlier ones), so a long-lived writer drifts to umask-created
+    0644 while the comment below promises 0o600 on a file that carries prompt
+    and error text.
+    """
+
+    def _open(self) -> TextIOWrapper:
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:  # Windows and exotic filesystems; the log still works
+            pass
+        return stream
+
+
 def _open_rotating_handler(
     max_bytes: int,
     backup_count: int,
+    path: Optional[Path] = None,
 ) -> tuple[Optional[logging.Handler], Optional[Path]]:
-    """Open the bounded rotating handler, or ``(None, None)`` if impossible."""
+    """Open a bounded rotating handler, or ``(None, None)`` if impossible.
+
+    ``path`` defaults to this package's own console log. A caller with its own
+    file passes one: the session runtimes share a file of their own, and it needs
+    the same bound as this one rather than the unbounded handler it used to get.
+    """
     directory = ensure_log_dir()
     if directory is None:
         return None, None
-    path = directory / LOG_FILE_NAME
+    target = path if path is not None else directory / LOG_FILE_NAME
     try:
-        handler = logging.handlers.RotatingFileHandler(
-            path,
+        handler = _PrivateRotatingFileHandler(
+            target,
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding="utf-8",
@@ -293,13 +398,10 @@ def _open_rotating_handler(
         # traceback on startup is a broken one.
         return None, None
     handler.setFormatter(logging.Formatter(DEFAULT_LOG_FORMAT))
-    # 0o600 to match the directory's 0o700 and `credentials.env`'s own mode:
-    # the file carries prompt and error text from an interactive session.
-    try:
-        os.chmod(path, 0o600)
-    except OSError:  # Windows and exotic filesystems; the log still works
-        pass
-    return handler, path
+    # No chmod here: `_PrivateRotatingFileHandler._open` applies 0o600 to every
+    # file it opens, which includes this first one, and doing it in one place is
+    # what keeps a rotation from drifting back to umask-created 0644.
+    return handler, target
 
 
 def _redirect_fd_stderr(logfd: int) -> Optional[int]:

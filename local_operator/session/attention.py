@@ -244,7 +244,7 @@ def bootstrap_transcript(
             exc,
             # An arbitrary unknown exception is being swallowed here, and `%r`
             # names its type but not the frame that raised it. The destination
-            # is a real file (a spawned runtime's `log_dir()/mobile.log`), so
+            # is a real file (a spawned runtime's `log_dir()/runtime.log`), so
             # the traceback is what makes the next novel failure recoverable
             # from disk instead of only reproducible.
             exc_info=True,

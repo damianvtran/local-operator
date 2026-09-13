@@ -2354,6 +2354,58 @@ def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
         container[key] = [item.model_dump(mode="json") for item in folded]
 
 
+def largest_frame_fields(frame: dict[str, Any], *, limit: int = 3) -> str:
+    """The biggest payload fields of a frame the wire cannot carry, biggest first.
+
+    Attribution has to cover the whole ``data`` map, not one known wrapper:
+
+    * ``frontend_sync`` carries a canonical ``snapshot`` and ``frontend_update``
+      carries ``changes``, so those wrappers are unwrapped and their children
+      ranked as peers — the granularity the connect-time report already prints
+      (``cwd=1,049B``) and the unit a producer bounds;
+    * every other key of ``data`` is ranked alongside them, because the bulk of a
+      real oversized frame measured on the operator's machine sat in
+      ``data.job_trajectory_appends``, a SIBLING of ``changes``. Ranking only the
+      wrapper's children printed ``largest fields: jobs=588B`` for a 2.9 MB
+      frame — a wrong field name, which is worse than none, because it aims the
+      fix at a bystander.
+
+    A wrapper is skipped once unwrapped: its own total would otherwise always
+    outrank the single child that blew the limit, hiding the answer inside the
+    sum. Empty string when there is nothing to attribute, so a caller can say so
+    rather than invent one.
+    """
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return ""
+    # A key can arrive twice: once as a child of an unwrapped wrapper and once as
+    # a sibling of it (the update's own keys and the state's fields do not
+    # intersect today, but a future field named in both would be silently lost by
+    # a first-writer-wins merge). Keep the LARGER of the two, because the frame's
+    # size is the sum and the larger entry is the one worth naming.
+    candidates: dict[str, tuple[int, Any]] = {}
+
+    def offer(key: str, value: Any) -> None:
+        size = len(json.dumps(value).encode())
+        previous = candidates.get(key)
+        if previous is None or size > previous[0]:
+            candidates[key] = (size, value)
+
+    for key, value in data.items():
+        if key in ("snapshot", "changes") and isinstance(value, dict):
+            for inner_key, inner_value in value.items():
+                offer(inner_key, inner_value)
+        else:
+            offer(key, value)
+    if not candidates:
+        return ""
+    sizes = sorted(candidates.items(), key=lambda row: row[1][0], reverse=True)[:limit]
+    return ", ".join(
+        f"{key}={size:,}B" + (f", n={len(value)}" if isinstance(value, (list, dict)) else "")
+        for key, (size, value) in sizes
+    )
+
+
 def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     """Diagnose a frame that will not fit ``cap_bytes``, or ``None`` if it fits.
 
@@ -2373,19 +2425,8 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     encoded = len(json.dumps(frame).encode()) + 1  # the socket writes a "\n" too
     if encoded <= cap_bytes:
         return None
-    data = frame.get("data")
-    snapshot = data.get("snapshot") if isinstance(data, dict) else None
-    parts: list[str] = []
-    if isinstance(snapshot, dict):
-        sizes = sorted(
-            ((len(json.dumps(value).encode()), key, value) for key, value in snapshot.items()),
-            reverse=True,
-            key=lambda row: row[0],
-        )[:3]
-        for size, key, value in sizes:
-            count = f", n={len(value)}" if isinstance(value, (list, dict)) else ""
-            parts.append(f"{key}={size:,}B{count}")
-    detail = f" largest fields: {', '.join(parts)}" if parts else ""
+    fields = largest_frame_fields(frame)
+    detail = f" largest fields: {fields}" if fields else ""
     return (
         f"{frame.get('op', 'frame')} is {encoded:,} bytes, over the "
         f"{cap_bytes:,}-byte socket line limit; it cannot be sent and the "
