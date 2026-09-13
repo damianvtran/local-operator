@@ -715,7 +715,7 @@ def test_rebuild_pricing_runs_off_the_event_loop_thread(
     """Structural, not timing: the whole rebuild body is on a worker thread.
 
     The SCAN counts as much as the price here (review R1-5): ``all_usage_rows``
-    copies a dict per usage row and ``journal_shrank`` walks the entries again,
+    copies a dict per usage row and ``lost_money_rows`` walks the entries again,
     so asserting thread identity for ``price_rows`` alone would let an O(rows)
     walk back onto the loop with the test still green. Both spies are checked.
     """
