@@ -29,6 +29,7 @@ from local_operator.server.models.desktop_sessions import (
     AttentionState,
     CommandReceipt,
     CreatedSession,
+    DraftPreviewPayload,
     HistoryPage,
     MessageAdmission,
     NotificationClaim,
@@ -48,7 +49,12 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
 )
-from local_operator.session.frontend_state import SlashResult
+from local_operator.session.cold_model import synthesise_cold_state
+from local_operator.session.frontend_state import (
+    FrontendSync,
+    SlashResult,
+    sync_wire_payload,
+)
 from local_operator.session.session_search import search_store
 from local_operator.slash_commands import slash_command_for
 
@@ -106,6 +112,25 @@ class SessionTarget(Input):
 
 
 class CreateSession(Input):
+    request_id: RequestID
+    cwd: str = Field(min_length=1, max_length=4096)
+    target: SessionTarget | None = None
+
+
+class DraftPreview(Input):
+    """A new-conversation pane's readings, for a session that does not exist.
+
+    Same shape as :class:`CreateSession` on purpose: the pane is asking the
+    question it will ask for real on the first send, and a body that differed
+    would let the two answers diverge.
+
+    ``request_id`` is carried for envelope parity and deliberately NOT journalled
+    as a durable receipt (see the route). A preview has no side effect to make
+    at-most-once, receipts are never pruned, and a renderer may re-issue this on
+    every re-render — writing a row per pane would make simply opening one cost
+    disk, which is exactly what this op exists to avoid.
+    """
+
     request_id: RequestID
     cwd: str = Field(min_length=1, max_length=4096)
     target: SessionTarget | None = None
@@ -330,6 +355,66 @@ async def create_session(body: CreateSession, request: Request):
         return reply(
             await receipts(request).run("create:" + body.request_id, body.model_dump(), create)
         )
+
+
+@router.post("/v1/desktop/sessions/preview", response_model=CRUDResponse[DraftPreviewPayload])
+async def preview_session(body: DraftPreview, request: Request):
+    """The readings a new-conversation pane may show, for a session that is not.
+
+    **Declared BEFORE ``/v1/desktop/sessions/{session_id}``** for the same reason
+    ``search`` is: FastAPI matches in declaration order, and although no POST
+    route exists under that path today, the client would otherwise get whatever
+    one a later edit adds, for a session literally named "preview".
+
+    A deliberately session-LESS op, and every absence below is the point. It
+    creates no record and no directory, binds no runtime, hands nothing to the
+    canonical store, and writes no receipt — a pane that is only being OPENED
+    must cost nothing durable. The alternative (create the record at pane open,
+    then cold-GET it) is honest but leaves a visible empty row in the sidebar for
+    every abandoned pane: ``create`` writes a directory plus a marker, and a
+    marker-only directory is listed.
+
+    The state comes from the SAME synthesis a real cold open uses
+    (``session.cold_model``), so the draft's model chip cannot disagree with the
+    model the first send actually gets — the UI swaps this payload for the first
+    cold frame at ``finishDraft``, where a flicker is visible.
+
+    The account-metadata step is SKIPPED, unlike a cold session: a draft has no
+    context reading to divide, and a synthetic stickiness key must not move a
+    real account's stickiness (the window is then an inert spec default).
+
+    ``target`` is validated exactly as ``create`` validates it, so an
+    unresolvable profile fails here rather than becoming a session that cannot
+    start — the pane renders no strip instead of a reading for a session that
+    cannot exist.
+    """
+
+    async def preview():
+        pool = host(request)
+        if body.target is not None:
+            target = body.target.model_dump()
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import validate_target
+            from local_operator.teams import TeamRegistry
+
+            await asyncio.to_thread(
+                validate_target,
+                AgentRegistry(pool.root),
+                TeamRegistry(pool.root),
+                target["kind"],
+                target["name"],
+            )
+        state = await synthesise_cold_state(config_dir=pool.root, session_id="", cwd=body.cwd)
+        sync = FrontendSync(
+            epoch=state.epoch,
+            sequence=state.sequence,
+            snapshot=state,
+            live_cursor=state.history_cursor,
+        )
+        return {"frontend": sync_wire_payload(sync)}
+
+    async with errors():
+        return reply(await preview())
 
 
 @router.get("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[SessionSnapshot])

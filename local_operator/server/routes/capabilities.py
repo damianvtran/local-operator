@@ -50,6 +50,16 @@ async def capabilities():
                 # exist, and gating the list on the search version would hide a
                 # working surface because a newer one is missing.
                 "session_search": 1,
+                # The readings a NEW-conversation pane may show, resolved by the
+                # backend for a session that does not exist yet (a draft has no
+                # session record, and the strip must be able to say what model
+                # the first send will use). Its own key rather than a bump of
+                # `session_catalogue`: a client renders the catalogue perfectly
+                # well against a backend without this route, and gating the list
+                # on it would hide a working surface because a newer one is
+                # missing. The draft strip is the only thing that may not render
+                # without it.
+                "draft_preview": 1,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
                 # Named for this map's convention (`<subsystem>: <version>`); the

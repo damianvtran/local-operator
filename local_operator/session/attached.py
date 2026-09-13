@@ -80,6 +80,10 @@ from local_operator.mobile.types import (
     SessionRecord,
 )
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
+from local_operator.session.cold_model import (
+    resolve_context_metadata,
+    synthesise_cold_state,
+)
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -93,6 +97,7 @@ from local_operator.session.frontend_state import (
     SnapshotMcpManager,
     SnapshotSubagentComms,
     SnapshotWakeScheduler,
+    WakeState,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
@@ -1731,124 +1736,67 @@ class AttachedSession:
             ),
         }
 
+    def _cold_wakes(self) -> list[WakeState]:
+        """The session's scheduled wakes, from the live wake index.
+
+        An INPUT to state synthesis rather than something it reads, because the
+        index is a derived file a supervisor rewrites without opening the
+        session. A session created cold has no index and no rows; an unreadable
+        one is the same absence.
+        """
+        from local_operator.wakes.store import read_entry
+
+        wakes: list[WakeState] = []
+        try:
+            entry = read_entry(self._config_dir, self._session_id)
+            for schedule in (entry or {}).get("schedules", []) or []:
+                if isinstance(schedule, dict):
+                    try:
+                        wakes.append(WakeState.model_validate(schedule))
+                    except Exception:  # noqa: BLE001 — skip an unreadable row
+                        continue
+        except Exception:  # noqa: BLE001 — no index is the common case
+            logger.debug("cold state could not read the wake index", exc_info=True)
+        return wakes
+
     async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
 
-        Off the loop: it reads the config file and the wake index.
+        A thin caller of :mod:`local_operator.session.cold_model`, which the
+        desktop's draft preview calls too — one resolution, two callers, so the
+        preview's readings and the just-created session's first cold frame
+        cannot disagree (the UI swaps one for the other at ``finishDraft``).
+
+        ``selection_sink`` is the one thing this caller adds: the synthesis reads
+        the conversation's saved selection anyway, and ``_seed_cold_usage`` needs
+        it to attribute a receipt that predates the serving-identity stamp,
+        without a second scan of a transcript that reaches 103 MB.
         """
-
-        def _build() -> FrontendSessionState:
-            from local_operator.session.frontend_state import (
-                FrontendModelSpec,
-                WakeState,
-            )
-
-            model: FrontendModelSpec | None = None
-            try:
-                from local_operator.config import ConfigManager
-
-                config = ConfigManager(config_dir=self._config_dir)
-                provider = str(config.get_config_value("hosting", "") or "")
-                model_id = str(config.get_config_value("model_name", "") or "")
-                from local_operator.session.model_selection import read_model_selection
-
-                saved = read_model_selection(self._config_dir / "sessions" / self._session_id)
-                # Held for ``_seed_cold_usage``: the very value the resolution
-                # below uses, so attributing an unstamped receipt costs no second
-                # read of the transcript's head (a 103 MB file at the top end).
-                self._cold_selection = saved
-                if self._birth_model is not None and (
-                    saved is None or self._model_selection_override
-                ):
-                    model = FrontendModelSpec(**self._birth_model.model_dump())
-                elif saved is not None:
-                    model = FrontendModelSpec(
-                        provider=saved.provider,
-                        model_id=saved.model_id,
-                        reasoning_effort=saved.effort,
-                    )
-                else:
-                    if provider and not model_id:
-                        from local_operator.model.defaults import default_model_for
-
-                        model_id = default_model_for(provider) or ""
-                    model = FrontendModelSpec(provider=provider, model_id=model_id)
-            except Exception:  # noqa: BLE001 — an unreadable config is not fatal
-                logger.debug("cold state could not read the configured model", exc_info=True)
-            if model is None:
-                # NEVER None. ``AttachedSession.model`` raises without a spec, and
-                # a cold viewer is exactly the state where config may be empty
-                # (a first run, before `/login`) — so the band would crash on
-                # the very screen that exists to help the user fix it. An empty
-                # spec renders as "no model" and is replaced by the runtime's
-                # own on first engage.
-                model = FrontendModelSpec(provider="", model_id="")
-
-            wakes: list[WakeState] = []
-            try:
-                from local_operator.wakes.store import read_entry
-
-                entry = read_entry(self._config_dir, self._session_id)
-                for schedule in (entry or {}).get("schedules", []) or []:
-                    if isinstance(schedule, dict):
-                        try:
-                            wakes.append(WakeState.model_validate(schedule))
-                        except Exception:  # noqa: BLE001 — skip an unreadable row
-                            continue
-            except Exception:  # noqa: BLE001 — no index is the common case
-                logger.debug("cold state could not read the wake index", exc_info=True)
-
-            return FrontendSessionState(
-                session_id=self._session_id,
-                epoch=f"cold-{self._session_id}",
-                cwd=cwd,
-                selected_model=model,
-                effective_model=model,
-                wakes=wakes,
-            )
-
-        state = await asyncio.to_thread(_build)
+        state = await synthesise_cold_state(
+            config_dir=self._config_dir,
+            session_id=self._session_id,
+            cwd=cwd,
+            birth_model=self._birth_model,
+            model_selection_override=self._model_selection_override,
+            wakes=self._cold_wakes(),
+            selection_sink=self._note_cold_selection,
+        )
         if state.selected_model is not None and state.selected_model.provider == "openai":
-            from local_operator.config import ConfigManager
-            from local_operator.model.configure import context_spec_for_access
-            from local_operator.providers.auth_store import AuthStore
-            from local_operator.providers.failover import (
-                AuthRetryKeyState,
-                _resolve_access_for_provider,
-            )
-
-            # Resolve the same account as dispatch, not a saved denominator
-            # from before maximum-context support. Never move account stickiness
-            # merely because a viewer opened a cold session.
-            configured_model = state.selected_model
-
-            async def _resolve() -> ModelSpec:
-                # AuthStore's SQLite connection is thread-affine. Creation,
-                # credential resolution and close belong to this ONE worker's
-                # event loop, not separately scheduled default-executor jobs.
-                auth = AuthStore(self._config_dir / "auth.db")
-                try:
-                    access = await _resolve_access_for_provider(
-                        auth,
-                        "openai",
-                        self._session_id,
-                        AuthRetryKeyState(),
-                        None,
-                        read_only=True,
-                        model_id=configured_model.model_id,
-                        scoped_blocks=True,
-                    )
-                    settings = ConfigManager(config_dir=self._config_dir).get_config().values
-                    return context_spec_for_access(configured_model, access, settings)
-                finally:
-                    auth.close()
-
+            # Resolve the account metadata the runtime would, so the band does
+            # not divide a real reading by a stale denominator. Metadata must
+            # never prevent viewing saved work.
             try:
-                model = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+                model = await resolve_context_metadata(
+                    self._config_dir, state.selected_model, stickiness_key=self._session_id
+                )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
                 logger.debug("cold context metadata unavailable", exc_info=True)
         return state
+
+    def _note_cold_selection(self, saved: StoredModelSelection | None) -> None:
+        """Hold the conversation's own selection for ``_seed_cold_usage``."""
+        self._cold_selection = saved
 
     @property
     def is_cold(self) -> bool:
