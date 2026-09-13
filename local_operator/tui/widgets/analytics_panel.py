@@ -330,17 +330,20 @@ def search_spend_section(
         lines.append(line)
 
     def search_notes(n: int, unpriced: int) -> tuple[str, ...]:
-        plural = "" if n == 1 else "s"
+        # Widest first, and the COUNT is on every rung: it is the part that must
+        # not be lost. ``search``/``searches`` rather than an "s" suffix -- the
+        # plural of this word is not its singular with an s on the end.
+        word = "search" if n == 1 else "searches"
         if not unpriced:
-            return (f"{n} search{plural}",)
+            return (f"{n} {word}",)
         if unpriced == n:
             return (
-                f"{n} search{plural} · no published price",
-                f"{n} search{plural} · unpriced",
+                f"{n} {word} · no published price",
+                f"{n} {word} · unpriced",
             )
         return (
-            f"{n} search{plural} · {unpriced} unpriced",
-            f"{n} search{plural} · {unpriced} ?",
+            f"{n} {word} · {unpriced} unpriced",
+            f"{n} · {unpriced} unpriced",
         )
 
     lines.append(section_header("Search spend", meta))
@@ -353,13 +356,14 @@ def search_spend_section(
         share = (
             format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
         )
+        word = "search" if session.searches == 1 else "searches"
         row(
             "This session",
             session,
             (
-                f"{session.searches} searches · {share} of search spend",
-                f"{session.searches} searches · {share}",
-                f"{session.searches} searches",
+                f"{session.searches} {word} · {share} of search spend",
+                f"{session.searches} {word} · {share}",
+                f"{session.searches} {word}",
             ),
         )
     # A dim sub-label rather than a section header: the rows under it PARTITION
@@ -657,6 +661,8 @@ def build_report(
     hover: str | None = None,
     layout: ReportLayout | None = None,
     forest: list["SessionNode"] | None = None,
+    search_spend: SearchSpendSnapshot | None = None,
+    session_search_spend: SearchSpendSnapshot | None = None,
 ) -> list[Text]:
     """Render one aggregate as a list of ``Text`` lines for the screen body.
 
@@ -701,6 +707,18 @@ def build_report(
     cannot go stale; a caller that passes a forest built from a different
     aggregate would get a report describing neither, which is why this is not
     derived from a mutable field.
+
+    ``search_spend``/``session_search_spend`` are the web-search halves, and
+    they are INPUTS rather than something derived from ``aggregate`` because
+    they are not in it: ``web_search`` bills separately from the model and keeps
+    its own process-wide ledger (see ``local_operator.web_search.cost``), which
+    this pure function must not reach into. The first is the process-wide total
+    and is drawn as its own section (below Totals, or with the empty-state
+    message when no model call was recorded at all — a run can have retrieval
+    spend and an unreadable model ledger). The second is the CURRENT session's,
+    drawn inside that section as its share of the total. Both default to
+    ``None`` so a caller with no ledger — a test, the desktop route — gets
+    exactly the report it got before.
     """
     width = max(40, width)
     fg = semantic_style("fg")
@@ -708,6 +726,23 @@ def build_report(
     accent = semantic_style("accent")
 
     lines: list[Text] = []
+    # Built once and spliced into BOTH branches below, because search spend is
+    # not in the ledger the ``calls == 0`` gate is a statement about.
+    search_lines = (
+        search_spend_section(
+            search_spend,
+            width,
+            meta="process-wide · live",
+            session=session_search_spend,
+            note=(
+                "Read from this process's live search ledger, not from disk. A resumed "
+                "conversation restores its recorded searches into it; sessions that are "
+                "not open here are not counted."
+            ),
+        )
+        if search_spend is not None
+        else []
+    )
 
     if aggregate.calls == 0:
         line = Text()
@@ -721,6 +756,9 @@ def build_report(
             style=dim,
         )
         lines.append(hint)
+        if search_lines:
+            lines.append(Text())
+            lines.extend(search_lines)
         return lines
 
     # -- headline totals -----------------------------------------------------
@@ -846,6 +884,14 @@ def build_report(
     cost_row.append(f"  {cost_note}", style=dim)
     lines.append(cost_row)
     lines.append(Text())
+
+    # -- search spend --------------------------------------------------------
+    # Beside the model money, in the same block's rhythm, because it answers the
+    # same question about the same session and a reader comparing the two should
+    # not have to hunt for the second half. It is NOT spliced into the Est. cost
+    # row above: no part of it came from this ledger, and a mixed figure could
+    # not say which half was measured.
+    lines.extend(search_lines)
 
     # -- historical time series (daily + monthly bars) ----------------------
     # Drawn only when the store handed the screen rollup rows. The metric label
@@ -1873,12 +1919,21 @@ class AnalyticsScreen(ModalScreen[None]):
         daily: list[UsagePeriod] | None = None,
         monthly: list[UsagePeriod] | None = None,
         window_totals: UsagePeriod | None = None,
+        search_spend: SearchSpendSnapshot | None = None,
+        session_search_spend: SearchSpendSnapshot | None = None,
     ) -> None:
         super().__init__()
         self._aggregate = aggregate
         # Grand total over the daily chart's window (``series_totals``), shown in
         # that chart's meta so the bars and their sum describe the same span.
         self._window_totals = window_totals
+        # The web-search halves, captured by the caller on the same pass that
+        # read this aggregate and held for the same reason: a repaint (every
+        # arrow key, every resize) must not re-read a moving ledger and show a
+        # search total from a different moment than the model figures beside
+        # it. None on both is the pre-search-spend report exactly.
+        self._search_spend = search_spend
+        self._session_search_spend = session_search_spend
         # The calendar rollup series the store handed us on open. Held so the
         # ``t`` toggle can re-render the SAME data with the other metric without
         # a second store read — the numbers do not change, only which of them
@@ -2224,6 +2279,9 @@ class AnalyticsScreen(ModalScreen[None]):
             # instant. Safe to share because the aggregate is a snapshot read on
             # a worker thread before the screen was pushed and never mutates.
             forest=self._forest(),
+            # Held snapshots, not ledger reads: see ``__init__``.
+            search_spend=self._search_spend,
+            session_search_spend=self._session_search_spend,
         )
 
     def _expandable_rows(self) -> bool:

@@ -36402,7 +36402,14 @@ class OperatorApp(App[None]):
         if not canonical:
             self._harvest_subagent_costs()
         total = self._spend_total()
-        if cost is not None or (self._session is not None and self._subagent_costs):
+        # Search spend joins the children in this gate for the same reason: a turn
+        # that priced nothing ITSELF can still have paid for retrieval, and -
+        # without this - the session's first search-heavy turn would leave the
+        # segment holding the previous turn's figure while the ledger moved.
+        search_spend = self._session_search_spend()
+        if cost is not None or (
+            self._session is not None and (self._subagent_costs or search_spend.searches)
+        ):
             # A turn that priced nothing itself still has a total worth showing
             # once a child has spent — a parent whose entire turn was one `task`
             # call reports no usage of its own, and reading "$—" beside a working
