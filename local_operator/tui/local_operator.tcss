@@ -1975,18 +1975,50 @@ SessionPickerScreen {
     background: $lo-sunken;
 }
 
+/* FULL-SCREEN, and deliberately carrying NO cap of its own. The shipped sheet
+ * said `max-width: 80` while Python capped at PICKER_MAX_WIDTH = 74 and the
+ * narrower won silently; Textual clips without reading anything back, so a
+ * second cap here over a budget Python already computed is invisible until a
+ * frame is inspected. Every row and column budget is `plan_layout`'s. */
 SessionPickerScreen .session-picker {
-    width: auto;
-    height: auto;
-    max-width: 80;
-    max-height: 80%;
+    width: 100%;
+    height: 100%;
+    layout: vertical;
     background: $lo-overlay;
-    padding: 1 2;
+    color: $lo-fg;
 }
 
-#session-picker-body {
-    width: auto;
-    height: auto;
+/* The two panes. `LIST_FR`/`PREVIEW_FR` are applied from Python on every
+ * layout change (`_apply_layout`) because the split FLIPS to vertical below
+ * the breakpoint; the widths here are the side-by-side starting state and must
+ * stay in step with those constants. */
+#session-picker-cols {
+    height: 1fr;
+}
+
+#session-picker-results {
+    width: 3fr;
+    height: 1fr;
+    padding: 0 1;
+    color: $lo-fg;
+}
+
+/* `border-left` is the divider between the panes; stacked, Python clears it
+ * and sets `border-top` instead. Tokens only — a literal hex here would not
+ * follow a theme change. */
+#session-picker-preview {
+    width: 2fr;
+    height: 1fr;
+    padding: 0 1;
+    border-left: solid $lo-edge;
+    color: $lo-fg;
+}
+
+/* One row, always drawn: it carries the query, the counters and the keys, and
+ * it is the only statement of how to leave the picker. */
+#session-picker-filter {
+    height: 1;
+    padding: 0 1;
     color: $lo-fg;
 }
 
