@@ -8,7 +8,11 @@ import httpx
 import pytest
 
 from local_operator.credentials import CredentialManager
-from local_operator.web_search.models import SearchResponse, WebSearchSettings
+from local_operator.web_search.models import (
+    SearchResponse,
+    SearchSource,
+    WebSearchSettings,
+)
 from local_operator.web_search.providers import PROVIDERS, parse_duckduckgo_html
 
 
@@ -1096,6 +1100,185 @@ def test_a_top_level_row_with_no_url_is_not_served_content() -> None:
                 }
             )
             assert _wall(body) is not None, f"a wall escaped behind a url-less {key} row"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1070: the served-url predicate and the extractor's cap must agree
+# ---------------------------------------------------------------------------
+
+
+def _url_of(length: int) -> str:
+    """A scheme-carrying url of exactly ``length`` characters.
+
+    The scheme matters: a url with no scheme is rejected by ``_source`` for a
+    different reason, so a length test built on one would pass whether or not
+    the cap is honoured.
+    """
+    return "http://" + "x" * (length - len("http://"))
+
+
+#: A real answer block, so the served cases below can show the answer that
+#: survives rather than the wall's own sentence coming back.
+_REAL_ANSWER_BLOCKS = [
+    {"intended_usage": "ask_text", "markdown_block": {"answer": "Paris is the capital."}}
+]
+
+
+def _served_and_sourced(body: str) -> tuple[str | None, list[SearchSource]]:
+    """The wall verdict and the extracted sources for one SSE body."""
+    from local_operator.web_search.providers import (
+        _parse_perplexity_sse,
+        _perplexity_authwall,
+        _perplexity_sources,
+    )
+
+    payload = _parse_perplexity_sse(body)
+    return _perplexity_authwall(payload), _perplexity_sources(payload, 10)
+
+
+@pytest.mark.parametrize("url", ["x" * 5_000, _url_of(4_097)])
+@pytest.mark.parametrize("key", ["sources_list", "search_results"])
+def test_a_row_whose_url_exceeds_the_extractor_cap_is_not_served_content(
+    url: str, key: str
+) -> None:
+    """#1070: the predicate took any non-blank url, and ``_source`` caps it.
+
+    A row past the cap suppressed the wall while the extractor built no source
+    from it, so ``not sources`` never fired either and the refusal sentence
+    (``Sign up and repeat your request.``) went back as the search result -- the
+    #1061 bug one rule narrower. Both url shapes the issue names are covered:
+    ``"x" * 5000`` is the issue's own repro (no scheme either, which the
+    extractor rejects independently) and 4097 carries a valid scheme, so it is
+    the shape that is over the cap and nothing else.
+    """
+    body = _sse(
+        {
+            "upsell_information": WALL_UPSELL,
+            "blocks": _ASK_ONLY_BLOCKS,
+            key: [{"url": url}],
+        }
+    )
+    wall, sources = _served_and_sourced(body)
+    assert wall is not None, f"a wall escaped behind an over-long {key} url"
+    # The zero-sources half is the extractor's own rule, measured rather than
+    # assumed: it is what made the suppressed wall reachable in the first place.
+    assert sources == []
+
+
+def test_the_served_url_cap_agrees_with_the_extractor_on_both_sides() -> None:
+    """The boundary: exactly the cap serves, one character past it refuses.
+
+    Both sides are derived from the url lengths the issue names, and the
+    lengths are checked against the single constant ``_source`` and the
+    predicate share -- so a second, drifting spelling of the cap fails here
+    instead of leaving one of these two shapes unpinned.
+    """
+    from local_operator.web_search.providers import _MAX_URL_CHARS
+
+    assert _MAX_URL_CHARS == 4_096
+
+    at_cap, past_cap = _url_of(4_096), _url_of(4_097)
+    assert (len(at_cap), len(past_cap)) == (4_096, 4_097)
+
+    served_wall, served_sources = _served_and_sourced(
+        _sse(
+            {
+                "upsell_information": WALL_UPSELL,
+                "blocks": _REAL_ANSWER_BLOCKS,
+                "sources_list": [{"url": at_cap}],
+            }
+        )
+    )
+    assert served_wall is None
+    assert [source.url for source in served_sources] == [at_cap]
+
+    refused_wall, refused_sources = _served_and_sourced(
+        _sse(
+            {
+                "upsell_information": WALL_UPSELL,
+                "blocks": _REAL_ANSWER_BLOCKS,
+                "sources_list": [{"url": past_cap}],
+            }
+        )
+    )
+    assert refused_wall is not None
+    assert refused_sources == []
+
+
+def test_a_sources_list_of_bare_strings_is_not_served_content() -> None:
+    """``["https://x"]`` is refused: ``_source`` reads object rows only.
+
+    Correct by inspection before this test, but unpinned (issue #1070). A
+    string is not a served result -- the extractor builds nothing from it -- so
+    counting it as one would suppress the wall with zero sources.
+    """
+    body = _sse(
+        {
+            "upsell_information": WALL_UPSELL,
+            "blocks": _ASK_ONLY_BLOCKS,
+            "sources_list": ["https://x"],
+        }
+    )
+    wall, sources = _served_and_sourced(body)
+    assert wall is not None
+    assert sources == []
+
+
+def test_a_scheme_with_no_authority_is_served_with_one_source() -> None:
+    """``{"url": "http://"}`` serves: a scheme is required, a host is not.
+
+    Correct by inspection before this test, but unpinned (issue #1070). The
+    extractor accepts it and builds one source, so the wall is suppressed and
+    the result stands -- the shape the length cap must NOT start refusing.
+    """
+    body = _sse(
+        {
+            "upsell_information": WALL_UPSELL,
+            "blocks": _REAL_ANSWER_BLOCKS,
+            "sources_list": [{"url": "http://"}],
+        }
+    )
+    wall, sources = _served_and_sourced(body)
+    assert wall is None
+    assert [source.url for source in sources] == ["http://"]
+
+
+@pytest.mark.asyncio
+async def test_a_wall_behind_an_over_long_row_refuses_through_the_provider(tmp_path) -> None:
+    """#1070 end to end: the refusal is raised, not handed back as the answer.
+
+    The parsing half is the unit above; this drives the provider entry point
+    the chain calls, which is where the sentence used to reach the model.
+    """
+    wall_event = {
+        "uuid": "pplx-long-url",
+        "status": "COMPLETED",
+        "final": True,
+        "text": "Sign up and repeat your request.",
+        "upsell_information": {
+            "name": "fraud_authwall_upsell",
+            "upsell_type": "LOGIN",
+            "cta": "SIGN_UP_OR_LOGIN",
+        },
+        "sources_list": [{"url": "x" * 5_000}],
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=_sse(wall_event))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError) as caught:
+            await PROVIDERS["perplexity"].search(
+                client,
+                _credentials(tmp_path),
+                WebSearchSettings(),
+                "query",
+                3,
+            )
+
+    message = str(caught.value)
+    assert "fraud_authwall_upsell" in message
+    assert "Sign up and repeat your request." not in message
 
 
 def test_a_payload_carrying_our_own_served_key_cannot_suppress_a_wall() -> None:
