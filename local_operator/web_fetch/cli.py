@@ -38,11 +38,14 @@ def add_fetch_subparser(
     setter = commands.add_parser("set", help="Set a single fetch config field")
     setter.add_argument(
         "key",
-        choices=("enabled", "ttl", "allow-private", "backend"),
+        choices=("enabled", "ttl", "allow-private", "backend", "attempts", "blocked-retry"),
     )
     setter.add_argument(
         "value",
-        help="on/off for enabled & allow-private; seconds for ttl; auto/stdlib for backend",
+        help=(
+            "on/off for enabled, allow-private & blocked-retry; seconds for ttl; "
+            "auto/stdlib for backend; 1-5 for attempts"
+        ),
     )
 
 
@@ -83,6 +86,8 @@ def format_fetch_status(manager: ConfigManager) -> str:
         f"Cache TTL: {settings.cache_ttl_seconds}s | cached URLs: {cache_count}",
         f"Allow private/loopback targets: {'yes' if settings.allow_private else 'no'}",
         f"Enrichment (.md / llms.txt): {'on' if settings.enrich else 'off'}",
+        f"Attempts per hop: {settings.max_attempts} | "
+        f"browser-profile retry on a refusal: {'on' if settings.blocked_retry else 'off'}",
     ]
     return "\n".join(rows)
 
@@ -115,8 +120,10 @@ async def _test_fetch(args: argparse.Namespace) -> int:
 def _set_field(args: argparse.Namespace) -> int:
     from local_operator.web_fetch.service import (
         set_allow_private,
+        set_blocked_retry,
         set_cache_ttl,
         set_fetch_enabled,
+        set_max_attempts,
         set_render_backend,
     )
 
@@ -126,7 +133,15 @@ def _set_field(args: argparse.Namespace) -> int:
     try:
         if key == "enabled":
             set_fetch_enabled(manager, value in ("on", "true", "1", "yes"))
-        elif key == "allow-private":
+            # The ONE key here that is not live: the tool's presence in the
+            # inventory is reconciled by the session, not re-read per call, so a
+            # running session has to re-add or drop the tool to see this.
+            print(
+                f"web_fetch {key} set to {value}. "
+                "Reload a running session to add or remove the tool."
+            )
+            return 0
+        if key == "allow-private":
             set_allow_private(manager, value in ("on", "true", "1", "yes"))
         elif key == "ttl":
             set_cache_ttl(manager, int(value))
@@ -134,13 +149,22 @@ def _set_field(args: argparse.Namespace) -> int:
             if value not in ("auto", "stdlib"):
                 raise ValueError("backend must be 'auto' or 'stdlib'")
             set_render_backend(manager, value)
+        elif key == "attempts":
+            set_max_attempts(manager, int(value))
+        elif key == "blocked-retry":
+            set_blocked_retry(manager, value in ("on", "true", "1", "yes"))
         else:  # pragma: no cover - argparse choices guard this
             print(f"error: unknown fetch field {key}")
             return 1
     except ValueError as error:
         print(f"error: {error}")
         return 1
-    print(f"web_fetch {key} set to {value}. Reload a running session to apply the master switch.")
+    # Every remaining key is read per fetch (the service resolves settings on
+    # every call), so a running session picks it up on the NEXT fetch with no
+    # reload at all. The message used to claim otherwise for all of them, which
+    # was wrong for the four live knobs and actively misleading for the two retry
+    # ones this change added (review round 1, N1).
+    print(f"web_fetch {key} set to {value}. Takes effect on the next fetch.")
     return 0
 
 

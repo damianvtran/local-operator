@@ -6,6 +6,15 @@ go-ahead on the flagged decisions at the end.
 Grounded against the tree at the time of writing; file:line citations are load-
 bearing, not decoration.
 
+**Companion document:** `web_fetch_robustness.md` extends this one with the
+retry policy, the anti-bot/challenge taxonomy, the blocked-retry request profile
+and the model-facing diagnostics for a refused or stalled fetch. Read it
+alongside §6 (pipeline), §7 (safety) and §9 (config) — it refines those three,
+and it contradicts ONE line of §7 item 7 on purpose: an escalated attempt after a
+refusal wears a browser-shaped header set instead of the plain lop
+`User-Agent`. That exception, its gate and its why are stated at §7 item 7 below
+and in the companion's §4.1/§4.3.
+
 ---
 
 ## 1. The problem, as the code actually has it
@@ -363,6 +372,17 @@ endpoints, internal services, `file://`, localhost admin panels). Policy:
 7. **No credential leakage:** do not forward ambient cookies/auth; each fetch is
    anonymous (this is the deliberate difference from `browser`, which uses the
    user's logged-in session). Set a plain `User-Agent` identifying lop.
+
+   **One stated exception, added by `web_fetch_robustness.md` (§4):** after an
+   origin has ALREADY refused an honest, self-identifying request (or stalled on
+   it), a single second attempt may be made with a browser-shaped header set
+   (`User-Agent` + `Accept`/`Accept-Language`/`Sec-Fetch-*`). It is off the
+   default path — the plain lop `User-Agent` remains the posture, the exception
+   is paid only on a refusal, the identity change happens at most once per fetch,
+   `web_fetch.blocked_retry: false` removes it entirely, and it carries none of
+   the user's cookies, credentials or session. The distinction this policy exists
+   to protect is *anonymous vs authenticated*; a spoofed UA is still anonymous,
+   which is why the exception is narrow rather than a reversal.
 
 This is a policy the reviewer must scrutinize; it is the security-sensitive part
 of the change. It is *not* a redesign of a subsystem, so it doesn't trip the
