@@ -223,6 +223,36 @@ def _identity_ids(root: Path | None = None) -> set[str]:
     return {str(entry.get("extension_id", "")) for entry in _identities(root)} - {""}
 
 
+def _previous_record_id(root: Path | None) -> str:
+    """The identity the legacy trio names RIGHT NOW, or "" when there is none."""
+    return str((_read_json(_pairing_path(root)) or {}).get("extension_id", ""))
+
+
+def _driver_record_id(identities: list[dict[str, Any]], *, driver_id: str, previous: str) -> str:
+    """Which identity the legacy trio should name, in the documented order.
+
+    ONE function so every writer and the change-detection in ``_record_driver``
+    cannot drift apart:
+
+    1. ``driver_id`` — the caller knows who holds the wheel;
+    2. else the identity the trio already names, when it is still listed — the
+       trio is the DRIVER's record, so pairing or revoking a standby must not
+       move it (round 1, M2/Q2);
+    3. else the most recently paired survivor.
+
+    Returns "" only when there is nobody to name.
+    """
+    listed = {str(entry.get("extension_id", "")) for entry in identities}
+    if driver_id and driver_id in listed:
+        return driver_id
+    if previous and previous in listed:
+        return previous
+    if not identities:
+        return ""
+    newest = max(identities, key=lambda entry: float(entry.get("paired_at", 0) or 0))
+    return str(newest.get("extension_id", ""))
+
+
 def _write_pairing(
     root: Path | None, identities: list[dict[str, Any]], *, driver_id: str = ""
 ) -> None:
@@ -252,20 +282,12 @@ def _write_pairing(
     ``_record_driver`` (promotion on a driver loss, ``drive``, pairing), so
     (2) is a *stable* record rather than a stale one.
     """
-    chosen: dict[str, Any] | None = None
-    if driver_id:
-        chosen = next(
-            (entry for entry in identities if entry.get("extension_id") == driver_id), None
-        )
-    if chosen is None:
-        previous = _read_json(_pairing_path(root)) or {}
-        previous_id = str(previous.get("extension_id", ""))
-        if previous_id:
-            chosen = next(
-                (entry for entry in identities if entry.get("extension_id") == previous_id), None
-            )
-    if chosen is None and identities:
-        chosen = max(identities, key=lambda entry: float(entry.get("paired_at", 0) or 0))
+    chosen_id = _driver_record_id(
+        identities, driver_id=driver_id, previous=_previous_record_id(root)
+    )
+    chosen = next((entry for entry in identities if entry.get("extension_id") == chosen_id), None)
+    if chosen is None and identities:  # pragma: no cover - chosen_id comes from `identities`
+        chosen = identities[0]
     payload: dict[str, Any] = {}
     if chosen is not None:
         payload["extension_id"] = chosen.get("extension_id", "")
@@ -852,6 +874,13 @@ class BridgeService:
             started_at=self.started_at,
         )
         self._heartbeat_task: asyncio.Task[None] | None = None
+        #: Set once the daemon has been asked to stop (see `_daemon_leaving`).
+        self._shutting_down = False
+        #: The uvicorn server object, when a runner provides one. Its
+        #: `should_exit` is set before sockets are closed, which is the earliest
+        #: in-process signal that a socket ending is teardown, not a driver loss.
+        self._server: Any = None
+
         self._ping_task: asyncio.Task[None] | None = None
         self._revoke_task: asyncio.Task[None] | None = None
         # Consecutive failed discovery-file writes, so recovery can be logged
@@ -1033,25 +1062,104 @@ class BridgeService:
         return str(driver.extension_id or "")
 
     def _record_driver(self) -> None:
-        """Rewrite the legacy trio so it names the LIVE driver (decision 1).
+        """Keep the legacy trio naming the LIVE driver — the DURABLE INVARIANT.
 
-        Called from every path that MOVES the wheel: a promotion on a driver
-        loss, `_take_free_wheel`, and `POST /driver`. Without this the trio named
-        whichever identity was paired last, so a rollback (or an older `lop`)
-        reading the file authorised the STANDBY — refusing the install the
-        operator was actually using with 4004, which is exactly the forced
-        re-pair decision 1 promises never to need (review round 1, M2 / QA Q2).
+        The invariant this maintains, stated precisely so it cannot be read as
+        more than it is: **the trio names a LISTED identity, and whenever a
+        paired driver is attached it names that driver** — so the file agrees
+        with `/health.driver_extension_id` in every state an operator can be
+        served from. The one state where the two differ is a token-less dial
+        TEMPORARILY holding the wheel (admitted so it can pair): it is not a
+        driver that can serve, it has no token hash to record, and the file
+        therefore keeps naming the last listed driver — which is precisely what
+        the note's "the file must not name a non-driver" asks for. That state
+        ends at its next dial or at its pairing, both of which come back through
+        here.
 
-        No-op when no pairing file exists (nothing to keep coherent) and when the
-        file lists nobody. Cheap and synchronous on purpose: callers run it
-        inside the no-await decision blocks (audit A1).
+        It is what the downgrade contract means (decision 1): a rollback, or an
+        older `lop`, reads exactly one identity out of this file, and it must be
+        the install the operator is actually using — not a standby it will
+        refuse with 4004.
+
+        Called from EVERY path that moves or settles the wheel: both handshake
+        branches (round 2, R2-1 — the cold-start dial after a restart was the
+        hole), a promotion on a driver loss, `_take_free_wheel`, `POST /driver`,
+        and a revoke that promotes. Cheap and synchronous because callers run it
+        inside the no-await decision blocks (audit A1); it writes only when the
+        name would CHANGE, so a reconnect that leaves the wheel where it was
+        costs one file read and no atomic write.
+
+        Declines to write while the daemon is going down (round 2, R2-1, QA's
+        half): a promotion during teardown is an artifact of us closing sockets,
+        not a fact about which install the operator is using, and persisting it
+        made a rollback bind to the standby — flakily, which is worse (measured
+        at 2/6 SIGTERM runs). The record then keeps naming the last install that
+        was driving, which is the install that will drive again after the
+        restart, and the next handshake reconciles it if not.
+        """
+        if self._daemon_leaving():
+            return
+        if not _pairing_path(self.root).exists():
+            return
+        identities = _identities(self.root)
+        if not identities:
+            return
+        wanted = _driver_record_id(
+            identities, driver_id=self._live_driver_id(), previous=_previous_record_id(self.root)
+        )
+        if not wanted or wanted == _previous_record_id(self.root):
+            return
+        _write_pairing(self.root, identities, driver_id=self._live_driver_id())
+
+    def _daemon_leaving(self) -> bool:
+        """True once this daemon has been asked to stop.
+
+        Two sources, because they cover different callers: the HTTP server's own
+        `should_exit` (uvicorn sets it BEFORE it closes listeners or connection
+        sockets — see `Server.shutdown` — which is what makes "we are closing
+        sockets" distinguishable from a live driver loss at the moment a
+        promotion happens), and `begin_shutdown`, set by `shutdown()` for
+        embedders and tests with no server object of their own.
+        """
+        if self._shutting_down:
+            return True
+        return bool(getattr(self._server, "should_exit", False))
+
+    def begin_shutdown(self) -> None:
+        """Mark the daemon as going down; called by `shutdown()` and any runner.
+
+        Public because a runner that owns the server object may know earlier than
+        the lifespan does (uvicorn fires the lifespan shutdown only AFTER it has
+        finished tearing connections down).
+        """
+        self._shutting_down = True
+
+    def watch_server_exit(self, server: Any) -> None:
+        """Attach the HTTP server this service is served by (see `_daemon_leaving`)."""
+        self._server = server
+
+    def _reconcile_driver_record(self) -> None:
+        """Make the legacy trio name a LISTED identity at daemon start.
+
+        Startup is the one moment the file is authoritative and nothing is
+        attached, so it is where a stale record self-heals instead of being
+        assumed correct: after an out-of-process `pair --revoke` of the identity
+        the trio names, the file would otherwise point at somebody who is no
+        longer authorised, and a rollback would authorise nobody. Repair uses the
+        same order as every other write (the surviving entries, newest first);
+        when the trio already names a listed identity it is left exactly as it
+        is, so an ordinary restart does not touch the file.
         """
         if not _pairing_path(self.root).exists():
             return
         identities = _identities(self.root)
         if not identities:
             return
-        _write_pairing(self.root, identities, driver_id=self._live_driver_id())
+        previous = _previous_record_id(self.root)
+        listed = {str(entry.get("extension_id", "")) for entry in identities}
+        if previous and previous in listed:
+            return
+        _write_pairing(self.root, identities, driver_id="")
 
     def _take_free_wheel(self, link: ExtensionLink) -> ExtensionLink | None:
         """Give a newly PAIRED link the wheel when nothing else holds it.
@@ -1097,7 +1205,15 @@ class BridgeService:
         was_driver = link.generation == self.driver_generation
         self.links.pop(link.generation, None)
         link.disconnect()
-        promoted = self._promote_standby() if was_driver else None
+        # No handover while the daemon is going down (round 2, R2-1, QA's half).
+        # Promoting then would move the wheel for nobody: the process is
+        # exiting, the promoted install will take the wheel on its own next dial
+        # after the restart, and `_record_driver()` would persist a driver the
+        # operator never used — which is how a graceful stop wrote the STANDBY
+        # into the downgrade record and made a rollback refuse the install in use
+        # (flaky: 2/6 SIGTERM runs). The wheel is left pointing at the idle link
+        # by the branch below, so every `self.link` read still says "no driver".
+        promoted = self._promote_standby() if was_driver and not self._daemon_leaving() else None
         if was_driver and promoted is None:
             # Nothing drives now. Point the wheel at the idle link so every
             # `self.link` read says "no driver" from ONE place, rather than
@@ -1610,11 +1726,19 @@ class BridgeService:
         # /health, so that `lop browser status` and the tool's socket probe can
         # both still reach it and report the truth.
         self.publish_safely()
+        # Before serving anybody: if the file the daemon just read names an
+        # identity that is no longer authorised (an out-of-process revoke while
+        # this daemon was down), repair it from the surviving entries — the
+        # downgrade contract must never point at nobody (round 2, R2-1).
+        self._reconcile_driver_record()
         self._heartbeat_task = asyncio.create_task(self._heartbeat())
         self._ping_task = asyncio.create_task(self._ping())
         self._revoke_task = asyncio.create_task(self._watch_revocation())
 
     async def shutdown(self) -> None:
+        # FIRST, before anything closes a socket: a socket ending from here on is
+        # teardown, not a driver loss (see `_record_driver` and `_retire_link`).
+        self.begin_shutdown()
         for task in (self._heartbeat_task, self._ping_task, self._revoke_task):
             if task is not None:
                 task.cancel()
@@ -1910,6 +2034,15 @@ class BridgeService:
             demoted = self.link
             self.driver_generation = generation
         link.role = "driver" if self.driver_generation == generation else "standby"
+        # The wheel moved (or settled) on THIS socket, so the durable record
+        # follows it here too (round 2, R2-1). Both branches above move it: the
+        # free-wheel branch is a cold start — after a restart the first dial
+        # takes the idle wheel, and the file still named whoever drove BEFORE
+        # the restart, so a rollback would authorise that install and refuse the
+        # live one — and the paired-demotes-unpaired branch is the M1 rule. The
+        # call is a no-op when the name would not change, so an ordinary
+        # reconnect that leaves the wheel where it was writes nothing.
+        self._record_driver()
         if demoted is not None:
             # The demoted incumbent holds a live socket and still believes it is
             # driving. The daemon already refuses it commands (it is `self.link`
@@ -3079,7 +3212,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local Operator browser bridge daemon")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args(argv)
-    uvicorn.run(create_app(args.port), host="127.0.0.1", port=args.port, log_level="info")
+    app = create_app(args.port)
+    # Built explicitly rather than via `uvicorn.run` so the service can see the
+    # server going down. uvicorn sets `Server.should_exit` when a stop signal
+    # arrives and only afterwards closes listeners and connection sockets; the
+    # lifespan shutdown event fires LAST. Without that reference the service
+    # cannot tell "a driver's socket ended because we are stopping" from "a
+    # driver's socket ended and a standby should take over", and the wrong answer
+    # writes the standby into the durable downgrade record (round 2, R2-1).
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=args.port, log_level="info"))
+    app.state.bridge.watch_server_exit(server)
+    server.run()
     return 0
 
 

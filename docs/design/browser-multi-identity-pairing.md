@@ -149,10 +149,21 @@ install at `daemon.py:1124-1148`; the send-side `wire=` discipline at
   what #996 hardened.
 - A new socket from a **different** authorised identity is accepted and told
   `role: "standby"`. It receives no `Request` frames. It does not evict.
+- **Paired outranks unpaired.** (Added in remediation round 1 — review finding M1
+  — and recorded here because the lines above did not carry it.) A dial that
+  presents a valid token takes the wheel from an incumbent that is connected but
+  *unpaired*: the cold-start rule below lets such an incumbent hold it, and every
+  session would otherwise answer `not_paired` while an authorised, paired install
+  stood waiting. The reverse is impossible — an unpaired dial never evicts a
+  paired driver, which is decision 4. It is the same refinement
+  `_promote_standby` and `POST /driver` already applied, that the wheel only goes
+  to a link that can serve a command; the handshake was the third place it holds.
 - Cold-start tie-break: **first to complete `hello` drives.** Deliberately not a
   configured priority — a priority list makes the preferred install evict the
   incumbent on *every* one of its reconnects, re-creating §1.4's war at the
   alarm period instead of at 1 Hz. Self-stable beats "correct but flapping".
+  Interaction with the rule above: a token-less dial can still win a cold start,
+  but its win is revocable by the first paired dial.
 - Escape hatch: `lop browser drive <id-or-label>` pins a driver explicitly
   (§8.2). One command, for when the operator cares which one is driving.
 
@@ -818,7 +829,9 @@ Never `.venv/bin/black` / `flake8` / `isort` / `pyright` directly
    not deliver "paired to both at once", which is the request. §2.1.
 
 5. **Driver rule: later-wins WITHIN an identity, incumbency ACROSS identities;
-   cold-start tie-break is first-to-complete-`hello`; `lop browser drive` pins.**
+   cold-start tie-break is first-to-complete-`hello`; `lop browser drive` pins;
+   and a PAIRED dial outranks an unpaired incumbent (§2.1, remediation round 1),
+   so a token-less dial's cold-start win is revocable.**
    *Rejected:* configured source priority (store preferred over unpacked) — the
    preferred install would evict the incumbent on every reconnect, re-creating
    the war at the alarm period. *Rejected:* first-paired — a stable rule that
