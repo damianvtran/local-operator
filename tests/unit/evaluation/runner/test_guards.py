@@ -174,15 +174,16 @@ def test_cost_rate_needs_two_full_windows_then_fires_on_a_spike() -> None:
 
 
 def test_cost_rate_says_so_when_cost_is_unreported() -> None:
-    """A zero previous window (unreported cost, or a free tier) has no rate to
-    exceed. The guard must not silently continue as if it had judged; it
-    names the skip so the ratio check's inertness is visible."""
+    """A zero previous window (a free tier, or a model the harness could not
+    price at all) has no rate to exceed. The guard must not silently continue
+    as if it had judged; it names the skip so the ratio check's inertness is
+    visible."""
 
     guard = CostRateGuard(window=3, ratio=2.0)
     verdict = guard.evaluate(_snapshot(recent_costs_micros=(0, 0, 0, 5, 5, 5)))
     assert verdict.kind == "continue"
     assert verdict.code == "cost-unreported"
-    assert "reported no cost" in verdict.detail
+    assert "priced at zero cost" in verdict.detail
     # The absolute cap still applies without reported ratio data.
     capped = CostRateGuard(window=3, ratio=2.0, max_cycle_cost_micros=4)
     assert capped.evaluate(_snapshot(recent_costs_micros=(0, 0, 0, 5, 5, 5))).kind == "truncate"

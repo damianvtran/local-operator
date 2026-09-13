@@ -189,13 +189,15 @@ class CostRateGuard:
     absolute cap is optional because a sane value depends on the model's
     price, which is the episode config's to know.
 
-    The ratio check needs REPORTED cost. A provider that reports no
-    ``usd_cost`` folds in as 0 (the evidence payload has no "unknown"
-    encoding), and a free tier is genuinely 0; either way a zero previous
-    window has no rate to exceed. Rather than silently returning the generic
-    continue, the guard says so in its verdict (``code="cost-unreported"``)
-    so a reader of the guard's decisions can see the ratio check was skipped,
-    and only ``max_cycle_cost_micros`` remains in force.
+    The ratio check needs a per-cycle cost that priced to something. A window
+    whose cycles all priced at 0 has no rate to exceed: either a genuinely free
+    route, or a model the harness could not price at all (a direct provider's
+    wire states only tokens, so the evidence prices it from the shared table
+    and folds in as 0 when the table has no row -- the evidence payload has no
+    "unknown" encoding). Rather than silently returning the generic continue,
+    the guard says so in its verdict (``code="cost-unreported"``) so a reader
+    of the guard's decisions can see the ratio check was skipped, and only
+    ``max_cycle_cost_micros`` remains in force.
 
     **The ratio is inapplicable to a doubly-capped episode.** When the episode
     declares BOTH an explicit step budget and an explicit provider-cost cap,
@@ -281,7 +283,7 @@ class CostRateGuard:
                 kind="continue",
                 code="cost-unreported",
                 detail=(
-                    f"the previous {self._window} cycles reported no cost, so the"
+                    f"the previous {self._window} cycles priced at zero cost, so the"
                     " cost-rate ratio cannot be judged; only the per-cycle cap applies"
                 ),
             )

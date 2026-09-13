@@ -10,6 +10,7 @@ will take is indistinguishable from one that writes none.
 from __future__ import annotations
 
 import errno
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from local_operator.evaluation.evidence.models import (
     ObservationPayload,
     ReconciliationPayload,
     ScoreArtifact,
+    UsageCostPayload,
 )
 from local_operator.evaluation.evidence.store import EvidenceWriter
 from local_operator.evaluation.evidence.verify import verify_bundle
@@ -36,6 +38,14 @@ from local_operator.evaluation.runner.episode import (
     DISCLOSED_INFRA_METADATA_KEYS,
     MAX_STDERR_TAIL_CHARS,
     EpisodeRunner,
+)
+from local_operator.evaluation.runner.provider_client import ProviderModelClient
+from local_operator.harness.types import (
+    ModelSpec,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamUsageEvent,
+    Usage,
 )
 from tests.unit.evaluation.runner.conftest import (
     ROUTE,
@@ -777,6 +787,97 @@ async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id:
     assert verify_bundle(root).valid
     steps = payloads(root, EnvironmentStepPayload)
     assert [step.truncation_reason for step in steps] == [None, "max-steps"]
+
+
+def _wait_reply(observation_message: Any) -> str:
+    """Reply with a wait bound to whichever observation id the message names."""
+
+    text = observation_message.content[0].text
+    observation_id = next(
+        line.split(": ", 1)[1] for line in text.splitlines() if line.startswith("Observation ID: ")
+    )
+    return json.dumps(
+        {"actions": [{"kind": "wait", "observation_id": observation_id, "duration_ms": 1}]}
+    )
+
+
+class DirectProviderStream:
+    """Answers every request the way a DIRECT provider's API does.
+
+    Tokens, and never a dollar amount -- DeepSeek, Anthropic, OpenAI, Gemini,
+    Kimi and xAI all omit ``usage.cost`` (only aggregators precompute a bill).
+    That omission is the whole point of this fixture: it is the shape the
+    runner used to price at 0.
+    """
+
+    def __call__(self, request: Any, signal: Any) -> Any:
+        return self._events(request)
+
+    async def _events(self, request: Any) -> Any:
+        yield StreamTextDelta(delta=_wait_reply(request.messages[-1]))
+        usage = Usage(
+            input_tokens=4783,
+            output_tokens=443,
+            reasoning_tokens=225,
+            cache_read_tokens=3840,
+            # The on-the-wire spec, as ``stream_with_failover`` stamps it.
+            provider="deepseek",
+            model_id="deepseek-flash",
+        )
+        yield StreamUsageEvent(usage=usage)
+        yield StreamEndEvent(stop_reason="stop", usage=usage)
+
+
+@pytest.mark.asyncio
+async def test_a_direct_providers_table_price_reaches_the_budget_cap(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The cap fires on a table-priced spend, end to end through the real client.
+
+    A direct provider reports tokens and no bill, so before this the episode's
+    ``provider_cost_micros`` stayed 0 and ``BudgetCapGuard`` could never fire:
+    a runaway direct-provider episode was bounded only by its step count. This
+    drives the REAL ``ProviderModelClient`` (scripted wire, real pricing path)
+    through the REAL runner and pins that the priced spend is what truncates.
+
+    The DeepSeek canary tokens price at 838 micro-USD per cycle, so a cap of
+    exactly that figure is reached by the FIRST cycle while the 20-step budget
+    is nowhere near binding -- the cap, not the step count, is what stops this
+    episode. (The cap is reached at its value, ``>=``, not only exceeded: the
+    next cycle would exceed it, and a budget is an authority.)
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    client = ProviderModelClient(
+        DirectProviderStream(),
+        route=ROUTE,
+        model_spec=ModelSpec(provider="deepseek", model_id="deepseek-flash"),
+        artifact_root=tmp_path / "artifacts",
+        prompt_cache_key="probe",
+    )
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 838}),
+        build_config(tmp_path, max_steps=20),
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    # The priced spend is in the journal, not a zero: this is the figure the
+    # cap is enforced on.
+    costs = payloads(root, UsageCostPayload)
+    assert [cost.cost_microusd for cost in costs] == [838]
+    assert payloads(root, ReconciliationPayload)[0].provider_cost_microusd == 838
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 1
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "budget-cap"
 
 
 @pytest.mark.asyncio
