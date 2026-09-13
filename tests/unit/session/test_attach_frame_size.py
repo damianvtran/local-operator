@@ -5486,3 +5486,64 @@ def test_an_unwatched_burst_cannot_starve_a_watched_sibling_of_budget() -> None:
     assert "job-big" not in filtered["job_trajectory_appends"]
     # Scope-dropping needs no replacement marker: the viewer never had those rows.
     assert "job-big" not in filtered["job_trajectory_replacements"]
+
+
+def _bulk_frame(*, others_chars: int, row_chars: int, rows: int = 2, todos_chars: int = 0):
+    """A hand-built payload whose non-trajectory bulk is controllable.
+
+    ``others_chars`` stands in for a roster-heavy frame: on a real one that bulk is
+    the job summaries and usage components, which is exactly the case where the
+    room left under the line limit is SMALLER than the appends' soft budget.
+    """
+    payload: dict[str, Any] = {
+        "epoch": "e1",
+        "sequence": 7,
+        "changes": {"jobs": [{"id": "job0", "label": "child"}], "bulk": "z" * others_chars},
+        "job_trajectory_appends": {
+            "job0": [_payload_event(index, payload_chars=row_chars) for index in range(rows)]
+        },
+        "job_trajectory_replacements": [],
+    }
+    if todos_chars:
+        payload["job_todo_updates"] = {"job0": [{"text": "t" * todos_chars}]}
+    return payload
+
+
+def test_a_near_limit_frame_drops_rows_the_room_cannot_hold() -> None:
+    """The room must bind when it is SMALLER than the soft budget, not only when it
+    is larger.
+
+    Measured by review at the previous head: 800,014 B of non-trajectory payload
+    plus one 250 KB newest row shipped a 1,050,435-byte frame under a
+    1,048,576-byte limit — over the line, i.e. degraded, when dropping the row
+    would have fitted. The soft budget cannot be the floor here: a frame with
+    little room left must ship fewer rows, not overflow.
+    """
+    payload = _bulk_frame(others_chars=800_000, row_chars=250_000)
+    filtered = filter_update_trajectories(
+        payload, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    assert _line_bytes({"op": "frontend_update", "data": filtered}) < _MAX_LINE_BYTES
+    assert filtered["job_trajectory_appends"]["job0"] == []
+    assert "job0" in filtered["job_trajectory_replacements"]
+
+
+def test_todos_count_against_the_room_the_appends_may_spend() -> None:
+    """``job_todo_updates`` rides the same frame and is bounded nowhere, so it has
+    to be measured as part of the rest of the payload: excluding it would overstate
+    the room by exactly the todo payload — a bound that does not count what ships,
+    which is the failure this whole area exists to stop."""
+    rows = 24
+    without = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows)
+    with_todos = _bulk_frame(others_chars=200_000, row_chars=24_000, rows=rows, todos_chars=680_000)
+
+    kept_without = filter_update_trajectories(
+        without, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )["job_trajectory_appends"]["job0"]
+    filtered_with = filter_update_trajectories(
+        with_todos, {"job0"}.__contains__, line_limit_bytes=_MAX_LINE_BYTES
+    )
+    kept_with = filtered_with["job_trajectory_appends"]["job0"]
+
+    assert len(kept_with) < len(kept_without)
+    assert _line_bytes({"op": "frontend_update", "data": filtered_with}) < _MAX_LINE_BYTES
