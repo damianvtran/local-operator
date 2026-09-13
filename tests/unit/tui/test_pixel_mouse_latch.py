@@ -29,11 +29,14 @@ nothing and would leak into sibling suites. Every env-frozen term the gate
 under test reads has to be pinned, or the developer's terminal decides the
 result.
 
-OUT OF SCOPE, deliberately: nothing here asserts behaviour under a terminal that
-genuinely honours mode 1016 and sends true pixel coordinates. On such a terminal
-the divisor is correct and this fix trades it away for a cell-accurate pointer;
-that trade is a product decision recorded in ``terminal_modes``, not a property
-this file tests.
+OUT OF SCOPE, deliberately: nothing DIRECTLY here asserts behaviour under a
+terminal that genuinely honours mode 1016 and sends true pixel coordinates. That
+arm is modelled instead in ``test_pixel_mouse_gate.py`` (the compliant-VT pty
+arm), because it needs a pty that switches scale on observing our write — and it
+is now a supported arm rather than a cost: the fix clears ``?1016l`` alongside
+``?2048l``, so a compliant VT is told to report cells and the pointer stays true
+there as well. The three configurations and why the pair of resets collapses
+them to one are recorded in ``terminal_modes``.
 
 All references pinned to textual 8.2.8; ``_xterm_parser.py`` is
 ``textual/_xterm_parser.py``, and ``drivers/linux_driver.py`` is
@@ -48,6 +51,7 @@ import select
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual import constants, events, messages
@@ -55,7 +59,9 @@ from textual._xterm_parser import XTermParser
 
 from local_operator.tui.terminal_modes import (
     DISABLE_IN_BAND_RESIZE,
+    DISABLE_PIXEL_SCALE_MODES,
     guard_pixel_mouse_latch,
+    pixel_mouse_negotiation_open,
     reset_in_band_resize,
 )
 
@@ -154,6 +160,46 @@ def test_guard_suppresses_in_band_negotiation(monkeypatch: pytest.MonkeyPatch) -
     assert [t for t in unguarded if isinstance(t, messages.InBandWindowResize)] != []
 
 
+@pytest.mark.parametrize(
+    ("smooth_scroll", "is_iterm"),
+    [
+        pytest.param(True, False, id="smooth-scrolling-on"),
+        pytest.param(True, True, id="smooth-scrolling-on-iterm"),
+        pytest.param(False, False, id="smooth-scrolling-off"),
+        pytest.param(False, True, id="smooth-scrolling-off-iterm"),
+    ],
+)
+def test_the_negotiation_mirror_agrees_with_textuals_own_gate(
+    monkeypatch: pytest.MonkeyPatch, smooth_scroll: bool, is_iterm: bool
+) -> None:
+    """The predicate the gate installs on, checked against the REAL branch.
+
+    Both halves of Textual's mode-report gate are asserted here through the
+    parser rather than through a table that restates the expression, because a
+    restatement cannot disagree with itself (review round 1, MINOR-1). The
+    iTerm rows are the ones that matter: a Textual release that drops the
+    ``not IS_ITERM`` clause reddens them here, because those tokens come from the
+    real branch. A second route to ``_enable_mouse_pixels`` (one call site today,
+    ``linux_driver.py:482``, pinned by inspection) would NOT be caught here — it
+    would enable pixel mouse without producing a mode-report token for this
+    comparison — and it would leave our copy silently wrong in the direction this
+    fix exists to prevent: installing the gate, and clearing 1016, while
+    ``?1016h`` is on the wire because we were the ones who asked for it.
+    """
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", smooth_scroll)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", is_iterm)
+
+    negotiated = [
+        token
+        for token in XTermParser().feed(MODE_REPLY_SUPPORTED_BUT_RESET)
+        if isinstance(token, messages.InBandWindowResize)
+    ]
+    assert pixel_mouse_negotiation_open() is bool(negotiated), (
+        "our mirror of Textual's mode-report gate disagrees with what the parser "
+        f"does for SMOOTH_SCROLL={smooth_scroll}, IS_ITERM={is_iterm}"
+    )
+
+
 def test_reply_two_would_re_enable_the_mode() -> None:
     """A bare reset produces exactly the reply that makes Textual undo it.
 
@@ -228,7 +274,12 @@ def test_reset_writes_only_to_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
     tty = _FakeStream(tty=True)
     assert reset_in_band_resize(tty) is True  # type: ignore[arg-type]
-    assert tty.written == DISABLE_IN_BAND_RESIZE == "\x1b[?2048l"
+    # Both modes, as ONE write, in the driver's own re-enable order inverted:
+    # `?2048l` for the report mode, `?1016l` for the pixel-mouse mode a
+    # co-tenant sets with it. Asserted as literal bytes because the wire is the
+    # contract — a constant that drifted would keep this green otherwise.
+    assert tty.written == DISABLE_PIXEL_SCALE_MODES == "\x1b[?2048l\x1b[?1016l"
+    assert DISABLE_IN_BAND_RESIZE == "\x1b[?2048l"
     assert tty.flushes == 1
 
     # A closed or detached stderr must never be what stops the app booting.
@@ -352,12 +403,14 @@ def _capture_boot_bytes(child_source: str, timeout: float = 30.0) -> bytes:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_startup_writes_the_reset_before_the_in_band_query() -> None:
-    """On a real pty the reset precedes the query, and 1016 is never enabled.
+    """On a real pty the resets precede the query, and 1016 is never enabled.
 
     This is the only test that can fail for an ORDERING mistake on the wire.
     The two calls could both be present and still be useless if they landed
     after ``drivers/linux_driver.py:299`` had already asked the terminal about
-    mode 2048.
+    mode 2048 — and the same is true of the ``?1016l`` half, which is why the
+    PAIR (contiguous, one write) is what is located here rather than the 2048
+    sequence alone.
 
     Scope, stated because it was overstated once (review round 3, MINOR 1):
     the child above re-implements the two calls, so this test pins the calls
@@ -373,13 +426,13 @@ def test_startup_writes_the_reset_before_the_in_band_query() -> None:
         f"ordering; captured {len(data)} bytes: {data[:400]!r}"
     )
 
-    reset = DISABLE_IN_BAND_RESIZE.encode()
-    assert reset in data, f"the reset never reached the wire; captured: {data[:400]!r}"
+    pair = DISABLE_PIXEL_SCALE_MODES.encode()
+    assert pair in data, f"the reset pair never reached the wire; captured: {data[:400]!r}"
 
-    reset_at = data.index(reset)
+    resets_at = data.index(pair)
     query_at = data.index(query)
-    assert reset_at < query_at, (
-        f"the reset landed at byte {reset_at}, after the driver's query at {query_at}: "
+    assert resets_at < query_at, (
+        f"the resets landed at byte {resets_at}, after the driver's query at {query_at}: "
         "the terminal was asked before it was told"
     )
 
@@ -515,36 +568,71 @@ def test_the_guard_leaves_a_value_textual_actually_reads(
 #: two calls, so deleting them from ``run_tui`` leaves this file green (review
 #: round 3, MINOR 1). This child calls the REAL ``run_tui`` and stubs the lazy
 #: ``local_operator.tui.app`` import to raise, so its failure lands immediately
-#: after the two calls and nothing has to boot.
+#: after the three calls and nothing has to boot.
 #:
 #: The recorders replace the module attributes ``run_tui`` resolves at call
 #: time, which is what makes this a test of the production path rather than of
 #: the child: remove a call from ``run_tui`` and no recorder fires.
+#:
+#: ``guard`` and ``gate`` are WRAPPERS around the real functions rather than
+#: recorders that return True: both decide for themselves what to do from the
+#: frozen constants, so a stub's return value would make every arm below assert
+#: the same thing.
 _WIRING_CHILD = """
-import asyncio, json, sys, types
+import asyncio, json, os, sys, types
 
 import local_operator.tui as tui
+from local_operator.tui.terminal_modes import pixel_mouse_gate_installed
 
 calls = []
 textual_loaded_at_call = None
 
 
+def _record(name):
+    global textual_loaded_at_call
+    calls.append(name)
+    if textual_loaded_at_call is None:
+        textual_loaded_at_call = any(
+            module == "textual" or module.startswith("textual.")
+            for module in sys.modules
+        )
+
+
 def _recorder(name):
     def _call(*_args, **_kwargs):
-        global textual_loaded_at_call
-        calls.append(name)
-        if textual_loaded_at_call is None:
-            textual_loaded_at_call = any(
-                module == "textual" or module.startswith("textual.")
-                for module in sys.modules
-            )
+        _record(name)
         return True
 
     return _call
 
 
+_real_guard = tui.guard_pixel_mouse_latch
+
+
+def _guard(*args, **kwargs):
+    _record("guard")
+    return _real_guard(*args, **kwargs)
+
+
+# The REAL gate, wrapped rather than stubbed: its whole point is that it decides
+# for itself whether it applies, and a stub returning True would make every
+# shape below assert the same thing. The guard is wrapped for the same reason.
+_real_gate = tui.install_pixel_mouse_gate
+
+
+def _gate(*args, **kwargs):
+    _record("gate")
+    return _real_gate(*args, **kwargs)
+
+
 tui.reset_in_band_resize = _recorder("reset")
-tui.guard_pixel_mouse_latch = _recorder("guard")
+tui.guard_pixel_mouse_latch = _guard
+tui.install_pixel_mouse_gate = _gate
+
+
+inherited = sys.argv[1]
+if inherited:
+    os.environ["TEXTUAL_SMOOTH_SCROLL"] = inherited
 
 
 class _NoApp(types.ModuleType):
@@ -559,24 +647,28 @@ try:
 except ImportError:
     pass
 
-print(json.dumps({"calls": calls, "textual_loaded_at_call": textual_loaded_at_call}))
+print(
+    json.dumps(
+        {
+            "calls": calls,
+            "installed": pixel_mouse_gate_installed(),
+            "textual_loaded_at_call": textual_loaded_at_call,
+        }
+    )
+)
 """
 
 
-def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> None:
-    """The wiring, which the pty ordering test cannot see (review round 3, MINOR 1).
+def _run_wiring_child(tmp_path: Path, inherited: str) -> dict[str, Any]:
+    """Run the real ``run_tui`` with ``TEXTUAL_SMOOTH_SCROLL`` as given.
 
-    ``_capture_boot_bytes``'s child re-implements the two calls, so both could be
-    deleted from ``run_tui`` with the whole file green — a plausible refactor
-    (moving them below the lazy import) would silently restore the reported bug.
-    This calls the REAL ``run_tui`` and stubs only the ``local_operator.tui.app``
-    import to raise, so the failure lands immediately after the two calls: with
-    either call missing, or with the calls moved below the import, ``calls``
-    comes back short and this goes red.
-
-    ``textual_loaded_at_call`` is the guard's precondition, asserted at the
-    moment the first call ran rather than inferred afterwards: the guard is
-    inert if ``textual.constants`` is already in ``sys.modules``.
+    ``inherited`` is ``""`` for absent: the child needs to distinguish absent
+    from an empty string, which is one of the shapes the guard deliberately
+    treats as absent, so it is passed as an argv value rather than through the
+    environment. The child's environment is built for it and carries no
+    ``TEXTUAL_SMOOTH_SCROLL`` of its own, so the three shapes here are the three
+    shapes under test — a developer whose shell exports ``0`` cannot make the
+    absent row pass for the wrong reason.
     """
     import json
     import subprocess
@@ -587,7 +679,7 @@ def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> Non
         "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".local-operator"),
     }
     out = subprocess.run(
-        [sys.executable, "-c", _WIRING_CHILD],
+        [sys.executable, "-c", _WIRING_CHILD, inherited],
         capture_output=True,
         text=True,
         cwd=_REPO_ROOT,
@@ -595,7 +687,62 @@ def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> Non
         timeout=120,
     )
     assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
 
-    result = json.loads(out.stdout)
-    assert result["calls"] == ["reset", "guard"], result
+
+def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> None:
+    """The wiring, which the pty ordering test cannot see (review round 3, MINOR 1).
+
+    ``_capture_boot_bytes``'s child re-implements the two calls, so both could be
+    deleted from ``run_tui`` with the whole file green — a plausible refactor
+    (moving them below the lazy import) would silently restore the reported bug.
+    This calls the REAL ``run_tui`` and stubs only the ``local_operator.tui.app``
+    import to raise, so the failure lands immediately after the calls: with any
+    of them missing, or with the calls moved below the import, ``calls`` comes
+    back short and this goes red.
+
+    ``textual_loaded_at_call`` is the guard's precondition, asserted at the
+    moment the first call ran rather than inferred afterwards: the guard is
+    inert if ``textual.constants`` is already in ``sys.modules``.
+    """
+    result = _run_wiring_child(tmp_path, "")
+
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is True, result
+    assert result["textual_loaded_at_call"] is False, result
+
+
+def test_run_tui_installs_the_gate_for_an_inherited_zero(tmp_path: Path) -> None:
+    """The recommended configuration must not lose the gate.
+
+    ``TEXTUAL_SMOOTH_SCROLL=0`` is what the operator's own runtime exports, what
+    a ``replace_self`` re-entry inherits, and what our documentation tells users
+    to set. The guard DEFERS to it — it is an integer Textual honours — so this
+    is the row that fails if the install is keyed on the guard's return value
+    instead of on the negotiation, which is exactly what it used to do.
+    """
+    result = _run_wiring_child(tmp_path, "0")
+
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is True, result
+    assert result["textual_loaded_at_call"] is False, result
+
+
+def test_run_tui_installs_nothing_while_textual_negotiates_pixel_mouse(
+    tmp_path: Path,
+) -> None:
+    """``TEXTUAL_SMOOTH_SCROLL=1`` on a non-iTerm terminal keeps upstream.
+
+    That user's textual still negotiates pixel mouse, so a delivered report IS a
+    statement about their coordinates and the divisor is correct: the gate must
+    install nothing, and the re-clean must not fire (it is keyed on the gate
+    being in force). The call is still MADE — the refusal lives inside it, so no
+    caller can install the gate in a configuration where upstream behaviour is
+    the right answer — which is why the sequence assertion below stays at three
+    calls and the meaning is carried by ``installed``.
+    """
+    result = _run_wiring_child(tmp_path, "1")
+
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is False, result
     assert result["textual_loaded_at_call"] is False, result
