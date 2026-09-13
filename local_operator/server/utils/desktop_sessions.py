@@ -63,6 +63,18 @@ REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
 SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
+#: The BRIDGE's subscription lease: what the renderer renews with a heartbeat,
+#: and how long a bridge-backed warm intent lives with no beat behind it.
+#:
+#: NOT the runtime's lifetime, which is the runtime-side
+#: ``DESKTOP_WATCH_LEASE_S`` (``session/runtime/types.py``), read a third time by
+#: the dial (``attached.py::_dial``). The two are 45 s by agreement rather than by
+#: construction, and since a live visible lease now CREATES the runtime, a
+#: mismatch is not cosmetic: if this one were raised alone the bridge would keep
+#: a lease it calls live while the reaper had already stopped counting the
+#: viewer, so the warmed runtime would idle out under a window still waiting to
+#: use it. Change them together, or make one derive from the other (review round
+#: 1: the architect's cross-reference nit on these two constants).
 WATCH_TTL = 45.0
 
 #: Pace of the lease-driven warm, in three parts, because a warm that cannot
