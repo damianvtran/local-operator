@@ -25,6 +25,7 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
+from local_operator.harness.rows import is_harness_chrome
 from local_operator.harness.types import (
     AbortSignal,
     AgentEndEvent,
@@ -3255,8 +3256,12 @@ async def test_connectivity_loss_after_deltas_continues_the_turn() -> None:
     assert on_screen == "The answer is 42."
 
     # A visible notice explains the seam rather than the text silently jumping.
+    # Its wording names what the loop KNOWS (the stream stopped mid-answer and
+    # the turn is being resumed) rather than a cause: this one branch also serves
+    # an aggregator whose upstream host died, where the machine's network is
+    # fine.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
-    assert any("network connection lost" in text for text in notices)
+    assert any("response stream cut mid-answer" in text for text in notices)
 
     # THE NO-DUPLICATION INVARIANT, asserted structurally: the retry carries the
     # partial answer as HISTORY, so the model writes the remainder instead of
@@ -3356,7 +3361,7 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
     # its position, rather than three identical claims of a reconnection.
     notices = [e.text for e in events if isinstance(e, NoticeEvent)]
     assert notices == [
-        f"network connection lost mid-response — retrying ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
+        f"response stream cut mid-answer — resuming the turn ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
 
@@ -3583,6 +3588,10 @@ async def test_aggregator_cut_mid_call_tells_the_model_the_call_was_aborted() ->
     assert "write" in instruction
     assert "aborted" in instruction
     assert "issue the call again from scratch" in instruction
+    # ...and replay must not paint it as the operator's own words: the composed
+    # shape the loop persists has to be recognised by the one shared chrome
+    # decision every surface folds through (round-1 M1).
+    assert is_harness_chrome(instruction)
     # The prose half is still there, so a cut in BOTH places gets both rules.
     assert loop_module.CONNECTIVITY_CONTINUATION_PROMPT in instruction
     # Persisted too, so a resumed session can explain the seam.

@@ -246,9 +246,11 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
 #: that message is assembled by the client from several fields
 #: (``metadata.error_type``, the relay sentence, the upstream's JSON-encoded
 #: ``raw``) and the order and casing are the aggregator's formatting, not part
-#: of the signal. Deliberately NARROW: a 5xx that names none of these is left
-#: exactly as it was, because "the gateway 500ed" with no evidence about WHAT
-#: failed is not a routing failure we are entitled to replay.
+#: of the signal. Deliberately NARROW: a 5xx that names none of these and carries
+#: no relay envelope — see :func:`is_aggregator_upstream_stream_failure` for that
+#: second, provenance-shaped piece of evidence — is left exactly as it was,
+#: because "the gateway 500ed" with no evidence about WHAT failed is not a routing
+#: failure we are entitled to replay.
 _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
     "provider_unavailable",
     "upstream error from",
@@ -1041,6 +1043,31 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
     moderation — and it is deterministic in its bytes, so re-asking earns the
     same answer while spending the turn's continuation budget. Only a 5xx is a
     statement about the gateway's own side of the hop.
+
+    A 5xx qualifies on EITHER of two kinds of evidence, and the second exists
+    because the first cannot cover the incident's whole class:
+
+    - the routing/transport WORDING in
+      :data:`_AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS`, when the upstream
+      host said something the markers recognise; or
+    - the relay ENVELOPE's own sentence (``clients.RELAY_ENVELOPE_MARKER``),
+      which is the gateway saying it is passing on an upstream provider's
+      failure. That is PROVENANCE rather than wording, so it stands however
+      opaque or unfamiliar the upstream host's body was — the case that stayed
+      terminal while every fixture started from the marker-bearing body, i.e.
+      the same incident waiting to happen again on a bare ``"ERROR"``.
+
+    Two shapes keep the pre-fix behaviour, recorded as decisions rather than
+    leftovers:
+
+    - a 5xx carrying NEITHER evidence; and
+    - ``503: no available model for this request``, a capacity/routing
+      condition. A re-issue could genuinely route around it, so admitting it is
+      arguable — but it makes no claim that anything DIED, and reading a routing
+      report out of it would be inferring the gateway's mood rather than its
+      words. Terminal costs the pre-existing behaviour (the operator reads the
+      gateway's own diagnostic); admitting it would spend the continuation
+      budget on what may be a property of the request's routing preferences.
     """
     if provider is None or not isinstance(error, ProviderError):
         return False
@@ -1052,8 +1079,20 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
         return False
     if error.status is None or error.status < 500:
         return False
+    # Imported at call time for the same reason as `registry` above: `clients`
+    # imports THIS module at module scope for `ProviderError`, so the reverse
+    # edge is deliberately taken late, from a frame that only runs once both
+    # modules are loaded.
+    from local_operator.providers.clients import RELAY_ENVELOPE_MARKER
+
     lowered = error.message.lower()
-    return any(marker in lowered for marker in _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS)
+    if any(marker in lowered for marker in _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS):
+        return True
+    # The envelope is the second kind of evidence: the gateway's own sentence
+    # saying it is relaying an UPSTREAM provider's failure. Sourced from the
+    # module that mints it rather than re-spelled here, because two copies of
+    # the wording would drift into disagreeing about what a relay looks like.
+    return RELAY_ENVELOPE_MARKER in lowered
 
 
 def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None = None) -> None:
@@ -1075,7 +1114,12 @@ def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None 
     * :func:`is_aggregator_upstream_stream_failure` — a gateway reporting its
       own upstream host dying in band. ``provider`` is the selector's provider,
       passed in by the driver because the predicate needs the identity and this
-      helper cannot recover it from the error.
+      helper cannot recover it from the error. Only the forwarded-any
+      ``ProviderError`` arm passes it: that is the arm an aggregator's IN-BAND
+      report arrives on. The transport arm deliberately calls this bare —
+      ``wrap_transport_error``'s result is status-less by construction, so the
+      aggregator predicate cannot fire there and passing a provider would only
+      suggest it could.
 
     Never clears the flag — a pre-connect connectivity loss that somehow
     surfaces here is still one. Only ever an upgrade.
@@ -3192,6 +3236,12 @@ async def stream_with_failover(
                     # catches httpx, so a socket that dies mid-body reaches here
                     # raw as `ReadError`/`RemoteProtocolError`/`ReadTimeout`.
                     # Mark it continuable before it leaves — see the sibling arm.
+                    #
+                    # `provider` is deliberately NOT passed here (unlike the
+                    # sibling arm): `wrap_transport_error`'s result is
+                    # status-less by construction, so the aggregator predicate it
+                    # would feed cannot fire, and naming one would read as if
+                    # this arm could classify an in-band gateway failure.
                     _mark_mid_stream_connectivity(wrapped)
                     raise wrapped from exc
                 record(wrapped, primary=is_primary)
