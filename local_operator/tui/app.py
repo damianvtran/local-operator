@@ -12774,19 +12774,30 @@ class OperatorApp(App[None]):
     #: needs the view on screen to be connected.
     #:
     #: WHICH ARMS THIS SET LANDS IN, named rather than inferred (review MINOR-a,
-    #: round 2). The refusals that need an owner are checked BEFORE this set is
-    #: consulted (``_session_transition_pending``, ``_model_activation_pending``,
-    #: shell mode, an open aside). ``_source_commands_ready`` asks a different
-    #: question — can the SOURCE serve a request — and its three false arms (a
-    #: pending command frame, a navigation in flight, a retired source) admit
-    #: every entry here; that exemption is the contract, not an oversight.
+    #: round 2, extended in round 3 to cover the arm that matters most). The
+    #: refusals that need an owner are checked BEFORE this set is consulted
+    #: (``_session_transition_pending``, ``_model_activation_pending``, shell
+    #: mode, an open aside). ``_source_commands_ready`` asks a different question
+    #: — can the SOURCE serve a request — and ALL FOUR of its false arms
+    #: (``display_only``, a pending command frame, a navigation in flight, a
+    #: retired source) admit every entry here. ``display_only`` is the one that
+    #: matters in practice and the reason this paragraph exists: it IS the state
+    #: every verdict arm above is in, so without the entry the app would name a
+    #: command it refuses.
+    #:
+    #: The other three are measured at the GATE, not on a keystroke, and the
+    #: difference is stated rather than blurred: on the real ``select()`` path a
+    #: navigation in flight arms ``_session_transition_pending`` first, so an
+    #: actual Enter is refused before the allowlist is read. The gate admits
+    #: ``/resume`` in all four arms (``_source_commands_ready()`` measured False
+    #: in each); the keystroke admits it only where the four pre-checks in
+    #: ``composer_submission_blocked`` are clear.
+    #:
     #: ``/resume`` is the only entry that starts a session transition, and the
     #: transition is why the exemption is safe rather than merely tolerated:
     #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
     #: in flight resolves to the session the user asked for, and a command frame
-    #: is ended by the transition instead of raced with it. Measured in the
-    #: stopped state with ``_source_commands_ready()`` False in all three: the
-    #: gate admits ``/resume`` and the dispatcher reaches the handler.
+    #: is ended by the transition instead of raced with it.
     _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings", "/resume"})
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
@@ -39046,7 +39057,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 110
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 111
     public members, and a positive ``isinstance`` walks every one of them.
     Measured on an arm64 host, CPython 3.12.13, min-of-seven over 2,000
     iterations:
