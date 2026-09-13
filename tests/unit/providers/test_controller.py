@@ -2292,3 +2292,212 @@ async def test_live_catalogue_fetches_providers_in_parallel(controller, store, m
     entries, statuses = await controller.live_catalogue()
     # Concurrency should be greater than 1 since providers are gathered
     assert max_concurrency > 1, f"Expected concurrent calls, got max_concurrency={max_concurrency}"
+
+
+def test_persisted_providers_excludes_an_env_only_provider(controller, monkeypatch) -> None:
+    """The rung that separates this from ``usable_providers``, and why it exists.
+
+    An env key is a working credential for a LOCAL turn — the stream-time cascade
+    resolves it — which is why ``usable_providers`` counts it. It is not consent
+    for a REMOTE picker: the mobile daemon is launched by a service manager whose
+    environment the phone's user never chose and cannot see, so an inherited
+    ``DEEPSEEK_API_KEY`` would silently add an account to a sheet reachable over
+    a tunnel.
+    """
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
+
+    usable = controller.usable_providers()
+    persisted = controller.persisted_providers()
+    assert usable is not None and persisted is not None
+    assert "deepseek" in usable, "the local cascade runs on it"
+    assert "deepseek" not in persisted, "nobody persisted it"
+
+
+def test_persisted_providers_excludes_a_keyless_local_provider(controller, monkeypatch) -> None:
+    """``allows_missing_api_key`` means usable with no credential at all, which is
+    the whole point of running a local Ollama — and exactly why it must not be
+    advertised remotely: keyless readiness is not evidence a server is running,
+    and the phone cannot reach the owner's loopback anyway."""
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    usable = controller.usable_providers()
+    persisted = controller.persisted_providers()
+    assert usable is not None and persisted is not None
+    assert "ollama" in usable
+    assert "ollama" not in persisted
+
+
+def test_persisted_providers_includes_a_stored_login(controller, store, monkeypatch) -> None:
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    store.upsert_credential("anthropic", {"access": "tok", "refresh": "ref", "type": "oauth"})
+    persisted = controller.persisted_providers()
+    assert persisted is not None
+    assert "anthropic" in persisted
+
+
+@pytest.mark.parametrize(
+    ("key_name", "provider_id"),
+    [
+        # The plain-string ``env_keys`` form.
+        ("OPENROUTER_API_KEY", "openrouter"),
+        ("OPENAI_API_KEY", "openai"),
+        # The CALLABLE form. Parametrizing over both forms is the point of this
+        # case rather than tidiness: a reader built on ``env_key_name`` alone
+        # resolves every string provider and silently drops the callable one, so
+        # a single string-keyed case passes over a reader that loses the only
+        # provider using the other form.
+        ("ANTHROPIC_API_KEY", "anthropic"),
+    ],
+)
+def test_persisted_providers_includes_a_legacy_credential_manager_key(
+    controller, monkeypatch, tmp_path, key_name, provider_id
+) -> None:
+    """``lop credential update`` writes the legacy file, ``/login`` writes auth.db.
+
+    A reader consulting only one of the two hides every provider configured
+    through the other, and both are sanctioned flows.
+    """
+    from local_operator.credentials import CredentialManager
+
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    manager = CredentialManager(tmp_path)
+    manager.set_credential(key_name, "sk-persisted")
+    controller.credential_manager = manager
+
+    persisted = controller.persisted_providers()
+    assert persisted is not None
+    assert provider_id in persisted
+
+
+def test_persisted_providers_ignores_an_empty_legacy_value(
+    controller, monkeypatch, tmp_path
+) -> None:
+    """A key present but blank is not a credential; the legacy file keeps such
+    rows, and treating one as a login sends the picker fetching anonymously."""
+    from local_operator.credentials import CredentialManager
+
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    manager = CredentialManager(tmp_path)
+    manager.set_credential("OPENROUTER_API_KEY", "")
+    controller.credential_manager = manager
+
+    persisted = controller.persisted_providers()
+    assert persisted is not None
+    assert "openrouter" not in persisted
+
+
+def test_persisted_providers_suppresses_a_secondary_flavour_when_oauth_is_active(
+    controller, store
+) -> None:
+    """Same suppression ``usable_providers`` performs: one account, offered once."""
+    store.upsert_credential("radient", {"access": "token", "type": "oauth"})
+    persisted = controller.persisted_providers()
+    assert persisted is not None
+    assert "radient" in persisted
+    assert "radient-key" not in persisted
+
+
+def test_persisted_providers_answers_none_on_an_unreadable_store(controller, store) -> None:
+    """ "I could not look" is not "you have nothing" — see ``picker_rows``, which
+    shows every model on ``None`` rather than claiming an empty inventory."""
+
+    def boom(provider=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.list_credentials = boom  # type: ignore[assignment]
+    assert controller.persisted_providers() is None
+
+
+def test_persisted_providers_reraises_cross_thread_misuse(controller, store) -> None:
+    """A connection used from the wrong thread is a BUG in the caller, not an
+    environment fact. It must not dress itself as the unreadable-store
+    degradation, which would silently label every model connected (D18)."""
+
+    def boom(provider=None):
+        raise sqlite3.ProgrammingError("SQLite objects created in a thread...")
+
+    store.list_credentials = boom  # type: ignore[assignment]
+    with pytest.raises(sqlite3.ProgrammingError):
+        controller.persisted_providers()
+
+
+@pytest.mark.asyncio
+async def test_live_catalogue_without_a_providers_argument_is_unchanged(
+    controller, store, monkeypatch
+) -> None:
+    """The default has to stay byte-identical: every existing caller passes no
+    ``providers``, and the narrowing was added for one new caller only."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
+
+    from local_operator.providers.registry import PROVIDER_REGISTRY
+
+    entries, statuses = await controller.live_catalogue()
+    fetched = {provider for provider, _ttl in calls}
+    assert len(fetched) > 1, "the whole registry is still enumerated"
+    assert "anthropic" in {entry.provider for entry in entries}
+    # Every provider reports a status, including the local ones that resolve a
+    # base URL and return before any listing call — so ``statuses`` is the
+    # registry, not the subset that made a request.
+    assert set(statuses) == {definition.id for definition in PROVIDER_REGISTRY}
+
+
+@pytest.mark.asyncio
+async def test_live_catalogue_narrows_to_the_named_providers(
+    controller, store, monkeypatch
+) -> None:
+    """A caller that has already decided which accounts it may speak for says so,
+    and nothing outside that set is contacted or reported."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    store.upsert_credential("openrouter", {"key": "sk-or", "type": "api_key"})
+    calls = _spy_available_models(
+        monkeypatch, live={"anthropic": ["claude-opus-5"], "openrouter": ["vendor/model"]}
+    )
+
+    entries, statuses = await controller.live_catalogue(providers={"anthropic"})
+    assert {provider for provider, _ttl in calls} == {"anthropic"}
+    assert set(statuses) == {"anthropic"}
+    assert {entry.provider for entry in entries} == {"anthropic"}
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_empty_set_fetches_nothing(controller, store, monkeypatch) -> None:
+    """``set()`` is honoured literally. An owner logged in to nothing is a real
+    state with a real answer; falling back to the whole registry would turn the
+    strictest case into the loosest one."""
+    store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
+    calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
+
+    entries, statuses = await controller.live_catalogue(providers=set())
+    assert calls == []
+    assert entries == []
+    assert statuses == {}
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
+    controller, store, monkeypatch
+) -> None:
+    """``connected`` follows the CALLER's determination for an admitted id.
+
+    ``usable_providers`` has no legacy ``credentials.env`` rung, so a provider
+    configured with ``lop credential update`` came back unconnected, listed
+    anonymously, and the phone's sheet showed it empty — with a credential on
+    disk the whole time. Narrowing must not be the reason rows disappear.
+    """
+    from local_operator.credentials import CredentialManager
+
+    for name in _USAGE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    calls = _spy_available_models(monkeypatch, live={"openrouter": ["vendor/model"]})
+
+    entries, _statuses = await controller.live_catalogue(providers={"openrouter"})
+    assert [provider for provider, _ttl in calls] == ["openrouter"]
+    assert [entry.selector for entry in entries] == ["openrouter/vendor/model"]
+    assert all(entry.connected for entry in entries)
+    assert isinstance(CredentialManager, type)
