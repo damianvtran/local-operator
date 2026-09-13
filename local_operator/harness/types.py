@@ -1927,6 +1927,41 @@ class ModelSpec(BaseModel):
     # guess: compatibility providers may serve the same model id while exposing
     # only chat/completions.
     supports_responses_api: bool = False
+    # DeepSeek's THINKING MODE refuses a request that does not carry back the
+    # reasoning the conversation already produced: EVERY assistant turn in the
+    # request must have a non-blank ``reasoning_content``, and one blank turn
+    # fails the whole request with HTTP 400 -- "The `reasoning_content` in the
+    # thinking mode must be passed back to the API."
+    #
+    # This is a property of the REQUEST, not of a single turn, and it is not
+    # something the harness can satisfy out of its own history. Measured live
+    # against ``api.deepseek.com/v1`` (2026-09-12, ``deepseek-flash``, thinking
+    # on): a tool-loop history whose assistant turns carry no
+    # ``reasoning_content`` key 400s 8/8, the same body with the key on every
+    # assistant turn answers 200, and filling only SOME of them 400s. What the
+    # validator reads is the key's PRESENCE rather than its text -- a body whose
+    # assistant turns all carry ``reasoning_content: ""`` answered 200 on one
+    # shape where the same body with the keys absent 400ed -- so the harness
+    # sends a real sentence rather than a blank, which is leniency no replica
+    # has promised (see ``replay.REASONING_ECHO_PLACEHOLDER``).
+    #
+    # The turns with nothing to carry back are ordinary: the model produced no
+    # reasoning at all (no ``usage.reasoning_tokens``) on ~29% of the assistant
+    # turns in the session that reported this (``9daa47ece7ad``, 66 of 230 turns
+    # in the request built at the point of failure), and a turn whose native
+    # payload was dropped -- by an edit, a truncation/abort, or a model,
+    # endpoint or credential-scope change (see ``providers.replay``) -- has none
+    # either. DeepSeek accepts a placeholder for those, so the fix is compliance
+    # at the wire layer rather than better capture.
+    #
+    # Derived in ``build_model_spec`` like every other capability here, so no
+    # wire client has to recognise a model name: it is set for the
+    # DeepSeek-HOSTED thinking-mode family on the direct ``deepseek`` route, and
+    # deliberately not for OpenRouter's route to the same weights (measured: an
+    # OpenRouter request of exactly this shape answers 200, the aggregator does
+    # not run this validator) nor for the legacy ``deepseek-chat`` /
+    # ``deepseek-reasoner`` rows.
+    requires_reasoning_echo: bool = False
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     # ``None`` means OMIT: send no key at all and let the vendor's own default
     # apply. That is now the common case rather than an exotic one — most

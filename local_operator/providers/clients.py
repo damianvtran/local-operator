@@ -67,8 +67,10 @@ from local_operator.model.speed import (
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import (
+    REASONING_ECHO_PLACEHOLDER,
     credential_scope,
     native_payload,
+    reasoning_echo_placeholder_tokens,
     replay_items,
 )
 
@@ -1769,6 +1771,40 @@ def _deepseek_tool_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]
     return output
 
 
+def _echo_reasoning_content(entry: dict[str, Any]) -> bool:
+    """Give one rendered assistant turn the reasoning echo its route requires.
+
+    Called only for a model whose ``requires_reasoning_echo`` is set, whose wire
+    validator reads the echo on EVERY assistant turn of the request. Returns
+    whether this turn took the PLACEHOLDER, which is what the caller counts for
+    context calibration -- a turn that already carries real reasoning, or that
+    has some recorded thought to echo instead, costs nothing extra here.
+
+    The role check is load-bearing rather than defensive: the validator reads
+    ``reasoning_content`` on ASSISTANT turns, and the key is meaningless (or
+    rejected) on a user or tool entry, so a helper that filled every entry it
+    was handed would put the field on messages that never had reasoning at all.
+
+    The recorded-text preference is not decoration: a reply whose reasoning was
+    stored under the compat ``reasoning`` key (some routes emit both) must still
+    be echoed as the real thing rather than replaced by a placeholder that says
+    the harness lost it. Only when there is nothing at all to echo does the
+    placeholder go in, because the alternative -- leaving it blank -- is an HTTP
+    400 for the whole request, not for this turn.
+    """
+    if entry.get("role") != "assistant":
+        return False
+    value = entry.get("reasoning_content")
+    if isinstance(value, str) and value.strip():
+        return False
+    recorded = entry.get("reasoning")
+    if isinstance(recorded, str) and recorded.strip():
+        entry["reasoning_content"] = recorded
+        return False
+    entry["reasoning_content"] = REASONING_ECHO_PLACEHOLDER
+    return True
+
+
 def _message_to_openai(message: Message) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -2241,11 +2277,14 @@ class OpenAICompatClient:
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
-        request = bind_native_context(
-            request, endpoint, "openai-chat", scope, _estimate_slope(request.model)
-        )
         direct_deepseek = request.model.provider == "deepseek"
         messages = self._system_messages(request)
+        # DeepSeek's thinking mode fails the WHOLE request when any assistant
+        # turn carries no reasoning back (see
+        # ``ModelSpec.requires_reasoning_echo``), so the echo is applied here,
+        # at the one boundary where the wire history is rendered, and real
+        # recorded reasoning always wins over the placeholder.
+        echo_turns = 0
         for message in request.messages:
             entry = self._replay_chat_message(message, request.model, endpoint, scope)
             # DeepSeek tool requests replay ALL prior native reasoning, even a
@@ -2258,7 +2297,22 @@ class OpenAICompatClient:
             )
             if _is_empty_assistant(message) and not native_reasoning:
                 continue
+            if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
+                echo_turns += 1
             messages.append(entry)
+        # Admission is finalized AFTER the render, so the placeholders the body
+        # just added are counted as the input they are -- the model reads the
+        # echo and the provider bills it. ``_effective_max_tokens`` below reads
+        # the hint this sets, and rendering reads only the model, the messages
+        # and the system blocks, none of which the bind writes.
+        request = bind_native_context(
+            request,
+            endpoint,
+            "openai-chat",
+            scope,
+            _estimate_slope(request.model),
+            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens(),
+        )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
         elif request.model.supports_prompt_cache:

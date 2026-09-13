@@ -16,6 +16,38 @@ from typing import Any
 
 from local_operator.harness.types import Message, ModelSpec
 
+#: What a model that REQUIRES a reasoning echo is sent for an assistant turn the
+#: harness has no reasoning for. See ``ModelSpec.requires_reasoning_echo`` for
+#: why the requirement is on the request rather than on a turn, and for the live
+#: measurements.
+#:
+#: Deliberately a visible sentence rather than an empty string or a space. The
+#: corpus on what the validator reads is thin and contradictory -- measured
+#: 2026-09-12, one all-blank body answered 200 where the same body with the keys
+#: ABSENT answered 400, which says the key's presence is what is checked, and an
+#: earlier shape of the same history answered 400 for both. A blank therefore
+#: relies on leniency no replica has promised, and it is also a value an
+#: intermediary could normalise away; text cannot be normalised into absence.
+#: It is deliberately not a harness bookkeeping word either -- the API
+#: concatenates the echo into the model's context, so this text is READ by the
+#: model and BILLED as input, and a phrase like "payload" or "details" would
+#: collide with the names the harness uses for its own provider state
+#: (``provider_payload["details"]`` and friends, which are never shipped). The
+#: cost is real but small: 23 characters on each assistant turn that lacked
+#: reasoning (66 of 230 turns in the session that reported this), counted by
+#: ``bind_native_context`` on the same ruler it uses for replayed reasoning.
+REASONING_ECHO_PLACEHOLDER = "[thinking not recorded]"
+
+
+def reasoning_echo_placeholder_tokens() -> int:
+    """Token estimate for one echo placeholder, on the counting ruler used here.
+
+    Held next to the constant so the body builder (which spends it) and
+    ``providers.context`` (which counts it) cannot drift into disagreeing about
+    what a placeholder costs.
+    """
+    return max(1, len(REASONING_ECHO_PLACEHOLDER) // 4)
+
 
 def credential_scope(api_key: str | None, oauth_access: Any = None) -> str:
     """Opaque identity, never the credential, for native-state provenance.

@@ -4845,3 +4845,50 @@ class TestTheConfiguredEffortClamp:
                 "openai", "gpt-5.4", mock_credential_manager, reasoning_effort="low"
             )
         assert config.spec.reasoning_effort == "medium"
+
+
+# ---------------------------------------------------------------------------
+# The DeepSeek thinking-mode reasoning echo
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("hosting", "model_name", "expected"),
+    [
+        # The direct route's thinking-mode family: every id that renders the V4
+        # thinking template, INCLUDING the pinned snapshot that ships no effort
+        # ladder, because the validator is a property of the template.
+        ("deepseek", "deepseek-flash", True),
+        ("deepseek", "deepseek-v4-flash", True),
+        ("deepseek", "deepseek-v4-pro", True),
+        ("deepseek", "deepseek-v4-flash-0731", True),
+        ("deepseek", "deepseek-v4-flash-vision-exp", True),
+        # A future snapshot of the same family is covered by the family rule
+        # rather than by a list someone has to remember to extend.
+        ("deepseek", "deepseek-v4-flash-1130", True),
+        # The legacy rows must NOT get it: the non-thinking chat model does not
+        # demand the echo, and the R1-era reasoner REJECTED an input
+        # ``reasoning_content`` outright, so a placeholder there would be the
+        # very 400 this capability prevents.
+        ("deepseek", "deepseek-chat", False),
+        ("deepseek", "deepseek-reasoner", False),
+        # The same weights behind an aggregator keep it off: measured, an
+        # OpenRouter request without the echo answers 200, so the requirement is
+        # the route's, not the model's.
+        ("openrouter", "deepseek/deepseek-v4-flash", False),
+        ("openrouter", "deepseek/deepseek-v4-flash-0731", False),
+        # And no other family gains a DeepSeek-only field.
+        ("openai", "gpt-5.2", False),
+        ("anthropic", "claude-opus-5", False),
+    ],
+)
+def test_reasoning_echo_capability_is_derived_per_route(hosting, model_name, expected):
+    assert build_model_spec(hosting, model_name).requires_reasoning_echo is expected
+
+
+def test_reasoning_echo_defaults_off_for_a_hand_built_spec():
+    """Every embedder and test double that builds a ModelSpec by hand keeps
+    today's body: the capability only ever arrives by derivation."""
+    assert (
+        ModelSpec(provider="deepseek", model_id="deepseek-flash").requires_reasoning_echo is False
+    )

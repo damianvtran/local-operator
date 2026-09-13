@@ -471,6 +471,24 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
 _OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
 
+#: The DeepSeek-hosted models that run DeepSeek's THINKING MODE, and therefore
+#: demand the reasoning echo documented on ``ModelSpec.requires_reasoning_echo``
+#: (with the live measurements behind it).
+#:
+#: A FAMILY rule rather than a set of ids, for two reasons. The dated snapshots
+#: are real ids a user can pin -- ``deepseek-v4-flash-0731`` is a shipped row
+#: here and ``/models`` lists whatever the vendor currently serves -- and every
+#: one of them renders the same thinking-mode template, so a literal set would
+#: 400 the moment a new snapshot shipped. And the two legacy rows must stay OFF
+#: for the opposite reason: ``deepseek-chat`` is the non-thinking chat model,
+#: and ``deepseek-reasoner`` predates this validator -- the R1-era API REJECTED
+#: an input ``reasoning_content`` outright, so a placeholder sent there would be
+#: the very 400 this capability exists to prevent.
+#:
+#: Anchored (unlike the boundary-marker table, which must absorb aggregator
+#: prefixes) because the capability is only ever set on the direct route.
+_DEEPSEEK_THINKING_MODELS = re.compile(r"^deepseek-(?:flash|v4)(?:-|$)")
+
 #: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
 #: model's provider emits at the head of the content channel, keyed on the MODEL
 #: id like :data:`_SAMPLING_POLICY` and for the same reason -- the template
@@ -609,6 +627,15 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     }
     fallback_levels = (
         ("none", "low", "high", "max") if direct_deepseek else supported_efforts(model_name)
+    )
+    # Whether this route's requests must echo reasoning back on every assistant
+    # turn. Keyed on the canonical provider AND the model family, and NOT on
+    # ``direct_deepseek``, which happens to cover almost the same ids: that flag
+    # also decides the effort ladder, and the pinned 0731 snapshot runs the same
+    # thinking-mode validator while shipping no ladder at all. See
+    # ``ModelSpec.requires_reasoning_echo`` for the measurements.
+    requires_reasoning_echo = canonical == "deepseek" and bool(
+        _DEEPSEEK_THINKING_MODELS.match(lowered)
     )
     effort_levels = listing_levels if listing_levels is not None else fallback_levels
     # THE LADDER and THE SEED are two separate questions with two different
@@ -830,6 +857,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         supports_images=supports_images,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
+        requires_reasoning_echo=requires_reasoning_echo,
         base_url=definition.base_url if definition else None,
         reasoning=reasoning,
         supports_sampling_params=supports_sampling_params,
