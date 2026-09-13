@@ -1422,6 +1422,41 @@ DOUBLE_STOP_WINDOW_S = 4.0
 #: Ctrl+C window, one step up.
 STOP_ALL_WINDOW_S = 10.0
 
+#: How long a failed speculative runtime engage must have been in flight
+#: before the app admits it in the transcript.
+#:
+#: The engage is silent on failure by design ("the real prompt reports the
+#: failure"), and that is right for the case it was written for: a warm-up that
+#: fails in a second costs the user nothing, the message they send next engages
+#: again, and a line about a start they never asked for is noise. It stops
+#: being right once the wait was long enough to be SEEN, because the band's
+#: `starting…` state is the whole of what the user was told. When such a wait
+#: ends with the band clearing into the same splash and an empty transcript,
+#: "a runtime is coming up" and "the runtime never came up" render identically
+#: — and the next keystroke silently re-arms the band
+#: (:meth:`OperatorApp._warm_runtime_for_draft`), so the state reads as
+#: permanent.
+#:
+#: This is a filter on a FINISHED failure, not a timer that paints mid-wait: it
+#: answers "was this long enough that the user was watching?". Every healthy
+#: engage measured on this machine is 1.0-2.6 s (and ~0.5-2 s with a dozen MCP
+#: servers), so 10 s is ~4x the slowest healthy boot and a merely slow one
+#: stays quiet. Both measured failure ceilings are far above it — 30.0-31.5 s
+#: when no owner record appears (``session/runtime/launch.py``'s
+#: ``DEFAULT_DEADLINE_S``) and 46.8 s when a record exists but its owner never
+#: answers the initial sync (``session/runtime/types.py``'s
+#: ``HEARTBEAT_TIMEOUT_S``) — so the case this exists for reports.
+START_ENGAGE_PATIENCE_S = 10.0
+
+#: The latch token for a binding that cannot name itself. A sentinel rather
+#: than the empty string, because the empty string is also the "nothing has been
+#: reported" value of ``_start_engage_reported_for`` — collapsing the two would
+#: silence every report on a reduced host, which is the opposite of what this
+#: latch is for. No production session reaches here without an id (the facade
+#: takes its id as a constructor argument), so this lane is a formality, but it
+#: is a formality that keeps the rule total.
+UNIDENTIFIED_BINDING = "<unidentified>"
+
 #: The working line's PHASE while a turn is parked on something the USER owes —
 #: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
 #: for both because the two waits are the same fact to every surface that reads
@@ -3958,6 +3993,15 @@ class OperatorApp(App[None]):
         #: binding. Reset by a session swap (`/new`, `/resume`), because the
         #: new binding is cold again and owes its own warm-up.
         self._warm_engage_started = False
+        #: Which BINDING's failed engage has already been reported, by session id —
+        #: cleared only by an explicit user attempt (`_claim_start_engage_notice`),
+        #: never by a keystroke's warm-up and never by a swap route. Keyed by
+        #: identity rather than reset by each caller that changes the binding:
+        #: the routes that swap `_session` are several (a sidebar switch parks the
+        #: outgoing facade rather than cancelling its engage), and a boolean would
+        #: need every one of them to remember — with the failure mode of the one
+        #: that forgets being a notice that names the wrong conversation.
+        self._start_engage_reported_for = ""
         #: What build THIS process loaded. App construction is process start
         #: for a TUI, so this is the honest "what is running in here" token,
         #: and it can never be refreshed — already-imported modules do not get
@@ -16168,6 +16212,18 @@ class OperatorApp(App[None]):
             self._refreshed_from = None
             return
         self._warm_engage_started = True
+        # WHEN the band went up, for the patience filter in the failure arm
+        # below. Monotonic because this measures a duration: a wall-clock step
+        # (NTP, a laptop waking from sleep) must not turn a one-second blip
+        # into a notice, or a genuine 30 s wait into a silent one.
+        engage_started = time.monotonic()
+        # WHO the band belongs to, captured beside ``ensure`` for the same reason
+        # and read at report time for the same reason `_announce_refresh_completed`
+        # compares a captured id: an engage worker can outlive its binding (the
+        # sidebar route parks the outgoing facade and cancels only the "session"
+        # worker group, not "warm-engage"), so the failure arm must be able to
+        # tell whose failure it is holding before it paints anything.
+        binding_id = str(getattr(session, "session_id", "") or "")
         self._set_starting(True)
 
         async def run() -> None:
@@ -16178,18 +16234,30 @@ class OperatorApp(App[None]):
                 # condition that used to leave the session cold and make the
                 # user's first command pay for a fresh bind.
                 await cast(Callable[..., Awaitable[None]], ensure)(foreground=False)
-            except Exception:  # noqa: BLE001 — the real prompt reports the failure
-                # A speculative warm-up that fails must stay silent: the user
-                # has not asked for anything yet, and the message they send
-                # next engages again and surfaces any error properly. The same
-                # holds for the mount engage, which the user did not ask for
-                # at all — clearing the latch leaves the first keystroke free
-                # to retry.
+            except Exception as error:  # noqa: BLE001 — the real prompt reports the failure
+                # A speculative warm-up that fails must stay silent WHILE the
+                # failure is too quick to have been watched: the user has not
+                # asked for anything yet, and the message they send next engages
+                # again and surfaces any error properly. The same holds for the
+                # mount engage, which the user did not ask for at all — clearing
+                # the latch leaves the first keystroke free to retry.
+                #
+                # Past ``START_ENGAGE_PATIENCE_S`` that reasoning inverts and
+                # the report is the whole point: the band has been up long
+                # enough that clearing it silently is the ONE outcome the user
+                # cannot read (see the constant). The gate lives in the helper
+                # so the silence here stays the default it is documented to be.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
                 # Same reason as the skip above: nothing bound, so there is no
                 # change to name and the pending stamp must not outlive it.
                 self._refreshed_from = None
+                self._report_start_engage_failure(
+                    reason=reason,
+                    error=error,
+                    elapsed=time.monotonic() - engage_started,
+                    binding_id=binding_id,
+                )
                 return
             finally:
                 self._set_starting(False)
@@ -16211,6 +16279,138 @@ class OperatorApp(App[None]):
             self._announce_refresh_completed()
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
+
+    def _report_start_engage_failure(
+        self, *, reason: str, error: Exception, elapsed: float, binding_id: str
+    ) -> None:
+        """Admit a speculative engage's failure — once per binding, when it was watched.
+
+        The narrow exception to "a speculative engage is silent on failure".
+        Silence is right while the failure is too quick to have been seen: the
+        latch is already clear, so the next message retries, and the real prompt
+        owns the report. It stops being right once the failure was long enough
+        for the user to have watched the band's `starting…` for it, because then
+        the band going away IS the whole account of what happened and the next
+        keystroke re-arms it: see :data:`START_ENGAGE_PATIENCE_S`.
+
+        Six gates, and each one is a way this could lie to the wrong person or
+        about the wrong thing:
+
+        * **binding identity** (``binding_id`` vs what is bound now) — first,
+          before the latch is even read. An engage worker can outlive the
+          binding it was started for, so "a failure happened" and "THIS session
+          failed" are different statements; painting the first as the second
+          tells the user their current conversation cannot start when nothing
+          about it failed, and it consumes the current binding's one notice on
+          the departed one's behalf (the sidebar route reaches this state — it
+          parks the outgoing facade and cancels only the `"session"` worker
+          group). One comparison closes the class, exactly as
+          :meth:`_announce_refresh_completed` closes it for the refresh stamp.
+        * ``elapsed >= START_ENGAGE_PATIENCE_S`` — the filter above. A refused
+          socket that fails in 200 ms stays silent, which is the existing
+          contract and the common case.
+        * the outcome is the bounded-WAIT class: a ``ConnectionError`` or
+          ``TimeoutError``, with ``actionable`` excluded. An
+          ``ActionableConnectionError`` carries a VETTED configuration sentence
+          (a missing credential, an unusable model) that the prompt relays with
+          its own text, and the two deliberate skips upstream of this arm — a
+          non-cold viewer, and no provider/model configured — return before it,
+          so neither can ever reach here.
+        * not a DELIBERATE stop. ``/stop`` leaves the viewer cold with
+          ``_deliberate_stop`` set and ``_unavailable_reason()`` saying "this
+          session was stopped"; that reason's own text is the honest answer, and
+          the prompt path relays it. Answering a stop receipt with "it may still
+          be starting" would contradict the line the user just read.
+        * no foreground bind in flight. The background engage SURRENDERS its place
+          in the queue the moment a prompt arrives and is cut to
+          ``_BACKGROUND_YIELD_BUDGET_S``, so a user who sends a message during a
+          slow start makes this engage give up by design — a bound, not a
+          failure. Reporting it answered a start instruction to the user who had
+          just sent one, while their prompt's own bind ran next and reported
+          whatever it found. Read off the bound facade, which is where the bind
+          lock publishes a foreground caller's arrival, and read AFTER the
+          identity gate so it is this binding's counter.
+        * once per binding per attempt cycle, keyed on the binding's own id
+          (``_start_engage_reported_for``). A failed engage clears
+          ``_warm_engage_started``, so any keystroke re-engages; without the key a
+          session that cannot start would grow a notice per keystroke. An
+          explicit attempt (a prompt, a command — ``_claim_start_engage_notice``)
+          clears the key instead of relying on a swap route, so a second failure
+          after the user has done what the notice asked is not silent.
+
+        The two ceilings this can surface are different FACTS, so they get
+        different sentences: "no record appeared at all" and "a record exists but
+        its owner never answered the initial sync" are not the same claim, and
+        one sentence covering both is false on one of them.
+
+        Both sentences are deliberately sized to the boot card's body budget
+        (69 cells at the 100-column composition the ladder was measured at): one
+        word more pushes each onto a second row, and that extra row costs the
+        splash its mark. Cleanliness aside, the wording states only what the app
+        measured: the engage surrendered its WAIT, and with a slow child the
+        runtime may still be about to appear, so the sentence promises an
+        attempt ("send a message to retry") rather than an outcome — the same
+        register as the sibling arm's "did not answer".
+        """
+        if binding_id != str(getattr(self._session, "session_id", "") or ""):
+            logger.debug(
+                "%s engage failure dropped: report belongs to %s, %s is bound",
+                reason,
+                binding_id or UNIDENTIFIED_BINDING,
+                getattr(self._session, "session_id", "") or "<none>",
+            )
+            return
+        token = binding_id or UNIDENTIFIED_BINDING
+        if self._start_engage_reported_for == token:
+            return
+        if getattr(self._session, "_deliberate_stop", False):
+            return
+        # Read off the facade, which is where the bind lock publishes a foreground
+        # caller's arrival (`AttachedSession._bind_lock_for`); a reduced host
+        # without the counter has no foreground path to race either.
+        if getattr(self._session, "_foreground_waiting", 0):
+            return
+        if elapsed < START_ENGAGE_PATIENCE_S:
+            return
+        if getattr(error, "actionable", False):
+            return
+        if not isinstance(error, (ConnectionError, TimeoutError)):
+            return
+        if getattr(error, "runtime_alive", False):
+            # The owner holds a live socket and did not sync inside
+            # ``HEARTBEAT_TIMEOUT_S``. "not answering" is the honest register
+            # for it, and it is the one verb that stays true of the no-record
+            # ceiling too.
+            body = "the runtime is not answering yet — send a message to retry"
+        else:
+            body = "no runtime yet — it may still be starting; send a message to retry"
+        self._start_engage_reported_for = token
+        # INFO, not DEBUG: this line is the one record that the user was told
+        # something, and the two ceilings it covers are exactly what an operator
+        # reading a support capture is looking for. The elapsed time lives here
+        # rather than in the copy, which counts the ENGAGE rather than the wait
+        # the user actually experienced (they watched the band from mount).
+        logger.info("%s engage reported to the user after %.1fs", reason, elapsed)
+        self._system_notice(body, "warning")
+
+    def _claim_start_engage_notice(self) -> None:
+        """Let the NEXT failed engage report again, on an explicit user ATTEMPT.
+
+        The per-binding key (``_start_engage_reported_for``) exists so a stray
+        keystroke cannot grow a notice per letter. That silence is wrong in one
+        place: after the user has done exactly what the notice asked — sent a
+        message that failed to bind — a second failure with no second admission
+        leaves the red line as the only account, and that line describes a
+        different situation (a reconnection for a start that never connected).
+
+        Cleared by the ATTEMPT, not by its outcome: what re-opens the report is
+        that the user asked for something again, whether or not that attempt is
+        the one that fails. Called from the two places that carry user intent
+        into a bind — the turn dispatcher every prompt passes through
+        (:meth:`_start_turn_for`) and the command path that runs a typed command
+        (:meth:`_bind_then_dispatch`) — never from a keystroke's warm-up.
+        """
+        self._start_engage_reported_for = ""
 
     def _needs_runtime_first(self, command: str, arg: str) -> bool:
         """Keep owner mutations behind initial sync, including non-picker routes.
@@ -16353,6 +16553,9 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
+        # A typed command is a user attempt in the same sense a prompt is, so a
+        # further start failure is news again (`_claim_start_engage_notice`).
+        self._claim_start_engage_notice()
         self._warm_engage_started = True
         self._set_starting(True)
 
@@ -22079,6 +22282,13 @@ class OperatorApp(App[None]):
         session = source.session
         if session is None or self._status is None:
             return
+        # The user asked for something, so a start failure from here on is news
+        # again even if this binding has already reported one — see
+        # `_claim_start_engage_notice`. Placed at this dispatch point because it
+        # is the one every prompt passes through (held through a compaction or
+        # not), so "the user tried" and "the app admits a further failure"
+        # cannot drift apart.
+        self._claim_start_engage_notice()
         # The turn's first append announces this prompt back as a user
         # MessageStartEvent (`_run_turn` emits it for every front end). The
         # echo is already painted — at submit, or before a compaction hold —
