@@ -980,7 +980,9 @@ async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns
     So this asserts BOTH halves per width: nothing split at any width (against
     the painted cell grid, because only the frame shows what wrapping did), and
     the signpost present in one of its two forms wherever the column can hold it
-    — which is what pins rung 2 at 70 rather than leaving it merely unpinned.
+    — which is what pins rung 2 at 70 rather than leaving it merely unpinned —
+    plus, where neither form fits, rung 4 read off the printed rows: the whole
+    sentence and no signpost fragment (review round 3, R3-2).
     """
     session = _session(_outcome(**_SLACK_DOWN), session_id="a")
     app = OperatorApp(lambda: _factory(session))
@@ -1026,11 +1028,31 @@ async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns
             assert signpost, f"the signpost vanished where the short form fits, at {columns}"
         else:
             # Rungs 3/4: measured, the short form cannot fit beside this sentence
-            # from 60 columns down, so the contract is only "nothing split".
-            assert not signpost or all(
-                line.endswith("\u2014 /mcp") or line.endswith("\u2014 /mcp for details")
-                for line in signpost
-            )
+            # from 60 columns down, so the contract here is rung 4 — the sentence
+            # WHOLE with no signpost at all. A "nothing was split" check cannot
+            # see that rung: ``signpost`` is itself built from the very predicate
+            # it would be compared against, so the assertion is a tautology
+            # (review round 3, R3-2). The pin is therefore the printed row:
+            # reconstruct the wrapped sentence from the notice's own rows and
+            # require it whole. A clamp (the failure mode this rung exists to
+            # avoid) leaves the tail unconsumed, and a surviving ``— /mcp`` leaves
+            # text after the sentence.
+            expected = "MCP slack failed: command not found: slack-mcp"
+            first = next(i for i, line in enumerate(lines) if "MCP slack failed:" in line)
+            parts: list[str] = []
+            for line in lines[first:]:
+                # The first row carries the notice's ``✗ `` spine; a continuation
+                # row is indented onto the hanging column instead.
+                text = line.split("\u2717", 1)[1].strip() if "\u2717" in line else line.strip()
+                if not text:
+                    break
+                parts.append(text)
+                if " ".join(parts) == expected:
+                    break
+            painted = " ".join(parts)
+            assert (
+                painted == expected
+            ), f"rung 4 is not the whole sentence at {columns} columns: {painted!r}"
 
 
 def test_the_droppable_parenthetical_mirrors_the_managers_own_detail_token() -> None:
