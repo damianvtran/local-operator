@@ -300,7 +300,7 @@ class SessionProtocol(Protocol):
         ...
 
     async def complete_once(self, system: str, prompt: str) -> str:
-        """One cheap, isolated, single-attempt provider call for a host errand.
+        """One cheap, isolated, near-single-attempt provider call for a host errand.
 
         Not a turn: no tools, no history, no transcript entry. Hosts use it
         for small derived text (conversation auto-naming) without rebuilding

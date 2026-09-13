@@ -22688,7 +22688,7 @@ class OperatorApp(App[None]):
         """One isolated re-title call; ``None`` from it means "leave it alone".
 
         Same shape and the same failure policy as the first naming call: it runs
-        alongside the turn, it is single-attempt and isolated, and every failure
+        alongside the turn, it is isolated and near-single-attempt, and every failure
         resolves to "no change" rather than to a notice. The band therefore
         never flickers on a failed check — nothing repaints unless a genuinely
         different title came back.
@@ -22758,17 +22758,23 @@ class OperatorApp(App[None]):
         still wanted it.
 
         So the safety moved from the TIMING into the SHAPE of the request, which
-        is what ``session.complete_once`` now builds: one attempt, no fallback
-        chain, no credential rotation, no sticky-route read or write, no quota
+        is what ``session.complete_once`` now builds: at most two AUTH attempts
+        (the second only when a bearer was rejected outright and a read-only
+        re-resolve hiding that row produced a different one), no fallback chain,
+        no credential rotation, no sticky-route read or write, no quota
         preflight, no boundary classification, not the session's prompt cache
         key, a 1024-token cap, the cheapest route the session can reach, and a
-        15-second ceiling. A 429 here is swallowed by ``generate_title`` and
-        cannot have touched anything the turn depends on — see
-        ``ChatRequest.isolated`` for the enumeration.
+        15-second ceiling that now covers those attempts SERIALLY rather than a
+        single call. A 429 here is swallowed by ``generate_title`` and cannot
+        have touched anything the turn depends on — see ``ChatRequest.isolated``
+        for the enumeration.
 
         What the user sees: the opener's excerpt the instant they submit, then
-        the model's title about five seconds later (measured against
-        anthropic/claude-opus-5), both while the turn is still running.
+        the model's title a few seconds later (measured at ~5 s against
+        anthropic/claude-opus-5, and 1.99 s on a deepseek route that spent a
+        rejected bearer and a sibling retry), both while the turn is still
+        running. A rejected credential costs one extra serial request inside the
+        same 15-second ceiling rather than a second wall-clock budget.
 
         The generation owns the shared latch. Reload supersedes this attempt
         synchronously (``_cancel_naming_attempt``) before the replacement

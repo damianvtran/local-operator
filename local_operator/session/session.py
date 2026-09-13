@@ -10242,7 +10242,7 @@ class Session:
     ERRAND_MAX_TOKENS = 1024
 
     async def complete_once(self, system: str, prompt: str) -> str:
-        """One CHEAP, ISOLATED, single-attempt provider call for a host errand.
+        """One CHEAP, ISOLATED, near-single-attempt provider call for a host errand.
 
         Hosts need the session's configured provider and credentials for small
         side errands — conversation auto-naming is the only caller — and
@@ -10255,15 +10255,18 @@ class Session:
         CONCURRENTLY with the turn, so the safety comes from the shape of the
         request instead of from the timing:
 
-        * ``isolated`` — one attempt, no fallback chain, no credential
-          rotation, no sticky-route read or write, no quota preflight, no
-          effort-boundary classification, a read-only credential resolve and
-          not the session's prompt cache key. See the field's docstring for the
-          six pieces of session-wide state that protects, and why each one
-          mattered.
+        * ``isolated`` — at most two AUTH attempts (the second only when a
+          bearer was rejected outright and a read-only re-resolve hiding that
+          row produced a different one; the pre-existing fast-mode-refusal
+          re-ask can add one more), no fallback chain, no credential rotation,
+          no sticky-route read or write, no quota preflight, no effort-boundary
+          classification, a read-only credential resolve and not the session's
+          prompt cache key. See the field's docstring for the six pieces of
+          session-wide state that protects, and why each one mattered.
         * ``replayable=False`` — deliberately the opposite of the compaction
           errand below. Replay exists so a stalled read does not permanently
-          lose an EXPENSIVE result; a title is worth one attempt and no more.
+          lose an EXPENSIVE result; a title is worth its one or two attempts
+          and no more (see ``isolated`` for the auth-shaped second one).
         * ``max_tokens`` — bounds a model that ignores the output format.
         * cheapest route available: the ``lo`` subagent tier when the operator
           has configured one, otherwise this session's model — either way
@@ -10294,8 +10297,9 @@ class Session:
             # errand consistent with the turn.
             #
             # The failure mode this protects is quiet: the errand is
-            # ``isolated`` with one attempt and no fallback, so a rejected
-            # request surfaces only as a conversation that never gets a title.
+            # ``isolated`` with no fallback (and at most one auth retry), so a
+            # rejected request surfaces only as a conversation that never gets
+            # a title.
             temperature=model.temperature,
             replayable=False,
             isolated=True,
@@ -10539,8 +10543,8 @@ class Session:
         an advisor call that hits the turn's warm prefix costs about 2.6% of
         the bill, and the same call on a cold namespace costs about 25.6% and
         turns the whole feature into a net loss. So the advisor deliberately
-        forgoes isolation's protections (single attempt, no route/credential
-        state) to stay on the session's cache key.
+        forgoes isolation's protections (a near-single-attempt budget, no
+        route/credential state) to stay on the session's cache key.
 
         For exactly the same reason there is NO ``advisor_model`` /
         ``advisor_effort`` config key, and adding one would be a regression

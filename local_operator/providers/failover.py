@@ -22,7 +22,14 @@ import inspect
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
@@ -2199,6 +2206,16 @@ class FailoverAuthStore(Protocol):
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        # Declared so the contract matches what the driver actually sends: the
+        # isolated auth re-resolve passes these to ask for a SIBLING without
+        # taking any routing decision. A store that omits them still works —
+        # the call raises ``TypeError``, the resolver reports no sibling, and
+        # the errand keeps its single attempt — but a store that wants the
+        # errand to recover has to accept them, and a Protocol that hid them
+        # made "legacy stores are fine" rest on a swallowed exception rather
+        # than on a stated contract.
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> str | None: ...  # pragma: no cover
 
     def rotate_sibling(
@@ -2243,6 +2260,9 @@ class OAuthAccessSource(Protocol):
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        #: Same optional exclusion contract as :meth:`FailoverAuthStore.get_api_key`.
+        exclude_keys: Collection[str] | None = None,
+        exclude_credential_ids: Collection[int] | None = None,
     ) -> "OAuthAccess | None": ...  # pragma: no cover
 
 
@@ -2365,19 +2385,34 @@ async def stream_with_failover(
     primary_target = FallbackTarget(primary_selector, request.model.reasoning_effort)
 
     if request.isolated:
-        # DECORATION: one attempt on the model it named, and no reach into
-        # anything the concurrent turn depends on. Expressed by disabling retry
-        # rather than by a second code path, because "retry disabled" already
-        # means exactly the three things needed here — no fallback chain below,
-        # no transport-retry budget, and no credential rotation (every rotation
-        # `continue` sits behind a `retry.enabled` raise). Dropping the route
-        # state removes the fourth: a decorative call neither pins the session
-        # to a fallback nor clears a pin the turn is relying on. The fifth is
-        # not expressible here — the credential cascade takes routing decisions
-        # of its own on a read — so the resolve below is asked for read-only
-        # (`read_only=request.isolated`).
+        # DECORATION: at most one attempt on the model it named — with one
+        # sanctioned exception, the single auth re-resolve latched below — and
+        # no reach into anything the concurrent turn depends on. Expressed by
+        # disabling retry rather than by a second code path, because "retry
+        # disabled" already means exactly the three things needed here — no
+        # fallback chain below, no transport-retry budget, and no credential
+        # rotation (every rotation `continue` sits behind a `retry.enabled`
+        # raise; the auth exception does not rotate anything, it re-READS).
+        # Dropping the route state removes the fourth: a decorative call
+        # neither pins the session to a fallback nor clears a pin the turn is
+        # relying on. The fifth is not expressible here — the credential
+        # cascade takes routing decisions of its own on a read — so the resolve
+        # below is asked for read-only (`read_only=request.isolated`).
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
+
+    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
+    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
+    # walk: the errand makes at most TWO AUTH attempts, and the second only
+    # when the read-only re-resolve produced a bearer that differs from the one
+    # the provider just rejected.
+    #
+    # "Two auth attempts", not "two wire attempts": the pre-existing fast-mode
+    # refusal re-ask (below, and deliberately NOT gated on `retry.enabled`)
+    # can add one same-key attempt at standard speed before this latch is ever
+    # consulted, so a fast-mode model's errand can reach three requests. That
+    # path is older than this one and is left exactly as it was.
+    isolated_auth_resolved = False
 
     targets = [primary_target]
     if retry.enabled and retry.model_fallback:
@@ -2898,9 +2933,11 @@ async def stream_with_failover(
                 # fault ceiling nor rotate — it waits, in place, on a minutes-
                 # long backoff, until the network returns or the patient budget
                 # is spent. The sleep stays abortable, so Ctrl-C still wins.
-                # Gated on retry.enabled so an isolated/decorative call still
-                # makes exactly one attempt (the `not retry.enabled` raise below
-                # would otherwise be pre-empted by this patient loop).
+                # Gated on retry.enabled so an isolated/decorative call never
+                # enters the patient loop: connectivity loss is not an auth
+                # failure, so it gets no re-resolve either and the
+                # `not retry.enabled` raise below ends the errand on its first
+                # attempt (which this loop would otherwise pre-empt).
                 if retry.enabled and is_connectivity_loss(exc):
                     if connectivity_retries < retry.connectivity_max_retries:
                         connectivity_retries += 1
@@ -2942,6 +2979,53 @@ async def stream_with_failover(
                         shortest_retry_after_ms or exc.retry_after_ms, exc.retry_after_ms
                     )
                 if not retry.enabled:
+                    if (
+                        request.isolated
+                        and not isolated_auth_resolved
+                        and (exc.auth_error or exc.status in (401, 403))
+                    ):
+                        # The one widening of the isolated budget, and it is
+                        # auth-shaped only. Deployment reality: a pool can
+                        # hold a stale key while the TURN beside us rotates
+                        # past it and stays healthy, so the errand's read-only
+                        # resolve keeps landing on the dead row (the pick is a
+                        # hash of the session id — re-firing the errand later
+                        # picks the same row) and every naming call for such a
+                        # session fails forever. One extra request, and only
+                        # here, buys the title back: a READ-ONLY re-resolve
+                        # with the rejected bearer hidden may serve the errand
+                        # from a sibling — the resolve's own sanctioned move
+                        # (see `_resolve_access_for_provider`) — while the
+                        # sticky pointer, the block list and the demotion set
+                        # stay exactly as they were, so the turn beside us
+                        # keeps resolving to precisely what it did before.
+                        # Non-auth failures (5xx, 429, request-kind, transport)
+                        # keep the exactly-one-attempt behaviour: a rate limit
+                        # says wait, and an errand must not.
+                        isolated_auth_resolved = True
+                        sibling = await _resolve_access_for_provider(
+                            auth,
+                            provider,
+                            session_id,
+                            state,
+                            exc,
+                            read_only=request.isolated,
+                            model_id=spec.model_id,
+                            scoped_blocks=retry.usage_aware_fallback,
+                            # The ROW, not just its bearer: an OAuth token
+                            # rotates under a refresh, so a key-only exclusion
+                            # would let the rejected account back in.
+                            rejected_credential_id=(
+                                access.credential_id if access is not None else None
+                            ),
+                        )
+                        if sibling is not None and sibling.access_token != key:
+                            # `retry_same_key` consumes the record just
+                            # resolved: the loop top then skips its own resolve
+                            # and fires this sibling directly.
+                            access = sibling
+                            retry_same_key = True
+                            continue
                     raise
                 if _same_credential_retry_allowed(
                     exc,
@@ -3028,9 +3112,10 @@ async def stream_with_failover(
                 # charging the fault ceiling or rotating buys nothing — the only
                 # thing that helps is waiting, in place, for the network to come
                 # back. The backoff is abortable, so Ctrl-C still breaks out.
-                # Gated on retry.enabled so an isolated/decorative call still
-                # makes exactly one attempt rather than entering the patient loop
-                # ahead of the `not retry.enabled` raise below.
+                # Gated on retry.enabled so an isolated/decorative call never
+                # enters the patient loop ahead of the `not retry.enabled` raise
+                # below. Connectivity loss is not auth-class, so no re-resolve
+                # follows it either: the errand ends on its first attempt.
                 if retry.enabled and is_connectivity_loss(wrapped):
                     if connectivity_retries < retry.connectivity_max_retries:
                         connectivity_retries += 1
@@ -3289,6 +3374,7 @@ async def _resolve_access_for_provider(
     read_only: bool = False,
     model_id: str = "",
     scoped_blocks: bool = False,
+    rejected_credential_id: int | None = None,
 ) -> "OAuthAccess | None":
     """Bridge AuthStore into the a/b/c resolver shape, returning the
     :class:`~local_operator.providers.auth_store.OAuthAccess` record (or
@@ -3300,6 +3386,29 @@ async def _resolve_access_for_provider(
     credential — and neither ``retry.enabled=False`` nor a dropped
     ``route_state`` is upstream of that. A decorative call resolves the account
     the turn is already on and decides nothing.
+
+    The one thing ``read_only`` DOES allow is answering a caller that comes
+    back with the bearer it was just handed rejected outright (``error`` set):
+    the resolve then asks for a SIBLING by hiding the rejected row from that
+    single resolve instead of rotating onto it — see the resolver's
+    ``read_only`` branch. That is the isolated errand's one sanctioned second
+    attempt (deployment reality: pools contain stale keys, and one stale row
+    must not permanently silence a decorative call), and it still decides
+    nothing about routing.
+
+    ``rejected_credential_id`` names the ROW whose bearer was just rejected, and
+    it is what makes that sibling leg correct for OAuth. Two reasons it cannot
+    be left to the bearer string alone:
+
+    - A forced refresh of the SAME row returns a new bearer, which
+      ``resolve_next_key``'s ``_accept`` treats as a fresh candidate. Under
+      ``read_only`` the refresh-same-account leg is therefore SKIPPED entirely
+      (see below): re-presenting the account the provider just rejected, with a
+      fresh token, spends the errand's one extra attempt on the credential least
+      likely to work while the healthy sibling is never asked. An expired token
+      is the turn's problem to fix, on the turn's own rotation.
+    - A row's bearer can rotate underneath us (the concurrent turn refreshing
+      it), so a key-only exclusion would let the rejected row back in.
     """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
@@ -3324,15 +3433,31 @@ async def _resolve_access_for_provider(
             flags["model_id"] = model_id
         return flags
 
-    async def _access(*, force_refresh: bool = False) -> "OAuthAccess | None":
+    def _exclusion_flags(rejected_key: str | None) -> dict[str, Any]:
+        """The rejected row, named BOTH ways — see this function's docstring on
+        why an id is required alongside the bearer for OAuth. Each key rides
+        only when it has a value, so the flags stay absent for a store that has
+        nothing to exclude."""
+        flags: dict[str, Any] = {}
+        if rejected_key:
+            flags["exclude_keys"] = frozenset((rejected_key,))
+        if rejected_credential_id:
+            flags["exclude_credential_ids"] = frozenset((rejected_credential_id,))
+        return flags
+
+    async def _access(
+        *, force_refresh: bool = False, exclude: str | None = None
+    ) -> "OAuthAccess | None":
         if oauth_store is None:
             return None
-        return await oauth_store.get_oauth_access(
-            provider, session_id, **_model_flags(force_refresh)
-        )
+        flags = _model_flags(force_refresh)
+        flags.update(_exclusion_flags(exclude))
+        return await oauth_store.get_oauth_access(provider, session_id, **flags)
 
-    async def _key(*, force_refresh: bool = False) -> str | None:
-        return await auth.get_api_key(provider, session_id, **_model_flags(force_refresh))
+    async def _key(*, force_refresh: bool = False, exclude: str | None = None) -> str | None:
+        flags = _model_flags(force_refresh)
+        flags.update(_exclusion_flags(exclude))
+        return await auth.get_api_key(provider, session_id, **flags)
 
     async def resolver(ctx: ApiKeyResolveContext) -> str | None:
         try:
@@ -3340,6 +3465,35 @@ async def _resolve_access_for_provider(
                 record = await _access()
                 if record is None:
                     return await _key()
+            elif read_only:
+                # The isolated errand's sibling leg, and it is deliberately the
+                # FIRST thing tried rather than the last. ``resolve_next_key``
+                # ordinarily spends a leg on force-refreshing the same account
+                # before rotating; for a decorative call that is the wrong
+                # trade, because a refreshed token on the row the provider just
+                # rejected is the candidate least likely to work, and spending
+                # the errand's single extra attempt there means the healthy
+                # sibling is never asked at all (an OAuth pool whose refresh
+                # SUCCEEDS therefore stayed permanently unnamed). Re-authing a
+                # stale account is the turn's job, on the turn's own rotation.
+                #
+                # ``_rotate_sibling`` blocks or demotes the failing row and
+                # moves session stickiness — routing decisions that belong to
+                # the TURN, not to decoration running beside it — so the sibling
+                # instead comes from the store hiding the rejected ROW from this
+                # resolve alone: the sticky pointer, the block list and the
+                # demotion set come out of the call exactly as they went in.
+                #
+                # A store that does not accept the exclusion kwargs raises
+                # ``TypeError`` here, which the ``except Exception`` below turns
+                # into "no sibling"; the driver's differs-check then refuses the
+                # retry and the errand keeps its single-attempt budget. So a
+                # foreign or older store degrades to today's behaviour rather
+                # than breaking — covered by
+                # ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``.
+                record = await _access(exclude=ctx.previous_key)
+                if record is None:
+                    return await _key(exclude=ctx.previous_key)
             elif ctx.last_chance:
                 # Family-scoped rotation blocks ride only with usage-aware
                 # routing: on the opt-out path no preflight probe exists to
