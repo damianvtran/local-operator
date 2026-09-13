@@ -2497,6 +2497,18 @@ def _defective_reply(case: str, current: Observation) -> str:
                 "public_observations": "",
             }
         )
+    if case == "unquotable-batch-key":
+        # Every stray key in the batch is unquotable, so the diagnostic can name
+        # only their count -- the branch that must fall back to stating the
+        # accepted shape. A lone U+E0001 repeated: short enough to pass the
+        # length bound, refused by the ``repr`` bound because it expands.
+        return json.dumps(
+            {
+                "reply_version": "1.0",
+                "action_batch": {"actions": [], "\U000e0001" * 40: 1},
+                "public_observations": "",
+            }
+        )
     if case == "extra-action-key":
         return json.dumps(
             {
@@ -2601,6 +2613,11 @@ _REJECTION_HINT_CASES = [
             '"action_batch"',
             '"public_observations"',
         ],
+    ),
+    (
+        "unquotable-batch-key",
+        "envelope-shape",
+        ["1 unexpected key(s): 1 not shown", 'the batch is exactly {"actions": [...]}'],
     ),
     ("extra-action-key", "extra-action-key", ['"frame_id"', '"wait"', '"duration_ms"']),
     ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),

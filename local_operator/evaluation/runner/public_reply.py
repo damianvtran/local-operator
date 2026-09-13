@@ -27,6 +27,15 @@ _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
 #: defect -- a reworded opening would silently reclassify them.
 _BATCH_SHAPE_RULE = "model reply action_batch requires exactly an actions array"
 
+#: The two legal shapes, offered together for a reply that never committed to
+#: the envelope: the version-less legacy batch, or the full envelope. Named so
+#: the clause can be dropped from the ONE sentence that must not offer the
+#: legacy batch (see :data:`_MISPLACED_REPLY_VERSION`).
+_EITHER_SHAPE_CLAUSE = (
+    '. Reply with EITHER the plain batch {"actions": [...]} and no other top-level '
+    "keys, OR the full envelope with exactly reply_version, action_batch, public_observations"
+)
+
 #: Present in the envelope diagnostic exactly when ``reply_version`` was found
 #: somewhere OTHER than the top level of the envelope: nested inside
 #: ``action_batch``, or duplicated at both levels. It is the discriminator
@@ -255,6 +264,24 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _nested_key_clause(keys: Sequence[str]) -> str:
+    """Where reserved keys other than the version key belong, when nested.
+
+    Split from :data:`_MISPLACED_REPLY_VERSION` deliberately: this clause names
+    the key and stays inside ``envelope-shape``, because a reply that put its
+    notes inside the batch still has the envelope's shape as its defect. Only
+    ``reply_version`` gets the dedicated class, and only when IT is the key that
+    was nested -- a reply whose ``public_observations`` is nested while the
+    version key is simply absent must not be told that ``reply_version`` is in
+    the wrong place, which is a key the model never wrote.
+    """
+
+    return (
+        f"It carried {', '.join(repr(key) for key in keys)} inside 'action_batch'; "
+        "the envelope's own keys belong at the top level, not inside a batch"
+    )
+
+
 def _batch_shape_diagnostic(batch: Any) -> str:
     """Why ``action_batch`` was refused, naming the keys that landed in it.
 
@@ -282,10 +309,15 @@ def _batch_shape_diagnostic(batch: Any) -> str:
     unexpected = sorted(set(batch) - {"actions"})
     if not unexpected:
         return _BATCH_SHAPE_RULE
-    diagnostic = (
-        f"{_BATCH_SHAPE_RULE}; it carried {len(unexpected)} unexpected key(s): "
-        f"{_unexpected_key_summary(unexpected)}"
-    )
+    named = _unexpected_key_summary(unexpected)
+    diagnostic = f"{_BATCH_SHAPE_RULE}; it carried {len(unexpected)} unexpected key(s): {named}"
+    if not any(is_quotable_key(key) for key in unexpected):
+        # Every stray key was unquotable or over the cap, so the count is all
+        # that can be said about THEM -- and a count on its own is not something
+        # the model can act on. State the accepted batch instead: it is the shape
+        # the model has to emit, and it is the only half of this sentence that
+        # survives a key that cannot be quoted.
+        diagnostic += ' -- the batch is exactly {"actions": [...]}'
     if "reply_version" in unexpected:
         return f"{diagnostic}; {_MISPLACED_REPLY_VERSION}"
     return diagnostic
@@ -340,7 +372,7 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
                 )
             sentence = "model reply used the reserved envelope but " + "; ".join(parts)
             misplaced = _misplaced_envelope_keys(value, missing)
-            if misplaced:
+            if "reply_version" in misplaced:
                 # The key is not missing, it is in the wrong PLACE, and that is
                 # a different repair -- so it is a different class (see
                 # ``classify_rejection``) and a different sentence. The
@@ -352,11 +384,19 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
                 # that costs a model already inside the envelope its notes, to
                 # fix a defect that is one key's position.
                 raise ValueError(f"{sentence}. {_MISPLACED_REPLY_VERSION}")
-            raise ValueError(
-                sentence + '. Reply with EITHER the plain batch {"actions": [...]} and no other '
-                "top-level keys, OR the full envelope with exactly reply_version, "
-                "action_batch, public_observations"
-            )
+            if misplaced:
+                # Some OTHER reserved key was nested in ``action_batch``. It is
+                # named for the same reason, but it stays in ``envelope-shape``:
+                # the class above exists for the key whose PLACEMENT is the whole
+                # defect, and a reply that put, say, its notes inside the batch
+                # has the envelope's shape as its defect. Firing the
+                # version-specific sentence here would misdirect the model to a
+                # key it never wrote -- and would take the class key's
+                # measurement with it.
+                raise ValueError(
+                    f"{sentence}. {_nested_key_clause(misplaced)}{_EITHER_SHAPE_CLAUSE}"
+                )
+            raise ValueError(sentence + _EITHER_SHAPE_CLAUSE)
         raise ValueError(
             "model reply requires exactly reply_version, action_batch, public_observations"
         )

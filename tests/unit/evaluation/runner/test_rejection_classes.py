@@ -219,6 +219,13 @@ _NESTED_VERSION_BODY = json.dumps(
     }
 )
 _OMITTED_VERSION_BODY = json.dumps({"action_batch": {"actions": []}, "public_observations": ""})
+#: A reserved key nested in ``action_batch`` that is NOT the version key, with
+#: the version key simply absent. Reachable in the paid corpora
+#: (``batch-minimax-m3-canary5/task_087`` and ``task_106``), and the reason the
+#: version-specific sentence may only fire for ``reply_version``: telling the
+#: model that ``reply_version`` is in the wrong place here names a key it never
+#: wrote, and takes the class key's measurement with it.
+_NESTED_NOTES_BODY = json.dumps({"action_batch": {"actions": [], "public_observations": "a note"}})
 
 #: The measured half of the envelope diagnostic, byte for byte. Measured on
 #: ``minimax/minimax-m3`` at 9/10 recovered against 4/10 for the bare rule, so it
@@ -287,6 +294,29 @@ def test_a_misplaced_reply_version_is_its_own_class() -> None:
         assert '"reply_version": "1.0"' in hint
         assert '"action_batch"' in hint and '"public_observations"' in hint
         assert '{"actions": [...]}' not in hint
+
+
+def test_an_unnamed_but_nested_reserved_key_stays_in_envelope_shape() -> None:
+    """Only ``reply_version`` gets the dedicated class, and only when IT moved.
+
+    A nested reserved key is named, because the model cannot otherwise see which
+    key was in the wrong place -- but the reply's defect is still the envelope's
+    shape, so it stays ``envelope-shape`` and keeps the measured EITHER clause.
+    The class key is a MEASUREMENT as well as a hint: firing it for a key the
+    model never wrote both misdirects the repair and inflates the sub-rate the
+    next arm is meant to read.
+    """
+
+    reason = _envelope_reason(_NESTED_NOTES_BODY)
+    key = classify_rejection(reason)
+    hint = rejection_hint(
+        key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE
+    )
+
+    assert key == "envelope-shape"
+    assert "'public_observations'" in hint and "inside 'action_batch'" in hint
+    assert "'reply_version' belongs at the top level" not in hint
+    assert '{"actions": [...]}' in hint
 
 
 def test_the_misplaced_repair_keeps_the_measured_sentence_as_its_prefix() -> None:
