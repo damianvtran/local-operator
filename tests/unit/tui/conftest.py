@@ -332,6 +332,15 @@ def restore_upstream_xterm_parser() -> Iterator[None]:
     most the test that installed it, and every test starts clean — which is the
     property the sibling tests rely on.
 
+    Directory scope is complete today, and that is checked rather than assumed:
+    the two call sites that AWAIT the real ``run_tui`` anywhere in ``tests/``
+    are ``test_app_pilot.py::test_run_tui_forwards_provider_controller`` and
+    ``test_logger_silence.py``, both in this directory (``test_cli_new.py``'s
+    ``run_tui`` names are stand-ins installed on a fake TUI module). A new test
+    OUTSIDE ``tests/unit/tui`` that awaits the real ``run_tui`` therefore needs
+    this fixture hoisted to ``tests/conftest.py``, not copied — nothing here
+    would fail, the leaked gate would just start affecting other workers' tests.
+
     Nothing is asserted here: this is a restore, and a test that wants to prove
     the parser is clean asserts it itself (``gated`` does).
 

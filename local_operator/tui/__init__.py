@@ -180,9 +180,13 @@ async def run_tui(
     # calls are load-bearing: the reset must land on the wire before the
     # driver queries `?2048$p` (linux_driver.py:299), and the env guard must
     # be set before `textual.constants` is imported (SMOOTH_SCROLL is a Final,
-    # read once). Together they stop the terminal sending resize reports and
-    # stop Textual re-enabling the mode after seeing our reset. See
-    # `terminal_modes` for why neither half suffices alone.
+    # read once). The reset is now the PAIR — `?2048l` and `?1016l` — because
+    # under the guard we ask for neither the reports nor pixel-scale
+    # coordinates, and it is 1016 that decides whether the terminal's numbers
+    # are cells; see THE CO-TENANCY TRADE in `terminal_modes`. Together they
+    # stop the terminal sending resize reports and stop Textual re-enabling the
+    # mode after seeing our reset. See `terminal_modes` for why neither half
+    # suffices alone.
     reset_in_band_resize()
     guard_pixel_mouse_latch()
     # Then the second half, called unconditionally because it decides for itself

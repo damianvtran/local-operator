@@ -8185,9 +8185,13 @@ class OperatorApp(App[None]):
         # want the terminal available and the app non-headless.
         self._start_notifier()
         # Second out-of-app escape on the same terms, and the one that has to
-        # exist BEFORE the first resize arrives: a co-tenant can dirty mode 2048
+        # exist for the first resize AFTER MOUNT: a co-tenant can dirty mode 2048
         # at any moment, and the report for the resize that reveals it latches
-        # Textual's pixel divisor while that very report is parsed.
+        # Textual's pixel divisor while that very report is parsed. Not the very
+        # first Resize message the app ever sees — Textual dispatches a synthetic
+        # one before `Mount` (textual/app.py:3433 vs :3438), so no `on_mount`
+        # body can be there for it; that event is built by
+        # `Resize.from_dimensions` rather than parsed, so it can latch nothing.
         self._start_mode_reclaimer()
         # Straight after the band exists and before the session is asked for:
         # the saved mode has to be in force by the time the first tool can ask,
@@ -20541,6 +20545,12 @@ class OperatorApp(App[None]):
     def _start_mode_reclaimer(self) -> None:
         """Keep the in-band resize mode closed for the rest of the session.
 
+        Both resets the object writes (``?2048l`` and ``?1016l``, see
+        ``terminal_modes.DISABLE_PIXEL_SCALE_MODES``) are re-asserted, because
+        under the guard we ask for neither the reports nor pixel-scale
+        coordinates and the terminal state behind both is shared with every
+        process on the tty.
+
         Same sink and same gate shape as :meth:`_start_terminal_title` and
         :meth:`_start_notifier`: ``driver.write`` because a second writer
         interleaves an escape into a frame Textual's writer thread is painting,
@@ -20551,13 +20561,19 @@ class OperatorApp(App[None]):
         The third gate is the configuration itself: this object exists only when
         ``run_tui`` installed the parser gate, i.e. only while the negotiation is
         closed. A configuration that still negotiates pixel-mouse coordinates
-        wants smooth scrolling and pixel positions, and a mid-session ``?2048l``
-        would switch that off underneath it.
+        wants smooth scrolling and pixel positions, and a mid-session
+        ``?2048l``/``?1016l`` pair would switch that off underneath it (the
+        driver restores ``?1016h`` on its own negotiation reply, but there is no
+        reason to make it).
 
         The mode can be dirtied by any process sharing the tty, so this is
         constructed at mount rather than lazily on the first resize: the report
         that reveals a dirty mode latches the divisor while it is parsed, so the
-        re-closer has to already exist when the first one arrives.
+        re-closer has to already exist when the first resize after mount arrives.
+        (The synthetic ``Resize`` Textual dispatches BEFORE ``Mount`` —
+        textual/app.py:3433 vs :3438 — cannot be covered by anything built here:
+        it is constructed by ``Resize.from_dimensions`` rather than parsed, so it
+        latches nothing, and the boot reset owns the boot case.)
         """
         driver = self._driver
         if driver is None or self.is_headless:

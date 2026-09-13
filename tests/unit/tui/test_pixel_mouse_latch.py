@@ -29,11 +29,14 @@ nothing and would leak into sibling suites. Every env-frozen term the gate
 under test reads has to be pinned, or the developer's terminal decides the
 result.
 
-OUT OF SCOPE, deliberately: nothing here asserts behaviour under a terminal that
-genuinely honours mode 1016 and sends true pixel coordinates. On such a terminal
-the divisor is correct and this fix trades it away for a cell-accurate pointer;
-that trade is a product decision recorded in ``terminal_modes``, not a property
-this file tests.
+OUT OF SCOPE, deliberately: nothing DIRECTLY here asserts behaviour under a
+terminal that genuinely honours mode 1016 and sends true pixel coordinates. That
+arm is modelled instead in ``test_pixel_mouse_gate.py`` (the compliant-VT pty
+arm), because it needs a pty that switches scale on observing our write — and it
+is now a supported arm rather than a cost: the fix clears ``?1016l`` alongside
+``?2048l``, so a compliant VT is told to report cells and the pointer stays true
+there as well. The three configurations and why the pair of resets collapses
+them to one are recorded in ``terminal_modes``.
 
 All references pinned to textual 8.2.8; ``_xterm_parser.py`` is
 ``textual/_xterm_parser.py``, and ``drivers/linux_driver.py`` is
@@ -56,7 +59,9 @@ from textual._xterm_parser import XTermParser
 
 from local_operator.tui.terminal_modes import (
     DISABLE_IN_BAND_RESIZE,
+    DISABLE_PIXEL_SCALE_MODES,
     guard_pixel_mouse_latch,
+    pixel_mouse_negotiation_open,
     reset_in_band_resize,
 )
 
@@ -155,6 +160,44 @@ def test_guard_suppresses_in_band_negotiation(monkeypatch: pytest.MonkeyPatch) -
     assert [t for t in unguarded if isinstance(t, messages.InBandWindowResize)] != []
 
 
+@pytest.mark.parametrize(
+    ("smooth_scroll", "is_iterm"),
+    [
+        pytest.param(True, False, id="smooth-scrolling-on"),
+        pytest.param(True, True, id="smooth-scrolling-on-iterm"),
+        pytest.param(False, False, id="smooth-scrolling-off"),
+        pytest.param(False, True, id="smooth-scrolling-off-iterm"),
+    ],
+)
+def test_the_negotiation_mirror_agrees_with_textuals_own_gate(
+    monkeypatch: pytest.MonkeyPatch, smooth_scroll: bool, is_iterm: bool
+) -> None:
+    """The predicate the gate installs on, checked against the REAL branch.
+
+    Both halves of Textual's mode-report gate are asserted here through the
+    parser rather than through a table that restates the expression, because a
+    restatement cannot disagree with itself (review round 1, MINOR-1). The
+    iTerm rows are the ones that matter: a Textual release that drops the
+    ``not IS_ITERM`` clause, or adds a second route to ``_enable_mouse_pixels``
+    (one call site today, ``linux_driver.py:482``), would leave our copy
+    silently wrong in the direction this fix exists to prevent — installing the
+    gate, and clearing 1016, while ``?1016h`` is on the wire because we were the
+    ones who asked for it.
+    """
+    monkeypatch.setattr(constants, "SMOOTH_SCROLL", smooth_scroll)
+    monkeypatch.setattr("textual._xterm_parser.IS_ITERM", is_iterm)
+
+    negotiated = [
+        token
+        for token in XTermParser().feed(MODE_REPLY_SUPPORTED_BUT_RESET)
+        if isinstance(token, messages.InBandWindowResize)
+    ]
+    assert pixel_mouse_negotiation_open() is bool(negotiated), (
+        "our mirror of Textual's mode-report gate disagrees with what the parser "
+        f"does for SMOOTH_SCROLL={smooth_scroll}, IS_ITERM={is_iterm}"
+    )
+
+
 def test_reply_two_would_re_enable_the_mode() -> None:
     """A bare reset produces exactly the reply that makes Textual undo it.
 
@@ -229,7 +272,12 @@ def test_reset_writes_only_to_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
     tty = _FakeStream(tty=True)
     assert reset_in_band_resize(tty) is True  # type: ignore[arg-type]
-    assert tty.written == DISABLE_IN_BAND_RESIZE == "\x1b[?2048l"
+    # Both modes, as ONE write, in the driver's own re-enable order inverted:
+    # `?2048l` for the report mode, `?1016l` for the pixel-mouse mode a
+    # co-tenant sets with it. Asserted as literal bytes because the wire is the
+    # contract — a constant that drifted would keep this green otherwise.
+    assert tty.written == DISABLE_PIXEL_SCALE_MODES == "\x1b[?2048l\x1b[?1016l"
+    assert DISABLE_IN_BAND_RESIZE == "\x1b[?2048l"
     assert tty.flushes == 1
 
     # A closed or detached stderr must never be what stops the app booting.
@@ -353,12 +401,14 @@ def _capture_boot_bytes(child_source: str, timeout: float = 30.0) -> bytes:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="pty semantics are POSIX-only")
 def test_startup_writes_the_reset_before_the_in_band_query() -> None:
-    """On a real pty the reset precedes the query, and 1016 is never enabled.
+    """On a real pty the resets precede the query, and 1016 is never enabled.
 
     This is the only test that can fail for an ORDERING mistake on the wire.
     The two calls could both be present and still be useless if they landed
     after ``drivers/linux_driver.py:299`` had already asked the terminal about
-    mode 2048.
+    mode 2048 — and the same is true of the ``?1016l`` half, which is why the
+    PAIR (contiguous, one write) is what is located here rather than the 2048
+    sequence alone.
 
     Scope, stated because it was overstated once (review round 3, MINOR 1):
     the child above re-implements the two calls, so this test pins the calls
@@ -374,13 +424,13 @@ def test_startup_writes_the_reset_before_the_in_band_query() -> None:
         f"ordering; captured {len(data)} bytes: {data[:400]!r}"
     )
 
-    reset = DISABLE_IN_BAND_RESIZE.encode()
-    assert reset in data, f"the reset never reached the wire; captured: {data[:400]!r}"
+    pair = DISABLE_PIXEL_SCALE_MODES.encode()
+    assert pair in data, f"the reset pair never reached the wire; captured: {data[:400]!r}"
 
-    reset_at = data.index(reset)
+    resets_at = data.index(pair)
     query_at = data.index(query)
-    assert reset_at < query_at, (
-        f"the reset landed at byte {reset_at}, after the driver's query at {query_at}: "
+    assert resets_at < query_at, (
+        f"the resets landed at byte {resets_at}, after the driver's query at {query_at}: "
         "the terminal was asked before it was told"
     )
 
