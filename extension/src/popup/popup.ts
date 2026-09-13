@@ -34,6 +34,14 @@ type State =
   // user has nothing to fix) is the truth, and the user needs the one fact only
   // this surface can tell them: which install IS driving.
   | "standby"
+  // Paired, and NOT connected to anything: the daemon severed the wheel-holder
+  // for silence and nothing has taken the wheel since (driver field empty,
+  // `link_attached` false, `extension_unresponsive` true). Its own card because
+  // the two cards around it both lie here: `paired` claims a connection that
+  // does not exist ("Code accepted. Connecting this browser…" — UX round 4,
+  // U10) and `unresponsive` names a culprit the daemon cannot identify once the
+  // driver field is cleared, so neither install can be singled out.
+  | "severed"
   | "origin"
   | "origin-ack"
   // The neutral pre-render placeholder. Never shown BY render() — it is the
@@ -47,10 +55,86 @@ const sections = [
   "incompatible",
   "unresponsive",
   "standby",
+  "severed",
   "origin",
   "origin-ack",
   "pending",
 ].map((id) => document.getElementById(id));
+
+// ── The standby card's promise, and the two facts that qualify it ───────────
+//
+// The card's paragraph was static markup and said one thing: "If that one
+// disconnects, this browser takes over". That is true of a CLEAN disconnect and
+// was false-looking for the event a standby actually waits through — the driver
+// going mute, where the daemon holds the wheel for up to a minute before it
+// promotes anybody. UX round 3 measured 50.3 s of that window rendering a frame
+// byte-identical to the healthy one, and round 4 (U9) closed it: the same facts
+// the daemon already publishes (`link_silent_s`, `takeover_within_s`) now pick
+// between three sentences.
+//
+// Captured from the markup rather than duplicated in TS: the paragraph is
+// rewritten on every standby render, and a health payload that stops reporting
+// silence has to put the SHIPPED sentence back — otherwise the last clause stays
+// on screen and the healthy frame stops being the byte-identical one the design
+// rounds approved. Whitespace is normalised once here because the markup carries
+// the source's newlines and indentation, and appending to that would depend on a
+// trailing space that a future edit to popup.html could remove.
+const STANDBY_PROMISE_DEFAULT = (
+  document.getElementById("standby-promise")?.textContent ?? ""
+)
+  .replace(/\s+/g, " ")
+  .trim();
+
+// Seconds of silence from the wheel-holder after which the standby card stops
+// implying that an immediate takeover is what this browser is waiting for.
+//
+// The number is derived from the daemon's own bound, not chosen: a healthy
+// worker answers a ping on the socket's own `onmessage` handler and emits
+// nothing else while idle, so ONE `PING_INTERVAL_S` (20 s) is its longest
+// legitimate silence and the daemon declares the link unproven at
+// `LINK_SILENCE_TIMEOUT_S` (50 s) — which is where `takeover_within_s` starts
+// counting from. 30 s is 1.5 x the healthy sawtooth, the same multiple
+// `_peer_answers_a_solicited_ping` measured against: past a late ping tick, and
+// still ~20 s before the daemon commits, so the clause lands before the fact it
+// qualifies rather than with it.
+const SILENT_WHEEL_AFTER_S = 30;
+
+// The countdown's granularity. `takeover_within_s` is an upper bound computed
+// from the silence deadline plus one ping tick, so a to-the-second render would
+// imply a precision the wire does not carry. Rounded to the nearest 5 s and
+// floored at one step: a value under 2.5 s rounds to 0, and "in about 0 seconds"
+// is a sentence the card must not be able to print.
+const TAKEOVER_ROUNDING_S = 5;
+
+/** The standby card's paragraph for the health payload on screen.
+ *
+ * Three states, in order of what the daemon is actually doing: a takeover
+ * committed (`takeover_within_s` non-null) gets the countdown the field was
+ * added for; a wheel that is attached and past the healthy silence bound gets
+ * the clause that names this event; everything else — a healthy driver, a wheel
+ * nobody holds, an older daemon sending neither field — gets the shipped
+ * sentence untouched.
+ */
+function standbyPromise(health: Health): string {
+  const takeover = health.takeover_within_s;
+  if (typeof takeover === "number" && Number.isFinite(takeover)) {
+    const seconds = Math.max(
+      TAKEOVER_ROUNDING_S,
+      Math.round(takeover / TAKEOVER_ROUNDING_S) * TAKEOVER_ROUNDING_S,
+    );
+    return `${STANDBY_PROMISE_DEFAULT} The other install has stopped answering. Switching to this browser in about ${seconds} seconds.`;
+  }
+  const silence = health.link_silent_s;
+  if (
+    health.link_attached === true &&
+    typeof silence === "number" &&
+    Number.isFinite(silence) &&
+    silence > SILENT_WHEEL_AFTER_S
+  ) {
+    return `${STANDBY_PROMISE_DEFAULT} If it stops answering instead, this browser takes over as soon as Local Operator gives up on it, usually within about a minute.`;
+  }
+  return STANDBY_PROMISE_DEFAULT;
+}
 
 // True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
 // popup's own socket before /health reports paired (the worker still has to
@@ -136,6 +220,22 @@ interface Health {
   /** Whether a link is attached right now; not the same as healthy. Paired
    * with the flag above so a render can say what it actually observes. */
   link_attached?: boolean;
+  /** How long the DRIVER's link has been silent, in seconds (a daemon-side
+   * measurement that outlives the socket by `LINK_DROP_TTL_S`). Declarative for
+   * most cards; the standby card reads it to stop implying that a normal
+   * disconnect is the only event worth naming (UX round 4, U9). Optional — a
+   * daemon predating the field sends none, and the card then keeps the shipped
+   * sentence. */
+  link_silent_s?: number;
+  /** Seconds until the daemon gives up on a mute wheel-holder and promotes
+   * somebody, or `null` when nothing is pending. Present ONLY while the
+   * wheel-holding link is attached and not answering, which is the window the
+   * standby card used to spend promising an immediate takeover. An UPPER BOUND,
+   * not a schedule — the daemon derives it from its silence deadline plus one
+   * ping tick — so the card rounds it rather than implying precision. Optional
+   * for the same reason as the field above: an older daemon sends nothing, and
+   * `null`/absent both mean "no countdown to show". */
+  takeover_within_s?: number | null;
   paired: boolean;
   browser: string;
   /** Which install is driving, and what to call it. Optional because a daemon
@@ -186,6 +286,13 @@ const TONE: Record<State, string> = {
   // holding the wheel — so the card takes the same hairline as the other
   // transitional states rather than claiming an achievement or an error.
   standby: "var(--hairline-strong)",
+  // Neutral, and deliberately NOT danger (UX round 4, U10). The state is "this
+  // browser is not connected", which is also what a HEALTHY standby shows for
+  // the ~0.5 s between the wheel being severed and its own promotion — measured
+  // flipping to Connected in 0.53 s. Painting that transient red would be the
+  // same class of false alarm the per-install gate on `unresponsive` was added
+  // to remove, and the copy is conditional for the same reason.
+  severed: "var(--hairline-strong)",
   origin: "var(--hairline-strong)",
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
@@ -279,6 +386,33 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // on one line at 300px. Measured the same way as the two above and in the same
 // run: `node scripts/popup-states-shot.mjs dist <out>`, which is the harness the
 // numbers in this table come from.
+//
+// The pin stays 193px after U9, deliberately, and the arithmetic is worth
+// spelling out because the card is no longer one height. The standby card now
+// renders at three heights, all measured with that harness and that payload:
+//
+//   healthy driver (shipped sentence)          294.77px  <- the pinned shape
+//   driver attached, silent past 30 s          353.27px  (+58.5, three lines)
+//   takeover committed, counting down          333.77px  (+39.0, two lines)
+//
+// Only the first is pinned, for exactly the reason `unresponsive` is not pinned
+// below: the two taller variants exist only while the daemon is between a wedge
+// and a severance — around a minute — and their whole job is to be acted on,
+// whereas the healthy shape is the one a reopen actually repeats. Because
+// show() records the pin for the card it PAINTS, a render inside the wedge still
+// writes 193px, so the reopen that follows a cleared wedge lands on the healthy
+// height exactly. Measuring the variants INTO the constant would make every
+// healthy open pay their height instead, which is the trade the wedge pin was
+// rejected for further down this comment.
+//
+// (The recorded 314.27px for this card did NOT reproduce in that same run, on
+// this head or on the pre-change one: the payload above measures 294.77px on
+// both, so the constant may over-reserve ~19.5px — one line — for the healthy
+// case. That is pre-existing and not this change's: the copy the healthy state
+// renders is byte-identical either side of it, and the difference is most likely
+// a longer driver-line payload in whichever run produced 314.27px. Re-measure
+// with both spellings of the handle before changing the constant; do not
+// re-derive it from this paragraph.)
 //
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and
@@ -784,17 +918,30 @@ async function renderOnce(): Promise<void> {
   }
 
   if (selfPaired && !drivesThis) {
-    // Paired, and not driving. Two sub-states, and the daemon's own live answer
+    // Paired, and not driving. THREE sub-states, and the daemon's own live answer
     // separates them:
     //   * it LISTS this install as a standby — a durable role, worth naming who
     //     holds the wheel, because that is the question this card answers;
-    //   * it does not — an idle wheel (a restart or a worker wake, in the ~1 s
-    //     before the next dial takes it) or a link the daemon has not accepted
-    //     yet. The "Paired. Code accepted. Connecting this browser…" card says
-    //     exactly that, and it is what this state rendered before the
-    //     per-install gate existed (review R2-3). Never the pairing form, which
-    //     would invite re-submitting a code for an install that holds a token;
-    //     never the connected card, which claims the agent can drive it now.
+    //   * it lists NOTHING and no link is attached while the unresponsive latch
+    //     is up — the wheel was severed and nobody has taken it, so this browser
+    //     is not connected to anything (the `paired` card below would claim
+    //     "Code accepted. Connecting this browser…" over a connection that does
+    //     not exist: UX round 4, U10);
+    //   * it lists nothing otherwise — an idle wheel (a restart or a worker
+    //     wake, in the ~1 s before the next dial takes it) or a link the daemon
+    //     has not accepted yet. The "Paired. Code accepted. Connecting this
+    //     browser…" card says exactly that, and it is what this state rendered
+    //     before the per-install gate existed (review R2-3). Never the pairing
+    //     form, which would invite re-submitting a code for an install that
+    //     holds a token; never the connected card, which claims the agent can
+    //     drive it now.
+    //
+    // The order matters: the severed state is checked BEFORE the `paired` card,
+    // and it is keyed on the two facts the daemon is unambiguous about — no link
+    // attached AND the unresponsive latch up. That pair also covers a HEALTHY
+    // standby's ~0.5 s pre-promotion window (measured flipping to Connected in
+    // 0.53 s), which is why the card it reaches is neutral and its copy is
+    // conditional rather than naming this install's worker.
     if (healthStandby !== false) {
       const other = document.getElementById("standby-driver");
       if (other) {
@@ -816,7 +963,18 @@ async function renderOnce(): Promise<void> {
       // latched for as long as it stood by, so a later revoke rendered the
       // success view ("paired") instead of putting the code field back.
       locallyPaired = false;
+      // The paragraph is rewritten per render, not only when a clause applies:
+      // this branch runs on EVERY standby render, and a driver that starts
+      // answering again has to put the shipped sentence back. Cheap and
+      // unconditional rather than a compare-then-write, because the DOM
+      // assignment is idempotent and the branch below is the only writer.
+      const promise = document.getElementById("standby-promise");
+      if (promise) promise.textContent = standbyPromise(health);
       show("standby");
+      return;
+    }
+    if (health.extension_unresponsive === true && health.link_attached === false) {
+      show("severed");
       return;
     }
     show("paired");
@@ -1136,6 +1294,12 @@ document.getElementById("reload-extension")?.addEventListener("click", reloadExt
 // Same remedy, reached from the consent card's inline banner (U1/Q5/D3). One
 // handler for both so the two surfaces cannot drift apart.
 document.getElementById("origin-wedge-reload")?.addEventListener("click", reloadExtension);
+// The same remedy once more, from the "not connected" card (UX round 4, U10).
+// With the wheel severed, the only thing the user can act on is their own
+// worker, and it is the only route this card can offer: the daemon clears the
+// driver field when it severs, so it cannot say WHICH install was the wedged
+// one, and the copy is worded conditionally for that reason.
+document.getElementById("severed-reload")?.addEventListener("click", reloadExtension);
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {

@@ -31,7 +31,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
  * than one that fails when an id is renamed. */
 const IDS = [
   "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
-  "standby", "standby-driver",
+  "standby", "standby-driver", "standby-promise",
+  "severed", "severed-reload",
   "origin", "origin-ack",
   "origin-host", "origin-again", "origin-scope", "origin-scope-detail", "origin-position",
   "origin-waiting", "origin-allow", "origin-deny", "origin-previous", "origin-next",
@@ -117,6 +118,13 @@ function installDomStub() {
   // swapped out (the "Checking…" in-flight state), so a stub whose buttons
   // start blank would make a correct restore look like a cleared button.
   nodes.get("retry-unresponsive").textContent = "Check again";
+  // The standby card's promise paragraph, off the same principle: popup.ts
+  // captures the markup's own sentence at module scope and puts it BACK for
+  // every case that has no qualifier to add (U9), so a stub starting blank would
+  // make "the shipped sentence is restored" — the half that keeps the healthy
+  // frame byte-identical — unobservable. Whitespace-normalised, because that is
+  // what the module does to it before appending.
+  nodes.get("standby-promise").textContent = STANDBY_PROMISE;
 
   globalThis.document = {
     getElementById: (id) => nodes.get(id) ?? null,
@@ -139,6 +147,35 @@ function installDomStub() {
 // store build, the one every pre-existing row implicitly modelled.
 const STORE_ID = "omibaecbjdhgbbcedbnnnmjpmopfheof";
 const DEV_ID = "jbadjeaodkoboanppmpjiifpconegdcj";
+
+/** The standby card's promise paragraph exactly as popup.html ships it, in the
+ * whitespace-normalised form popup.ts keeps. The healthy frame must render THIS
+ * and nothing else — it is the frame the earlier design and UX rounds approved
+ * byte-for-byte, and U9's whole risk is a qualifier leaking into the common
+ * case. */
+const STANDBY_PROMISE =
+  "This browser is paired, but the agent is connected to another browser right now. " +
+  "If that one disconnects, this browser takes over and the agent opens a new tab; " +
+  "the tab the agent was using stays open where it is.";
+
+/** The clause the card appends while the wheel is attached and merely silent. */
+const SILENT_CLAUSE =
+  "If it stops answering instead, this browser takes over as soon as Local " +
+  "Operator gives up on it, usually within about a minute.";
+
+/** The standby install's /health payload; `overrides` carry the silence fields.
+ * `driver_extension_id` names the OTHER install, which is what makes this popup
+ * the standby rather than the driver (see "WHICH INSTALL AM I?"). */
+const standbyHealth = (overrides = {}) => ({
+  paired: true,
+  extension_connected: true,
+  protocol_version: 1,
+  driver_extension_id: STORE_ID,
+  driver_label: "Chrome 0.1.13",
+  authorized_extension_ids: [STORE_ID, DEV_ID],
+  standby_extension_ids: [DEV_ID],
+  ...overrides,
+});
 
 function installChromeStub({ sendMessage, id = STORE_ID } = {}) {
   const areas = { session: new Map(), local: new Map() };
@@ -270,7 +307,7 @@ function visibleState(nodes) {
   // asked for it would fail rather than report.
   const states = [
     "connected", "paired", "pairing", "disconnected", "incompatible", "unresponsive",
-    "standby", "origin", "origin-ack",
+    "standby", "severed", "origin", "origin-ack",
   ];
   return states.filter((id) => !nodes.get(id).classList.contains("hidden"));
 }
@@ -1234,6 +1271,256 @@ test("E4: a revoked pairing does not keep showing the standby card", async () =>
     assert.ok(
       !visibleState(nodes).includes("standby"),
       "a stale standby connState must not claim a pairing that is gone",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * THE STANDBY CARD'S PROMISE (UX round 4, U9/U10 — the two user-visible lies).
+ *
+ * U9: the card promised an immediate takeover through the whole window in which
+ * the driver was mute, because the paragraph was static markup. Measured at
+ * 50.3 s of silence, the daemon already reported `takeover_within_s: 19.7` while
+ * the card rendered byte-identically to its healthy frame. U10: once the daemon
+ * severed the wheel and nothing had taken it, BOTH installs' fresh popups
+ * painted "Paired. Code accepted. Connecting this browser…" — a pairing flow
+ * claiming progress over a connection that does not exist.
+ *
+ * These rows drive the real module and read the PAINTED text, so they fail if
+ * either sentence loses its qualifier — which is the failure mode that matters,
+ * not whether the field is on the wire.
+ * ------------------------------------------------------------------------- */
+
+test("U9: a silent wheel appends the event the promise was missing", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // 41.2 s of silence, and `takeover_within_s` still null: the FIRST ~50 s of
+  // the wedge, which is the whole window the old card lied through. The number
+  // is UX's own measurement at t+35.3 s of their run.
+  installHealth(() => standbyHealth({ link_attached: true, link_silent_s: 41.2, takeover_within_s: null }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+    const promise = nodes.get("standby-promise").textContent;
+    assert.ok(
+      promise.startsWith(STANDBY_PROMISE),
+      "the shipped promise must survive: the clause qualifies it, it does not replace it",
+    );
+    assert.ok(promise.endsWith(SILENT_CLAUSE), `silent wheel must name its own event, got: ${promise}`);
+    assert.ok(
+      !promise.includes("Switching to this browser in about"),
+      "nothing has been committed yet, so there is no countdown to render",
+    );
+    // The fixture sentence is a hand-copy of the markup's, and the module composes
+    // its output from the MARKUP's — so a popup.html edit that drifted from this
+    // constant would otherwise be invisible here while changing every frame.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const para = markup.slice(markup.indexOf('id="standby-promise"'));
+    const shipped = para.slice(para.indexOf(">") + 1, para.indexOf("</p>")).replace(/\s+/g, " ").trim();
+    assert.equal(
+      shipped,
+      STANDBY_PROMISE,
+      "STANDBY_PROMISE must be popup.html's own sentence, or every assertion above is about a copy",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U9: a committed takeover swaps the clause for the countdown", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  // The instant UX measured (t+44.3 s): silence past the deadline, so the daemon
+  // reports 19.7 s to the severance. Rounded to the nearest 5 s — the field is an
+  // upper bound, so a to-the-second render would claim precision it lacks.
+  installHealth(() => standbyHealth({ link_attached: true, link_silent_s: 50.3, takeover_within_s: 19.7 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    const promise = nodes.get("standby-promise").textContent;
+    assert.equal(
+      promise,
+      `${STANDBY_PROMISE} The other install has stopped answering. Switching to this browser in about 20 seconds.`,
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U9: the healthy standby frame is untouched, and clears a stale qualifier", async () => {
+  // Both halves of the risk in one row. The healthy driver (silence ~1.6 ms,
+  // measured) must render the SHIPPED sentence exactly — the byte-identical
+  // frame every earlier design and UX approval rests on — and a render that
+  // follows a qualified one must put the sentence back rather than leave the
+  // last clause on screen.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = standbyHealth({ link_attached: true, link_silent_s: 50.3, takeover_within_s: 19.7 });
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+    assert.match(nodes.get("standby-promise").textContent, /Switching to this browser in about 20 seconds/);
+
+    // RENDER N+1: the wedge cleared (same shape, healthy values), and the render
+    // is driven by the storage event every real re-render goes through.
+    health = standbyHealth({ link_attached: true, link_silent_s: 0.0016, takeover_within_s: null });
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.equal(
+      nodes.get("standby-promise").textContent,
+      STANDBY_PROMISE,
+      "a driver that answers again must return the card to its shipped sentence",
+    );
+
+    // The clause is keyed on ATTACHED silence, not on a bare number: a value left
+    // over from a severed link is not a wheel anybody is holding.
+    health = standbyHealth({ link_attached: false, link_silent_s: 55.0, takeover_within_s: null });
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.equal(nodes.get("standby-promise").textContent, STANDBY_PROMISE);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U10: a severed wheel says so instead of claiming the pairing success copy", async () => {
+  // QA's §6.2 / UX's U10 state, verbatim: the daemon severed the mute driver and
+  // nothing took the wheel (the standby was taken offline so nothing could be
+  // promoted), so BOTH installs are authorised and NEITHER is named as driving.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: false,
+    protocol_version: 1,
+    driver_extension_id: "",
+    takeover_within_s: null,
+    standby_extension_ids: [],
+    authorized_extension_ids: [DEV_ID, STORE_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["severed"],
+      "a fresh popup after severance must not paint the pairing-success card",
+    );
+    // The copy itself, against the real markup: this harness's DOM is flat and
+    // does not parse popup.html, so a section's text and its containment are
+    // asserted where they actually live. Two properties, and both are the
+    // finding: the reload control must be INSIDE #severed (or the card offers
+    // nothing to do) and the sentence must stay CONDITIONAL — the daemon cannot
+    // name a culprit once the driver field is cleared, and "your extension
+    // stopped answering" is a claim this popup cannot make about itself.
+    const markup = await readFile(join(HERE, "..", "src", "popup", "popup.html"), "utf8");
+    const section = markup.slice(markup.indexOf('<section id="severed"'));
+    const body = section.slice(0, section.indexOf("</section>"));
+    // Collapsed, because the markup wraps these sentences across source lines and
+    // an assertion that only held for one line-length would be about formatting.
+    const copy = body.replace(/\s+/g, " ");
+    assert.ok(
+      body.includes('id="severed-reload"'),
+      "the reload control must live inside #severed, or the card offers no route out",
+    );
+    assert.ok(
+      copy.includes("Local Operator isn't driving this browser right now."),
+      "the card must state the fact it can state: nothing is driving this browser",
+    );
+    assert.ok(
+      copy.includes("If this browser's extension has stopped answering, reload it."),
+      "the remedy must stay conditional, because either install could be the mute one",
+    );
+    assert.ok(
+      !/your extension/i.test(copy),
+      "the copy must not blame THIS install's extension: the driver field is empty, so both are candidates",
+    );
+    assert.ok(
+      !copy.includes("Code accepted"),
+      "the pairing-success sentence is the lie this card exists to replace",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U10: the severed card is keyed on the latch, and never steals a named standby", async () => {
+  // Two controls, because the copy cannot name a culprit and the condition is
+  // shared with a healthy transient:
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  let health = {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: "",
+    takeover_within_s: null,
+    standby_extension_ids: [DEV_ID],
+    authorized_extension_ids: [DEV_ID, STORE_ID],
+  };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "an install the daemon still LISTS as a standby keeps the standby card: nothing has been severed",
+    );
+
+    // The SAME empty-driver, not-attached shape without the latch is the idle
+    // wheel — a daemon that has simply not been dialled yet, where the worker is
+    // about to reconnect. It keeps the pre-existing reading, so the new card
+    // cannot swallow the common case.
+    health = {
+      paired: true,
+      extension_connected: false,
+      protocol_version: 1,
+      driver_extension_id: "",
+      link_attached: false,
+      standby_extension_ids: [],
+      authorized_extension_ids: [DEV_ID, STORE_ID],
+    };
+    await chrome.storage.session.set({ connState: "standby" });
+    await tick(20);
+    assert.deepEqual(
+      visibleState(nodes),
+      ["paired"],
+      "without the unresponsive latch this is the idle wheel, not a severance",
     );
   } finally {
     await bundle.close();
