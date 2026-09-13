@@ -630,6 +630,48 @@ async def amain() -> int:
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _on_signal, sig)
+
+    # SIGHUP KEEPS THE RUNTIME RUNNING. Two things may end a session's work,
+    # and neither is an interface: the runtime's own residency predicate
+    # (``_should_exit``) and the deliberate kill switch (``control.stop_session``
+    # → socket stop → SIGTERM → SIGKILL). SIGHUP is the classic "the terminal
+    # that started me is gone" signal — the one ``nohup`` exists to ignore —
+    # and this process is spawned detached (``start_new_session=True``) with
+    # its log going to a file, so losing a controlling terminal is not a reason
+    # to drop a turn half-done.
+    #
+    # Left at its DEFAULT disposition a HUP kills the interpreter outright:
+    # no caused turn outcome, no lease release, no record unpublish, no
+    # ``session runtime: exiting`` line. The session is then left reading as an
+    # anonymous "cause could not be determined" cut-off, which is exactly the
+    # shape a terminal/interface teardown would produce — and nothing may end a
+    # session's work that way.
+    #
+    # The latch, not a per-signal log line: a HUP storm (a terminal that keeps
+    # re-delivering on its way down) must not be able to fill the runtime log.
+    hup_logged = False
+
+    def _ignore_sighup() -> None:
+        nonlocal hup_logged
+        if hup_logged:
+            return
+        hup_logged = True
+        logger.info(
+            "session runtime: ignoring SIGHUP (pid %d); this runtime is detached from interfaces",
+            os.getpid(),
+        )
+
+    # ``SIGHUP`` is POSIX-only, and a platform without it must not fail to boot
+    # a runtime over a signal it could not have received.
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is not None:
+        try:
+            loop.add_signal_handler(sighup, _ignore_sighup)
+        except (NotImplementedError, RuntimeError):
+            # Same fallback ``exec_worker`` uses for a platform whose loop
+            # cannot take signal callbacks: the intended disposition is
+            # SIG_IGN either way, and losing the log line beats losing the turn.
+            signal.signal(sighup, signal.SIG_IGN)
     if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1":
         # SIGUSR1 prints every asyncio task's stack to the child log. The
         # child has no terminal and no attached debugger, and a wedged turn
