@@ -201,11 +201,19 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: genuinely dead network has to surface an error rather than pin the session in
 #: a silent retry forever.
 #:
-#: Only a CONNECTIVITY loss is continued, never an ordinary stream error. When
-#: the machine is offline nothing was wrong with the request, the credential or
-#: the provider, so re-asking is the whole fix; a 5xx or a refusal means the
-#: provider DID answer, and replaying that turn would re-bill it to hide a
-#: failure the user needs to see.
+#: Only a cut the provider layer certifies as RESUMABLE is continued, and there
+#: are two families today. A CONNECTIVITY loss, where the machine is offline:
+#: nothing was wrong with the request, the credential or the provider, so
+#: re-asking is the whole fix. And an AGGREGATOR's in-band report that one of
+#: its UPSTREAM hosts died mid-stream (``is_aggregator_upstream_stream_failure``):
+#: a gateway is a router, so the next attempt is served by another of its hosts
+#: — re-issuing the turn IS the failover, rather than a pass dying while it
+#: holds a half-composed tool call.
+#:
+#: Everything else stays terminal exactly as before, and the distinction is the
+#: one both predicates are built on: the provider DID answer about the request
+#: it was given — a first-party 5xx, or a refusal, 4xx or in-band — so replaying
+#: that turn would re-bill it while hiding a failure the user needs to see.
 MAX_CONNECTIVITY_CONTINUATIONS = 3
 
 #: What the loop tells the model after the network cut its answer short.
@@ -221,6 +229,48 @@ CONNECTIVITY_CONTINUATION_PROMPT = (
     "Continue it seamlessly from exactly where it stopped — do not repeat any "
     "of it, do not restart, and do not apologise or mention the interruption."
 )
+
+#: What the loop tells the model when the interruption landed inside a TOOL CALL.
+#:
+#: The prompt above assumes the cut fell in a SENTENCE, and its instruction is
+#: to continue that sentence seamlessly. A call still being dictated when the
+#: socket died is truncated JSON: the continuation branch drops it — it cannot
+#: be run, and cannot be replayed faithfully — so the model's own record of
+#: having chosen that action is erased. Leaving it to the prose prompt then asks
+#: the model to continue a sentence it never finished while the action it had
+#: already decided on is silently lost, which is exactly what happened to the
+#: aborted ``write`` call in the incident. This instruction carries the one fact
+#: the drop erased, names the tool so a multi-call turn is unambiguous, and is
+#: written to stand alone — a cut that produced no prose at all gets it on its
+#: own — as well as to follow the prose prompt above.
+CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT = (
+    "[system] A tool call ({tools}) was aborted by the network interruption "
+    "before it finished, so it never ran. If you still need that action, issue "
+    "the call again from scratch."
+)
+
+
+def _continuation_instruction(*, resumable_text: bool, interrupted: list[ToolCall]) -> str:
+    """The instruction appended to an interrupted turn, shaped to the cut.
+
+    Both halves are independent, because the two cuts are: the interruption can
+    land in prose, inside a tool call, or — the incident's shape — in prose with
+    a call already being dictated. The prose half is added only when there is
+    partial prose to continue (this is the same view of "text" the serializer
+    takes; the whitespace-only guard in the continuation branch is what keeps
+    the two from disagreeing), and the call half only when a call was cut off.
+
+    A turn that has NEITHER is re-asked whole rather than continued, so it never
+    reaches here: with nothing committed to history there is no partial answer
+    to refer to and the retry is a clean re-ask.
+    """
+    parts: list[str] = []
+    if resumable_text:
+        parts.append(CONNECTIVITY_CONTINUATION_PROMPT)
+    if interrupted:
+        tools = ", ".join(sorted({call.name for call in interrupted}))
+        parts.append(CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT.format(tools=tools))
+    return " ".join(parts)
 
 
 # How the loop recognises "this DeepSeek thinking-mode request never carried the
@@ -881,22 +931,30 @@ class AgentLoop:
                                         new_messages,
                                         redact=config.redact_tool_result,
                                     )
-                                if resumable_text:
-                                    # KEYED ON PROSE ALONE, independently of the
-                                    # pairing above — an `elif` here silently lost
-                                    # the instruction for the one shape that most
-                                    # needs it. A cut that produced BOTH partial
+                                if resumable_text or truncated:
+                                    # KEYED ON PROSE ALONE — and on an
+                                    # interrupted CALL, which has no prose to key
+                                    # on — independently of the pairing above.
+                                    # An `elif` here silently lost the
+                                    # instruction for the one shape, and only
+                                    # the prose half was ever emitted, so a turn
+                                    # whose call was cut off mid-arguments got an
+                                    # instruction to "continue seamlessly" a
+                                    # sentence it never finished while the action
+                                    # it had chosen quietly vanished from its
+                                    # history. A cut that produced BOTH partial
                                     # prose and a complete call took the pairing
-                                    # arm and never reached this one, so text the
-                                    # user had already read was committed to
-                                    # history with nothing telling the model not
-                                    # to repeat it, and the answer could restart
-                                    # mid-sentence ("Paris is the capital of Paris
-                                    # is the capital of France."). Keeping the
-                                    # calls (above) is what made that shape
-                                    # reachable: before it, any turn with a call
-                                    # had its calls cleared and fell into the
-                                    # text arm, which did append this prompt.
+                                    # arm and never reached this one at all, so
+                                    # text the user had already read was
+                                    # committed to history with nothing telling
+                                    # the model not to repeat it, and the answer
+                                    # could restart mid-sentence ("Paris is the
+                                    # capital of Paris is the capital of
+                                    # France."). Keeping the calls (above) is
+                                    # what made that shape reachable: before it,
+                                    # any turn with a call had its calls cleared
+                                    # and fell into the text arm, which did append
+                                    # this prompt.
                                     #
                                     # Ordering is load-bearing: the synthetic tool
                                     # results are appended FIRST, so the prompt
@@ -950,7 +1008,12 @@ class AgentLoop:
                                     # without emitting a `MessageStartEvent`, so
                                     # there is no live announcement to suppress
                                     # and the announce loop is correctly untouched.
-                                    prompt = Message.user(CONNECTIVITY_CONTINUATION_PROMPT)
+                                    prompt = Message.user(
+                                        _continuation_instruction(
+                                            resumable_text=resumable_text,
+                                            interrupted=truncated,
+                                        )
+                                    )
                                     context.messages.append(prompt)
                                     new_messages.append(prompt)
                             # Neither text nor a surviving call? The message is
