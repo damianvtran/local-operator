@@ -62,16 +62,66 @@ an unpatched boot was measured doing — ``?2048h`` at byte ~123, ``?1016h`` at
 ~131, reports immediately after — so without the guard our reset would be undone
 within milliseconds of being written, by us.
 
-SO BOTH MECHANISMS ARE LOAD-BEARING AND NEITHER IS REDUNDANT. The reset clears
-the mode AT THE TERMINAL, including a sticky one we inherited; the environment
-guard stops TEXTUAL from turning it straight back on after seeing the reset.
-Remove either one and the divisor latches again — the first on state left set in
-the VT by an earlier app, the second on the driver's reply to its own query.
+A BOOT-TIME RESET CANNOT CATCH A CO-TENANT THAT DIRTIES THE MODE LATER. Mode
+2048 is per-VT state shared by every process on that tty, and the report for the
+resize that REVEALS a dirty mode arrives before any handler could act on it: the
+parser latches ``mouse_pixels`` while parsing that very report.
+
+THE PARSER GATE. :func:`install_pixel_mouse_gate` patches the CLASS method
+``XTermParser.parse_mouse_code`` to clear ``mouse_pixels`` before delegating, so
+that latch can never scale a coordinate we parse. It is installed only when the
+guard applied: with ``TEXTUAL_SMOOTH_SCROLL`` at 0 we never put ``?1016h`` on
+the wire, so no delivered report can be a legitimate statement that our
+coordinates are pixels, while an explicit ``TEXTUAL_SMOOTH_SCROLL=1`` keeps
+upstream behaviour byte for byte. Provenance: a LOCAL workaround for upstream
+behaviour, deliberately narrow (the one latch, never Textual's resize or
+terminal-size handling), idempotent, and reversible so a test can uninstall it.
+It lives in lop rather than upstream because the trade it implements is OURS: we
+are the ones who chose to stop negotiating pixel coordinates (THE ACCEPTED COST,
+below), so we are the ones who must not let a divisor that is only correct for
+that negotiation keep running. DELETE IT once upstream gates the latch on the
+mode actually having been requested — the issue's own mitigation candidate 3,
+i.e. ``mouse_pixels`` set only where ``SMOOTH_SCROLL`` is on; the gate's tests
+name the version they were verified against, so a Textual bump that ships that
+fix is visible there.
+
+THE MID-SESSION RE-CLEAN. :class:`InBandResizeReclaimer` re-asserts ``CSI
+?2048l`` through the app's driver writer on ``Resize`` and on focus-in — the
+issue's title, answered within one interaction instead of at the next boot. The
+sink is ``driver.write`` and not ``sys.__stderr__`` for the reason
+``terminal_title.py`` and ``tui/images.py`` document: Textual serialises every
+byte it paints through one writer thread, so a second writer interleaves an
+escape into the middle of a frame. Volume: one 8-byte write per delivered
+``Resize`` message and per focus gain, with no per-frame or per-widget
+multiplier. Textual's ``App._on_resize`` (``app.py:4345-4356``) coalesces the
+SCREEN-level re-arrange at 1/120 s and returns early on an unchanged size, but
+that early return is inside its own handler, so the public ``on_resize`` still
+runs for every delivered message — the ceiling is the terminal's SIGWINCH
+delivery rate, the only remaining source in this configuration because the
+in-band path is off. A clock, a flush timer and their tests to turn a
+few-times-a-second 8-byte write into a smaller number of 8-byte writes is not a
+trade worth making, so this deliberately does not coalesce.
+
+SO EACH MECHANISM IS LOAD-BEARING AND NONE IS REDUNDANT. The reset clears the
+mode AT THE TERMINAL, including a sticky one we inherited; the environment guard
+stops TEXTUAL from turning it straight back on after seeing the reset; the
+parser gate keeps a report that arrives anyway from scaling our coordinates,
+which no amount of not-asking can do; and the mid-session re-clean closes a mode
+a co-tenant set AFTER boot, which the boot reset cannot reach. Remove any one and
+the divisor latches again — the first on state left set in the VT by an earlier
+app, the second on the driver's reply to its own query, the third on a dirty
+mode that outlived our boot, the fourth on a co-tenant that dirtied it while we
+were running.
 
 ORDERING. :func:`reset_in_band_resize` must reach the wire before the driver
 issues its ``CSI ?2048$p`` query at ``linux_driver.py:299``, and
 :func:`guard_pixel_mouse_latch` must run before ``textual.constants`` is
 imported, because ``SMOOTH_SCROLL`` is a ``Final`` read once at import time.
+:func:`install_pixel_mouse_gate` therefore runs AFTER the guard — it imports
+``textual._xterm_parser`` (which imports ``textual.constants``), so it must not
+be what freezes that constant ahead of the guard's write — and it must run
+before the app starts reading input, since it patches the class the driver's
+parser is an instance of.
 
 RESIZE STAYS LIVE. Nothing here costs us resize handling. With the negotiation
 suppressed the driver's ``_in_band_window_resize`` stays False, which is the
@@ -85,10 +135,14 @@ therefore take the animated path at ``scrollbar.py:395`` instead of the
 immediate one. A slightly animated scrollbar drag is worth a mouse that points
 where the user is pointing.
 
-Deliberately stdlib-only, importing nothing from this package and — critically —
-nothing from ``textual``: the same leaf discipline as ``terminals.py``, and here
-it is also a correctness requirement, since importing this module must not be
-what pulls ``textual.constants`` in ahead of the guard.
+Deliberately stdlib-only at module scope, importing nothing from this package and
+— critically — nothing from ``textual``: the same leaf discipline as
+``terminals.py``, and here it is also a correctness requirement, since importing
+this module must not be what pulls ``textual.constants`` in ahead of the guard.
+:func:`install_pixel_mouse_gate` and :func:`pixel_mouse_gate_installed` import
+``textual._xterm_parser`` INSIDE the call for exactly that reason: patching a
+third-party class is not worth breaking the invariant that this module is safe
+to import at any point in the boot.
 
 All references pinned to textual 8.2.8. Every bare ``linux_driver.py`` means
 ``textual/drivers/linux_driver.py`` — there is no top-level file of that name,
@@ -99,9 +153,17 @@ files of those names in the ``textual`` package root.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
-from typing import MutableMapping, TextIO
+from typing import TYPE_CHECKING, Any, Callable, MutableMapping, TextIO
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never executed
+    # Deliberately NOT a runtime import: see the module docstring's leaf
+    # discipline. These two names exist so the patched method and the reclaimer
+    # can be annotated without pulling ``textual`` in at import time.
+    from textual._xterm_parser import XTermParser as _XTermParser
+    from textual.message import Message
 
 #: ``CSI ? 2048 l`` — reset in-band window resize notifications. Addressed at the
 #: TERMINAL rather than at Textual's view of the mode because mode 2048 is
@@ -197,3 +259,146 @@ def reset_in_band_resize(stream: TextIO | None = None) -> bool:
         # cosmetic escape is never worth failing a boot over.
         return False
     return True
+
+
+#: Attribute this module stamps onto the wrapper it installs, so
+#: :func:`install_pixel_mouse_gate` can tell its own wrapper from upstream's
+#: method without comparing against a saved reference (which would be a second
+#: source of truth for "installed").
+_GATE_MARKER = "_lop_pixel_mouse_latch_gate"
+
+
+def install_pixel_mouse_gate() -> bool:
+    """Stop the in-band-report latch from scaling coordinates; True if installed.
+
+    Patches the CLASS method ``XTermParser.parse_mouse_code``, which is the only
+    place the divisor is computed (``_xterm_parser.py:94-102``), to clear
+    ``mouse_pixels`` before delegating to the original. The class and not an
+    instance because the driver builds its parser when the app starts, after
+    this runs; a per-instance patch would have to reach into the driver.
+
+    Narrow on purpose: it touches the ONE one-way latch and nothing else.
+    Textual's resize handling, ``terminal_size``/``terminal_pixel_size``
+    bookkeeping and the ``Resize`` token are all left exactly as upstream has
+    them, so the out-of-band SIGWINCH path the guard puts us on is unaffected.
+
+    Idempotent: installing over its own wrapper returns False and does not wrap
+    twice. Reversible by :func:`uninstall_pixel_mouse_gate`, which restores the
+    original function object, so a test can leave the class as it found it.
+
+    Call it only when :func:`guard_pixel_mouse_latch` returned True. With an
+    explicit ``TEXTUAL_SMOOTH_SCROLL=1`` the user asked for smooth scrolling and
+    pixel coordinates; forcing the divisor off would ignore that, so install
+    NOTHING there and leave upstream behaviour untouched.
+    """
+    from textual._xterm_parser import XTermParser
+
+    current = XTermParser.parse_mouse_code
+    if getattr(current, _GATE_MARKER, False):
+        return False
+    original = current
+
+    # ``functools.wraps`` for the ``__wrapped__`` link uninstall follows, and
+    # because a bare wrapper loses the original's name and docstring in any
+    # traceback that goes through mouse parsing.
+    @functools.wraps(original)
+    def parse_mouse_code(self: _XTermParser, code: str) -> Message | None:
+        # The latch is one-way and ungated upstream (a delivered report sets it
+        # whatever we negotiated), so clearing it here is what keeps the divisor
+        # off every coordinate this parser will ever see.
+        if self.mouse_pixels:
+            self.mouse_pixels = False
+        return original(self, code)
+
+    setattr(parse_mouse_code, _GATE_MARKER, True)
+    # ``setattr`` on the class rather than an annotated assignment: this is a
+    # third-party class we do not import for typing, and the wrapper is a plain
+    # function, so it still binds as a method.
+    setattr(XTermParser, "parse_mouse_code", parse_mouse_code)
+    return True
+
+
+def uninstall_pixel_mouse_gate() -> bool:
+    """Undo :func:`install_pixel_mouse_gate`; False when nothing was installed.
+
+    Restores the ORIGINAL function object rather than unwrapping by hand, so a
+    test that installs and uninstalls leaves ``XTermParser`` byte-identical to
+    how it found it — including after several install/uninstall cycles.
+    """
+    from textual._xterm_parser import XTermParser
+
+    current = XTermParser.parse_mouse_code
+    if not getattr(current, _GATE_MARKER, False):
+        return False
+    original = getattr(current, "__wrapped__", None)
+    if original is None:  # pragma: no cover - the marker implies the link
+        return False
+    setattr(XTermParser, "parse_mouse_code", original)
+    return True
+
+
+def pixel_mouse_gate_installed() -> bool:
+    """True when the parser class currently carries the gate.
+
+    The app asks this rather than remembering the guard's return value, so the
+    gate and the re-clean cannot disagree about which configuration is in
+    force: there is one answer, and it is the state of the class.
+    """
+    from textual._xterm_parser import XTermParser
+
+    return bool(getattr(XTermParser.parse_mouse_code, _GATE_MARKER, False))
+
+
+class InBandResizeReclaimer:
+    """Re-assert ``CSI ?2048l`` mid-session through an injected write sink.
+
+    The boot reset cannot reach a mode a co-tenant sets while we run, and the
+    report that reveals it arrives before any handler could act, so this is the
+    recency half: :meth:`reclaim` runs on ``Resize`` and on focus-in and closes
+    the mode within one interaction.
+
+    The sink is whatever the caller passes — in the app, ``driver.write``, which
+    is ``App._driver.write`` and the same door ``terminal_title.py``,
+    ``tui/images.py`` and ``tui/notify.py`` use, because Textual serialises
+    everything it paints through one writer thread and a second writer
+    interleaves an escape into the middle of a frame.
+
+    Headless and no-driver gating lives with the caller (the app builds one of
+    these only when it has a driver and is not headless), so this object stays a
+    single-purpose, directly testable thing.
+    """
+
+    __slots__ = ("_env", "_write")
+
+    def __init__(
+        self,
+        write: Callable[[str], Any],
+        *,
+        env: MutableMapping[str, str] | None = None,
+    ) -> None:
+        self._write = write
+        #: Injection point for tests, mirroring :func:`reset_in_band_resize`'s
+        #: stream parameter: production passes nothing and reads ``os.environ``
+        #: at call time, which is what makes the kill switch work when it is set
+        #: after boot.
+        self._env = env
+
+    def reclaim(self) -> bool:
+        """Hand ``CSI ?2048l`` to the sink; True when it was handed over.
+
+        The kill switch is the same ``LOCAL_OPERATOR_NO_MODE_RESET`` the boot
+        reset honours, and it is read per call rather than cached so setting it
+        mid-session suppresses the next write.
+
+        A failed write is swallowed, like :func:`reset_in_band_resize`'s: a
+        writer thread that has already died must not turn a resize into an
+        exception, and a cosmetic escape is never worth an event.
+        """
+        env = os.environ if self._env is None else self._env
+        if env.get(_ENV_DISABLE):
+            return False
+        try:
+            self._write(DISABLE_IN_BAND_RESIZE)
+        except (OSError, ValueError):
+            return False
+        return True

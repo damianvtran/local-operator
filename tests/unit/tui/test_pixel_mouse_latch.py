@@ -48,6 +48,7 @@ import select
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual import constants, events, messages
@@ -515,13 +516,17 @@ def test_the_guard_leaves_a_value_textual_actually_reads(
 #: two calls, so deleting them from ``run_tui`` leaves this file green (review
 #: round 3, MINOR 1). This child calls the REAL ``run_tui`` and stubs the lazy
 #: ``local_operator.tui.app`` import to raise, so its failure lands immediately
-#: after the two calls and nothing has to boot.
+#: after the three calls and nothing has to boot.
 #:
 #: The recorders replace the module attributes ``run_tui`` resolves at call
 #: time, which is what makes this a test of the production path rather than of
 #: the child: remove a call from ``run_tui`` and no recorder fires.
+#:
+#: ``guard`` is a WRAPPER around the real guard rather than a recorder that
+#: returns True: the gate is installed on the guard's own return value, so a
+#: stubbed return would make the deferral arm below assert nothing.
 _WIRING_CHILD = """
-import asyncio, json, sys, types
+import asyncio, json, os, sys, types
 
 import local_operator.tui as tui
 
@@ -529,22 +534,40 @@ calls = []
 textual_loaded_at_call = None
 
 
+def _record(name):
+    global textual_loaded_at_call
+    calls.append(name)
+    if textual_loaded_at_call is None:
+        textual_loaded_at_call = any(
+            module == "textual" or module.startswith("textual.")
+            for module in sys.modules
+        )
+
+
 def _recorder(name):
     def _call(*_args, **_kwargs):
-        global textual_loaded_at_call
-        calls.append(name)
-        if textual_loaded_at_call is None:
-            textual_loaded_at_call = any(
-                module == "textual" or module.startswith("textual.")
-                for module in sys.modules
-            )
+        _record(name)
         return True
 
     return _call
 
 
+_real_guard = tui.guard_pixel_mouse_latch
+
+
+def _guard(*args, **kwargs):
+    _record("guard")
+    return _real_guard(*args, **kwargs)
+
+
 tui.reset_in_band_resize = _recorder("reset")
-tui.guard_pixel_mouse_latch = _recorder("guard")
+tui.guard_pixel_mouse_latch = _guard
+tui.install_pixel_mouse_gate = _recorder("gate")
+
+
+inherited = sys.argv[1]
+if inherited:
+    os.environ["TEXTUAL_SMOOTH_SCROLL"] = inherited
 
 
 class _NoApp(types.ModuleType):
@@ -563,20 +586,13 @@ print(json.dumps({"calls": calls, "textual_loaded_at_call": textual_loaded_at_ca
 """
 
 
-def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> None:
-    """The wiring, which the pty ordering test cannot see (review round 3, MINOR 1).
+def _run_wiring_child(tmp_path: Path, inherited: str) -> dict[str, Any]:
+    """Run the real ``run_tui`` with ``TEXTUAL_SMOOTH_SCROLL`` as given.
 
-    ``_capture_boot_bytes``'s child re-implements the two calls, so both could be
-    deleted from ``run_tui`` with the whole file green — a plausible refactor
-    (moving them below the lazy import) would silently restore the reported bug.
-    This calls the REAL ``run_tui`` and stubs only the ``local_operator.tui.app``
-    import to raise, so the failure lands immediately after the two calls: with
-    either call missing, or with the calls moved below the import, ``calls``
-    comes back short and this goes red.
-
-    ``textual_loaded_at_call`` is the guard's precondition, asserted at the
-    moment the first call ran rather than inferred afterwards: the guard is
-    inert if ``textual.constants`` is already in ``sys.modules``.
+    ``inherited`` is ``""`` for absent: the child needs to distinguish absent
+    from an empty string, which is one of the shapes the guard deliberately
+    treats as absent, so it is passed as an argv value rather than through the
+    environment.
     """
     import json
     import subprocess
@@ -587,7 +603,7 @@ def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> Non
         "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".local-operator"),
     }
     out = subprocess.run(
-        [sys.executable, "-c", _WIRING_CHILD],
+        [sys.executable, "-c", _WIRING_CHILD, inherited],
         capture_output=True,
         text=True,
         cwd=_REPO_ROOT,
@@ -595,7 +611,41 @@ def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> Non
         timeout=120,
     )
     assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
 
-    result = json.loads(out.stdout)
+
+def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> None:
+    """The wiring, which the pty ordering test cannot see (review round 3, MINOR 1).
+
+    ``_capture_boot_bytes``'s child re-implements the two calls, so both could be
+    deleted from ``run_tui`` with the whole file green — a plausible refactor
+    (moving them below the lazy import) would silently restore the reported bug.
+    This calls the REAL ``run_tui`` and stubs only the ``local_operator.tui.app``
+    import to raise, so the failure lands immediately after the calls: with any
+    of them missing, or with the calls moved below the import, ``calls`` comes
+    back short and this goes red.
+
+    ``textual_loaded_at_call`` is the guard's precondition, asserted at the
+    moment the first call ran rather than inferred afterwards: the guard is
+    inert if ``textual.constants`` is already in ``sys.modules``.
+    """
+    result = _run_wiring_child(tmp_path, "")
+
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["textual_loaded_at_call"] is False, result
+
+
+def test_run_tui_installs_the_gate_only_when_the_guard_applied(tmp_path: Path) -> None:
+    """The third call is conditional, and the condition is the guard's answer.
+
+    ``TEXTUAL_SMOOTH_SCROLL=1`` is a user asking for smooth scrolling and pixel
+    coordinates: Textual honours it, the guard defers, and no gate may be
+    installed — with one installed the latch would clear a divisor that is
+    correct, and the re-clean would switch the mode off underneath them (see
+    ``terminal_modes``). The unset arm is the same child, so the difference here
+    is the configuration and not the harness.
+    """
+    result = _run_wiring_child(tmp_path, "1")
+
     assert result["calls"] == ["reset", "guard"], result
     assert result["textual_loaded_at_call"] is False, result
