@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from rich.cells import cell_len
@@ -39,6 +41,7 @@ from local_operator.tui.widgets.session_picker import (
     NAME_MIN_CELLS,
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
+    _clocks_row,
     _footer_hints,
     _meta_legends,
     filter_rows,
@@ -3042,6 +3045,8 @@ def _chrome(text: str, name: str) -> bool:
         return True
     if name in stripped or stripped.startswith("started "):
         return True
+    if CKPT_MODEL in stripped or CKPT_CWD in stripped:
+        return True
     return bool(re.search(r"\d+–\d+ of \d+", stripped)) or "not read" in stripped
 
 
@@ -3352,9 +3357,15 @@ async def test_the_optional_header_row_is_shed_before_the_conversation_line(
 
         painted = [text for _, text in _pane_rows(app, screen) if text.strip()]
         assert any("turn 0" in text for text in painted), (size, painted)
-        # ...and the model line is drawn only where there is a row under it.
-        shed = screen._content_rows() - 4 < 1
-        assert any("claude-opus-5" in text for text in painted) is not shed, (size, painted)
+        # ...and the model line is drawn only where the pane can keep it WITHOUT
+        # cost to the claims above it: the conversation line first, then the
+        # counter row, then this one (`_meta_row` owns that order, and
+        # `test_the_panes_rows_are_claimed_in_precedence_order` pins it at the
+        # size where they compete). This case is the one the previous round
+        # answered by hand, so it asks the same predicate the paint does rather
+        # than a second arithmetic that agrees with it today.
+        drawn = bool(screen._meta_row(len(screen._preview_lines())))
+        assert any("claude-opus-5" in text for text in painted) is drawn, (size, painted)
         assert len(screen.render_preview_for_test()) <= preview.size.height, size
 
 
@@ -3376,3 +3387,359 @@ def test_the_position_marker_never_states_a_range_that_ends_before_it_starts() -
         assert int(match.group(2)) >= int(match.group(1)), (drawn, text)
     # One drawn line reads as the one line it is at, not as nothing.
     assert screen._preview_pane_status(40, 0, 0, 299).plain.startswith("1–1 of 299")
+
+
+#: The checkpoint fixture's own words, shared by the helper that writes it and
+#: the frame classifier that has to tell its row from a line of conversation.
+CKPT_MODEL = "claude-opus-5"
+CKPT_CWD = "/Users/example/workspace"
+
+#: Terminal sizes whose preview content rows run the whole drawable band: the
+#: plan's floor (4 content rows), every content height between, and a tall pane.
+#: `body` is what the pane has left for the window after its header and (where
+#: there is room) the counter row — 1 through 6 here.
+BAND_SIZES: tuple[tuple[int, int], ...] = (
+    (100, 14),  # content 4 -> body 1
+    (40, 15),  # content 5 -> body 1 (2 with a checkpoint' shed row)
+    (40, 16),  # content 6 -> body 2 (1 with a checkpoint)
+    (100, 16),  # content 6 -> body 2
+    (45, 17),  # content 7 -> body 3 (2 with a checkpoint)
+    (100, 30),  # content 8 -> body 4 (3 with a checkpoint)
+    (120, 36),  # content 10 -> body 6 (5 with a checkpoint)
+    # The narrowest pane the plan draws: 16 cells of text on a 20-column
+    # terminal, where a width model that claims more than the widget has makes
+    # every line and the rule wrap and spend rows the budget never counted.
+    (20, 20),
+)
+
+
+def _is_role_label(text: str) -> bool:
+    """Is this row nothing but a role label (`▸ you`, `▪ lop`)?
+
+    The gutter is its own row and its body follows on the rows beneath it, so a
+    row that IS the label is not a line of conversation — it is the introduction
+    to one, and the pane painting it with nothing under it is the shape UX round
+    3 reported at a two-row body budget.
+    """
+    return bool(re.match(r"^[▸▪]\s*\S*\s*$", text.strip()))
+
+
+class _PaneFrame(NamedTuple):
+    """The pane's painted frame, split where the pane itself splits it.
+
+    A NamedTuple rather than a dict so a wrong key is a type error at the call
+    site instead of a KeyError in the middle of a parametrised sweep.
+    """
+
+    rows: list[str]
+    header: list[str]
+    window: list[str]
+    status: str | None
+    counter: str | None
+    markers: list[str]
+    labels: list[str]
+    conversation: list[str]
+    meta: list[str]
+
+
+def _pane_frame(app: App[None], screen) -> _PaneFrame:
+    """The pane's PAINTED frame, read off the compositor.
+
+    Header / window / counter, from the paint rather than from the widget's Text,
+    because the two things this round is about — a row that is reserved and never
+    painted, and a counter that reports rows nobody can see — are both invisible
+    to the model string.
+
+    A window MARKER is found by its leading ellipsis. The stem ("turns in the
+    middle") is the wrong detector: at a 16-cell pane the statement is truncated
+    to ``… turns in th…``, and reading that as conversation is exactly the mistake
+    the counter's invariant is here to catch.
+    """
+    rows = [text for _, text in _pane_rows(app, screen)]
+    rules = [i for i, text in enumerate(rows) if text.strip() and set(text.strip()) == {"─"}]
+    rule = rules[-1] if rules else -1
+    window = rows[rule + 1 :]
+    status = None
+    # The status row's last rung is the bare `⋮` — the position ladder sheds the
+    # arithmetic before it sheds the marker — so the row is the status row either
+    # way, and only its arithmetic is optional.
+    if window and (re.search(r"\d+–\d+ of \d+", window[-1]) or window[-1].strip() == "⋮"):
+        status = window[-1].strip()
+        window = window[:-1]
+    return _PaneFrame(
+        rows=rows,
+        header=rows[:rule],
+        window=window,
+        status=status,
+        counter=status if status and re.search(r"\d+–\d+ of \d+", status) else None,
+        markers=[text for text in window if text.strip().startswith("…")],
+        labels=[text for text in window if _is_role_label(text)],
+        # CONVERSATION means prose. A bare role label is not prose — "a label
+        # with nothing beneath it reads as a turn that failed to load", which is
+        # the defect this round's first item is — so a pane whose only non-chrome
+        # row is `▸ you` has no conversation row and the sweep has to see it.
+        conversation=[
+            text
+            for text in window
+            if text.strip() and not text.strip().startswith("…") and not _is_role_label(text)
+        ],
+        meta=[text for text in rows if CKPT_MODEL in text],
+    )
+
+
+def _over_window_transcript(root: Path, session_id: str, *, checkpoint: bool = False) -> None:
+    """A transcript longer than both read windows, so the pane states the gap."""
+    filler = "y" * 8_000
+    entries = [
+        _message("user", f"burst {index}: open the file {filler}", ts=float(index))
+        for index in range(80)
+    ]
+    _write_transcript(root, session_id, _with_checkpoint(entries, checkpoint))
+    transcript = root / "sessions" / session_id / "transcript.jsonl"
+    assert transcript.stat().st_size > 2 * PREVIEW_TAIL_BYTES, "fixture is not over-window"
+
+
+def _sub_window_transcript(root: Path, session_id: str, *, checkpoint: bool = False) -> None:
+    """A transcript inside one read window: no gap, so no statement."""
+    entries = [_message("user", f"turn {index} " + "conversation body " * 6) for index in range(4)]
+    _write_transcript(root, session_id, _with_checkpoint(entries, checkpoint))
+
+
+def _with_checkpoint(entries: list[dict[str, object]], checkpoint: bool) -> list[dict[str, object]]:
+    """Append the checkpoint LAST, the way a real transcript carries it.
+
+    Not cosmetic: ``SessionPreviews.checkpoint`` reads the store's TAIL window,
+    so a checkpoint written at the head of an over-window file is never found —
+    a fixture that puts it first tests a row with no checkpoint while claiming
+    to test one.
+    """
+    if not checkpoint:
+        return entries
+    return [*entries, _checkpoint_entry(CKPT_MODEL, CKPT_CWD, ts=1.0)]
+
+
+@asynccontextmanager
+async def _band_case(tmp_path: Path, size: tuple[int, int], shape: str, checkpoint: bool):
+    """Open the real app on one fixture, at one size, ready to be read."""
+    session_id = "cc0000000001"
+    if shape == "over-window":
+        _over_window_transcript(tmp_path, session_id, checkpoint=checkpoint)
+    else:
+        _sub_window_transcript(tmp_path, session_id, checkpoint=checkpoint)
+    app = _real_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen([_row(session_id, "a long conversation")], NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        yield app, screen, pilot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", BAND_SIZES)
+@pytest.mark.parametrize("shape", ["over-window", "sub-window"])
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_every_body_budget_the_plan_draws_paints_a_line_and_counts_it(
+    tmp_path: Path, size: tuple[int, int], shape: str, checkpoint: bool
+) -> None:
+    """The band, not the value: every budget 1..N, both reads, ± a checkpoint.
+
+    Three rounds in a row moved a boundary and left the class alive one row
+    further out, because each fix was pinned at the size that failed. The
+    failures themselves were all one shape — the pane reserving rows the paint
+    did not have — so this sweeps the whole drawable band and asserts the two
+    invariants that make the reservations true at every budget:
+
+    * a drawn pane paints at least one row of actual conversation (UX U5: at
+      the opening frame and at ``ctrl+g``);
+    * the counter's ``N–M`` is EXACTLY the transcript rows the pane is showing —
+      ``N == offset + 1``, ``T == the wrapped-line total``, and
+      ``M − N + 1 == transcript rows painted``, count for count, in every state
+      (agent review round 5's MINOR counted the hoisted statement as a line of
+      transcript, so the pane claimed a line nobody could reach).
+    """
+    async with _band_case(tmp_path, size, shape, checkpoint) as (app, screen, pilot):
+        preview = screen.query_one("#session-picker-preview")
+        plan = plan_layout(*size, querying=False)
+        if not preview.display or not plan.preview_rows:
+            # The floor: no pane at all, and the plan says so (U5's other half).
+            assert plan.preview_rows == 0, (size, plan.preview_rows)
+            return
+
+        total = len(screen._preview_lines())
+        budget = screen._pane_body_rows(total)
+        assert preview.size.height == screen._content_rows(), (size, preview.size.height)
+        assert budget >= 1, (size, budget)
+
+        for state in ("top", "mid", "end"):
+            if state == "mid":
+                screen._pane_top = min(3, max(0, total - 1))
+                screen._repaint()
+                await pilot.pause()
+            elif state == "end":
+                screen.action_pane_end()
+                await pilot.pause()
+            offset = screen.preview_offset_for_test()
+            frame = _pane_frame(app, screen)
+            window, status, counter = frame.window, frame.status, frame.counter
+
+            # Every reserved row is PAINTED. When the read is clipped the
+            # window is EXACTLY the budget (the counter's row is the budget's
+            # own reservation, spent on the counter), and a read that fits
+            # simply does not fill it — the two states a missing row can hide in
+            # are "the pane reserved a row it left bare" and "the pane painted
+            # more rows than it reserved", and both are checked here.
+            if status:
+                assert len(window) == budget, (size, state, frame)
+            else:
+                assert len(window) <= budget, (size, state, frame)
+            if status and counter:
+                match = re.search(r"(\d+)–(\d+) of (\d+)", counter)
+                assert match, counter
+                first, last, told_total = (int(match.group(i)) for i in (1, 2, 3))
+                assert first == offset + 1, (size, state, counter, offset)
+                assert told_total == total, (size, state, counter, total)
+                assert last >= first, (size, state, counter)
+                # Count for count: the statement is a note about the read, not a
+                # line of it, so it is excluded on both sides of the equality.
+                assert last - first + 1 == len(window) - len(frame.markers), (
+                    size,
+                    state,
+                    counter,
+                    frame,
+                )
+
+            if state != "mid":
+                assert frame.conversation, (size, state, frame)
+            # ...and on a gapped read the statement is painted at the TOP only,
+            # and only where there is room for it AND a line of conversation
+            # under it: at one body row the conversation wins the row, which is
+            # what stopped a bare `▸ you` under the statement (UX round 3, U5).
+            if shape == "over-window" and state == "top":
+                assert bool(frame.markers) == (budget >= 2), (size, state, frame)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "size,expect_meta,expect_counter",
+    [
+        ((100, 14), False, False),  # content 4: room for the line of conversation only
+        ((40, 15), False, True),  # content 5: the counter outranks the model row
+        ((100, 16), True, True),  # content 6: room for all three claims
+    ],
+)
+async def test_the_panes_rows_are_claimed_in_precedence_order(
+    tmp_path: Path, size: tuple[int, int], expect_meta: bool, expect_counter: bool
+) -> None:
+    """Agent review round 5's NOTE: the optional row did not know the counter exists.
+
+    The pane's rows are claimed in a fixed order — conversation, then the
+    counter, then the optional ``model · cwd`` row — and each size below is one
+    step of it: at four content rows there is room for a line of conversation and
+    nothing else; at five the counter row is claimed and the model row goes,
+    which is the state the NOTE found the wrong way round (the model row was kept
+    and the counter dropped); at six all three fit, so nothing is spent to buy
+    anything. The size where they compete is here, not in a comment.
+    """
+    async with _band_case(tmp_path, size, "over-window", True) as (app, screen, pilot):
+        total = len(screen._preview_lines())
+        frame = _pane_frame(app, screen)
+        assert frame.conversation, (size, frame)
+        assert bool(frame.meta) == expect_meta, (size, frame)
+        assert bool(frame.counter) == expect_counter, (size, frame)
+        # The reservation and the paint agree — one predicate, asked twice.
+        assert bool(screen._meta_row(total)) == expect_meta, (size, total)
+        assert screen._pane_body_rows(total) >= 1, size
+        if expect_counter:
+            # ...and the counter is the pane's LAST content row, so the row it
+            # was given is not left bare below it (design round 5, D9).
+            preview = screen.query_one("#session-picker-preview")
+            status = _status_row(app, screen)
+            assert status is not None, (size, _pane_rows(app, screen))
+            assert status[0] == preview.content_region.bottom - 1, (
+                size,
+                _pane_rows(app, screen),
+            )
+
+
+def test_the_clock_row_keeps_every_value_with_its_unit() -> None:
+    """Design round 6's MINOR: the ellipsis landed inside the age.
+
+    At a 38-cell clock row the old form cut the second value to
+    ``started 1033d ago · last worked 1…`` — 1m, 1h and 1d all unreadable, and
+    the age is the entire content of the field. The two `` ago `` suffixes are
+    redundant under labels that already say what the value measures, and
+    dropping them is what fits both values whole at 40 columns.
+    """
+    assert _clocks_row("1033d ago", "1033d ago", 34) == "started 1033d · last worked 1033d"
+    assert _clocks_row("3h ago", "1m ago", 34) == "started 3h · last worked 1m"
+    assert "ago" not in _clocks_row("3h ago", "1m ago", 34)
+    # One value only: the recency is the field the picker sorts on.
+    assert _clocks_row("1033d ago", "1m ago", 20) == "last worked 1m"
+    # ...and at the narrowest pane the plan draws — 16 cells of text on a
+    # 20-column terminal — the VALUE keeps its unit rather than being cut to
+    # `last wor…`, which is the rung the failing width cannot need.
+    assert _clocks_row("3h ago", "1033d ago", 16) == "1033d"
+    # THE FUNCTION NEVER RETURNS TWO ROWS, at any width the window can have.
+    for width in range(10, 120):
+        for started, worked in (
+            ("just now", "just now"),
+            ("1033d ago", "1m ago"),
+            ("·", "3h ago"),
+            ("·", "just now"),
+        ):
+            row = _clocks_row(started, worked, width)
+            assert cell_len(row) <= width, (width, started, worked, row)
+            assert "\n" not in row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "age_s,expected",
+    [
+        (60.0, "started just now · last worked 1m"),
+        (1033 * 86_400.0, "last worked 1033d"),
+    ],
+)
+async def test_the_painted_clock_row_keeps_its_units_at_forty_columns(
+    tmp_path: Path, age_s: float, expected: str
+) -> None:
+    """The same defect, on the frame the designer measured it on.
+
+    40 columns is a 34-cell pane text width, and the row is painted by the real
+    app under the production stylesheet — the unit-level test above cannot see a
+    row that wraps, which is how this row was broken in the first place (the
+    wrapped clock row took the pane's last line with it).
+    """
+    _over_window_transcript(tmp_path, "cc0000000001")
+    app = _real_app()
+    async with app.run_test(size=(40, 15)) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen(
+            [
+                SessionRow(
+                    id="cc0000000001",
+                    mtime=NOW - age_s,
+                    name="a long conversation",
+                    created_at=NOW - age_s,
+                )
+            ],
+            NOW,
+        )
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        await _open_with_transcript(screen, pilot, tmp_path / "sessions")
+        frame = _pane_frame(app, screen)
+        clock = [row for row in frame.rows if "last worked" in row]
+        assert len(clock) == 1, (clock, frame.rows)
+        # The value arrives WITH its unit, on one row: no `ago`, no ellipsis, and
+        # never a bare `last wor…`. The second case is the designer's own repro —
+        # a 1033d age under a 12-cell label does not fit the 34 cells beside
+        # `started`, so the recency survives alone rather than being cut.
+        assert expected in clock[0], (age_s, clock)
+        assert "ago" not in clock[0], clock
+        assert "…" not in clock[0], clock
+        assert frame.conversation, frame
