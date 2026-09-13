@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import hmac
 import inspect
 import json
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
 from local_operator.paths import config_dir
+from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
@@ -72,7 +74,11 @@ from local_operator.session.runtime.types import (
     ClientLocality,
     SessionRecord,
 )
-from local_operator.session.transcript import durable_conversation_path
+from local_operator.session.transcript import (
+    _ATTACHMENT_FLOOR_BYTES,
+    ATTACHMENT_KEY,
+    durable_conversation_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +242,240 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
     return _frame_line_bytes(probe) - 2
+
+
+#: Line bytes the shedding stage deliberately leaves UNSPENT.
+#:
+#: The residual share is exact, so spending all of it parks the frame a handful
+#: of bytes under the limit — measured at 11 on a 2 MiB text result. A frame
+#: flush against the line is a frame the NEXT per-frame field flips from
+#: "briefly clipped text" to the emptied fallback beneath it, and this codebase
+#: has already paid for that lesson once (``JOB_TEXT_FRAME_BUDGET_CHARS``
+#: carries the 13-byte precedent). Per-row tool text is the right place to buy
+#: the room from: it is a preview by construction, and a few hundred characters
+#: spread across a roster are invisible where an emptied payload is not.
+_FIT_SHED_RESERVE_BYTES = 4 * 1024
+
+
+def _reference_image_payloads(
+    value: Any, store: AttachmentStore, *, key: str, floor: int
+) -> tuple[Any, int]:
+    """Copy ``value`` with oversized inline image payloads replaced by references.
+
+    ``key`` and ``floor`` are the durable encoder's own ``ATTACHMENT_KEY`` and
+    ``_ATTACHMENT_FLOOR_BYTES``, imported rather than restated: the live pass
+    must externalize exactly the blocks the transcript would, under exactly the
+    key it writes, or a viewer resolves one shape and a resume the other.
+
+    Returns ``(value_or_copy, moved)``. The input is NEVER mutated: one producer
+    frame is handed to every recipient by :meth:`RuntimeServer._relay_on_loop`,
+    so a pass that rewrote it in place would have the first connection decide
+    what every later connection sends — and the later connection would then
+    enqueue a reference for a frame nobody measured. Only the spine that
+    actually changed is copied, which is ``filter_update_trajectories``'s
+    precedent for the same reason.
+
+    An image block is identified by carrying a LONG ``data`` string alongside
+    either the ``image`` type or a ``mime_type``, rather than by ``data`` alone
+    the way the durable encoder does it. The durable encoder has to key on
+    ``data`` because it dumps with ``exclude_defaults`` and so loses the
+    block's discriminant; the live wire dumps the models whole, so the
+    discriminant is right there to check, and checking it keeps a tool's
+    free-form ``details`` payload — which admits a ``data`` key this module has
+    never heard of — from being rewritten into an image it never was.
+
+    A store that refuses the write (read-only home, full disk) leaves the
+    payload inline. The frame then stays large and the guard degrades it
+    honestly; a half-reference with no resolvable digest would instead render
+    as an unavailable image on every client.
+    """
+    if isinstance(value, dict):
+        data = value.get("data")
+        if (
+            isinstance(data, str)
+            and len(data) >= floor
+            and (value.get("type") == "image" or isinstance(value.get("mime_type"), str))
+        ):
+            ref = store.put(data, str(value.get("mime_type") or "image/png"))
+            if ref is None:
+                return value, 0
+            block = {field_name: item for field_name, item in value.items() if field_name != "data"}
+            block[key] = ref.digest
+            block["mime_type"] = ref.mime_type
+            return block, 1
+        moved = 0
+        copied: dict[str, Any] = {}
+        for field_name, item in value.items():
+            fresh, count = _reference_image_payloads(item, store, key=key, floor=floor)
+            moved += count
+            copied[field_name] = fresh
+        return (copied, moved) if moved else (value, 0)
+    if isinstance(value, list):
+        moved = 0
+        items: list[Any] = []
+        for item in value:
+            fresh, count = _reference_image_payloads(item, store, key=key, floor=floor)
+            moved += count
+            items.append(fresh)
+        return (items, moved) if moved else (value, 0)
+    return value, 0
+
+
+def _map_tool_results(
+    value: Any, transform: Callable[[dict[str, Any]], dict[str, Any]]
+) -> tuple[Any, int]:
+    """Copy ``value`` rewriting every payload-bearing ``tool_execution_end`` result.
+
+    ``transform`` must return a NEW dict: the caller's input frame is shared with
+    every recipient of the relay, exactly as above. Recursing rather than
+    reaching for known paths is what makes this work for both envelopes the
+    chokepoint sees — an ``event`` frame carries the end directly, a
+    ``frontend_update`` carries one inside ``changes["live_events"]`` or a job's
+    ``job_trajectory_appends``.
+    """
+    if isinstance(value, dict):
+        if value.get("type") == "tool_execution_end" and isinstance(value.get("result"), dict):
+            return {**value, "result": transform(value["result"])}, 1
+        moved = 0
+        copied: dict[str, Any] = {}
+        for field_name, item in value.items():
+            fresh, count = _map_tool_results(item, transform)
+            moved += count
+            copied[field_name] = fresh
+        return (copied, moved) if moved else (value, 0)
+    if isinstance(value, list):
+        moved = 0
+        items: list[Any] = []
+        for item in value:
+            fresh, count = _map_tool_results(item, transform)
+            moved += count
+            items.append(fresh)
+        return (items, moved) if moved else (value, 0)
+    return value, 0
+
+
+def _shed_tool_result_payloads(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
+    """Bound the result payloads of the tool ends in ``frame``, on a copy.
+
+    The share is RESIDUAL, measured the way :func:`_frame_size_without_delta`
+    measures: the frame is re-measured with every such result's payload blanked
+    (empty ``content``, ``details`` None) and what is left under ``cap_bytes`` is
+    what the payloads may spend. A fixed budget would be wrong in both
+    directions here — the frame's other content (a compacted transcript row, a
+    deep roster) is not this pass's to spend, and what it leaves varies by
+    orders of magnitude.
+
+    The bounding itself is ``frontend_state._bound_live_result_in_place``, the
+    same machinery the in-flight seed uses, so a card that sheds here and a card
+    that sheds on reconnect elide the same thing and say the same thing about
+    it. The event is never dropped: the EVENT is what settles the card, which is
+    why the seed keeps its rows too.
+
+    Two fallbacks, in order, before the frame is handed to the guard. The
+    residual share can only buy each row its legible text floor if it is at
+    least that large, and below it the bound overshoots by the floor it just
+    promised; when the bounded frame still does not fit, an EMPTIED result is
+    tried, because a settled card with nothing in it still beats the notice,
+    which loses the event and with it the settling. Only a frame with no tool
+    end at all — or one too large regardless of them — reaches the guard.
+    """
+    from local_operator.session.frontend_state import _bound_live_result_in_place
+
+    emptied, count = _map_tool_results(
+        frame, lambda result: {**result, "content": [], "details": None}
+    )
+    if not count:
+        return frame
+    residual = cap_bytes - _frame_line_bytes(emptied) - _FIT_SHED_RESERVE_BYTES
+    if residual <= 0:
+        return frame
+    share = residual // count
+
+    def bounded(result: dict[str, Any]) -> dict[str, Any]:
+        # ``_bound_live_result_in_place`` edits its argument and its blocks in
+        # place, and the argument here is a slice of the shared producer frame.
+        fresh = copy.deepcopy(result)
+        _bound_live_result_in_place(fresh, share=share)
+        return fresh
+
+    shed, _ = _map_tool_results(frame, bounded)
+    if _frame_line_bytes(shed) <= cap_bytes:
+        return shed
+    if _frame_line_bytes(emptied) <= cap_bytes:
+        return emptied
+    return shed
+
+
+def fit_frame_for_wire(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
+    """Return ``frame`` prepared for the socket line, or the honest stand-in.
+
+    WHY A FIT PASS IN FRONT OF THE GUARD. :func:`relay_frame_or_degraded` is
+    honest but destructive: it sheds the WHOLE frame, so an oversized
+    ``tool_execution_end`` never reaches the viewer, the live tool card never
+    settles (``session/attached.py`` carries ``_pending_tool_ends`` and the
+    ``⊘ interrupted`` fallback for exactly that stranded card), and the viewer
+    falls back to a full re-sync. Measured on the operator's own session bytes
+    (digest ``b8758f0a``, a 317,726-byte page render, base64 through the real
+    store): one ``message`` with two of them serializes to an 847,600-byte
+    frame, and two such rows to 1,695,113 bytes — 1.62x the 1 MiB line
+    ``start_server(..., limit=_MAX_LINE_BYTES)`` enforces.
+
+    The asymmetry that says this is the right layer: the DURABLE path already
+    solved the shape. ``transcript._externalize_attachments`` moves any block
+    over ``_ATTACHMENT_FLOOR_BYTES`` into the content-addressed store and leaves
+    ``{"attachment": <digest>, "mime_type": ...}``, which every frontend
+    already resolves — the desktop route, the phone daemon, and the resume path
+    all read that key. The live event stream was the only route still shipping
+    the base64.
+
+    Ordered stages, cheapest first, each re-measured because each can be enough:
+
+    1. Fits already -> returned UNCHANGED (identity), so the common path costs
+       the single ``json.dumps`` it always cost.
+    2. Image payloads moved to the attachment store, under the durable path's
+       own key. Never partial: a store that refuses the write keeps the inline
+       payload and the frame simply stays large.
+    3. A payload-bearing ``tool_execution_end`` still oversized -> its result
+       payloads bounded on a copy, so the EVENT survives to settle the card
+       while only its payload is replaced by the existing honest marker.
+    4. :func:`relay_frame_or_degraded`, unchanged in behaviour and authority and
+       still the terminal step. Only a frame that is genuinely unfittable — an
+       image-free oversize, a store that cannot be written, a payload the
+       residual share cannot buy down — reaches it, and it still says so at
+       ERROR because that is now an alarm rather than the normal path.
+    """
+    original = _frame_line_bytes(frame)
+    if original <= cap_bytes:
+        return frame
+    op = frame.get("op", "frame")
+    referenced, moved = _reference_image_payloads(
+        frame, AttachmentStore(), key=ATTACHMENT_KEY, floor=_ATTACHMENT_FLOOR_BYTES
+    )
+    if moved:
+        if _frame_line_bytes(referenced) <= cap_bytes:
+            logger.info(
+                "session runtime: fitted an oversized %s frame to the socket line: "
+                "%d -> %d bytes, %d image payload(s) moved to the attachment store",
+                op,
+                original,
+                _frame_line_bytes(referenced),
+                moved,
+            )
+            return referenced
+        frame = referenced
+    shed = _shed_tool_result_payloads(frame, cap_bytes)
+    if shed is not frame:
+        logger.info(
+            "session runtime: fitted an oversized %s frame to the socket line: "
+            "%d -> %d bytes, %d image payload(s) moved and tool result payload(s) "
+            "bounded in place of degrading the event",
+            op,
+            original,
+            _frame_line_bytes(shed),
+            moved,
+        )
+        frame = shed
+    return relay_frame_or_degraded(frame, cap_bytes)
 
 
 def _compose_reuses_key(retained: dict[str, Any], incoming: dict[str, Any]) -> bool:
@@ -3025,7 +3265,9 @@ class RuntimeServer:
         # future relay caller can bypass it by forgetting to check. (The
         # ``frontend_sync`` frame does not come through here — it is written
         # directly at connect time and carries its own report.)
-        frame = relay_frame_or_degraded(frame, _MAX_LINE_BYTES)
+        # The fit pass sits in front of the guard so the guard is the last
+        # resort rather than the normal path for a payload-bearing frame.
+        frame = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
         try:
             conn.event_queue.put_nowait(frame)
         except asyncio.QueueFull:
@@ -3629,10 +3871,13 @@ class RuntimeServer:
                 return replacement, None
             return replacement, f"unsendable {op} ({size} bytes)"
         if op in ("event", "frontend_update"):
-            # Already degraded at enqueue (``_enqueue_client_frame`` routes both
-            # relay families through ``relay_frame_or_degraded``), so this is a
-            # belt rather than the guard — but the same rule holds: never write
-            # what the peer cannot read.
+            # Already fitted at enqueue (``_enqueue_client_frame`` routes both
+            # relay families through ``fit_frame_for_wire``, whose terminal step
+            # IS this guard), so this is a belt rather than the guard — but the
+            # same rule holds: never write what the peer cannot read. A frame
+            # that arrives here over the limit is one the fit pass could not
+            # refit (an image-free oversize, an unwritable store), and the guard
+            # says so at ERROR on the way through.
             return relay_frame_or_degraded(frame, _MAX_LINE_BYTES), None
         logger.error(
             "session runtime: dropped an unsendable %s frame for session %s "

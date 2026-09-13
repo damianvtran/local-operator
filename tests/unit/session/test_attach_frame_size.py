@@ -4885,3 +4885,278 @@ async def test_a_junk_scalar_frame_does_not_kill_the_connection(
     finally:
         client.close()
         registrant.close()
+
+
+# ---------------------------------------------------------------------------
+# The live wire's fit pass: oversized frames are REFIT, and the guard becomes
+# the last resort rather than the normal path.
+#
+# The durable transcript solved this shape long ago — a block over
+# ``_ATTACHMENT_FLOOR_BYTES`` moves into the content-addressed store and the row
+# carries ``{"attachment": <digest>, "mime_type": ...}``, which every frontend
+# already resolves. The live event stream was the one route still shipping the
+# base64, and the guard answered it by shedding the WHOLE frame, event included.
+# ---------------------------------------------------------------------------
+
+
+def _wire_image_b64(size: int = 400_000) -> str:
+    """A deterministic inline payload shaped like a page render's base64."""
+    return base64.b64encode(bytes(range(256)) * (size // 256)).decode("ascii")
+
+
+def _wire_image_row(*, images: int, role: str = "tool") -> dict[str, Any]:
+    """One message row carrying ``images`` inline image blocks."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": "PAGE"}]
+    content += [
+        {"type": "image", "data": _wire_image_b64(), "mime_type": "image/png"}
+        for _ in range(images)
+    ]
+    message = {"id": "m1", "role": role, "content": content}
+    if role == "tool":
+        message["tool_call_id"] = "call_image"
+    return message
+
+
+def _wire_image_frame(*, images: int, rows: int = 1, role: str = "tool") -> dict[str, Any]:
+    messages = [_wire_image_row(images=images, role=role) for _ in range(rows)]
+    data: dict[str, Any] = {"type": "history_delta", "messages": messages}
+    if rows == 1:
+        data = {"type": "message_start", "message": messages[0]}
+    return {"op": "event", "data": data}
+
+
+def test_a_user_message_with_three_images_is_referenced_too() -> None:
+    """The pass is generic over content blocks, not a tool-result special case.
+
+    A user row's images ride the same event grade — mobile's multi-attachment
+    prompt path depends on it — so a pass that only knew about
+    ``result.content`` would leave the operator's own pasted pages oversized.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=3, role="user")
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "message_start"
+    images = [block for block in fitted["data"]["message"]["content"] if block["type"] == "image"]
+    assert len(images) == 3
+    assert all("data" not in block and block["attachment"] for block in images)
+
+
+def test_the_notice_is_no_longer_emitted_for_an_image_oversize(caplog: Any) -> None:
+    """The operator-visible banner is what the guard says; it must not be said.
+
+    This is the assertion the operator's screenshot turns into: no ``notice``
+    event, and no ERROR naming the socket limit — because an image oversize is
+    now a payload the wire can carry rather than an alarm.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=3, rows=2)
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    with caplog.at_level(logging.INFO):
+        sendable = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert sendable["data"]["type"] != "notice"
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    # And the fit is announced at INFO with its size and image count, because a
+    # silent rewrite of what the wire carries is exactly what nobody can debug.
+    infos = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+    assert any("attachment store" in line and "image payload(s)" in line for line in infos), infos
+
+
+def test_the_guard_still_degrades_a_genuinely_unfittable_frame() -> None:
+    """The guard keeps its authority: only unfittable frames reach it.
+
+    Two shapes that no refit can help — a pure-text oversize with no payload to
+    move, and a canonical delta whose body is one enormous string. Both must
+    still come back as the honest stand-in, with the sequencing fields the
+    client's gap check depends on.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    text_frame = _oversized_event_frame()
+    assert _line_bytes(text_frame) > _MAX_LINE_BYTES
+    sendable = fit_frame_for_wire(text_frame, _MAX_LINE_BYTES)
+    assert sendable["op"] == "event"
+    assert sendable["data"]["type"] == "notice"
+    assert _line_bytes(sendable) <= _MAX_LINE_BYTES
+
+    update = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e1",
+            "sequence": 7,
+            "changes": {"cwd": "y" * (_MAX_LINE_BYTES + 10)},
+        },
+    }
+    assert _line_bytes(update) > _MAX_LINE_BYTES
+    sendable_update = fit_frame_for_wire(update, _MAX_LINE_BYTES)
+    assert sendable_update["data"]["degraded"] is True
+    assert sendable_update["data"]["epoch"] == "e1"
+    assert sendable_update["data"]["sequence"] == 7
+    FrontendUpdate.model_validate(sendable_update["data"])
+
+
+def test_a_fitting_frame_is_returned_unchanged() -> None:
+    """The common path stays one measure and NO allocation.
+
+    ``is`` rather than equality: a refit that copied every ordinary frame would
+    put an allocation on the hot path for nothing, and the identity is also what
+    tells the caller the frame it handed in is what the wire will carry.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = {"op": "event", "data": {"type": "notice", "text": "hello", "kind": "info"}}
+    assert fit_frame_for_wire(frame, _MAX_LINE_BYTES) is frame
+
+
+def test_a_store_write_failure_falls_back_to_the_notice(monkeypatch: Any) -> None:
+    """A store that cannot be written must never produce a PARTIAL reference.
+
+    ``AttachmentStore.put`` returns ``None`` for a read-only home, a full disk
+    or undecodable input. The frame then keeps its inline payloads and the guard
+    degrades it honestly; the one outcome that must never happen is a reference
+    whose digest resolves to nothing, which renders as an unavailable image on
+    every client at once.
+    """
+    from local_operator.session.attachments import AttachmentStore
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+    from local_operator.session.transcript import ATTACHMENT_KEY
+
+    monkeypatch.setattr(AttachmentStore, "put", lambda self, data, mime: None)
+    frame = _wire_image_frame(images=3, rows=2)
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    sendable = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert sendable["data"]["type"] == "notice"
+    assert ATTACHMENT_KEY not in json.dumps(sendable)
+
+
+def test_the_reference_key_is_the_durable_key() -> None:
+    """One key, so a viewer and a resume cannot disagree about what it means.
+
+    Restating the key in the transport would be the drift #694 was: the durable
+    path and the live path resolving the same concept under two spellings, with
+    one of them silently ignored by pydantic.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+    from local_operator.session.transcript import ATTACHMENT_KEY
+
+    frame = _wire_image_frame(images=3, role="user")
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    images = [block for block in fitted["data"]["message"]["content"] if block["type"] == "image"]
+    assert images
+    for block in images:
+        assert set(block) == {"type", ATTACHMENT_KEY, "mime_type"}
+
+
+def test_referencing_keeps_the_frame_under_the_cap_for_the_worst_case() -> None:
+    """Twelve images in one event: the reference pass scales, the guard does not.
+
+    The residual shape the operator hit is a frame that grows with the payload
+    it carries. References are constant-size, so the fitted frame is smaller by
+    the payload's whole cost rather than by a fixed allowance.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = _wire_image_frame(images=12)
+    assert _line_bytes(frame) > 4 * _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) < 64 * 1024, _line_bytes(fitted)
+    assert fitted["data"]["type"] == "message_start"
+
+
+def test_the_live_delta_bounds_a_job_rows_free_text() -> None:
+    """A bound at the snapshot boundary alone leaks on every later delta.
+
+    ``sync_wire_payload`` clipped a job row's ``result_text``/``prompt``/
+    ``error_text``; ``FrontendStateStore.mutate``'s jobs path re-serializes the
+    same rows by its own route and applied only the launch-prompt budgets. A
+    child whose result was a whole transcript page therefore rode out unbounded
+    on every live delta while its reconnecting snapshot was clipped — one row is
+    enough to put a delta over the socket line on its own.
+    """
+    from local_operator.session.frontend_state import (
+        JOB_PROMPT_WIRE_CHARS,
+        JOB_RESULT_WIRE_CHARS,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update = store.mutate(
+        jobs=[
+            JobState(
+                id="j1",
+                type="task",
+                status="running",
+                label="child",
+                result_text="R" * 500_000,
+                prompt="P" * 300_000,
+                error_text="E" * 100_000,
+            )
+        ]
+    )
+
+    assert update is not None
+    row = update.changes["jobs"][0]
+    assert len(row["result_text"]) <= JOB_RESULT_WIRE_CHARS + 1
+    assert len(row["prompt"]) <= JOB_PROMPT_WIRE_CHARS + 1
+    assert row["result_text"].endswith("…"), "a clipped preview must read as clipped"
+
+
+def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event() -> None:
+    """A payload no reference can carry: shed the payload, keep the EVENT.
+
+    The operator's invisible failure was the card that never settled, and the
+    event is what settles it — so a tool result larger than the whole line is
+    bounded in place rather than degraded away. ``LIVE_EVENT_BLOCK_ELIDED_
+    PLACEHOLDER`` is the marker the in-flight seed already uses for the same
+    row, so a live card and a reconnected card elide identically.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        fit_frame_for_wire,
+    )
+
+    frame = {"op": "event", "data": _live_end("call_text", text="x" * (2 * _MAX_LINE_BYTES))}
+    assert _line_bytes(frame) > _MAX_LINE_BYTES
+
+    fitted = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
+
+    assert _line_bytes(fitted) <= _MAX_LINE_BYTES
+    assert fitted["data"]["type"] == "tool_execution_end"
+    assert fitted["data"]["tool_call_id"] == "call_text"
+    bounded = fitted["data"]["result"]["content"][0]["text"]
+    assert bounded != "x" * (2 * _MAX_LINE_BYTES)
+    assert bounded.endswith("…"), "a clipped preview must read as clipped"

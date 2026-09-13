@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any, cast
 
 import pytest
@@ -2928,3 +2929,121 @@ async def test_the_compose_fold_never_emits_an_unreadable_frame() -> None:
     for frame in conn.event_queue._queue:
         size = len(json.dumps(frame).encode()) + 1
         assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
+
+
+# ---------------------------------------------------------------------------
+# The wire fit pass: a live frame carrying images is REFERENCED, not degraded.
+#
+# Measured on the operator's own session bytes (a 317,726-byte page render,
+# base64 through the real attachment store): one ``tool_execution_end`` with two
+# of them is an 847,600-byte frame, and two such rows in one frame is 1,695,113
+# bytes — 1.62x the 1 MiB line the attach reader enforces. The guard answered
+# that with a ``notice``: the event was dropped, the live tool card could never
+# settle, and the viewer fell back to a full re-sync.
+# ---------------------------------------------------------------------------
+
+
+def _image_b64(size: int = 400_000) -> str:
+    """A deterministic inline payload shaped like a page render's base64."""
+    import base64
+
+    return base64.b64encode(bytes(range(256)) * (size // 256)).decode("ascii")
+
+
+def _wire_bytes(frame: dict[str, Any]) -> int:
+    """The size the socket will write, re-derived here on purpose.
+
+    The production rule is ONE function (``server._frame_line_bytes``); this is a
+    test asserting against it, so it computes the number itself rather than
+    calling the code under test — a measurement taken through the same helper
+    cannot catch that helper being wrong.
+    """
+    return len(json.dumps(frame).encode()) + 1
+
+
+def _image_tool_end(*, images: int, call_id: str = "call_image") -> dict[str, Any]:
+    """One ``tool_execution_end`` whose result carries ``images`` page renders."""
+    data = _image_b64()
+    content: list[dict[str, Any]] = [{"type": "text", "text": "PAGE"}]
+    content += [{"type": "image", "data": data, "mime_type": "image/png"} for _ in range(images)]
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": call_id,
+        "tool_name": "screenshot",
+        "is_error": False,
+        "result": {
+            "tool_call_id": call_id,
+            "tool_name": "screenshot",
+            "content": content,
+            "is_error": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_three_image_tool_end_frame_is_referenced_not_degraded() -> None:
+    """The chokepoint must fit an image-bearing event, not shed it.
+
+    Degrading this frame loses the ``tool_execution_end``, and the end is the
+    only thing that settles the live tool card — the ``⊘ interrupted`` fallback
+    exists for exactly the stranded card that follows. A reference resolves to
+    the same bytes on every in-repo frontend, and the metrics are the frame
+    size, the surviving identity fields and the round-trip of each digest.
+    """
+    import re
+
+    from local_operator.session.attachments import AttachmentStore
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+    frame = {"op": "event", "data": _image_tool_end(images=3)}
+    original = _image_b64()
+    assert _wire_bytes(frame) > _MAX_LINE_BYTES
+
+    server._enqueue_client_frame(conn, frame)
+
+    assert server.dropped == []
+    enqueued = conn.event_queue.get_nowait()
+    assert _wire_bytes(enqueued) <= _MAX_LINE_BYTES
+    assert enqueued["data"]["type"] == "tool_execution_end"
+    assert enqueued["data"]["tool_call_id"] == "call_image"
+    assert enqueued["data"]["tool_name"] == "screenshot"
+    images = [block for block in enqueued["data"]["result"]["content"] if block["type"] == "image"]
+    assert len(images) == 3
+    for block in images:
+        assert "data" not in block
+        assert re.fullmatch(r"[0-9a-f]{32}", block["attachment"]), block
+        assert block["mime_type"] == "image/png"
+        resolved = AttachmentStore().get(block["attachment"])
+        assert resolved is not None, "the reference does not resolve to stored bytes"
+        assert resolved[0] == original
+
+
+@pytest.mark.asyncio
+async def test_the_reference_pass_does_not_mutate_the_shared_frame() -> None:
+    """One producer frame reaches every recipient; none of them owns it.
+
+    ``_relay_on_loop`` hands the SAME dict to each connection's enqueue, so a
+    pass that rewrote in place would let the first connection decide what the
+    second sends — and would leave the producer holding a frame it never built.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    server._closed = threading.Event()
+    first, second = _stalled_conn(), _stalled_conn()
+    server._clients[id(first.writer)] = first
+    server._clients[id(second.writer)] = second
+    data = _image_tool_end(images=3)
+    before = json.dumps(data, sort_keys=True)
+
+    server._relay_on_loop(data)
+
+    assert json.dumps(data, sort_keys=True) == before, "the producer frame was mutated"
+    frames = [conn.event_queue.get_nowait() for conn in (first, second)]
+    for frame in frames:
+        assert _wire_bytes(frame) <= _MAX_LINE_BYTES
+        assert "data" not in frame["data"]["result"]["content"][1]
+    assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
