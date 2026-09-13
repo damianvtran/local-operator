@@ -31,6 +31,11 @@ from tests.unit.session.runtime.test_server import FakeHandle
 #: Upper bound on an awaited event, never a budget to sleep through.
 DEADLOCK_GUARD_S = 30.0
 
+#: The stable half of each notice sentence — the part that names the FACT rather
+#: than the advice, so the copy can be reworded without un-pinning the behaviour.
+FAIL_START_FRAGMENT = "no runtime yet"
+SILENT_OWNER_FRAGMENT = "not answering yet"
+
 
 def _configure_provider(config_dir: Path) -> None:
     """Make the temp config look like a configured machine (see the
@@ -809,7 +814,7 @@ def _failure_notices(app) -> list[str]:  # noqa: ANN001 — a Textual app, untyp
     return [
         str(block._text)
         for block in app.query(NoticeBlock)
-        if "no runtime came up for this session" in str(block._text)
+        if FAIL_START_FRAGMENT in str(block._text)
     ]
 
 
@@ -875,7 +880,7 @@ async def test_a_watched_mount_failure_is_reported_once_with_the_next_step(
                 "the notice must name the next step; it was the only account of "
                 f"what happened: {notice!r}"
             )
-            assert app._start_engage_notice_shown is True
+            assert app._start_engage_reported_for == viewer.session_id
     finally:
         await viewer.dispose()
 
@@ -1039,9 +1044,7 @@ async def test_a_new_binding_reports_again(tmp_path: Path, monkeypatch) -> None:
         async with app.run_test(size=(100, 30)) as pilot:
             assert await _pump_until(
                 pilot,
-                lambda: any(
-                    "no runtime came up for this session" in text for text in _notice_texts(app)
-                ),
+                lambda: any(FAIL_START_FRAGMENT in text for text in _notice_texts(app)),
             )
 
             second = await make("s2")
@@ -1049,7 +1052,7 @@ async def test_a_new_binding_reports_again(tmp_path: Path, monkeypatch) -> None:
             await app._reload_session()
             assert await _pump_until(
                 pilot,
-                lambda: any("did not answer in " in text for text in _notice_texts(app)),
+                lambda: any(SILENT_OWNER_FRAGMENT in text for text in _notice_texts(app)),
             ), (
                 "the swapped-in binding's own failure was suppressed by the old " "binding's notice"
             )
@@ -1112,3 +1115,200 @@ async def test_a_prompt_in_flight_owns_the_failure_not_the_band(
             ), "a prompt in flight owns the outcome; the band must stay quiet"
     finally:
         await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_engage_cannot_report_against_the_binding_that_replaced_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review round 1, R1 — the report and its latch carry BINDING IDENTITY.
+
+    The engage worker outlives the binding it was started for on the SIDEBAR
+    route: ``_select_sidebar_session`` cancels the ``"session"`` worker group
+    only, while the mount engage runs in ``"warm-engage"`` (which
+    ``_cancel_runtime_engage`` clears, and that is wired to `/new` and `/resume`
+    alone) — so the outgoing facade is parked, the swap commits, and the old
+    engage still fails at its own 30 s deadline. Without an identity gate that
+    tail paints session A's failure as the user's *current* session, and it
+    consumes B's one notice on A's behalf, so B's own genuine failure is silent.
+
+    Driven through ``_adopt_session`` (the sidebar's own commit edge) with the
+    two failures told apart by their CLASS: A's is the live-but-silent ceiling
+    and B's is the no-record one, so one notice present and the other absent
+    says which binding reported.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    from local_operator.session.attached import RuntimeUnresponsiveError
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for sid in ("s1", "s2"):
+        (tmp_path / "sessions" / sid).mkdir(parents=True, exist_ok=True)
+    _configure_provider(tmp_path)
+
+    from local_operator.session.attached import AttachedSession
+    from local_operator.tui.app import OperatorApp
+
+    attempts: list[str] = []
+
+    async def swap_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        attempts.append(str(session_id))
+        # s1 fails LATE, i.e. after the swap below has already committed — the
+        # 30 s deadline's shape, compressed. s2 fails promptly, so its own
+        # report lands while s1's engage is still parked.
+        await asyncio.sleep(0.6 if str(session_id) == "s1" else 0.05)
+        if str(session_id) == "s1":
+            raise RuntimeUnresponsiveError("the runtime is not responding")
+        raise ConnectionError("the runtime is reconnecting")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", swap_failure)
+
+    async def _never():
+        raise AssertionError("takeover was not expected")
+
+    async def make(session_id: str):
+        return await AttachedSession.cold(
+            session_id, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+
+    first = await make("s1")
+    second = await make("s2")
+    app = OperatorApp(lambda: _make_coro(first))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            # The swap commits while s1's engage is in flight, exactly as the
+            # sidebar route does. Only the "session" group would be cancelled
+            # there; here nothing is, which is the worst case the gate must hold.
+            assert await _pump_until(pilot, lambda: attempts == ["s1"])
+            app._adopt_session(second)
+            # The mount engage the arriving binding owes, triggered the way the
+            # route triggers it (`_engage_runtime_eagerly`, the same call the
+            # sidebar commit and `/resume` make) — s1's worker stays parked.
+            app._engage_runtime_eagerly()
+
+            # B's own failure is reported: the latch was not spent on A's behalf.
+            assert await _pump_until(
+                pilot, lambda: any(FAIL_START_FRAGMENT in t for t in _notice_texts(app))
+            ), "the arriving binding's own failure was suppressed by the departed one"
+            # And A's late failure is NOT: one notice, and it is not A's sentence.
+            for _ in range(30):
+                await pilot.pause()
+            await asyncio.sleep(0.7)
+            for _ in range(30):
+                await pilot.pause()
+            texts = _notice_texts(app)
+            assert not any(SILENT_OWNER_FRAGMENT in t for t in texts), (
+                "a departed binding's failure was painted against the bound session: " f"{texts!r}"
+            )
+            assert len([t for t in texts if FAIL_START_FRAGMENT in t]) == 1
+            assert app._start_engage_reported_for == "s2"
+    finally:
+        await first.dispose()
+        await second.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_attempt_re_arms_the_notice(tmp_path: Path, monkeypatch) -> None:
+    """UX round 1, U2 — a second failure after the user TRIED is not silent.
+
+    The per-binding key stops a stray keystroke growing a notice per letter.
+    That is the wrong silence after the user has done what the notice asked and
+    the attempt failed too, where the only feedback left is the red line about a
+    reconnection. Cleared by the ATTEMPT (`_claim_start_engage_notice`, called
+    from the turn dispatcher and the command path), never by a keystroke.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+    attempts: list[int] = []
+
+    async def slow_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        attempts.append(1)
+        await asyncio.sleep(0.2)
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, slow_failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            # Counted over EVERY notice rather than the start-failure sentence:
+            # what this case pins is that a notice appears AT ALL after the
+            # attempt, so a copy change must not be able to satisfy it.
+            assert await _pump_until(pilot, lambda: len(_notice_texts(app)) == 1)
+
+            # The attempt: a real submit, which goes through the turn dispatcher
+            # (or the bind-then-dispatch path) and re-arms the report.
+            from textual import events
+
+            from local_operator.tui.widgets.editor import Editor
+
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            app.post_message(events.Paste("hello there"))
+            await pilot.pause()
+            await pilot.press("enter")
+            assert await _pump_until(
+                pilot, lambda: len(attempts) >= 2
+            ), "the submitted prompt never reached the engage"
+
+            # A later failure on the same binding is admitted again.
+            before = len(_notice_texts(app))
+            app._warm_runtime_for_draft()
+            assert await _pump_until(
+                pilot, lambda: len(_notice_texts(app)) > before
+            ), "a failure after an explicit attempt stayed silent"
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_stop_is_never_reported_as_a_start_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review round 1, R3 — the fallback sentence must not cover a `/stop`.
+
+    ``_unavailable_reason()`` answers "this session was stopped" for a
+    deliberate stop and "the runtime is reconnecting" otherwise, and the sibling
+    arm keeps their own text precisely because both are honest answers the
+    prompt relays. A stop that answered "it may still be starting" would
+    contradict the receipt the user just read.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    async def stopped_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        await asyncio.sleep(0.2)
+        raise ConnectionError("this session was stopped")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, stopped_failure)
+    viewer._deliberate_stop = True
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+            for _ in range(20):
+                await pilot.pause()
+            assert _notice_texts(app) == [], "a deliberate stop is not a start failure"
+    finally:
+        await viewer.dispose()
+
+
+def test_the_patience_threshold_sits_below_both_engage_ceilings() -> None:
+    """Review round 1, R5 — the filter is only meaningful between the two facts.
+
+    Strictly below the shorter ceiling, or no failure could ever be long enough
+    to report; strictly positive, or every blip would be. The FIGURE itself is
+    policy calibrated on one laptop's measurements (1.0-2.6 s healthy engages);
+    a CI-derived recalibration is owed rather than claimed, and is recorded on
+    the PR. What this test protects is the ordering, which a change to either
+    deadline could otherwise invalidate silently.
+    """
+    from local_operator.session.runtime.launch import DEFAULT_DEADLINE_S
+    from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S
+    from local_operator.tui.app import START_ENGAGE_PATIENCE_S
+
+    assert START_ENGAGE_PATIENCE_S > 0
+    assert START_ENGAGE_PATIENCE_S < DEFAULT_DEADLINE_S
+    assert START_ENGAGE_PATIENCE_S < HEARTBEAT_TIMEOUT_S

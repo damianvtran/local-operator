@@ -267,3 +267,75 @@ async def test_the_deferred_round_still_reports_its_outcome_to_a_subscriber(
         release.set()
         await await_store_maintenance_for_tests()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_degradation_arm_also_pushes_the_outcome_to_a_subscriber(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, R2 — the arms WITHOUT a manager are the ones that lost it.
+
+    ``attach_mcp_dispose`` refreshes the frontend store, and it only runs when
+    ``wire_mcp_into_session`` returned a manager. Discovery raising and the MCP
+    layer failing to import both return ``None``, so on the deferred path the
+    child recorded an outcome that no viewer could ever read: a viewer bound
+    before the wiring kept the empty snapshot it was seeded with. The same code
+    on the eager path told that viewer correctly, because the record waited for
+    the wiring and the seed carried the outcome — so this is a regression the
+    deferral introduced, not a pre-existing gap.
+    """
+
+    async def exploding_discovery(cwd: str, auth_store: Any = None) -> Any:
+        raise RuntimeError("discovery exploded")
+
+    monkeypatch.setattr("local_operator.mcp.discover_and_load_mcp_tools", exploding_discovery)
+
+    import argparse
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.session_factory import (
+        await_store_maintenance_for_tests,
+        create_session,
+    )
+
+    args = argparse.Namespace(
+        hosting="test",
+        model="mock",
+        agent_name=None,
+        agent_id=None,
+        yolo=True,
+        train=False,
+    )
+    session = await create_session(
+        args,
+        ConfigManager(isolated_config),
+        CredentialManager(isolated_config),
+        AgentRegistry(isolated_config),
+        has_ui=False,
+        cwd=str(isolated_config),
+        defer_mcp_wiring=True,
+    )
+    try:
+        pushed: list[Any] = []
+        subscription = cast(Any, session).subscribe_frontend(pushed.append)
+        assert subscription.sync.snapshot.mcp_startup is None
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + GUARD_S
+        while loop.time() < deadline:
+            if any("mcp_startup" in update.changes for update in pushed):
+                break
+            await asyncio.sleep(0.02)
+        reported = [
+            update.changes["mcp_startup"] for update in pushed if "mcp_startup" in update.changes
+        ]
+        assert reported, (
+            "the degradation arm recorded an outcome no viewer could read: no push "
+            "carried mcp_startup after discovery raised"
+        )
+        assert reported[-1]["failures"] == {"discovery": "discovery exploded"}
+    finally:
+        await await_store_maintenance_for_tests()
+        await session.dispose()
