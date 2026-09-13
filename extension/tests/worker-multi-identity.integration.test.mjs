@@ -228,7 +228,7 @@ test("E2: role standby hands back every debugger session and surface", async () 
   }
 });
 
-test("E3: an UNPAIRED standby lands on the pairing form, not the standby card", async () => {
+test("E1b: an UNPAIRED standby lands on the pairing form, not the standby card", async () => {
   // A second install's first dial is exactly this: paired: false and standby,
   // because the first install holds the wheel. Reporting "standby" there showed
   // the user a card claiming a pairing that did not exist yet, with no way to
