@@ -87,6 +87,7 @@ from local_operator.session.frontend_state import (
     FrontendStateStore,
     FrontendSync,
     FrontendUpdate,
+    FrontendUsage,
     JobState,
     SnapshotJobs,
     SnapshotMcpManager,
@@ -94,6 +95,7 @@ from local_operator.session.frontend_state import (
     SnapshotWakeScheduler,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
 from local_operator.session.peer import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session.protocol import (
@@ -108,6 +110,12 @@ from local_operator.session.transcript import (
     Transcript,
     read_replay_suffix,
     replay_entries,
+    usages_since_newest_shrink,
+)
+from local_operator.session.usage_seed import (
+    reading_identity,
+    reading_window,
+    seed_reported_usage,
 )
 from local_operator.session_lease import SessionLeaseHeldError
 
@@ -879,6 +887,21 @@ class AttachedSession:
         #: wanted it (review round 1, C2). Only ``cold()`` asks for it, and it
         #: is cleared the moment that consumes it.
         self._cold_checkpoint: dict[str, Any] | None = None
+        #: The newest usage RECEIPT the journal holds, stashed during that same
+        #: suffix read so a cold open can seed its accounting from the
+        #: conversation's own history when the checkpoint leaves the fields null
+        #: (``_seed_cold_usage``). The checkpoint is written only by a runtime
+        #: with a frontend attached at turn end, and a desktop detaches between
+        #: requests — so on this surface the row is usually ABSENT and the
+        #: transcript is the only place the reading exists. Parsed from the
+        #: entries the suffix read already had; there is no second parse and no
+        #: second read of a file that is 103 MB at the top end.
+        self._cold_seed_usage: Usage | None = None
+        #: The conversation's own journalled model selection, as read while
+        #: synthesising cold state. Held so the seeding can attribute a receipt
+        #: that predates the serving-identity stamp (``usage_seed.reading_
+        #: identity``) without reading the transcript's head a second time.
+        self._cold_selection: StoredModelSelection | None = None
         # Message ids whose row the follower has ALREADY painted live. The sync
         # seed and relayed stream are filtered against this set as well as
         # ``_history_ids``, so a turn that became durable mid-join — or a
@@ -1300,6 +1323,8 @@ class AttachedSession:
         # row. Absence of that file must not hide independently durable spend.
         state = self._restore_cold_details(state)
         self._cold_checkpoint = None
+        self._cold_seed_usage = None
+        self._cold_selection = None
         self._install_frontend(state)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
@@ -1340,7 +1365,7 @@ class AttachedSession:
         """
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
-            return self._restore_cold_subagents(state)
+            return self._seed_cold_usage(self._restore_cold_subagents(state))
         try:
             raw = checkpoint.get("state") if isinstance(checkpoint, dict) else None
             if not isinstance(raw, dict):
@@ -1363,7 +1388,7 @@ class AttachedSession:
                 "the saved session details could not be read, so the subagent and "
                 "todo panels start empty"
             )
-            return self._restore_cold_subagents(state)
+            return self._seed_cold_usage(self._restore_cold_subagents(state))
         # A fork's transcript carries the PARENT's checkpoints verbatim (#573),
         # and the parent's children are not this session's to list — the same
         # reason ``fork.EXCLUDED_SIDECARS`` leaves the roster behind. The
@@ -1416,7 +1441,79 @@ class AttachedSession:
             }
         )
 
-        return self._restore_cold_subagents(restored)
+        return self._seed_cold_usage(self._restore_cold_subagents(restored))
+
+    def _seed_cold_usage(self, state: FrontendSessionState) -> FrontendSessionState:
+        """Fill still-null accounting from the conversation's own receipts.
+
+        The cold path's second source, AFTER the durable checkpoint, and it
+        exists because the checkpoint is usually absent on this surface: the
+        runtime writes one only with a frontend attached at turn end
+        (``FrontendStateStore.checkpoint``), while a desktop detaches between
+        requests. So a conversation reopened cold opened with an empty context
+        and no spend — for a session that might be deep into its window with
+        dollars already on it — until the user spent a whole turn. The transcript
+        holds those readings; ``_cold_seed_usage`` is the one the suffix read
+        stashed (``_read_transcript._replay``).
+
+        FILLS ONLY, field by field, and that order is the contract: a checkpoint
+        that carried accounting wins, because it is the conversation's LAST
+        turn-end state whereas a receipt is one point in time. Every write is
+        therefore gated on the target field still being unset.
+
+        * ``last_usage`` — the raw receipt, whenever there is one.
+        * ``context_tokens`` — only when the reading can be attributed to the
+          model that will RUN (``reading_identity`` against the effective spec),
+          which is the same gate ``_consistent_context`` applies to a checkpoint
+          reading. A count measured on another model is not convertible.
+        * ``context_window`` — only from ``reading_window``, which requires a
+          RESOLVED window for that same model. Never the spec's 128k default:
+          dividing a real 322,546 by a phantom 128,000 is the 268.2% defect this
+          deliberately does not reintroduce. With no window the strip renders
+          its honest ``window unknown`` state — absolute tokens, no arc.
+        * ``cumulative_parent_cost`` with ``cost_knowledge=FLOOR`` — priced from
+          ONE receipt, so it UNDERSTATES lifetime spend on a long conversation.
+          That is what ``floor`` means on the wire and the cost chip already
+          prints the mark; a total that pretends to be exact would be the lie.
+          An unpriceable model yields ``None`` and no chip rather than
+          ``$0.0000``.
+
+        Nothing here touches the wire shape: this fills INPUTS the strip already
+        reads, and ``cumulative_cost`` stays a derived property. There is no
+        ``refresh_frontend_usage`` on a viewer — the seed happens at open.
+        """
+        seed = self._cold_seed_usage
+        if seed is None:
+            return state
+        spec = state.effective_model or state.selected_model
+        if spec is None:
+            return state
+        changes: dict[str, Any] = {}
+        if state.last_usage is None:
+            # Through the wire form and back, as every other writer of this
+            # field does: ``model_copy`` does not validate, so the receipt has
+            # to be constructed as the FrontendUsage the field declares rather
+            # than smuggled in as a bare Usage.
+            changes["last_usage"] = FrontendUsage.model_validate(seed.model_dump(mode="json"))
+        if state.context_tokens is None and seed.context_tokens:
+            identity = reading_identity(seed, fallback=self._cold_selection)
+            if identity == (str(spec.provider or ""), str(spec.model_id or "")):
+                changes["context_tokens"] = int(seed.context_tokens)
+                changes["context_is_estimate"] = False
+        window = reading_window(seed, fallback=self._cold_selection, spec=spec)
+        if window is not None:
+            changes["context_window"] = window
+        if state.cumulative_parent_cost is None:
+            from local_operator.session.frontend_state import CostKnowledge
+            from local_operator.tui.costs import turn_cost
+
+            cost = turn_cost(f"{spec.provider}/{spec.model_id}".strip("/"), seed)
+            if cost is not None:
+                changes["cumulative_parent_cost"] = cost
+                changes["cost_knowledge"] = CostKnowledge.FLOOR
+        if not changes:
+            return state
+        return state.model_copy(update=changes)
 
     def _restore_cold_subagents(self, state: FrontendSessionState) -> FrontendSessionState:
         """Overlay the independently committed roster and lifetime ledger.
@@ -1656,6 +1753,10 @@ class AttachedSession:
                 from local_operator.session.model_selection import read_model_selection
 
                 saved = read_model_selection(self._config_dir / "sessions" / self._session_id)
+                # Held for ``_seed_cold_usage``: the very value the resolution
+                # below uses, so attributing an unstamped receipt costs no second
+                # read of the transcript's head (a 103 MB file at the top end).
+                self._cold_selection = saved
                 if self._birth_model is not None and (
                     saved is None or self._model_selection_override
                 ):
@@ -3652,6 +3753,16 @@ class AttachedSession:
             )
             if want_checkpoint:
                 self._cold_checkpoint = suffix.checkpoint
+                # The accounting fallback rides the SAME read, from the rows
+                # already in hand: the suffix reader stops only once the newest
+                # shrink and its kept window are buffered, so every post-shrink
+                # message row — and therefore every still-valid usage receipt —
+                # is in ``suffix.entries``. One parse, one pass, no extra I/O on
+                # a file that reaches 103 MB. See ``_seed_cold_usage`` for what
+                # the reading is used for and why the checkpoint still wins.
+                self._cold_seed_usage = seed_reported_usage(
+                    usages_since_newest_shrink(suffix.entries)
+                )
             cut = through_id
             if cut is not None and not suffix.through_present and not strict_cut:
                 # Older owners used best-effort cursors; preserve that fallback
