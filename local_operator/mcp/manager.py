@@ -408,13 +408,28 @@ def _chain_holds_dns(exc: BaseException) -> bool:
     exception that caused this one, so walking it lets an unrelated earlier
     resolver error in the same task relabel an ``unreachable`` as ``dns`` — and
     both are network failures, so only the phrase would be wrong (agent review
-    R1-6). Nothing is lost by dropping it, measured: httpx's real resolver
-    failure nests ``ConnectError('[Errno 8] nodename nor servname provided, or
-    not known')`` → ``ConnectError(gaierror(…))`` → ``gaierror(…)``, where the
-    ``gaierror`` leaf is reached through ``__context__`` — but the OUTERMOST
-    ``ConnectError``'s own sentence already carries the resolver text, which is
-    the signal :data:`_DNS_TEXT_MARKERS` exists for. So the class-name and
-    message probes both still fire on the first link of the chain.
+    R1-6).
+
+    The DNS reading does not depend on that hop, measured on this tree against
+    the real exception types:
+
+    * a bare ``socket.gaierror`` is classified ``dns`` by
+      :data:`_TRANSPORT_EXC_DETAIL`'s MRO match before any walk happens — the
+      direct case is classification, not luck;
+    * ``ConnectError`` whose ``__cause__`` is the ``gaierror`` reaches it
+      through this walk;
+    * a ``ConnectError``'s own *sentence* is the third net, and it is the one
+      httpx's real chain needs: it nests ``ConnectError('[Errno 8] nodename nor
+      servname provided, or not known')`` → ``ConnectError(gaierror(...))`` →
+      ``gaierror`` with the last hop on ``__context__`` (confirmed by the
+      round-2 reviewer's live probe), so the outermost sentence matching
+      :data:`_DNS_TEXT_MARKERS` is what fires.
+
+    What is left uncovered is a mapped wrapper whose only resolver evidence is a
+    ``__context__`` hop AND whose sentence carries no marker: that reads
+    ``unreachable`` instead of ``dns``. Both are network failures, and the
+    alternative is the unsound hop above, so it is a recorded limit rather than
+    a gap to close.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -1373,18 +1388,29 @@ class _AuthChallengeWatcher:
     leaves the connect with NO verdict, and a reachable-but-refusing server gets
     reported as a network failure — the user is sent to diagnose a link that
     works instead of running ``/mcp login|reauth`` (QA round 1, Q1-1). So the
-    observation is recorded a second time in a slot ``begin`` never clears, and
+    observation is recorded a second time in a slot ``begin`` does not clear, and
     only the transport-failure path reads it (``_challenge_error``'s
     ``prefer_observed``): for every other shape the last-request verdict is the
     right one and F5 stands.
+
+    The concession is bounded by the peer's own answer, and that bound is
+    load-bearing: the latch is cleared by any endpoint response that is NOT a
+    challenge. The case that made this necessary is a 401 the attempt then
+    SATISFIED — challenge, 200, and only then a transport death — where the
+    latched verdict reported a proven-good grant as "run /mcp login" and, worse,
+    wrote the durable OAuth-challenge record ``_challenge_error`` re-verdicts the
+    next connect with (review round 2, R2-1). So the latch survives exactly the
+    one thing it exists for: a request that never got an answer at all.
     """
 
     def __init__(self, server_url: str) -> None:
         self.server_url = server_url
         self.status_code: int | None = None
         #: The challenge seen at ANY point during this attempt, unlike
-        #: :attr:`status_code`. One attempt, one watcher, so this never has to
-        #: be reset.
+        #: :attr:`status_code`. One attempt, one watcher, so this never has to be
+        #: reset BETWEEN attempts; it is cleared by an endpoint response that is
+        #: not a challenge, which is what stops a satisfied 401 from outliving
+        #: its truth (see the class docstring).
         self.saw_challenge: int | None = None
 
     async def begin(self, request: Any) -> None:
@@ -1425,9 +1451,11 @@ class _AuthChallengeWatcher:
         server refusing us — so such a response must neither set a verdict nor
         clear one.
 
-        ``begin`` has already cleared the slot for this request, so this only
-        ever needs to record a challenge; a non-challenge response simply
-        leaves the cleared state in place.
+        ``begin`` has already cleared :attr:`status_code` for this request, so
+        this records the challenge and clears the LATENT latch rather than
+        leaving it: the latch exists for a request that never gets an answer,
+        and any answer that is not a challenge is the peer proving the endpoint
+        is up and content — the state an earlier 401 must not outlive.
         """
         try:
             if self._endpoint_key(str(response.request.url)) != self._endpoint_key(self.server_url):
@@ -1438,9 +1466,17 @@ class _AuthChallengeWatcher:
             # slot again for that follow-up.
             if 300 <= status < 400:
                 return
-            self.status_code = status if status in (401, 403) else None
-            if self.status_code is not None:
-                self.saw_challenge = self.status_code
+            if status in (401, 403):
+                self.status_code = status
+                self.saw_challenge = status
+                return
+            # Not a challenge: the attempt has evidence that this endpoint
+            # answers and (a 200 after a grant, most importantly) is satisfied,
+            # so both slots go. Keeping the latch here is what reported a
+            # 401 → 200 → transport-death attempt as "run /mcp login" and wrote
+            # the durable OAuth-challenge record with it (review round 2, R2-1).
+            self.status_code = None
+            self.saw_challenge = None
         except Exception:  # noqa: BLE001 — an observer must never break a connect
             logger.debug("auth challenge observation failed", exc_info=True)
 
@@ -2614,14 +2650,21 @@ class McpManager:
         "run /mcp login" would be a worse error than the opaque one.
 
         ``prefer_observed`` widens the evidence to *any* challenge this connect
-        attempt saw (:attr:`_AuthChallengeWatcher.saw_challenge`), and the
-        transport-failure arm is the only caller that passes it. WHERE that
-        matters: the peer answered a 401 and the transport then gave up on a
-        retry that produced no second response, so the last-request verdict is
-        ``None`` while the server is demonstrably up and refusing us. Reading
-        the challenge there is the honest classification and it is the one the
-        PR's contract promises; the default stays last-request-only because for
-        a failure the peer never answered, the transport label is right (F5).
+        attempt saw and has not since disproved
+        (:attr:`_AuthChallengeWatcher.saw_challenge`), and the transport-failure
+        arm is the only caller that passes it. WHERE that matters: the peer
+        answered a 401 and the transport then gave up on a retry that produced no
+        second response, so the last-request verdict is ``None`` while the server
+        is demonstrably up and refusing us. Reading the challenge there is the
+        honest classification and it is the one the PR's contract promises; the
+        default stays last-request-only because for a failure the peer never
+        answered, the transport label is right (F5).
+
+        The latch is bounded by the peer's answers, which matters here rather
+        than in the watcher: an endpoint response that is NOT a challenge clears
+        it, so a 401 the attempt went on to satisfy cannot re-verdict the connect
+        — and cannot write the durable challenge record below either (review
+        round 2, R2-1).
 
         On a real challenge this runs metadata discovery once to learn whether
         an OAuth authorization server actually exists. Discovery is only paid
