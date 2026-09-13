@@ -1394,13 +1394,30 @@ class _AuthChallengeWatcher:
     right one and F5 stands.
 
     The concession is bounded by the peer's own answer, and that bound is
-    load-bearing: the latch is cleared by any endpoint response that is NOT a
-    challenge. The case that made this necessary is a 401 the attempt then
+    load-bearing: the latch is cleared by ANY endpoint response that is not a
+    challenge — whatever its status, and 3xx excepted because a redirect hop is
+    the client being sent elsewhere rather than a verdict (the early return in
+    :meth:`observe`). That is wider than "the attempt was authorised", and
+    deliberately so: the clear is a DISPROOF, not a verdict. It answers one
+    question — did the peer speak on this endpoint during this attempt? — and a
+    4xx/5xx answers it exactly as well as a 200, because the failure mode this
+    guards is a later transport death being read as the peer never having
+    spoken. The case that made the clear necessary is a 401 the attempt then
     SATISFIED — challenge, 200, and only then a transport death — where the
     latched verdict reported a proven-good grant as "run /mcp login" and, worse,
     wrote the durable OAuth-challenge record ``_challenge_error`` re-verdicts the
-    next connect with (review round 2, R2-1). So the latch survives exactly the
-    one thing it exists for: a request that never got an answer at all.
+    next connect with (review round 2, R2-1).
+
+    Narrowing the clear to 2xx was considered and rejected (review round 3,
+    R3-1): it would re-arm the latch on the strength of a response the peer did
+    NOT confirm as satisfied, and that sequence is not reachable anyway — the
+    streamable-HTTP client opens its GET stream only on the ``initialized``
+    notification and sends DELETE only once a session id exists, so neither can
+    precede a challenge, and a peer 4xx/5xx surfaces as its own server error
+    rather than as a transport death. This paragraph, like the class, follows the
+    code: a future editor who wants the narrow form has to bring the evidence
+    that it is reachable. So the latch survives exactly the one thing it exists
+    for: a request that never got an answer at all.
     """
 
     def __init__(self, server_url: str) -> None:
@@ -1470,11 +1487,14 @@ class _AuthChallengeWatcher:
                 self.status_code = status
                 self.saw_challenge = status
                 return
-            # Not a challenge: the attempt has evidence that this endpoint
-            # answers and (a 200 after a grant, most importantly) is satisfied,
-            # so both slots go. Keeping the latch here is what reported a
-            # 401 → 200 → transport-death attempt as "run /mcp login" and wrote
-            # the durable OAuth-challenge record with it (review round 2, R2-1).
+            # Not a challenge: the peer answered this endpoint on this attempt,
+            # so both slots go. The clear is a DISPROOF (the peer is speaking),
+            # not a claim that the attempt was authorised, which is why any
+            # non-auth status clears it rather than only a 2xx — see the class
+            # docstring for why the wider form is the one the code keeps. Leaving
+            # the latch here is what reported a 401 → 200 → transport-death
+            # attempt as "run /mcp login" and wrote the durable OAuth-challenge
+            # record with it (review round 2, R2-1; round 3, R3-1).
             self.status_code = None
             self.saw_challenge = None
         except Exception:  # noqa: BLE001 — an observer must never break a connect

@@ -136,8 +136,9 @@ shed whole, then — for the transport family only — its own `(timed out)` det
 token dropped so the short form still fits, and finally **no signpost at all**
 when even that cannot fit beside the sentence (around 70 columns and below for
 a long failure). It is never split across a fold, and the sentence is never
-edited to make room for it: an application error's own parenthetical, and the
-host in a transport phrase, both survive whole, and the notice wraps instead. Why: the transport is the one layer a single local fault takes out for
+edited to make room for it **except for its own detail token**: an application
+error's own parenthetical, and the host in a transport phrase, both survive
+whole, and the notice wraps instead. Why: the transport is the one layer a single local fault takes out for
 **every remote server at once**, and the operator's own boot screen — 10 of 11
 servers "failed" with `Request 'initialize' timed out` and nothing saying the
 machine's connection was the problem — was chased through MCP config and OAuth
