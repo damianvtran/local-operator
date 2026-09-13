@@ -565,7 +565,7 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # `usage`); the screen it opens IS the receipt, so it never echoes.
         "analytics": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/theme`: bare `/title` reports the name the
-        # conversation currently carries, and the space offers the `refresh`
+        # conversation currently carries, and the space offers the `--refresh`
         # row — the one word a user could not guess. Deliberately not REQUIRED:
         # Enter on the bare command answers, which is the line `/login` sits on
         # the other side of. Keyed by PRIMARY name, so `rename`, not `title`.

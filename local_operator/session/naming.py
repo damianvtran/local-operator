@@ -157,6 +157,68 @@ THEME_SYSTEM_PROMPT = (
     "punctuation."
 )
 
+#: The ON-DEMAND twin of :data:`THEME_SYSTEM_PROMPT`, and every difference
+#: between the two is a consequence of one fact: the user typed the command.
+#:
+#: The anchor-keeping instruction over there ("repeat it verbatim unless the
+#: work has moved to a different subject") is what makes the automatic path
+#: cheap and drift-free, and it is exactly what made the on-demand path answer
+#: ``<title/>`` to almost everything: asked to keep the name unless the subject
+#: MOVED, a model looking at one body of work correctly says it did not, and
+#: :func:`refresh_title` folds both the sentinel and a verbatim restatement onto
+#: :data:`TITLE_UNCHANGED`. A user who asks for the name to be reconsidered and
+#: is told "the name still fits" every time has a command that does nothing.
+#:
+#: ``<current-title>`` still rides the DATA — :func:`build_theme_context` puts
+#: it there for both callers — so this block, like its twin, only teaches the
+#: model what the scaffolding means. What it teaches differently is that the
+#: anchor is a prior decision under review rather than a default to return.
+#:
+#: The ``<title/>`` sentinel is kept, for genuine small talk only. An equal
+#: answer reached after a real fresh judgement still folds to
+#: :data:`TITLE_UNCHANGED` at the call site: that outcome stays reachable and
+#: honest, it just stops being the answer the prompt asks for.
+#:
+#: The tie-break in the third sentence group is what stops the opposite defect.
+#: Removing the anchor instruction removed every reason to PREFER the standing
+#: name, and a real-model probe (12 rounds, each stored title fed back as the
+#: next anchor on work that was still the same work) repainted 8 times across 6
+#: distinct titles and never settled — "HTML rendering and caching" to "markdown
+#: rendering" to "caching and rendering", every one of them a fair name for the
+#: same session. A command that never settles reads as broken, and it is not
+#: free: the store path repaints the status band (one update, which carries the
+#: terminal tab with it) and pushes the new name to the phone. The sidebar is
+#: NOT on that list — it re-reads on its own 2 s interval whether or not a title
+#: moved — and the case does not need it. So equally-accurate alternatives
+#: resolve to the standing name, and the casefold fold at the call site turns
+#: that into an honest :data:`TITLE_UNCHANGED`.
+#:
+#: The rule is narrow ON PURPOSE. The defect this whole prompt exists to fix was
+#: an anchor that kept the name ALWAYS; "no more accurate" is not that, and
+#: leaves the fresh judgement decisive wherever the standing name is stale — a
+#: stale name is not equally accurate, so the headline case (the session that
+#: genuinely moved on) still retitles. ``when present`` is there because this
+#: caller, unlike :func:`generate_retitle`, runs on unnamed sessions too: with
+#: no anchor the tag is simply absent from the data, and a rule written as
+#: though it were always there would be an instruction about nothing.
+REFRESH_SYSTEM_PROMPT = (
+    "Write a 3 to 7 word title for what the conversation in <chat> is about "
+    "NOW. The user has asked for the name to be worked out again.\n"
+    "The most recent turns are the strongest signal; the earliest turns are "
+    "background. <elided/> marks turns left out.\n"
+    "<current-title>, when present, is the name being reconsidered, not a name "
+    "to keep. Judge the conversation afresh and answer with the title it "
+    "deserves today. When your best alternative is no more accurate than "
+    "<current-title>, keep <current-title>: a different paraphrase of the same "
+    "name is not a better title.\n"
+    "Never title one file, error, or tool call the conversation happened to "
+    "touch.\n"
+    "Reply with only <title>3 to 7 words</title>. No task at all, just small "
+    "talk: reply exactly <title/>.\n"
+    "Capitalize only the first word and names. No quotes, no trailing "
+    "punctuation."
+)
+
 #: How many turns to sample from each end of the trajectory for the theme
 #: context, ported from omp's ``THEME_CONTEXT_HEAD_TURNS`` / ``_TAIL_TURNS``.
 #: The HEAD is what states the subject — the opening request is the only turn
@@ -167,6 +229,27 @@ THEME_SYSTEM_PROMPT = (
 #: leaving the model to name whatever the last message touched.
 THEME_HEAD_TURNS = 3
 THEME_TAIL_TURNS = 4
+
+#: The same sampling for the ON-DEMAND refresh, and the weighting inverts.
+#:
+#: The automatic sampler above weights the HEAD because its job is to resist
+#: drift — the opener is the only turn that says what the session is FOR. An
+#: on-demand refresh is asked the opposite question ("what is this about NOW?"),
+#: so 8 tail turns against 2 head turns is a deliberate 4:1 recency bias.
+#:
+#: The head is kept at 2 rather than 0 because an opener is still what
+#: distinguishes "the same work, further along" from "a genuinely different
+#: subject". Dropping it entirely would reintroduce the tail-only window that
+#: caused the original drift, just on a path the user triggers.
+#:
+#: :data:`THEME_TURN_CHARS` is unchanged and still bounds each turn, so the
+#: envelope grows from at most 7x240 chars to at most 10x240 — roughly 600 extra
+#: input tokens, on a call the user explicitly asked for and is waiting on,
+#: against an automatic call that fires unasked. Under 10 conversational turns
+#: the two samplings are identical and no ``<elided/>`` is emitted, so a short
+#: session costs nothing extra.
+REFRESH_HEAD_TURNS = 2
+REFRESH_TAIL_TURNS = 8
 
 #: Per-turn character budget inside the sampled ``<chat>``. The whole point of
 #: the retitle call staying cheap is that it never grows with the conversation:
@@ -785,7 +868,12 @@ def _theme_turns(turns: Sequence[_Turn], newest: str) -> list[tuple[str, str]]:
 
 
 def build_theme_context(
-    turns: Sequence[_Turn], newest: str = "", *, current_title: str = ""
+    turns: Sequence[_Turn],
+    newest: str = "",
+    *,
+    current_title: str = "",
+    head_turns: int = THEME_HEAD_TURNS,
+    tail_turns: int = THEME_TAIL_TURNS,
 ) -> str:
     """A sampled ``<chat>`` of the whole trajectory for the theme titling call.
 
@@ -802,14 +890,22 @@ def build_theme_context(
     disjoint fragments presented as adjacent read as an abrupt topic switch and
     invite exactly the drift this sampler exists to prevent.
 
+    The sampling ratio is a PARAMETER because the two callers ask different
+    questions of the same trajectory. The automatic path asks "has the subject
+    moved away from what this session is for?", which needs the head; the
+    on-demand path asks "what is this about now?", which needs the tail (see
+    :data:`REFRESH_HEAD_TURNS`). The defaults are the automatic constants
+    precisely so the drift-resistant caller cannot be changed by editing this
+    signature.
+
     Returns ``""`` when there is nothing titleable, which the caller reads the
     same way it reads a low-signal message: spend no call.
     """
     collected = _theme_turns(turns, newest)
     if not collected:
         return ""
-    head_end = min(THEME_HEAD_TURNS, len(collected))
-    tail_start = max(head_end, len(collected) - THEME_TAIL_TURNS)
+    head_end = min(head_turns, len(collected))
+    tail_start = max(head_end, len(collected) - tail_turns)
     sampled = collected[:head_end] + collected[tail_start:]
     # Index into ``sampled`` where the tail begins; the marker is emitted once,
     # immediately before it, and only when turns were actually dropped between
@@ -922,13 +1018,15 @@ async def generate_retitle(
 
 #: Argument words that mean "work the title out again" rather than "make the
 #: title these words". Several spellings because the command's own vocabulary
-#: does not tell a user which one it wants: ``/title refresh`` is what the help
-#: row and the argument list advertise, and someone who types ``update`` or
-#: ``retitle`` from another tool's habit has expressed the same intention
-#: exactly — answering that with a conversation literally renamed "update" would
-#: be a hostile reading of an unambiguous request. ``rename`` is deliberately
-#: NOT here: it is this command's other spelling, so ``/title rename`` is at
-#: least as likely to be a user starting to type a name as it is a verb.
+#: does not tell a user which one it wants: ``/title --refresh`` is what the
+#: help row and the argument list advertise (the bare words all keep working,
+#: and must — a user who learned one before the flag spelling landed still has
+#: it), and someone who types ``update`` or ``retitle`` from another tool's
+#: habit has expressed the same intention exactly — answering that with a
+#: conversation literally renamed "update" would be a hostile reading of an
+#: unambiguous request. ``rename`` is deliberately NOT here: it is this
+#: command's other spelling, so ``/title rename`` is at least as likely to be a
+#: user starting to type a name as it is a verb.
 #:
 #: The collision is real but not close: a user who genuinely wants a title
 #: spelled "refresh" is asking for a one-word name that is also this command's
@@ -1134,7 +1232,8 @@ async def refresh_title(
     here — they are guesses about whether a refresh is WANTED, and this caller
     already knows.
 
-    Three specific gates are therefore dropped rather than relaxed:
+    Those gates are therefore dropped rather than relaxed, and the call itself
+    is asked differently:
 
     * **A current title is not required.** ``generate_retitle`` returns early
       without one because it has no anchor to judge drift against, but a
@@ -1151,19 +1250,35 @@ async def refresh_title(
       verbatim restatement of the anchor onto ``None`` because both mean "do
       not repaint". A user who asked is owed the distinction, so it comes back
       as :data:`TITLE_UNCHANGED` and the receipt can say the name still fits.
+    * **The question is asked with its OWN system block and a tail-heavy
+      sample.** :data:`REFRESH_SYSTEM_PROMPT` and
+      :data:`REFRESH_HEAD_TURNS` / :data:`REFRESH_TAIL_TURNS` replace the
+      automatic pair. The automatic prompt instructs the model to keep the
+      anchor unless the subject moved — correct where it is, and the whole
+      reason that path does not drift — which made this one answer "the name
+      still fits" to nearly everything a user could type the command on.
+      :data:`TITLE_UNCHANGED` is still a real outcome: the fold below is
+      unchanged, and an equal title reached after a genuine reconsideration is
+      an honest answer. It is just no longer the one the prompt asks for.
 
     What is deliberately NOT dropped is the isolation: this is the same single
     bounded tools-free call through :func:`_ask_for_title`, so a provider
     failure surfaces as :data:`TITLE_UNAVAILABLE` and can never reach the turn
     running alongside it as an exception.
     """
-    context = build_theme_context(turns or (), newest, current_title=current)
+    context = build_theme_context(
+        turns or (),
+        newest,
+        current_title=current,
+        head_turns=REFRESH_HEAD_TURNS,
+        tail_turns=REFRESH_TAIL_TURNS,
+    )
     if not context:
         # Nothing titleable: a session with no user/assistant turns yet. Named
         # apart from a provider failure because the fix is different — this one
         # resolves itself as soon as the conversation has content.
         return TitleRefresh(TITLE_NOTHING_YET)
-    title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
+    title = await _ask_for_title(REFRESH_SYSTEM_PROMPT, context, complete_fn, timeout)
     if title is CALL_CANCELLED:
         # Reported rather than collapsed into a verdict, because the cancel was
         # swallowed below and this is the only remaining evidence of it. Every

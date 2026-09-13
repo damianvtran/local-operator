@@ -3069,7 +3069,7 @@ class ServingSessionHandle(SessionHandle):
         if not name:
             current = getattr(session, "conversation_name", "") or ""
             text = (
-                f"name: {current} — /title <words>, or /title refresh"
+                f"name: {current} — /title <words>, or /title --refresh"
                 if current
                 else "no name set — /title <words> to set one"
             )

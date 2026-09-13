@@ -162,18 +162,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # imperative, `/title refresh` is the request, and a bare `/title` reports.
     #
     # OPTIONAL rather than NONE now that an argument has a value list: the space
-    # offers `refresh` to a user who does not know the word exists, and Enter on
-    # the bare command still reports the current name — the exact distinction
-    # `/approvals` and `/effort` draw against `/login`'s REQUIRED. Free typing
-    # is unaffected, so an arbitrary title still submits.
+    # offers `--refresh` to a user who does not know the capability exists, and
+    # Enter on the bare command still reports the current name — the exact
+    # distinction `/approvals` and `/effort` draw against `/login`'s REQUIRED.
+    # Free typing is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
-        # 43 cells, inside the ~55 at which the description column wraps and
+        # 45 cells, inside the ~55 at which the description column wraps and
         # renders a phantom command name in `/help` (see `/model`, `/theme`).
-        # The `refresh` word has to be HERE because the help table is where a
+        # The `--refresh` flag has to be HERE because the help table is where a
         # user learns the command exists at all, and the capability it names is
-        # the reason this entry changed.
-        "Name this conversation, or refresh the name",
+        # the reason this entry changed. Spelled as the flag because that is
+        # what the argument picker offers and what the notices point at; the
+        # bare word still parses, it is just no longer what is advertised.
+        "Name this conversation, or --refresh the name",
         aliases=("title",),
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.rename",
