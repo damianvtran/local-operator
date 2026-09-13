@@ -187,11 +187,21 @@ class TestTheClassifierNamesTheLayer:
         """The class name is not always faithful, so the SENTENCE is read too.
 
         Measured, the real failure nests ``httpx.ConnectError`` →
-        ``httpcore.ConnectError`` → ``socket.gaierror``, and the class signal
-        finds it. A re-wrap that keeps only the resolver's sentence (a plain
-        ``OSError`` from a proxy client, a newer httpcore that flattens the
-        cause) would otherwise classify as ``unreachable`` — still a network
-        failure, but the wrong one to point the user at.
+        ``httpcore.ConnectError`` → ``socket.gaierror``, where the last hop is the
+        middle link's ``__context__`` (its ``__cause__`` is ``None``). The
+        classifier walks ``__cause__`` only — ``__context__`` is the implicit
+        link and would let an unrelated earlier resolver error relabel an
+        ``unreachable`` (agent review R1-6) — so on that chain the class probe
+        stops at ``httpcore.ConnectError`` and what fires is the OUTERMOST
+        sentence below. A re-wrap that keeps only the resolver's sentence (a
+        plain ``OSError`` from a proxy client, a newer httpcore that flattens the
+        cause) therefore still classifies.
+
+        The genuinely direct cases do not depend on wording at all: a bare
+        ``socket.gaierror`` is classified by :data:`_TRANSPORT_EXC_DETAIL`'s MRO
+        match, and a ``ConnectError`` whose ``__cause__`` is the ``gaierror``
+        reaches it through the walk — both covered by
+        ``test_each_real_transport_exception_renders_a_network_line``.
         """
         rewrapped = httpx.ConnectError("[Errno 8] nodename nor servname provided, or not known")
         assert rewrapped.__cause__ is None and rewrapped.__context__ is None
@@ -271,6 +281,45 @@ class TestTheClassifierNamesTheLayer:
             dispatcher.CONNECTION_CLOSED,
             dispatcher.REQUEST_TIMEOUT,
         }
+
+    def test_the_two_transport_messages_are_pinned_against_the_installed_sdk(self) -> None:
+        """Pin the WORDING too, for the same reason the numbers are pinned.
+
+        ``_TRANSPORT_RPC_MESSAGE`` requires the dispatcher's own sentence as well
+        as its code, so a reworded upstream message makes
+        ``_dispatcher_transport_detail`` return ``None`` for a genuinely dead
+        transport — a real ``-32000`` rendering opaque — with every test still
+        green. Read from the SDK's SOURCE rather than by driving a live
+        dispatcher: the point is to fail loudly on a reword, and minting the pair
+        would need a fake transport and a real timeout to reproduce what two
+        source assertions settle (agent review round 2, R2-4).
+        """
+        import inspect
+
+        from mcp.shared import jsonrpc_dispatcher as dispatcher
+
+        from local_operator.mcp.manager import _TRANSPORT_RPC_MESSAGE
+
+        source = inspect.getsource(dispatcher)
+        # Both sides: the sentences the SDK's raise sites produce must still be in
+        # its source, AND the bounds held here must accept them.
+        sdk_messages = {
+            dispatcher.CONNECTION_CLOSED: "Connection closed",
+            dispatcher.REQUEST_TIMEOUT: f"Request {'initialize'!r} timed out",
+        }
+        for code, message in sdk_messages.items():
+            prefix, suffix = _TRANSPORT_RPC_MESSAGE[code]
+            assert message.startswith(prefix) and message.endswith(suffix), (
+                f"the SDK's {code} sentence {message!r} no longer matches "
+                f"_TRANSPORT_RPC_MESSAGE{code}; update that table"
+            )
+        assert '"Connection closed"' in source, (
+            "CONNECTION_CLOSED is no longer raised with the literal "
+            '"Connection closed"; update _TRANSPORT_RPC_MESSAGE'
+        )
+        assert 'f"Request {method!r} timed out"' in source, (
+            "REQUEST_TIMEOUT's sentence changed in the SDK; update " "_TRANSPORT_RPC_MESSAGE"
+        )
 
     def test_an_ordinary_application_error_is_not_a_transport_failure(self) -> None:
         """A server that answered with its own error keeps its own sentence.

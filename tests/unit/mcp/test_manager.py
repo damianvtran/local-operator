@@ -2607,6 +2607,77 @@ class TestAnObservedChallengeOutranksTheTransportLabel:
         assert manager.startup_network_failures() == set()
         await manager.disconnect_all()
 
+    @pytest.mark.asyncio
+    async def test_a_challenge_the_attempt_satisfied_stops_winning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2-1: 401 → 200 → transport death must NOT read as an auth failure.
+
+        The latch is bounded by the peer's own answers: an endpoint response that
+        is not a challenge proves this endpoint answers and is satisfied (a 200
+        after a grant is the case that matters), so the earlier 401 must not
+        outlive it. Reproduced on the first cut as ``/mcp login remote to
+        authorize`` with an EMPTY network subset — and, worse, with a durable
+        OAuth-challenge record written for a grant the attempt had just proved
+        good.
+        """
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import (
+            NETWORK_FAILURE_MARKER,
+            _AuthChallengeWatcher,
+        )
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401))  # the peer challenges us ...
+        assert watcher.saw_challenge == 401
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(200))  # ... and the retry is SATISFIED
+        assert watcher.status_code is None
+        assert watcher.saw_challenge is None, "a proven-good answer clears the latch"
+
+        # No challenge, so nothing to classify: this is the path that also
+        # short-circuits BEFORE the durable ``record_oauth_challenge`` write.
+        assert await manager._challenge_error(cfg, watcher, prefer_observed=True) is None
+
+        # And on the real connect path, the same sequence ends in the network
+        # label — with the server counted in the network subset, which is what
+        # "network ⊆ failures by construction" needs to stay meaningful.
+        monkeypatch.setattr("local_operator.mcp.manager.STARTUP_GATE_MS", 1)
+        settled = asyncio.Event()
+        manager.on_startup_settled = settled.set
+
+        async def satisfied_then_dying(
+            stack: Any,
+            name: str,
+            cfg_: Any,
+            timeout_s: float | None,
+            stderr_log: Any,
+            *,
+            interactive: bool = False,
+            challenge_watcher: Any = None,
+        ) -> ServerConnection:
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(401))
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(200))
+            await asyncio.sleep(0.05)  # past the gate: the deferred failure path
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", satisfied_then_dying)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        await manager._connect_round({"remote": cfg}, {})
+        await asyncio.wait_for(settled.wait(), timeout=10)
+
+        failures = manager.startup_failures()
+        assert set(failures) == {"remote"}, failures
+        assert failures["remote"].startswith(NETWORK_FAILURE_MARKER), failures
+        assert manager.startup_network_failures() == {"remote"}
+        await manager.disconnect_all()
+
 
 class TestMcpAuthRecoveryHint:
     """The remedy an MCP auth failure earns, and the one it must never get.
