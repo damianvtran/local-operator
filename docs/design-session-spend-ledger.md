@@ -703,7 +703,9 @@ on the true value rather than a rounded float), and have both existing
 (write `≥`/`+` in dim, as `append_cost` already does — `analytics_panel.py:196-211`).
 Then a change to the ladder reaches every surface by construction, and the
 `$1.2k` abbreviation moves to the chart's axis labels only (where the space is
-actually short), never to a table cell or a headline.
+actually short), never to a table cell or a headline. *(Implemented as: the
+abbreviation is DROPPED, because this repo has no money chart axis to move it
+to — see §12.1 note 3.)*
 
 ## 9. Perf budget
 
@@ -958,15 +960,11 @@ Tests: the four provenance fixtures; idempotence by call count; the
 off-the-loop-thread structural assertion; the `28a800c6a783`-shaped
 compaction fixture.
 
-**T7 — stamp `estimated_usd_cost` on the parent turn's usage (optional, but
-recommended).**
-Where the price is known off-loop, write it onto the usage that the transcript
-row persists, so every FUTURE rebuild is exact and cheap without repricing —
-the field's stated purpose (`harness/types.py:407-410`). Touches:
-`local_operator/model/configure.py` (`_record_stream`/`_record_usage` area,
-`:5222-5420`) and/or `harness/loop.py:1808`. *Flagged: the ordering between
-`_record_stream`'s post-loop code and the loop's message finalization is not
-something this design settles from reading alone — see §13.*
+**T7 — stamp `estimated_usd_cost` on the parent turn's usage — DROPPED, with a
+measurement.** See §13.1: the ordering contract holds but the price is genuinely
+not known at the only site that holds the usage object before the row is
+written, so the stamp could only carry the paint-grade estimate. Superseded by
+the record itself, which *is* the durable money.
 
 **T8 — one formatter, one precision ladder, exact on demand.**
 Move the number ladder into `tui/costs.py::format_usd(micro: int)`, have both
@@ -989,17 +987,90 @@ Slice order matters in one direction only: T2 depends on T1, T3 on T2, T4 on
 T3. T5-T9 are independent given T1-T3 and can be batched into one remediation
 round, which is what keeps this from becoming five cascading review rounds.
 
+### 12.1 Implementation notes — where the code differs from this document
+
+Recorded by the implementing agent, each with the reason, so a reviewer does not
+have to reconstruct the decision.
+
+1. **The rebuild starts from the ADOPT seam, not from `Session.__init__`.** This
+document says "started once at session construction". Construction is a
+synchronous function that runs in contexts with no event loop (unit tests, the
+SDK facades, a fork's `__init__`), where `create_task` would either raise or
+leave a task nothing awaits. The rebuild therefore starts from
+`Session.rebuild_spend_if_needed`, called by `refresh_frontend_usage` — the
+method the app already calls when it adopts a session for display — and is
+still once per session per process, asserted by a call count. The guarantee the
+document actually asks for (never on the paint path, never blocking the open)
+holds by construction: no renderer names it, which `test_spend_ledger.py`
+asserts against `tui/app.py`'s source.
+2. **A pre-ledger session's accumulator is SEEDED from its best legacy figure**
+(`Session.seed_spend_floor`), in memory only. Without it the first live call
+after a resume would publish only its own cost and the restored conversation's
+dollars would vanish from the cell — the regression this ledger exists to
+remove, reintroduced on the one population the ledger cannot yet speak for.
+The seed is deliberately NOT persisted, so the record stays absent and the
+rebuild still fires. Consequence, stated plainly: a pre-ledger session that is
+USED before its rebuild lands persists a truthful `floor: true` record, and the
+rebuild will not fire for it on a later resume, because a record now exists.
+Trusting a marked lower bound over a reconstruction is the honest side of that
+trade.
+3. **`$1.2k` is dropped, not moved to the chart axis.** §8.4 says to confine it
+to chart axes "where the space is actually short". The repo has no money chart
+axis to move it to (`analytics_panel` has no axis, sparkline or bar labeller),
+so the abbreviation is simply gone: `$1200.00` wherever a table cell or a
+headline renders it. Inventing an axis to park it on would be inventing a
+surface.
+4. **`append_custom` did not take `preserve_mtime`; it does now.** R8's option 1
+assumed the flag was already plumbed to that entry point. It was not — only
+`append_message(s)` had it — so the bookkeeping exemption could not be claimed
+by a custom row at all. The predicate (`_is_bookkeeping_batch`) and the
+parameter both changed together; the mtime itself is still restored only for a
+batch the predicate admits, so a caller cannot erase a real turn from the age
+ranking by asking.
+5. **The rebuild prices its rows in ONE worker-thread batch** (`spend.price_rows`)
+rather than one `to_thread` per row. The resolver's expensive path is per MODEL,
+not per row, and a batch is what makes "every price in a rebuild happened off
+the event loop" a single, assertable fact.
+
 ## 13. What I could not settle from the code, and what would settle it
 
-1. **The exact ordering between `_record_stream`'s post-stream recording code
-   and the harness loop's message finalization** (`configure.py:5222` vs
-   `harness/loop.py:1808`). Whether `estimated_usd_cost` can be stamped on the
-   usage object the transcript row will persist (T7) depends on whether the
-   generator's post-loop body runs before the loop finalizes `assistant.usage`.
-   Analytics records successfully, so it runs *in the normal case* — but that is
-   evidence of a working path, not of the ordering contract. **Settled by**: a
-   two-line instrumented run (print in both places, one `exec` turn) on a
-   branch. If it does not hold, T7 moves to the transcript write path instead.
+1. **SETTLED — measured 2026-09-13, and T7 is DROPPED as a result.** The
+   ordering question was: does `_record_stream`'s post-stream body run before
+   the harness loop finalizes `assistant.usage`, so that `estimated_usd_cost`
+   could be stamped on the object the transcript row persists?
+
+   **The ordering holds. The premise does not.** A two-line instrumented run
+   (prints in `configure._record_usage` and after `assistant.usage = usage` in
+   `harness/loop.py`, plus one in `analytics.model.price_snapshot`), driving one
+   real turn through a real `Session` and the real `SessionStreamFn._record_stream`
+   with only the wire stream faked, printed:
+
+   ```
+   PROBE configure._record_usage 0x109eceee0 est= None in= 1200 thread= 8414060928
+   PROBE loop:1808               0x109eceee0 est= None in= 1200 thread= 8414060928
+   PROBE price_snapshot deepseek deepseek-chat          thread= 6164295680
+   transcript usage row: estimated_usd_cost=None usd_cost=None in=1200
+   ```
+
+   So `_record_usage` DOES run before the loop's finalization (same usage
+   object, same thread), **but the price is not known there**: `_record_usage`
+   only ENQUEUES a snapshot (``recorder.record_call`` → `queue.put_nowait`), and
+   `price_snapshot` runs later on the recorder's daemon thread — after the
+   turn's row is already on disk, as the last line shows. Stamping the durable
+   field at that site would therefore mean pricing synchronously **on the event
+   loop**, which is exactly the paint-grade estimate this document rejects
+   (§5.2) — the field would carry the number §2.4 measured to be wrong.
+
+   T7 must not be built at that site, and the alternative (the transcript write
+   path) cannot help either: by the time a row is written, no holder of that
+   usage object knows a price that is better than the paint resolver's. **The
+   record itself is the answer to "what did this cost"** — it is written at the
+   call boundary, priced where the price is knowable, and recalled in O(1). The
+   `estimated_usd_cost` stamp would only have made future REBUILDS cheaper, and
+   rebuilds exist for sessions that have no record; after this change those are
+   the rare cases. Dropped deliberately, with the measurement recorded here so
+   nobody re-derives it.
+
 2. **Whether the transcript's `_lock` contention is acceptable for a per-call
    append** when a `compact_file` rewrite of a 255 MB journal is in flight. The
    append itself is 0.057 ms (§9), but the lock is held across the fold's
