@@ -586,3 +586,6 @@ async def test_a_read_only_session_still_shows_its_share(tmp_path, monkeypatch) 
 
     assert "This session" in text
     assert "1 read" in text
+    # The share row's noun follows the kind: `0 searches · 100%` would be the
+    # guard's fix producing a worse sentence than the bug it closed.
+    assert "0 searches" not in text
