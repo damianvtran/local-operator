@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -2485,6 +2486,29 @@ def _defective_reply(case: str, current: Observation) -> str:
         )
     if case == "envelope-shape":
         return json.dumps({"reply_version": "1.0", "action_batch": {"actions": []}})
+    if case == "misplaced-reply-version":
+        # Verbatim the shape of the two sealed DeepSeek episodes that repeated
+        # this defect identically and sealed: the full envelope, with the
+        # version key written inside ``action_batch`` as well as at the top.
+        return json.dumps(
+            {
+                "reply_version": "1.0",
+                "action_batch": {"actions": [], "reply_version": "1.0"},
+                "public_observations": "",
+            }
+        )
+    if case == "unquotable-batch-key":
+        # Every stray key in the batch is unquotable, so the diagnostic can name
+        # only their count -- the branch that must fall back to stating the
+        # accepted shape. A lone U+E0001 repeated: short enough to pass the
+        # length bound, refused by the ``repr`` bound because it expands.
+        return json.dumps(
+            {
+                "reply_version": "1.0",
+                "action_batch": {"actions": [], "\U000e0001" * 40: 1},
+                "public_observations": "",
+            }
+        )
     if case == "extra-action-key":
         return json.dumps(
             {
@@ -2579,6 +2603,22 @@ _REJECTION_HINT_CASES = [
         ['The only accepted value is "1.0"'],
     ),
     ("envelope-shape", "envelope-shape", ["omitted 'public_observations'"]),
+    (
+        "misplaced-reply-version",
+        "env-version-misplaced",
+        [
+            "unexpected key(s): 'reply_version'",
+            "'reply_version' belongs at the top level of the envelope",
+            '"reply_version": "1.0"',
+            '"action_batch"',
+            '"public_observations"',
+        ],
+    ),
+    (
+        "unquotable-batch-key",
+        "envelope-shape",
+        ["1 unexpected key(s): 1 not shown", 'the batch is exactly {"actions": [...]}'],
+    ),
     ("extra-action-key", "extra-action-key", ['"frame_id"', '"wait"', '"duration_ms"']),
     ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
     ("keys-not-array", "keys-not-array", ['["ctrl", "alt", "t"]', "not an object"]),
@@ -2627,6 +2667,66 @@ async def test_a_refused_reply_is_told_what_to_send_instead(
     assert "input_value=" not in rejected.diagnostic
     assert "errors.pydantic.dev" not in rejected.diagnostic
     assert "[type=" not in rejected.diagnostic
+
+
+#: A token that names something the model can act on: a quoted key, field, kind
+#: or literal (the harness's own renderings always quote what they name), a
+#: numeric bound, or an accepted count. A refusal carrying none of these restates
+#: a rule with nothing to act on, and that is the defect this pins: this arm's
+#: two deaths were three attempts each against a sentence that named nothing.
+_NAMING_TOKEN = re.compile(
+    r"[\"'][^\"'\s]+[\"']"  # a quoted key, field, kind, or literal
+    r"|\d+\.\.\d+"  # a numeric bound
+    r"|\bexactly (?:one|two|\d+)\b"  # an accepted count
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "class_key"),
+    [(row[0], row[1]) for row in _REJECTION_HINT_CASES],
+    ids=[row[0] for row in _REJECTION_HINT_CASES],
+)
+async def test_no_refusal_is_sent_without_naming_the_defect(
+    tmp_path: Path, case: str, class_key: str
+) -> None:
+    """STANDING INVARIANT: a refusal names the defect or the accepted shape.
+
+    Per class rather than in aggregate, because the failure this guards against
+    is one branch quietly regressing to the bare rule while every other branch
+    still names its defect -- measured, not hypothetical: ``action_batch``'s own
+    key set was the one sentence in ``decode_public_reply`` that named nothing
+    (the envelope level above it named the carried and omitted keys), and over
+    the six readable arms ten refusals received it while twenty-two received a
+    named key set. It is also the only repair turn in that file with no
+    accepted-shape example, so it stated neither the keys nor the shape.
+
+    The check is deliberately weak in FORM and strict in EFFECT: any quoted
+    identifier, any numeric bound, any accepted count, or the canonical envelope
+    satisfies it, because those are the things the doctrine on ``rejection_hint``
+    promises ("every branch states the accepted shape, literal, or bound").
+    What it refuses is a sentence that states only a rule. Adding a class to
+    the taxonomy means adding a row here -- that is the same convention the
+    module docstring already states for this table ("the taxonomy is pinned
+    against the real parsers, per class, through the client").
+
+    One row is borderline by design and is recorded rather than quietly widened:
+    ``second-batch`` names the rule and the accepted count but no key, value or
+    class ("carries a second action batch ...; send exactly one action batch").
+    It is a preserved, measured sentence from the batch rules, so it is left
+    alone here -- the count is what makes it actionable, and paraphrasing a
+    measured sentence is the change this table exists to prevent.
+    """
+
+    current = _screen_observation(tmp_path, 0)
+    stream = RecordingStream(lambda _message: _defective_reply(case, current))
+
+    with pytest.raises(DecisionRejected) as info:
+        await _client(stream, tmp_path).decide(current, _turns(current))
+
+    diagnostic = info.value.diagnostic
+    assert _NAMING_TOKEN.search(diagnostic), diagnostic
+    assert info.value.class_key == class_key
 
 
 @pytest.mark.asyncio
