@@ -65,6 +65,8 @@ from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
+    EVENT_MUTE_CAPABILITY,
+    EVENT_MUTE_DROP_TYPES,
     HEARTBEAT_INTERVAL_S,
     ClientKind,
     ClientLocality,
@@ -318,6 +320,28 @@ _TUI_SEND_TIMEOUT_S = 5.0
 # reconnect through durable history + canonical frontend_sync instead of drift.
 _EVENT_QUEUE_MAX = 64
 
+#: Drop reasons that are an ordinary part of a client's life, kept at INFO: a
+#: close the runtime itself was asked for (``runtime shutdown``), a peer that
+#: closed first, and a daemon dial that superseded its own predecessor. Every
+#: OTHER reason means the runtime removed a client that had not asked to leave —
+#: an attach-cap eviction, a queue overflow, a send timeout — which is exactly
+#: the event a viewer learns about only as a cold facade, so those are logged at
+#: WARNING. Derived from the call sites rather than guessed: see the eleven
+#: ``_drop_client`` callers, and keep this list beside any new one.
+#:
+#: ``frontend requested but unsupported`` is deliberately NOT in this set, and
+#: the call is a decision rather than an oversight (review n1). It reads like a
+#: client-caused drop, but the level is chosen by what the user sees, and what
+#: they see is identical to an eviction: a viewer that asked to be kept live is
+#: cut off and reads cold next. The cause is also permanent rather than
+#: transient — a runtime whose handler has no ``subscribe_frontend`` refuses
+#: every reconnect the same way — so burying it at INFO would make the one
+#: recurring reason a viewer keeps going cold the one reason the log does not
+#: show without turning INFO on for the whole runtime.
+_GRACEFUL_DROP_REASONS = frozenset(
+    {"runtime shutdown", "reader eof", "reader reset", "daemon replaced"}
+)
+
 # Ops whose answer is structured data (a typed slash result, a cancel count)
 # rather than a one-line receipt: they reply with a ``result`` frame so the
 # invoker renders the outcome locally instead of the owner's transcript
@@ -442,6 +466,13 @@ class _ClientConn:
     # frame. Daemon connections never set it; a v3 attach client that omitted
     # the flag keeps projection-only behaviour.
     wants_events: bool = False
+    #: An attach connection's raw event relay is MUTED: it asked (see
+    #: ``EVENT_MUTE_CAPABILITY``) to stop receiving delta-grade frames until it
+    #: unmutes. Per connection, not per session — the same owner serves each
+    #: viewer's own interest, so a parked viewer's mute never slows the one on
+    #: screen. Flipped by the ``event_mute``/``event_unmute`` ops (handled in
+    #: the control loop, which owns ``conn``) and read in ``_relay_on_loop``.
+    events_muted: bool = False
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
@@ -713,6 +744,10 @@ class RuntimeServer:
             # surface that is not there.
             capabilities=(
                 [DESKTOP_WATCH_CAPABILITY]
+                # Unconditional, unlike the handle-gated entries below: the
+                # mute is a property of the RELAY this server always runs, not
+                # of anything the handle implements.
+                + [EVENT_MUTE_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -1616,11 +1651,25 @@ class RuntimeServer:
         # SERVER-GLOBAL state has to honour that contract, or the late second
         # call reaches across to whatever connection replaced this one.
         was_registered = self._clients.pop(id(conn.writer), None) is not None
-        # One INFO per actual removal. The reader loop's ``finally`` always
-        # calls again after a send-path drop; that second call is a no-op and
-        # must not look like a second failure (DEBUG only).
+        # One line per actual removal, at ONE level chosen by WHY it happened.
+        #
+        # A view that went cold and was told to reselect used to leave nothing
+        # in the log to read: the removal was recorded at INFO beside every
+        # routine close, so the reason a watching terminal lost its owner — the
+        # attach cap evicting it, an event queue overflowing, a send timing out
+        # — could not be found without turning INFO on for the whole runtime.
+        # The reasons below that mean "we dropped a client that did not ask to
+        # leave" are therefore WARNING, and the ones that are an ordinary part
+        # of a client's life stay INFO. The reader loop's `finally` always calls
+        # again after a send-path drop; that second call is a no-op and must not
+        # look like a second failure (DEBUG only).
         peer = conn.writer.get_extra_info("peername")
-        log = logger.info if was_registered else logger.debug
+        if not was_registered:
+            log = logger.debug
+        elif reason in _GRACEFUL_DROP_REASONS:
+            log = logger.info
+        else:
+            log = logger.warning
         log(
             "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s",
             conn.kind,
@@ -2109,6 +2158,30 @@ class RuntimeServer:
                 # ``retire_if_pristine``: both are lifecycle ops that must not
                 # trigger the post-ack refresh (the exemption list below).
                 detail = await self._refresh_if_idle()
+            elif op in ("event_mute", "event_unmute"):
+                # Raw-event interest, per connection, for a viewer that stops
+                # painting this session while parked (see
+                # ``EVENT_MUTE_CAPABILITY``). Handled here rather than in
+                # ``_dispatch`` for the same reason ``watch_job`` is: it
+                # mutates this connection's own relay state and never touches
+                # the session, and the dispatcher deliberately has no ``conn``.
+                #
+                # Delta-grade frames ONLY, and the set is deliberately the
+                # same one the viewer's parked ``EventController`` discards
+                # app-side: muting anything a client still needs for state
+                # (turn boundaries, gates, notices) would change what a
+                # reveal can reconstruct, and the unmute path rebuilds live
+                # text from history plus the canonical seed either way.
+                # Idempotent: re-asserting the current state is how a
+                # reconnected parked viewer gets its mute back.
+                #
+                # Attach-only, like ``desktop_watch``: the relay this mutes is
+                # never sent to daemon connections, so a daemon sending it is
+                # a client bug and the error frame is the honest reply.
+                if conn.kind != "attach":
+                    raise ValueError("event muting requires an attach connection")
+                conn.events_muted = op == "event_mute"
+                detail = "delta-grade events muted" if conn.events_muted else "events resumed"
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -2170,6 +2243,12 @@ class RuntimeServer:
                 # push, and the handle is mid-dispose) or refused (nothing
                 # changed, so there is nothing to push).
                 "retire_now",
+                # Connection-local relay toggles, like ``watch`` above: they
+                # mutate only this connection's OWN event interest, never the
+                # session, so a refresh has nothing new to see and there is
+                # no changed state to push.
+                "event_mute",
+                "event_unmute",
             ):
                 await self._handle.refresh()
                 await self._push()
@@ -2300,6 +2379,17 @@ class RuntimeServer:
         )
         return await self._retire_for("stale-build", to=newer.label())
 
+    def _retire_detail(self, to: str) -> str:
+        """``" (old → new)"`` for a retirement reason, when both stamps exist.
+
+        The build pair is what makes the reason actionable later: "the runtime
+        retired" says nothing about which build it left for.
+        """
+        boot = getattr(self, "_boot_build", None)
+        if boot is None or not to:
+            return ""
+        return f" ({boot.label()} → {to})"
+
     async def _retire_for(self, reason_label: str, *, to: str = "") -> str:
         """Retire this runtime iff it is idle, announcing ``reason_label``.
 
@@ -2329,14 +2419,28 @@ class RuntimeServer:
         if not callable(request_stop):
             return "kept: this runtime cannot stop itself gracefully"
         await self.announce_retiring(reason_label, to=to)
-        # The one await between decision and stop; re-ask, as
-        # ``_retire_if_pristine`` does after its broadcast.
-        try:
-            reason = str(may_refresh() or "")
-        except Exception as exc:  # noqa: BLE001
-            return f"kept: idle probe failed ({exc})"
-        if reason:
-            return f"kept: {reason} (arrived while retiring was announced)"
+        # The ONE await between decision and stop, so the final check is a LATCH
+        # and not another sample: a ``prompt`` admitted in this gap would open a
+        # turn that ``request_stop`` then aborts one await later. ``begin_retire``
+        # commits the runtime in the same synchronous step that checks it, so
+        # from here the admissions refuse and the retirement is clean by
+        # construction (design §5.1). The cut-off CAUSE is always
+        # ``runtime-retired``: ``reason_label`` names the trigger for the log and
+        # the wire announcement, while the cause is the vocabulary token a
+        # restored session renders.
+        begin_retire = getattr(h, "begin_retire", None)
+        if callable(begin_retire):
+            if not begin_retire("runtime-retired", self._retire_detail(to)):
+                return "kept: work arrived while retiring was announced"
+        else:
+            # A reduced/older handle without the latch keeps today's re-check
+            # rather than retiring unguarded.
+            try:
+                reason = str(may_refresh() or "")
+            except Exception as exc:  # noqa: BLE001
+                return f"kept: idle probe failed ({exc})"
+            if reason:
+                return f"kept: {reason} (arrived while retiring was announced)"
         logger.info("session runtime: retiring (%s)", reason_label)
         result = request_stop()
         if inspect.isawaitable(result):
@@ -2897,10 +3001,18 @@ class RuntimeServer:
         """
         if self._closed.is_set():
             return
+        # A muted connection (``EVENT_MUTE_CAPABILITY``) is filtered PER EVENT,
+        # not dropped from the recipient snapshot: its interest is the delta
+        # grade only, and turn boundaries, gates, notices and so on must keep
+        # flowing or a parked viewer's state would silently rot while muted.
+        event_type = str(data.get("type") or "")
         recipients = [
             conn
             for conn in self._clients.values()
-            if conn.kind == "attach" and conn.wants_events and conn.events_ready
+            if conn.kind == "attach"
+            and conn.wants_events
+            and conn.events_ready
+            and not (conn.events_muted and event_type in EVENT_MUTE_DROP_TYPES)
         ]
         if not recipients:
             return
@@ -3358,7 +3470,16 @@ class RuntimeServer:
         frontend = getattr(self._handle, "_frontend", None)
         mutate = getattr(frontend, "mutate", None)
         if callable(mutate):
-            mutate(pending_gate=pending.to_json() if pending is not None else None)
+            payload = pending.to_json() if pending is not None else None
+            if payload is not None:
+                # Same stamp as `ServingSessionHandle._publish_pending_gate`,
+                # through the handle's own helper so the privacy gate cannot
+                # hold on one publication site and not the other. Reduced hosts
+                # reach the gate contract through here, and a desktop banner
+                # raised from one of them must be as triageable as any other.
+                namer = getattr(self._handle, "_notifiable_session_name", None)
+                payload["session_name"] = namer() if callable(namer) else ""
+            mutate(pending_gate=payload)
         self._schedule_push()
 
 

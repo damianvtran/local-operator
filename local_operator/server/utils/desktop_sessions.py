@@ -52,6 +52,21 @@ SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
 WATCH_TTL = 45.0
 
+#: The completion kinds the DESKTOP BRIDGE may put on the wire as a
+#: ``notification`` frame. Narrower than ``NotificationKind`` on purpose.
+#:
+#: ``ask``/``approval`` are absent because they already reach the desktop as
+#: ``pending_gate`` in the snapshot and update frames, and a second channel for
+#: the same card is the duplicate this whole contract exists to prevent.
+#:
+#: ``interrupted`` is absent because the user pressed Ctrl+C or Esc a moment
+#: ago and already knows — telling them their own stop worked is the definition
+#: of a notification nobody wants, which is the same call the TUI already
+#: makes. The counter-argument (on the desktop an interruption can come from
+#: another surface) is real but undecidable here: ``AgentEndEvent`` carries
+#: ``aborted`` with no actor. One frozenset entry away if that ever changes.
+BRIDGE_NOTIFIABLE_KINDS = frozenset({"complete", "error"})
+
 
 async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
@@ -169,7 +184,25 @@ class DesktopSessionBridge:
         sub.queued_bytes = 0
         sub.queue.put_nowait(None)
 
-    def publish(self, kind: str, payload: dict[str, Any]) -> None:
+    def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
+        """Put one frame on every live subscriber, and normally into replay.
+
+        ``replay=False`` publishes LIVE ONLY. It exists for the ``notification``
+        frame, whose whole value is timeliness: replaying it on reconnect toasts
+        the user about a turn that finished while their laptop lid was shut,
+        possibly hours later. The durable signal for "you missed something" is
+        not lost — the ``attention`` frame and the sidebar's unseen mark both
+        survive a reconnect and are the right surface for it.
+
+        THE SEQUENCE STILL ADVANCES for a non-replayed frame, and that is
+        load-bearing rather than incidental. :meth:`events` computes ``gap``
+        from ``after_seq < first - 1`` where ``first`` is the oldest RETAINED
+        frame's seq, so a skipped seq simply never becomes ``first`` and a
+        client reconnecting at the notification's own cursor still satisfies
+        the test against the next retained frame. Not incrementing would
+        instead make ``seq`` non-monotonic across the two paths and break the
+        receipt cursor every renderer keeps.
+        """
         self.sequence += 1
         frame = {
             "session_id": self.session_id,
@@ -179,11 +212,14 @@ class DesktopSessionBridge:
             "payload": payload,
         }
         size = len(json.dumps(frame, separators=(",", ":")).encode())
-        self.replay.append((frame, size))
-        self.replay_bytes += size
-        while self.replay and (len(self.replay) > REPLAY_COUNT or self.replay_bytes > REPLAY_BYTES):
-            _, removed = self.replay.popleft()
-            self.replay_bytes -= removed
+        if replay:
+            self.replay.append((frame, size))
+            self.replay_bytes += size
+            while self.replay and (
+                len(self.replay) > REPLAY_COUNT or self.replay_bytes > REPLAY_BYTES
+            ):
+                _, removed = self.replay.popleft()
+                self.replay_bytes -= removed
         for sub in self.subscribers.values():
             if sub.overflow:
                 continue
@@ -232,7 +268,110 @@ class DesktopSessionBridge:
             # own receipt clock rather than borrowing a runtime sequence.
             if previous:
                 self.publish("attention", state)
+                # THE NOTIFICATION EDGE, published AFTER the attention frame so
+                # a reader that toasts already holds the receipt state that
+                # explains the toast. The same `previous` baseline rule governs
+                # both: a bridge's FIRST read is the session's history, not
+                # news, and opening a conversation must not announce the
+                # completion it ended on last week.
+                await self._maybe_publish_notification(previous, state)
         return state
+
+    async def _maybe_publish_notification(
+        self, previous: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        """Turn a newly published, unseen completion into one notification frame.
+
+        THE AUTHORITY IS THE ATTENTION PUBLICATION, not any engine event. A
+        `completions` row exists only because ``Session._publish_attention_
+        outcome`` decided the turn produced a notifiable outcome — in the
+        process that owns the job manager, using the same delegated-children
+        check the TUI uses (``job.type == "task" and job.status == "running"``).
+        A delegating parent's premature ``agent_end`` writes an ``eligible:
+        False`` marker and publishes nothing, so there is simply no row for the
+        bridge to see, and each settled child re-enters as a fresh turn whose
+        own completion publishes normally.
+
+        That is why this method asks no questions about jobs, ``agent_end`` or
+        ``turn_end``: reconstructing the decision here would mean making it
+        again in a process with less information, which is how a frontend ends
+        up disagreeing with the TUI about whether a turn finished. The bridge
+        OBSERVES the decision; it does not judge it.
+
+        NO CLAIM IS TAKEN HERE. ``claim_delivery`` is claim-then-deliver, and
+        the claimant must be the deliverer — between this frame and an OS
+        banner lie an SSE socket, the Electron main process, a support check
+        and a focus gate. A claim taken here that the renderer then suppresses
+        would mark the completion delivered while nobody was told, for good. A
+        frame is an OFFER; the renderer claims through ``POST /notified``
+        immediately before it shows the banner.
+
+        Guarded end to end: a notification is chrome, and this runs inside the
+        1 s attention poll whose loop already treats a store error as costing
+        one tick rather than the feature.
+        """
+        token = state.get("completion_token")
+        if (
+            not token
+            or token == previous.get("completion_token")
+            or not state.get("unseen")
+            or state.get("kind") not in BRIDGE_NOTIFIABLE_KINDS
+        ):
+            return
+        try:
+            from local_operator.notifications import (
+                NOTIFICATION_CONTRACT_VERSION,
+                compose,
+            )
+
+            # The LIVE name wins over the sidecar: a rename reaches frontend
+            # state before it reaches `title.json`, and `compose` falls back to
+            # the stored title on its own when this is empty (a cold bridge has
+            # no runtime to ask).
+            remote = self.remote
+            session_name = ""
+            if remote is not None:
+                session_name = getattr(remote.frontend_state, "conversation_title", "") or ""
+            # `compose` reads up to 128 KiB for the title and 64 KB for the
+            # preview, and `refresh_attention` runs on the event loop. Off-loop
+            # for the same reason the store read above is.
+            composed = await asyncio.to_thread(
+                compose,
+                state["kind"],
+                session_dir=self.root / "sessions" / self.session_id,
+                session_name=session_name,
+            )
+            self.publish(
+                "notification",
+                {
+                    "contract": NOTIFICATION_CONTRACT_VERSION,
+                    "kind": composed.kind,
+                    "title": composed.title,
+                    "status": composed.status,
+                    "body": composed.body,
+                    "body_is_snippet": composed.body_is_snippet,
+                    # Additive since the first draft of this frame; a renderer
+                    # that does not know the field simply shows the body, which
+                    # is already the right thing to do with it.
+                    "body_is_failure": composed.body_is_failure,
+                    "title_is_session_name": composed.title_is_session_name,
+                    # Keyed on the DURABLE completion token rather than on this
+                    # bridge's sequence: `acquire()` mints a new epoch and
+                    # resets `sequence` to 0 after a detached interval, so a
+                    # seq-keyed dedupe re-toasts the same completion on every
+                    # reconnect. The prefix is the frame's own kind (round 1,
+                    # n1): a token has exactly one kind, so it costs nothing,
+                    # and a store or dedupe-map dump no longer reads as an
+                    # error banner mislabelled `complete:`.
+                    "dedupe_key": f"{composed.kind}:{self.session_id}:{token}",
+                    "completion_token": token,
+                    "session_name": composed.title if composed.title_is_session_name else None,
+                    "focus_policy": "when_unfocused",
+                },
+                replay=False,
+            )
+        except Exception:  # noqa: BLE001 — chrome must not cost the attention poll
+            logger.debug("notification compose failed for %s", self.session_id, exc_info=True)
 
     async def _poll_attention(self) -> None:
         # Read-only polling is shared by every subscriber of this bridge and
@@ -483,6 +622,45 @@ class DesktopSessions:
             )
 
         return await asyncio.to_thread(acknowledge)
+
+    async def claim_notification(self, session_id: str, token: str) -> bool:
+        """Claim the right to TOAST ``token``; exactly one surface ever wins.
+
+        NOTIFYING IS NOT READING, and this is the boundary that keeps the two
+        watermarks apart. ``claim_delivery`` writes ``deliveries`` only: the
+        sidebar's unseen mark and ``receipts.acknowledged`` are untouched, so a
+        session the user was merely *told about* stays unread until they
+        actually open it. Routing this through :meth:`acknowledge_attention`
+        instead would clear the mark for a conversation nobody looked at, which
+        is the one thing ``docs/ATTENTION.md`` forbids outright.
+
+        Cold path, exactly like :meth:`acknowledge_attention`: same session-id
+        validation, no bridge acquire, no runtime spawn. A completion worth
+        announcing is usually one whose owner has already exited, and a banner
+        is never a reason to start a process.
+
+        ``backend="desktop"`` names the claimant. The column is diagnostics
+        only — no decision may read it, because a claim that consulted anything
+        beyond the monotonic sequence would stop being clock-free — but naming
+        it correctly is what makes a store dump readable when two surfaces
+        disagree about who toasted.
+
+        Returns ``False`` for an unknown or foreign token rather than raising:
+        the caller's next step is "show or do not show a banner", and a
+        surface that cannot claim simply stays quiet.
+        """
+
+        def claim() -> bool:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return AttentionStore(self.root / "attention.db").claim_delivery(
+                f"session/{session_id}", token, "desktop"
+            )
+
+        return await asyncio.to_thread(claim)
 
     async def attachment(self, session_id: str, digest: str) -> tuple[bytes, str]:
         """Decoded bytes and mime type for one content-addressed attachment.

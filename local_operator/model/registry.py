@@ -236,6 +236,11 @@ class ModelInfo(BaseModel):
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Unknown differs from a provider's explicit denial; the spec builder must
+    # not manufacture tool/reasoning support after a live listing denies it.
+    supports_tools: Optional[bool] = None
+    reasoning: Optional[bool] = None
+    reasoning_default_effort: Optional[str] = None
     supports_prompt_cache: bool = False
     supports_responses_api: bool = False
     cache_writes_price: Optional[float] = None
@@ -1339,22 +1344,28 @@ google_models: Dict[str, ModelInfo] = {
 }
 
 deepseek_models: Dict[str, ModelInfo] = {
-    # V4 family (2026): 1M context, implicit prompt caching, an order of
-    # magnitude cheaper than the V3 line. `-latest` floats to the newest
-    # snapshot; the dated ids pin a snapshot so a rollout cannot silently
-    # change behaviour under a long-running agent.
-    "deepseek-v4-flash": ModelInfo(
-        id="deepseek-v4-flash",
-        name="DeepSeek V4 Flash",
-        max_tokens=32_768,
-        context_window=1_048_576,
-        supports_images=False,
+    # /models is authoritative for inventory but currently returns ONLY ids,
+    # object and owner. These omitted-field fallbacks come from DeepSeek's
+    # pricing and create-chat-completion docs (2026-09-12), not an aggregator:
+    # https://api-docs.deepseek.com/quick_start/pricing
+    # https://api-docs.deepseek.com/api/create-chat-completion
+    # 384K is 393216 OUTPUT tokens, not a default request budget. Prices below
+    # are conservative PEAK estimates; off-peak is half (weekdays 01-04/06-10
+    # UTC are peak). Usage accounting has no time-of-use tariff model.
+    "deepseek-flash": ModelInfo(
+        id="deepseek-flash",
+        name="DeepSeek Flash",
+        max_tokens=393_216,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_tools=True,
+        reasoning=True,
         supports_prompt_cache=True,
-        input_price=0.14,
-        output_price=0.28,
-        cache_writes_price=0.14,
-        cache_reads_price=0.014,
-        description="Fast, cheap agentic workhorse with a 1M context window",
+        input_price=0.30,
+        output_price=1.20,
+        cache_writes_price=0.30,
+        cache_reads_price=0.006,
+        description="DeepSeek V4.1 Flash with vision; peak price estimate (off-peak half)",
         recommended=True,
     ),
     "deepseek-v4-flash-0731": ModelInfo(
@@ -1379,15 +1390,17 @@ deepseek_models: Dict[str, ModelInfo] = {
     "deepseek-v4-pro": ModelInfo(
         id="deepseek-v4-pro",
         name="DeepSeek V4 Pro",
-        max_tokens=65_536,
-        context_window=1_048_576,
+        max_tokens=393_216,
+        context_window=1_000_000,
         supports_images=False,
+        supports_tools=True,
+        reasoning=True,
         supports_prompt_cache=True,
-        input_price=0.435,
-        output_price=0.87,
-        cache_writes_price=0.435,
-        cache_reads_price=0.0435,
-        description="Stronger V4 tier for harder reasoning and long refactors",
+        input_price=1.32,
+        output_price=3.96,
+        cache_writes_price=1.32,
+        cache_reads_price=0.044,
+        description="DeepSeek V4 Pro (0813); peak price estimate (off-peak half)",
         recommended=False,
     ),
     "deepseek-chat": ModelInfo(
@@ -1419,6 +1432,17 @@ deepseek_models: Dict[str, ModelInfo] = {
         recommended=False,
     ),
 }
+
+# Officially documented floating aliases now serve V4.1 Flash. Keep manual
+# selectors working offline, but a successful /models listing hides aliases.
+# Do NOT copy current vision/pricing onto the old pinned 0731 snapshot.
+for _deepseek_alias, _deepseek_label in (
+    ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+    ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision (legacy alias)"),
+):
+    deepseek_models[_deepseek_alias] = deepseek_models["deepseek-flash"].model_copy(
+        update={"id": _deepseek_alias, "name": _deepseek_label, "recommended": False}
+    )
 
 qwen_models: Dict[str, ModelInfo] = {
     # No row here carries a cache price, and their absence is a correction rather

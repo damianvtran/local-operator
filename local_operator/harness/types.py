@@ -1224,6 +1224,18 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     aborted: bool = False
     error: str | None = None
     generation: int = 0
+    #: Why the turn was CUT OFF by something other than a deliberate stop, when
+    #: that is what happened. ``cut_off_cause`` is the machine token
+    #: (``incidents.CUT_OFF_CAUSES``); ``cut_off`` is its rendered operator
+    #: sentence, carried so a viewer can name the cause without re-deriving it
+    #: from the vocabulary. Both default to ``""``, which is also what an OLD
+    #: runtime produces — and ``AgentEvent`` is ``extra="allow"``, so an old
+    #: viewer that has never heard of these fields keeps them as extras and
+    #: never fails validation. That is the whole backwards-compatibility story
+    #: here: no ``PROTOCOL_VERSION`` bump is needed for an additive field on a
+    #: frame old readers already accept.
+    cut_off: str = ""
+    cut_off_cause: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
@@ -1387,6 +1399,34 @@ class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):
     tool_name: str
     args: dict[str, Any] = Field(default_factory=dict)
     intent: str | None = None
+    #: The WALL-CLOCK instant this call began executing, stamped by the
+    #: producer because no consumer can recover it afterwards.
+    #:
+    #: Without it a frontend has only its own arrival instant, and the only
+    #: frontend that notices is one that attaches to work already in flight —
+    #: a sidebar switch back to a conversation whose tool is still running, a
+    #: re-attach, a `/resume` onto a live turn. Those widgets are constructed
+    #: at the switch, so the live row's elapsed clock restarts there and counts
+    #: up from a zero belonging to the viewer rather than to the call: the
+    #: reported frame was a `bash` row reading `27s` and this event's true
+    #: start being half an hour earlier.
+    #:
+    #: ``None`` is a REAL answer rather than a missing value to be defaulted.
+    #: The field is additive, so every event an older runtime produced lacks
+    #: it, and a consumer that substituted its own fold or arrival instant
+    #: would print an age it invented — exactly the failure the widgets' blank
+    #: column exists to refuse. Consumers withhold the clock instead.
+    #:
+    #: Epoch rather than monotonic on purpose: this value crosses a process
+    #: boundary (``live_events`` is serialized onto the attach wire), and a
+    #: monotonic reading is not comparable across processes. It does NOT cross
+    #: the durable boundary: ``FrontendSessionState.checkpoint()`` strips the
+    #: folded map, so a resumed session never sees a stamp and withholds, which
+    #: is why absence above is described as a real answer rather than an
+    #: oversight. Readers convert the AGE once and then tick on their own
+    #: monotonic clock, so a later system-clock adjustment cannot move a
+    #: counter that is already running.
+    started_at_epoch: float | None = None
 
 
 class ToolExecutionUpdateEvent(AgentEvent[Literal["tool_execution_update"]]):
@@ -1937,6 +1977,42 @@ class ModelSpec(BaseModel):
     # knowledge out of the widgets — the division ``model.effort`` claims in its
     # own docstring and which those two sites were quietly breaking.
     reasoning_default_effort: str | None = None
+    # Provider REASONING-BOUNDARY MARKERS this model's chat template emits at
+    # the HEAD of the content channel, in the order they may appear. An EMPTY
+    # tuple -- the default, and what every unlisted model gets -- means the
+    # harness strips nothing from a reply, which is the ordinary case.
+    #
+    # **What this is.** MiniMax M3 through OpenRouter splits one model turn
+    # across two wire channels: the reasoning text arrives as
+    # ``reasoning_content`` and the answer as ``content``. The template's
+    # closing boundary token (``</mm:think>``) is emitted at the JOINT -- the
+    # opening half stays on the reasoning channel and only the closing half
+    # leaks into ``content``. So the reply the harness assembles is not prose
+    # and not model output at all: it is a template artifact welded to the
+    # front of a byte-perfect action batch. Measured over the sealed MiniMax
+    # campaign (329 rejection artifacts, 40 of which publish their reply text;
+    # counted 2026-09-12): 17 replies carried the token, all 17 at offset 0, all
+    # 17 CLOSING tags, zero opening tags -- an authorship signature no model
+    # prose can produce.
+    #
+    # **Why it is declared here rather than stripped at the call site.** The
+    # frontier this file already draws: no wire client, widget or runner
+    # recognises a model name, so a template token must be derived once, in
+    # ``build_model_spec``, and READ by the code that needs it. A hardcoded
+    # ``</mm:think>`` in the reply assembler would be a model-name check wearing
+    # a string literal, and it would silently mangle the first model whose
+    # prose legitimately starts with that text.
+    #
+    # **Why only the HEAD and only an exact token.** The strip is the one place
+    # in the reply path that can rewrite what the model sent, so its licence is
+    # kept as narrow as the evidence: a declared token at the very start of the
+    # assembled reply, removed whole. Nothing is searched for, nothing is
+    # removed from the middle, and a token inside a string value or behind a
+    # character of prose is left alone and judged as the bytes it is. Extracting
+    # the first balanced JSON object from prose -- the other way to rescue these
+    # replies -- remains refused for the reason ``_decode_leading_json`` gives:
+    # it can execute a batch the model never sent.
+    reasoning_boundary_markers: tuple[str, ...] = ()
     # Whether this ROUTE can serve this model at the provider's fast tier, and
     # whether the user has asked it to. Same division of labour as the effort
     # pair above, and for the same reason: the wire clients need "do I send the
@@ -2001,6 +2077,35 @@ class ChatRequest(BaseModel):
     # caches. Session hosts populate it once from their session id; keeping it
     # on the request lets retries and fallback clones preserve the same value.
     prompt_cache_key: str | None = None
+    # "Keep this conversation on the host that served it." Only the
+    # OpenAI-compatible CHAT wire consumes this (``OpenAICompatClient._build_
+    # body`` turns it into ``provider.order``); every other wire ignores it.
+    #
+    # It rides on the REQUEST rather than on the session for the same reason
+    # ``prompt_cache_key`` does: the wire client is rebuilt per route-key
+    # inside the failover driver, so client-held state cannot survive a call,
+    # while the request is what failover CLONES for each retry — so the pin
+    # follows a retry to the same host for free.
+    #
+    # Only OpenRouter populates it today. Its default route is price-weighted
+    # load balancing across many upstream hosts, and each switch is a cold
+    # prompt cache; the session records the host that served the last turn and
+    # asks for it again. An unrecognized entry is silently ignored by
+    # OpenRouter (verified: 200 + default routing), so a stale pin degrades to
+    # today's behaviour rather than failing the call.
+    provider_affinity: str | None = None
+    # Hosts this conversation has RETIRED: they served warm turns and returned
+    # no prefix reuse, so pinning to them is worse than churn (measured: one
+    # upstream cached 38% of same-host turns while its peers managed 99%, and
+    # the misses billed at full input price, 33x a cache read).
+    #
+    # Rendered as `provider.ignore`, which is a HARD filter — verified live
+    # that it composes with `order` (the ignored host is never attempted while
+    # the ordered host still serves). That hardness is why the set is bounded;
+    # see ``SessionStreamFn.MAX_RETIRED_PROVIDERS``. Sorted by the producer so
+    # the body stays byte-stable across turns, which matters for a field that
+    # rides in front of a cached prefix.
+    provider_avoid: list[str] = Field(default_factory=list)
     #: Coarse context-size hint for optional cache TTL, never wire content.
     #: The host seeds this from its last Usage; SessionStreamFn replaces it
     #: with the counted prefix plus estimated appended content when possible.
@@ -2148,6 +2253,29 @@ class StreamTextDelta(BaseModel):
     delta: str
 
 
+class StreamReasoningDelta(BaseModel):
+    """A fragment of the provider's private reasoning channel.
+
+    Reasoning has always been COLLECTED -- the OpenAI-compatible wire client
+    accumulates ``reasoning_content``/``reasoning`` to replay it in later
+    requests -- but it was never SURFACED, so a turn that spent its whole
+    output budget thinking looked identical to a client that dropped what it
+    was handed. That ambiguity is not academic: a rejection of "the model
+    emitted nothing" cannot be distinguished from "we discarded the model's
+    output" without it, and the two call for opposite responses (re-prompt the
+    model / fix the client).
+
+    Emitted on the reasoning channel only. It is deliberately NOT reasoning
+    rendered anywhere user-visible: private reasoning never enters the
+    transcript or the model-visible context, and no consumer is required to
+    act on this event. It exists so a caller that wants to know whether the
+    model produced anything can ask.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    delta: str
+
+
 class StreamToolCallDelta(BaseModel):
     type: Literal["tool_call_delta"] = "tool_call_delta"
     index: int
@@ -2166,6 +2294,20 @@ class StreamEndEvent(BaseModel):
     stop_reason: str  # stop | length | toolUse | refusal | error | aborted
     usage: Usage | None = None
     provider_payload: dict[str, Any] | None = None
+    #: The upstream host an aggregator actually routed this call to, as the
+    #: aggregator's own DISPLAY NAME (OpenRouter's ``provider`` chunk field:
+    #: "AtlasCloud", "Z.AI", "Google AI Studio"). Verbatim on purpose — the
+    #: display name is what an ``order`` entry accepts, and slug-normalising it
+    #: is wrong for 13 of 106 providers (``Z.AI`` is ``z-ai``, ``AtlasCloud``
+    #: is ``atlas-cloud``), so there is no table to keep in sync.
+    #:
+    #: Deliberately NOT ``provider_payload``: that dict is persisted per
+    #: message and is the substrate for native replay and compaction, so a
+    #: routing hint written there becomes transcript content. And deliberately
+    #: on the END event, not the start: the start event is the acceptance
+    #: boundary, and a stream that dies mid-way must not move the pin onto a
+    #: host that did not actually serve a turn.
+    served_provider: str | None = None
     #: The provider's own words about an abnormal end. For ``refusal`` this is
     #: the refusal message (or a line naming the provider's terminal marker when
     #: it sent no prose). Refusals used to be mapped onto ``stop``, which ended
@@ -2191,6 +2333,10 @@ class StreamModelEvent(BaseModel):
 StreamEvent = (
     StreamStartEvent
     | StreamTextDelta
+    # Beside the text delta it is the sibling of: one channel carries the
+    # answer, the other carries the work behind it, and a consumer that
+    # ignores this one sees exactly the stream it saw before.
+    | StreamReasoningDelta
     | StreamToolCallDelta
     | StreamUsageEvent
     | StreamEndEvent

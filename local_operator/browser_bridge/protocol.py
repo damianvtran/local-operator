@@ -178,6 +178,21 @@ class ErrorCode(StrEnum):
     # extension predates ownership" — an already-released extension's wording
     # cannot be retrofitted, so the NEW side is what has to be unambiguous.
     OWNER_REFUSED = "owner_refused"
+    # The extension socket is TCP-open and paired but has stopped answering:
+    # either no frame of ANY kind for LINK_SILENCE_TIMEOUT_S, or a command that
+    # consumed its whole budget while the link was already silent. A code of its
+    # own rather than a reuse of EXTENSION_DISCONNECTED, whose client copy tells
+    # the user to open a browser that is in fact already open — reusing it would
+    # re-create, in a new place, exactly the misdiagnosis that made the reported
+    # incident expensive. Not BUSY either: BUSY means "retry this action once",
+    # and an immediate retry lands on the same poisoned chain.
+    #
+    # Daemon-to-session only: the extension leg never parses ErrorCode (it only
+    # emits one), and an old daemon simply never produces this value, so it
+    # needs no PROTO_VERSION bump. Adding a code the EXTENSION could emit would:
+    # an old daemon validates `ErrorDetail.code` against this enum, so a value
+    # it does not know fails Response.model_validate and the frame is dropped.
+    EXTENSION_UNRESPONSIVE = "extension_unresponsive"
     INTERNAL = "internal"
 
 

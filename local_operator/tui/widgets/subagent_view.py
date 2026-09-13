@@ -72,6 +72,7 @@ from local_operator.harness.comms import (
     extract_parent_message,
 )
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
@@ -665,6 +666,18 @@ def fold_transcript_entries(
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
         if role == "user":
+            if is_harness_notice_row(payload):
+                # A row the harness wrote — the `harness_injected` stamp, or a
+                # notice a compaction block carried forward without one — is
+                # not the parent's words. A SUBAGENT fails over too
+                # (`journal_model_switch` names exactly that case) and the same
+                # compaction leak writes the notice into the child's
+                # transcript, where this fold would paint it as the parent
+                # speaking. The decision is the shared one from
+                # `harness/rows.py`, read here off the raw payload rather than
+                # a message, so the panel cannot answer it differently from the
+                # two main folds.
+                continue
             parent_message = extract_parent_message(text)
             if parent_message is not None:
                 # A persisted hub steer: model-facing XML around the parent's
@@ -1030,11 +1043,11 @@ class InstructionBlock(UserBlock):
         Binding("enter", "toggle_brief", "Expand instruction", show=False),
     ]
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, fold_width: int = 0) -> None:
         #: Set before `super().__init__`, which builds immediately.
         self._expanded = False
         self._hidden_rows = 0
-        super().__init__(text)
+        super().__init__(text, fold_width=fold_width)
         self.add_class("instruction-block")
 
     def _rows(self, body: int) -> list[str]:
@@ -1158,13 +1171,20 @@ def entry_block(
     its paragraph breaks, until the child eventually exits.
     """
     if entry.kind == "prompt":
-        return InstructionBlock(entry.text)
+        # The width goes to CONSTRUCTION for the kinds that wrap inside
+        # `__init__` (`InstructionBlock`/`UserBlock`/`NoticeBlock`/`WorkingBlock`)
+        # — a hint set after they are built is a width nothing will read (see
+        # `UserBlock.__init__`) — and through `set_fold_hint` for the kinds that
+        # author through the ladder on a later call (`AssistantBlock`,
+        # `ToolCard`). Every constructor clamps a zero itself, so the value is
+        # passed unconditionally rather than guarded here: two spellings of
+        # "no width" in one function is how the two drift apart.
+        return InstructionBlock(entry.text, fold_width=fold_width)
     if entry.kind in ("user", "parent_message"):
-        return UserBlock(entry.text)
+        return UserBlock(entry.text, fold_width=fold_width)
     if entry.kind in ("text", "subagent_message"):
         block = AssistantBlock()
-        if fold_width:
-            block.set_fold_hint(fold_width)
+        block.set_fold_hint(fold_width)
         block.update_text(entry.text)
         if entry.complete or settled:
             block.finalize_text()
@@ -1172,11 +1192,10 @@ def entry_block(
     if entry.kind == "notice":
         if entry.key == "__working__":
             activity = entry.text or "thinking"
-            return WorkingBlock(activity, activity)
-        return NoticeBlock(entry.text, entry.notice_kind)
+            return WorkingBlock(activity, activity, fold_width=fold_width)
+        return NoticeBlock(entry.text, entry.notice_kind, fold_width=fold_width)
     card = ToolCard("", entry.tool_name, entry.tool_args, entry.intent)
-    if fold_width:
-        card.set_fold_hint(fold_width)
+    card.set_fold_hint(fold_width)
     if entry.outcome == "error":
         card.restore(
             state="error",
@@ -1674,6 +1693,12 @@ class SubagentView(Vertical):
         #: the first ``show`` (an early repaint on a freshly mounted page)
         #: cannot raise on a missing attribute.
         self._paused = False
+        #: Whether the run was CUT OFF rather than stopped on purpose, from
+        #: ``AsyncJob.cut_off_cause`` (design round 2, D8). Initialised for the
+        #: same reason ``_paused`` is, and read only by the title's word — the
+        #: glyph and the ink are shared with ``interrupted``, because the mark
+        #: means "rehydrated and resumable" and that is true of both.
+        self._cut_off = False
         self._elapsed = "0s"
         #: The child's ROLE and effort TIER, recorded on the job at launch
         #: (``AsyncJob.agent_role``/``effort``). Shown in the title so the page
@@ -1815,6 +1840,7 @@ class SubagentView(Vertical):
         queued: bool,
         elapsed: str,
         paused: bool = False,
+        cut_off: bool = False,
         outcome: str = "",
         events: Sequence[Any],
         prompt: str = "",
@@ -1862,6 +1888,11 @@ class SubagentView(Vertical):
         self._label = strip_control_sequences(label or job_id)
         self._status = status
         self._queued = queued
+        # A cut-off reads as ``interrupted`` on the job row (that is the only
+        # word the roster has for a run that never settled); only the cause
+        # distinguishes it from a stop the user chose, and the page must not
+        # name the same child two things (design round 2, D8).
+        self._cut_off = cut_off
         # A pause is mechanically a cancel, so ``status`` reads ``cancelled``
         # and only the comms graph knows the difference. Carried here so the
         # page's title and the dock row it was opened from cannot name the
@@ -3231,7 +3262,11 @@ class SubagentView(Vertical):
             return row
 
         glyph, word, token = status_glyph(
-            self._status, queued=self._queued, spinner_glyph=spinner, paused=self._paused
+            self._status,
+            queued=self._queued,
+            spinner_glyph=spinner,
+            paused=self._paused,
+            cut_off=self._cut_off,
         )
         if (
             self._status == "cancelled"

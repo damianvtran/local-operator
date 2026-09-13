@@ -10,6 +10,7 @@ import {
 } from "./approval-store";
 import { BridgeCommandError, cdp } from "./cdp";
 import { safeHttpUrl, storedOriginAllowed } from "./origin-policy";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { getLocal, getSession, withSessionMutation } from "./state";
 
 export { safeHttpUrl } from "./origin-policy";
@@ -78,7 +79,11 @@ export async function consumeOnceGrant(url: URL, requester: string): Promise<boo
     const grant = grants[key];
     if (!grant || Date.now() >= grant.expiresAt || grant.requester !== requester) return false;
     delete grants[key];
-    await chrome.storage.session.set({ onceGrants: grants });
+    await deadline(
+      chrome.storage.session.set({ onceGrants: grants }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(onceGrants)",
+    );
     return true;
   });
   if (consumed) await sweepQueue();
@@ -100,7 +105,11 @@ async function consumeGrantFor(url: URL, sessionRequester: string, commandId: st
     }
     if (!grant || Date.now() >= grant.expiresAt) return false;
     delete grants[key];
-    await chrome.storage.session.set({ onceGrants: grants });
+    await deadline(
+      chrome.storage.session.set({ onceGrants: grants }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.session.set(onceGrants)",
+    );
     return true;
   });
   if (consumed) await sweepQueue();

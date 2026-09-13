@@ -815,6 +815,52 @@ def installed_build(prefix: str | Path | None = None) -> BuildStamp:
     return BuildStamp(version=installed_version(), source_ref=source_ref(prefix))
 
 
+def classify_import_failure(
+    exc: BaseException, module: str, *, boot: BuildStamp | None
+) -> str | None:
+    """Name a mid-install import as ``install-mid-update``, or ``None``.
+
+    ``lop-update`` and :func:`perform_upgrade` replace the installed tree IN
+    PLACE, so a process that loaded the old build can hit a lazy
+    ``from local_operator… import x`` the new tree no longer satisfies — the
+    observed shape is precise: the module still resolves, the NAME does not
+    (``ImportError: cannot import name '_journal_injection_ids' from
+    'local_operator.session.transcript'``, 605 times on one machine's log).
+
+    What separates that from a genuine packaging bug is the STAMP MOVING UNDER
+    THE PROCESS. If the install on disk still matches the build this process
+    booted from, the miss is ours and must stay an ordinary traceback — so
+    ``None``. A ``boot`` we could not read (``None``) also answers ``None``:
+    without a baseline there is nothing to compare, and guessing here would
+    relabel a real packaging error as an install race.
+
+    ``module`` is what the CALLER was importing, used when the exception itself
+    names nothing (some wrappers drop ``name``).
+    """
+    if not isinstance(exc, ImportError):
+        return None
+    named = str(getattr(exc, "name", "") or "")
+    text = str(exc) or ""
+    if not (
+        named.startswith("local_operator")
+        or module.startswith("local_operator")
+        or "local_operator" in text
+    ):
+        return None
+    if boot is None:
+        return None
+    try:
+        current = installed_build()
+    except Exception:  # noqa: BLE001 — an unreadable stamp is not evidence
+        return None
+    if current == boot:
+        return None
+    from local_operator.incidents import render_cut_off_reason
+
+    detail = "" if current.label() == boot.label() else f" ({boot.label()} → {current.label()})"
+    return render_cut_off_reason("install-mid-update", detail=detail)
+
+
 def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
     """Seconds since the install on disk was last written, or ``None``.
 

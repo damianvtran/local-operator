@@ -47,6 +47,7 @@ from local_operator.ecosystem_instructions import (
     log_ecosystem_provenance,
     read_ecosystem_instructions,
 )
+from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
 
 # Imported as an alias: ``config_dir`` is a parameter/local name in other
@@ -669,16 +670,28 @@ def _latest_user_query(transcript: Any) -> str:
     ``Transcript.entries()`` shape (``.type``, ``.payload``); any deviation
     degrades to an empty query, which skips selection — skill selection must
     never break a session.
+
+    Picks the newest row the OPERATOR wrote. A harness notice (the
+    ``harness_injected`` stamp, or one of the notice heads a compaction block
+    carried forward — see ``harness/rows.py``) is stored as a
+    ``role="user"`` row and is not a query: handing selection the harness's
+    prose would search the skills index for "[model switch] You are now
+    running as …" and freeze the result against it as the block's task id.
     """
     try:
         # Production transcripts index these at durable append time. Keep the
         # historical fallback for embedders/test stores exposing entries only.
         if hasattr(transcript, "latest_user_entry"):
-            entries = [
-                entry
-                for entry in (transcript.latest_entry("compaction"), transcript.latest_user_entry())
-                if entry is not None
-            ]
+            newest_user = transcript.latest_user_entry()
+            candidates: Any = [transcript.latest_entry("compaction"), newest_user]
+            if newest_user is not None and is_harness_notice_row(
+                getattr(newest_user, "payload", None) or {}
+            ):
+                # The indexed path names ONE user row, so a notice there would
+                # end the scan with nothing to select on. Fall back to the
+                # journal and walk back to the newest row the operator wrote.
+                candidates = transcript.entries()
+            entries = [entry for entry in candidates if entry is not None]
         else:
             entries = transcript.entries()
     except Exception:  # noqa: BLE001 — degradation is the contract
@@ -710,6 +723,8 @@ def _latest_user_query(transcript: Any) -> str:
                         break
             summary = edge or str(payload.get("summary", "")).strip()
         if not user_text and entry_type == "message" and payload.get("role") == "user":
+            if is_harness_notice_row(payload):
+                continue
             content = payload.get("content") or []
             user_text = "".join(
                 block.get("text", "") for block in content if isinstance(block, dict)
@@ -1859,11 +1874,33 @@ async def _prepare(
     # first so /new or /resume cannot retarget an in-flight factory at the await.
     args = argparse.Namespace(**vars(args))
 
+    # The configured birth-default effort (``model_effort``). Imported here, in
+    # the same local style as ``configure_model`` below, because this module is
+    # on the startup import path that ``test_import_graph`` guards and the
+    # reader is only needed once per session build.
+    from local_operator.model.effort import configured_effort
+
     def resolve_birth():
         agent = resolve_agent(args, agent_registry)
-        return agent, resolve_hosting_model_with_source(agent, args, config_manager)
+        hosting, model_name, model_source = resolve_hosting_model_with_source(
+            agent, args, config_manager
+        )
+        # Read in the same OFF-LOOP thread as the model resolution (a config read
+        # is cheap, but there is no reason to hop back to the loop for it). This
+        # is a BIRTH default only: the journal restore in ``Session.__init__``
+        # runs after the spec is built and re-derives it (clamping), so a
+        # conversation resumed on a stored selection outranks this value by
+        # design — ``model_effort`` must not fight the per-conversation journal
+        # (design §0.1).
+        return (
+            agent,
+            (hosting, model_name, model_source),
+            configured_effort(config_manager),
+        )
 
-    agent, (hosting, model_name, model_source) = await asyncio.to_thread(resolve_birth)
+    agent, (hosting, model_name, model_source), effort_default = await asyncio.to_thread(
+        resolve_birth
+    )
     yolo = bool(getattr(args, "yolo", False))
 
     transcript_dir, agent_id = _transcript_dir_and_agent_id(agent, args, agent_registry)
@@ -1937,6 +1974,12 @@ async def _prepare(
             model_name=model_name,
             credential_manager=credential_manager,
             env_config=get_env_config(),
+            # The standing config effort, CLAMPED inside ``configure_model``
+            # against this spec's own ladder. Carried unconditionally, even when
+            # ``model_source`` is ``"flag"``: a ``--model`` flag chooses a
+            # MODEL, not an effort, and the clamp makes it safe to keep the
+            # configured level across that choice (design D3).
+            reasoning_effort=effort_default,
             **chat_kwargs,
         )
     )

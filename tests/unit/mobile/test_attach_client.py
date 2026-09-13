@@ -11,11 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.mobile import attach_client
 from local_operator.mobile.attach_client import (
     ACK_TIMEOUT_S,
     ASIDE_DEADLINE_S,
     AttachClient,
     OwnerAckTimeout,
+    dialable_record_exists,
     find_runtime_record,
 )
 from local_operator.mobile.types import SessionProjection, TranscriptEntry
@@ -593,3 +595,71 @@ async def test_a_late_reply_for_an_abandoned_request_is_logged(
         await client.detach()
     finally:
         r.close()
+
+
+def _synthetic(pid: int, session_id: str, protocol: int = 5) -> registry.SessionRecord:
+    return registry.SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="",
+        cwd="/tmp",
+        model_label="",
+        control_port=1,
+        control_key="k",
+        protocol=protocol,
+    )
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        # The m3 case: a LIVE, dialable record for this pid under ANOTHER
+        # session_id — the rebind race `find_runtime_record` reports as
+        # `(None, pid)`. It is dialable, so no caller may call the process old.
+        ([(_synthetic(91234, "sess-previous"), "live")], True),
+        # A WEDGED record is dialable as well (review round 3, MINOR-2): the pid
+        # is alive and `scan` keeps the record for the recovery the redial exists
+        # to outlast, so a caller must pace this owner rather than age it.
+        ([(_synthetic(91234, "sess-previous"), "wedged")], True),
+        # A v1 record is not dialable at all, whatever it names.
+        ([(_synthetic(91234, "sess-other", protocol=1), "live")], False),
+        # Not live: the pid holds no record this build could talk to.
+        ([(_synthetic(91234, "sess-other"), "stale")], False),
+        # A live record for a DIFFERENT pid says nothing about this one.
+        ([(_synthetic(1, "sess-other"), "live")], False),
+        ([], False),
+    ],
+)
+def test_dialable_record_exists_answers_for_the_pid_not_the_session(
+    monkeypatch, tmp_path: Path, records, expected
+) -> None:
+    """The question `(None, pid)` cannot answer, asked where it can be.
+
+    `find_runtime_record` collapses "no usable record" and "a live dialable
+    record stamped with the previous session_id" into the same tuple, so the
+    `/resume` refusal has to ask the registry itself before it names a cause
+    (review m3). The session_id is deliberately NOT part of the question: the pid
+    is what a caller refuses about.
+    """
+    monkeypatch.setattr(attach_client, "scan", lambda _root: list(records))
+
+    assert dialable_record_exists(tmp_path, 91234) is expected
+
+
+def test_dialable_record_exists_is_unknown_when_the_registry_cannot_be_read(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A failed read is not evidence of absence, so it is not a `bool`.
+
+    The refusal it gates names a cause ("open in an older Local Operator
+    process"); a scan that raised has established nothing about the process, so
+    the tri-state is what keeps the caller from printing that sentence anyway.
+    """
+
+    def unreadable(_root: Path):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(attach_client, "scan", unreadable)
+
+    assert dialable_record_exists(tmp_path, 91234) is None

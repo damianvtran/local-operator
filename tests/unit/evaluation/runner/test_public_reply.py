@@ -27,8 +27,12 @@ from local_operator.evaluation.evidence.models import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
-from local_operator.evaluation.runner.episode import EpisodeRunner
-from local_operator.evaluation.runner.model import DecisionRejected, EpisodeTurn
+from local_operator.evaluation.runner.episode import EpisodeRunner, _rejection_detail
+from local_operator.evaluation.runner.model import (
+    DecisionRejected,
+    EpisodeTurn,
+    StreamShape,
+)
 from local_operator.evaluation.runner.provider_client import (
     DecisionParseError,
     _ContextBuilder,
@@ -40,10 +44,12 @@ from local_operator.evaluation.runner.public_reply import (
     _MAX_EXTRA_KEYS_SHOWN,
     MAX_PUBLIC_OBSERVATIONS_CHARS,
     REJECTED_PUBLIC_REPLY,
+    REJECTED_REPLY_WITHHELD,
     decode_public_reply,
     looks_like_public_reply,
     public_reply_contract,
     redact_public_reply,
+    rejected_reply_evidence,
 )
 from local_operator.harness.types import ImageContent, Message, ModelSpec, TextContent
 from tests.unit.evaluation.runner.conftest import (
@@ -288,6 +294,180 @@ async def test_f1_runner_repro_leaves_no_secret_in_bundle_or_replay(
             canary.encode() in path.read_bytes() for path in root.rglob("*") if path.is_file()
         )
     assert verify_bundle(root).valid
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_envelope_reaches_the_bundle_with_its_class(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The reply is evidence even when it is NOT replayable history.
+
+    An envelope-shaped reply is withheld from the corrective history because its
+    notes are unvalidated text; the bundle is a different boundary, and
+    withholding it there is what made 273 of the campaign's 280 rejection
+    artifacts unreadable. Both halves are asserted on the same run: the
+    artifact carries the reply and the class key, the next request carries the
+    placeholder, and neither carries the other's rendering.
+    """
+
+    rejected_reply = json.dumps(
+        {
+            "reply_version": "9.9",
+            "action_batch": {"actions": json.loads(type_payload(observation()))["actions"]},
+            "public_observations": "visible fact",
+        }
+    )
+    calls = 0
+
+    def reply(message: Message) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return rejected_reply
+        return _wait_reply(message)
+
+    config = build_config(tmp_path)
+    stream = RecordingStream(reply)
+    client = _client(stream, config.artifact_root)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        config,
+        selector=selector(tmp_path),
+        model=client,
+        launch=lambda _: FakeAdapter(tmp_path, episode_id),
+        rescue=_rescue_ok,
+        # No canaries: this run is about the boundary, not about redaction --
+        # the F1 tests above cover the withheld case.
+        redactions=RedactionSet.from_resolved_values(()),
+    )
+
+    outcome = await runner.run()
+
+    root = outcome.bundle_root
+    assert root is not None and len(stream.requests) >= 2
+    texts = [
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in root.rglob("*")
+        if path.is_file()
+    ]
+    assert any(
+        rejected_reply in text and "class: unsupported-reply-version" in text for text in texts
+    ), "the rejected reply and its class are in the bundle"
+    replay = "\n".join(message.text for message in stream.requests[1].messages)
+    assert REJECTED_PUBLIC_REPLY in replay
+    assert rejected_reply not in replay
+    assert verify_bundle(root).valid
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        lambda raw, secret: raw,
+        lambda raw, secret: raw.replace("fixture", "\\u0066ixture"),
+        lambda raw, secret: raw.replace(secret, quote(secret, safe="")),
+        lambda raw, secret: raw.replace(secret, base64.b64encode(secret.encode()).decode()),
+        # Escaping COMPOSES, so the scan has to decode more than one level. Both
+        # shapes below were reproduced by the round-1 review as surviving a
+        # single-level scan: the first carries an ESCAPED BACKSLASH before the
+        # escape (a canary inside a JSON string), the second escapes every
+        # character and then escapes the escapes again.
+        lambda raw, secret: raw.replace(secret, secret.replace("fixture", "\\\\u0066ixture")),
+        lambda raw, secret: raw.replace(
+            secret,
+            "".join(f"\\u{ord(character):04x}" for character in secret).replace("\\", "\\\\"),
+        ),
+    ],
+    ids=[
+        "plain",
+        "json-unicode-escape",
+        "percent",
+        "base64",
+        "json-escaped-twice",
+        "per-character-double-escape",
+    ],
+)
+def test_a_reply_carrying_a_canary_is_withheld_whole_from_evidence(transform: Any) -> None:
+    """Evidence publishes the reply ONLY through an escape-aware scan.
+
+    The reply reaches evidence as WIRE bytes, so a canary can be spelt with JSON
+    unicode escapes, percent escapes, or an encoding, and a substring check on
+    the raw text sees none of them. It is also the shape that is most likely to
+    be TRUNCATED (that is usually why it was refused), so the scan cannot lean
+    on a JSON parse -- the raw and unescaped renderings are checked regardless.
+
+    Withheld WHOLE, never partially: ``assert_clear`` matches a substring, so
+    publishing a masked or cut rendering is how a canary stops matching the
+    alarm that exists to catch it.
+    """
+
+    secret = "fixture/canary-evidence-911"
+    redactions = RedactionSet.from_resolved_values([secret])
+    raw = envelope(type_payload(observation()), secret)
+    reply = transform(raw, secret)
+    if reply != raw:
+        # The point of the case: a substring check on the raw text sees nothing.
+        assert secret not in reply
+
+    published = rejected_reply_evidence(reply, redactions)
+
+    assert published == REJECTED_REPLY_WITHHELD
+    assert secret not in published
+    assert reply not in published
+
+
+def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:
+    """Withholding the reply must not withhold the rejection.
+
+    A withheld section is still a readable one because the diagnostic, the class
+    and the stream shape are all harness-owned text -- which is what lets the
+    evidence boundary differ from the history boundary without making a bundle
+    unreadable.
+    """
+
+    rejected = DecisionRejected(
+        "Your previous reply was rejected: the reply declared a bad version",
+        reply=REJECTED_PUBLIC_REPLY,
+        evidence_reply='{"public_observations": "fixture-canary"}',
+        class_key="unsupported-reply-version",
+        stream_shape=StreamShape(content_deltas=2, reasoning_deltas=3, stop="stop"),
+    )
+    redactions = RedactionSet.from_resolved_values(["fixture-canary"])
+
+    detail = _rejection_detail(rejected, redactions)
+
+    assert REJECTED_REPLY_WITHHELD in detail
+    assert "fixture-canary" not in detail
+    assert "class: unsupported-reply-version" in detail
+    assert "reasoning_deltas=3" in detail
+    # The history rendering is NOT what evidence shows: the placeholder belongs
+    # to the correction, and pasting it here would read as "the model said this".
+    assert REJECTED_PUBLIC_REPLY not in detail
+
+
+def test_a_marker_that_imitates_a_header_cannot_open_another_section() -> None:
+    """Provider-owned text goes into the header ESCAPED, never raw.
+
+    The artifact promises a fixed section order that a script can read, and the
+    stop marker is the one part of that header the harness does not author. A
+    marker carrying a newline would otherwise write a line that reads like
+    another header (or hide the rest of the section), so non-printables are
+    escaped rather than truncated -- a 64-character bound does not neutralise a
+    short injection.
+    """
+
+    rejected = DecisionRejected(
+        "Your previous reply was rejected: refused",
+        reply="{}",
+        class_key="malformed-json",
+        stream_shape=StreamShape(content_deltas=1, stop="stop\nclass: extra-action-key"),
+    )
+
+    detail = _rejection_detail(rejected, None)
+
+    assert [line for line in detail.splitlines() if line.startswith("class: ")] == [
+        "class: malformed-json"
+    ]
+    assert "stop\\nclass: extra-action-key" in detail
 
 
 def test_reserved_key_scan_preserves_legacy_rejection_replay() -> None:

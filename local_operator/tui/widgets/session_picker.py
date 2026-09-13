@@ -62,6 +62,7 @@ footer (which is the only place the card says how to get out).
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -78,10 +79,10 @@ from textual.widgets import Static
 
 from local_operator.paths import config_dir
 
-# ``fork_haystack`` is imported rather than restated here: the phone's session
-# search matches over the same rows, and two spellings of "what text does this
-# row have" is how one surface ends up finding a fork the other cannot.
-from local_operator.resume import SessionRow, fork_haystack, format_age
+# The row's searchable text (``fork_haystack``) and the search itself both live
+# in ``session_search`` now: two spellings of "what text does this row have" is
+# how one surface ends up finding a fork the other cannot.
+from local_operator.resume import SessionRow, format_age
 from local_operator.session.preview import (
     SessionPreviews,
     clip_to_height,
@@ -209,14 +210,20 @@ PREVIEW_MIN = 8
 PREVIEW_MAX = 14
 LIST_MIN = 6
 
-#: Name/id matches at which the picker stops consulting the bounded soft tier
-#: (see ``SessionPickerScreen._soft_tier_wanted``). Three, not one: a single
-#: exact hit on a name is as often incidental as deliberate — ``spit`` matches
-#: "De\ *spit*\ e" — and treating it as a real answer hid every genuinely
-#: intended match behind it. Measured over 517 vocabulary-drawn typos, this
-#: floor loses no rows against running the tier on every keystroke while
-#: leaving the cursor exactly as stable.
-_PRECISE_HITS_ENOUGH = 3
+#: How stale a live marker may be while the picker is open. The spinner keeps
+#: advancing at ``SPINNER_INTERVAL_S`` (motion), but the DATA behind the markers
+#: — `registry.scan()` plus `read_index()` — is re-read at this cadence instead
+#: of on every frame.
+#:
+#: Sized against what the markers can actually say, not against taste: the
+#: states they report come from heartbeat recency, whose own resolution is
+#: 45 s (``HEARTBEAT_TIMEOUT_S``), so a 1 s refresh is 45× finer than that
+#: signal and no transition can be shown late at a scale a reader could
+#: notice. It still bounds the cost — 12.5 scans/s became 1 — and it keeps the
+#: repaint-on-change guard (`_tick`) working, which is what makes a row that
+#: REORDERS (a session parking on a gate, with nothing animating) reach the
+#: screen.
+LIVE_REFRESH_INTERVAL_S = 1.0
 
 #: Rows the picker's container costs on top of the lines its panes draw.
 #:
@@ -622,135 +629,20 @@ def scroll_into_window(costs: Sequence[int], top: int, cursor: int, budget: int)
     return top
 
 
-def filter_rows(
-    rows: Sequence[SessionRow],
-    query: str,
-    body_matches: AbstractSet[str] | None = None,
-) -> list[SessionRow]:
-    """Rows whose name or id contains ``query``, or whose id is in ``body_matches``.
-
-    A pure MEMBERSHIP filter: it decides which rows are shown and preserves the
-    order it was handed, so on its own it never moves a row under the cursor.
-    Relevance ORDERING lives in :func:`rank_rows`, applied by the screen only
-    when a query is active — keeping the "filtering never reorders" property
-    literally true of this function while the query-scoped ranking sits in the
-    one place that also re-homes the cursor.
-
-    The searchable name is composed by :func:`fork_haystack`, so a row visibly
-    tagged ``[fork]`` is found by typing ``fork`` — the tag is on screen, so it
-    has to be in the index.
-
-    The name/id test stays exact substring: those fields are a sentence the user
-    wrote and a hex id, where an exact match is what a precise query expects.
-    Soft matching (prefix, word-order, bounded typo) is not done here; it is
-    folded into ``body_matches`` by the caller via
-    :func:`local_operator.session.search_index.soft_search_digests`, so a soft
-    hit on the conversation surfaces the row exactly as an exact body hit does.
-
-    ``body_matches`` is the set of ids admitted on their conversation text —
-    exact body, a past name, or a bounded soft match — decided by the caller
-    and passed in rather than computed here, so this function stays pure and
-    cheap enough to run per keystroke, and a caller with no index (a test, an
-    embedder) keeps exactly the old name-and-id behaviour.
-    """
-    needle = query.strip().lower()
-    if not needle:
-        return list(rows)
-    matched = body_matches or frozenset()
-    return [
-        row
-        for row in rows
-        if needle in fork_haystack(row).lower() or needle in row.id.lower() or row.id in matched
-    ]
-
-
-def matched_in_body(row: SessionRow, query: str, body_matches: AbstractSet[str]) -> bool:
-    """True when ``row`` is on screen only because its CONVERSATION matched.
-
-    Drives the body-match marker. A row whose visible name already contains the
-    query needs no explanation; one that does not would otherwise read as the
-    filter returning something arbitrary, which is worse than no marker at all
-    because it makes the whole result set look untrustworthy.
-    """
-    needle = query.strip().lower()
-    if not needle:
-        return False
-    # Same haystack the filter admitted on, so a row surfaced by its VISIBLE
-    # fork tag is not additionally explained as a body match — the tag is
-    # already on the row and the two marks would contradict each other.
-    if needle in fork_haystack(row).lower() or needle in row.id.lower():
-        return False
-    return row.id in body_matches
-
-
-#: Relevance tiers, best (lowest) first, used to sort a FILTERED subset when a
-#: query is active. A tier is a property of ``(query, row)`` alone — it does not
-#: depend on the previous query or on the order rows arrived — which is what
-#: lets ranking coexist with the "no reorder under the cursor" invariant: the
-#: order changes only when the query changes, and a query change already
-#: re-homes the cursor to the top match (see ``set_query``).
-_RANK_NAME = 0  # exact substring in the visible name — the strongest signal
-_RANK_ID = 1  # exact substring in the id
-_RANK_BODY = 2  # exact substring in the body/past-name digest
-_RANK_SOFT = 3  # soft (prefix / token-AND / edit-distance) match only
-
-
-def rank_rows(
-    rows: Sequence[SessionRow],
-    query: str,
-    body_matches: AbstractSet[str] | None = None,
-) -> list[SessionRow]:
-    """``rows`` ordered by relevance to ``query``; recency order when empty.
-
-    Kept SEPARATE from :func:`filter_rows`, which stays a pure membership
-    filter, because the module's invariant is stated about filtering: "filtering
-    narrows; it never reorders". Ordering is a property of the QUERY, not of a
-    keystroke within a query's growth — so it is applied here, in the one place
-    that recomputes per query and re-homes the cursor, and only when a query is
-    active.
-
-    * **Empty query** -> ``rows`` unchanged (recency order, newest first,
-      exactly as today). A fixed query likewise never reorders: the key is a
-      pure function of ``(query, row)``, so repeated repaints and resizes
-      produce byte-for-byte the same order.
-    * **Non-empty query** -> a single deterministic ordering: the tier the row
-      matched in (name > id > body > soft), with recency (mtime desc) as the
-      stable tie-break WITHIN every tier. ``sorted`` is stable, so passing rows
-      already in recency order makes the tie-break free.
-
-    ``body_matches`` is the EXACT-body match set (from ``search_digests``),
-    passed in for the same reason :func:`filter_rows` takes it — this stays pure
-    and cheap, and a caller with no index gets name/id ranking unchanged. It is
-    only the exact-body set, not the soft set: a row in ``rows`` that matched
-    none of name, id, or exact body was admitted by the soft set and so takes
-    the soft tier, which needs no separate membership check.
-    """
-    needle = query.strip().lower()
-    if not needle:
-        return list(rows)
-    body = body_matches or frozenset()
-
-    def tier(row: SessionRow) -> int:
-        # Through the same composition :func:`filter_rows` admits on: a fork
-        # admitted on its tag must rank in the NAME tier, not fall through to
-        # the soft tier and sort below every incidental body hit.
-        if needle in fork_haystack(row).lower():
-            return _RANK_NAME
-        if needle in row.id.lower():
-            return _RANK_ID
-        # Exact body hit outranks a soft-only hit: an exact substring in the
-        # conversation is a stronger signal than a typo/prefix/word-order match.
-        if row.id in body:
-            return _RANK_BODY
-        # Admitted by the soft set (it is in the already-filtered ``rows`` yet
-        # matched neither name, id, nor exact body), so it ranks below every
-        # exact tier.
-        return _RANK_SOFT
-
-    # Stable sort on the tier alone: ``rows`` arrives newest-first, so equal
-    # tiers keep recency order without a second sort key. Sorting the tier as
-    # the only key is what preserves the recency tie-break for free.
-    return sorted(rows, key=tier)
+# ``filter_rows``, ``matched_in_body`` and ``rank_rows`` are RE-EXPORTED from
+# ``local_operator.session.session_search`` rather than defined here: the phone
+# daemon and the desktop catalogue search the same store, and three copies of
+# "what admits a row and what orders it" is how the phone ended up unable to
+# find a typo the picker resolves. The definitions and their rationale (the
+# tiers, the exact-body-versus-soft split, the recency tie-break) live in that
+# one module; this import is what keeps the picker's call sites and its tests
+# pointed at exactly one implementation.
+from local_operator.session.session_search import (  # noqa: E402  (kept beside its callers)
+    filter_rows,
+    matched_in_body,
+    rank_rows,
+    soft_tier_wanted,
+)
 
 
 def _pad_cells(text: str, width: int) -> str:
@@ -1335,6 +1227,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._body: Static
         #: Spinner phase for the running marker, advanced by ``_tick``.
         self._frame = 0
+        #: ``time.monotonic()`` of the last liveness refresh, or ``-inf`` so the
+        #: first tick always refreshes. The picker's data freshness is a stated
+        #: bound (``LIVE_REFRESH_INTERVAL_S``) rather than a side effect of the
+        #: frame rate; see ``_tick``.
+        self._live_refreshed_at = float("-inf")
         #: Has this picker EVER shown an exec row? Latched, never cleared while
         #: the screen lives — see :meth:`_exec_column_latched` for why the
         #: column may widen but must not narrow.
@@ -1394,6 +1291,14 @@ class SessionPickerScreen(ModalScreen[str | None]):
             # tier and the body-match marker. Both are recomputed only on a
             # query change, never per repaint — scanning 200 digests per paint
             # is the cost this cache exists to avoid.
+            #
+            # This call is UNLOCKED and shares ``search_index``'s process-wide
+            # memo with the server's locked path (``session_search``). Safe only
+            # because the picker is a single thread and no process hosts it
+            # beside a shared-path caller — the TUI does not run the server
+            # in-process. An embedder that did both would need to take
+            # ``session_search._SHARED_LOCK`` around this line, because the memo
+            # is one entry that two threads can interleave.
             self._body_matches = search_digests(self._digests, self._query)
             # The soft tier is expensive on its first call for a given store —
             # it tokenises every digest and builds a vocabulary over them — so
@@ -1415,76 +1320,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
         return self._filtered
 
     def _soft_tier_wanted(self, query: str) -> bool:
-        """Whether the bounded soft tier should run for ``query``.
+        """Whether to run the bounded soft tier for ``query``.
 
-        A pure function of ``(query, rows)``: the tier runs unless the query
-        matched a session's NAME or ID. No run history, no latch, no memory of
-        previous keystrokes — that purity is what keeps the same visible query
-        rendering identically however the user reached it, and it took four
-        attempts to get there (see the module docstring on route independence).
-
-        **Why name/id and not "any exact hit".** Gating on an empty exact result
-        looks equivalent and silently destroys typo search. The exact tier also
-        admits BODY substring hits, and on a real store almost every typed token
-        appears incidentally in some conversation: ``plin`` has 8 body hits,
-        ``gren`` has 1. One incidental hit anywhere in the store then silenced
-        the tier for the whole query, so the typo it exists to rescue could not
-        be found. Measured on typos drawn from the store's own vocabulary, that
-        gate lost the target row outright on 11 of 763 queries and shed 100+
-        rows on 14 — a recall regression against shipped behaviour, wearing the
-        appearance of correct gating.
-
-        A name or id match is different in kind. Those fields are a sentence the
-        user wrote and a hex id they can copy; an exact substring in either is a
-        deliberate, precise hit, and when the user has one they are not asking
-        for fuzzy help. A body substring is not that signal — it is as likely to
-        be the word appearing in passing inside an unrelated conversation.
-
-        Measured over 521 vocabulary-drawn typos against the base behaviour of
-        running the tier on every keystroke:
-
-        ==========================  ============  ==============
-        gate                        recall loss   top-row swaps
-        ==========================  ============  ==============
-        base (tier always runs)     0/521         0/279
-        any exact hit silences it   5/521         3/279
-        this gate (name/id only)    0/521         1/279
-        ==========================  ============  ==============
-
-        So it costs no recall against base while running the expensive tier no
-        more often than base does, and it disrupts the cursor LESS than the
-        gate it replaces.
-
-        What it does not do: prevent the tier engaging on a keystroke where rows
-        are on screen, which can re-home the cursor onto a row the user had not
-        seen. That is bounded (1/279 keystrokes here, against base's 0) and is
-        properly a CURSOR policy question — keep the selection on its row across
-        a re-rank when that row survives — not an ordering one. Ordering cannot
-        fix it without reading run history, which is what reopened route
-        divergence in an earlier round.
+        Delegates to ``session_search.soft_tier_wanted`` — the gate, the tier
+        floor it counts against and the name/id test it mirrors all live there,
+        with the measurements behind the floor. This exists as a method only
+        because the caching in :attr:`visible_rows` reads better with the store
+        it is gating in scope; the picker holds rows the phone and the desktop
+        do not, which is why the predicate takes them as an argument.
         """
-        needle = query.strip().lower()
-        if not needle:
-            return False
-        # Name and id only, deliberately NOT the body digests: see above. This
-        # mirrors the first two admission tests in ``filter_rows`` so the gate
-        # and the filter cannot drift apart on what "an exact hit" means.
-        #
-        # Counted against a small floor rather than tested for emptiness,
-        # because ONE precise hit is not yet a useful answer and can easily be
-        # incidental: ``spit`` matches the name "Failover Triggering Despite
-        # Available Account", and on that single hit the previous form silenced
-        # the tier and made every ``split`` session unreachable. Below the floor
-        # the user has almost nothing to look at, so the extra recall is worth
-        # more than the precision; at or above it they have a real answer and
-        # fuzzy additions would only dilute it.
-        precise = 0
-        for row in self._all:
-            if needle in fork_haystack(row).lower() or needle in row.id.lower():
-                precise += 1
-                if precise >= _PRECISE_HITS_ENOUGH:
-                    return False
-        return True
+        return soft_tier_wanted(self._all, query)
 
     @property
     def body_matched_ids(self) -> set[str]:
@@ -1995,21 +1840,38 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._timer = self.set_interval(SPINNER_INTERVAL_S, self._tick)
 
     def _tick(self) -> None:
-        """Advance the spinner and re-read what it is claiming.
+        """Advance the spinner, and re-read what the live markers claim.
 
-        Cheap by construction: the refresh is the same one `registry.scan()` +
-        `read_index()` pair the picker already budgets for as a per-open cost,
-        and the repaint is one `Static.update`. It runs only while the picker
-        is on screen — the timer dies with the screen.
+        TWO RATES, deliberately, because they answer different questions.
 
-        Skipped entirely when no row is animating, so a store of cold sessions
-        costs nothing: without a running session there is no motion to drive,
-        and re-scanning the registry ten times a second to discover that would
-        be the picker's own idle cost.
+        The FRAME advances at ``SPINNER_INTERVAL_S`` (12.5 Hz) while a row is
+        busy: that is motion, and motion is what makes the running marker read
+        as running rather than as a static bullet.
+
+        The DATA is re-read at ``LIVE_REFRESH_INTERVAL_S`` — the refresh is
+        `registry.scan()` (a glob, a JSON parse per record, a `ps` per
+        quiet-heartbeat record) plus `read_index()`, and `_tick` used to run it
+        unconditionally on every frame, so an idle picker re-scanned the whole
+        store 12.5 times a second. That is not a per-open cost and the previous
+        docstring's claim that it was "skipped entirely when no row is
+        animating" described a guard that did not exist.
+
+        The refresh is NOT skipped outright, because two things it feeds are
+        real while nothing spins: the repaint-on-visible-change guard below and
+        the rows themselves, which REORDER when a session parks on a
+        gate — this release's headline event, and one that arrives with no row
+        animating. So it is BOUNDED rather than dropped, and the bound is what
+        keeps a frozen marker from claiming to be live: the picker's own
+        freshness is now a stated number instead of an accident of the frame
+        rate, and at 1 s it is 45× finer than the 45 s heartbeat the live
+        states are derived from, which is the resolution they actually change
+        at.
         """
         before = self._marker_signature()
         refresh = self._refresh_live_state
-        if refresh is not None:
+        now = time.monotonic()
+        if refresh is not None and now - self._live_refreshed_at >= LIVE_REFRESH_INTERVAL_S:
+            self._live_refreshed_at = now
             try:
                 self._all = list(refresh(self._all))
                 # The filter cache is keyed on the query, which has not

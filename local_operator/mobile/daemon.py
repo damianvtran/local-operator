@@ -107,13 +107,67 @@ def _durable_fold_cache():
     use get a cache keyed by THEIR directories."""
     global _DURABLE_FOLD_CACHE
     if _DURABLE_FOLD_CACHE is None:
-        from local_operator.mobile.durable import DurableFoldCache
-
+        try:
+            from local_operator.mobile.durable import DurableFoldCache
+        except ImportError as exc:
+            # The daemon's own lazy import is a seam that sees a torn install
+            # directly (``durable`` pulls ``_journal_injection_ids`` at module
+            # scope). Log it NAMED, then re-raise: the fold cannot run without
+            # the module, and swallowing the import would turn a diagnosable
+            # install race into "no projection" with no cause anywhere.
+            _log_import_failure(exc, "local_operator.mobile.durable", where="durable fold cache")
+            raise
         _DURABLE_FOLD_CACHE = DurableFoldCache()
     return _DURABLE_FOLD_CACHE
 
 
 _DURABLE_FOLD_CACHE: Any = None
+
+#: The build this DAEMON PROCESS loaded, stamped once at construction. Compared
+#: against the install on disk by ``update.classify_import_failure``, which is
+#: the only way to tell a lazy import that lost a name to a HALF-REPLACED
+#: install from a genuine packaging bug (design §5.2). ``None`` means "not
+#: stamped yet", which classifies nothing rather than guessing.
+_BOOT_BUILD: Any = None
+_BOOT_BUILD_STAMPED = False
+
+
+def _boot_build() -> Any:
+    """This daemon's boot build, memoised on first read.
+
+    Called from ``MobileDaemon.__init__`` so the normal case stamps at process
+    start, before any install can replace the tree. A seam that somehow runs
+    first stamps there and then, which can only ever make the comparison MORE
+    conservative (a stamp taken after the swap equals the install, so the
+    failure stays an ordinary traceback).
+    """
+    global _BOOT_BUILD, _BOOT_BUILD_STAMPED
+    if not _BOOT_BUILD_STAMPED:
+        _BOOT_BUILD_STAMPED = True
+        try:
+            from local_operator.update import installed_build
+
+            _BOOT_BUILD = installed_build()
+        except Exception:  # noqa: BLE001 — an unreadable stamp classifies nothing
+            _BOOT_BUILD = None
+    return _BOOT_BUILD
+
+
+def _log_import_failure(exc: BaseException, module: str, *, where: str) -> None:
+    """Log a lazy-import failure, naming it when the install moved under us.
+
+    One logger call for the daemon's two lazy-import seams, so the 605-occurrence
+    ``durable fold failed for session X`` traceback becomes a sentence that says
+    WHAT happened and WHY, and the cause can be fed to the next turn's cut-off
+    vocabulary.
+    """
+    from local_operator.update import classify_import_failure
+
+    reason = classify_import_failure(exc, module, boot=_boot_build())
+    if reason is None:
+        logger.error("%s failed while importing %s", where, module, exc_info=exc)
+        return
+    logger.error("%s failed: %s (%s)", where, reason, module, exc_info=exc)
 
 
 def _custom_snapshot_cache():
@@ -467,6 +521,47 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
+def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
+    """Publish the durable outcome for a runtime the scan just found dead.
+
+    WHY THE DAEMON HAS TO DO THIS. Every other writer of a session's durable
+    outcome needs either a process that still exists or an open that happens
+    after the fact: the dying runtime writes its OWN marker (so a SIGTERM is
+    covered and a SIGKILL is not), a watching viewer journals what it witnessed,
+    and ``Session.__init__`` classifies on the next open. A daemon-OWNED session
+    killed while nobody watched therefore had NO record at all — no notice on the
+    phone, no ``completion_kind`` for the list, and no outcome for the frame's
+    ``stop_reason`` to be filled from (UX round 1, U1/U5).
+
+    The same import, on the same worker thread, as ``_bootstrap_mobile_attention``
+    already runs for up to 100 directories at boot — this is that sweep moved to
+    the moment the death is DISCOVERED, which is the only new thing about it.
+    The caller bounds it to one call per discovered death and to a daemon that
+    dials (an observer daemon's contract is to write nothing), and
+    ``bootstrap_transcript`` itself publishes nothing while a live owner holds
+    the record — which is what makes the successor race harmless: a runtime that
+    retired has already republished, so this classifies nothing and the
+    successor's own outcome stands.
+
+    ``reaped_owner`` is the dead record ``registry.scan`` reported AND deleted,
+    handed on to the classification because the deletion is the whole reason the
+    caller cannot re-read it. Without it the daemon's own sweep is what erases
+    the evidence for the death it just discovered (review round 2, MINOR-1).
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.session.transcript import Transcript
+
+    directory = _durable_user_session_dir(session_id)
+    if directory is None:
+        return
+    try:
+        bootstrap_transcript(
+            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
+        )
+    except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
+        logger.debug("classifying a discovered death failed", exc_info=True)
+
+
 def _bootstrap_mobile_attention() -> None:
     """Migrate the retained list once on daemon startup, not on passive reads."""
     from local_operator.paths import config_dir
@@ -543,8 +638,10 @@ def _durable_projection(session_id: str) -> SessionProjection | None:
         state = _durable_fold_cache().load(directory)
     except FileNotFoundError:
         return None
-    except Exception:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
-        logger.exception("durable fold failed for session %s", session_id)
+    except Exception as exc:  # noqa: BLE001 — an odd transcript yields no projection, not a 500
+        _log_import_failure(
+            exc, "local_operator.mobile.durable", where=f"durable fold for {session_id}"
+        )
         return None
     projection = SessionProjection(
         session_id=session_id,
@@ -871,19 +968,76 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     whole. Degradation is tiered and lossless for the collapsed view (see
     ``cap_projection_frame``); the retained projection object is untouched.
     """
+    from local_operator.harness.rows import completion_notice
     from local_operator.mobile.projection import cap_projection_frame
     from local_operator.mobile.types import TranscriptEntry
 
     data, degraded = cap_projection_frame(projection)
     attention = projection.attention
     data["attention"] = attention
+    # A CUT-OFF'S END REACHES THE PHONE HERE OR NOWHERE. ``ProjectionFold``
+    # learns ``stop_reason``/``cut_off`` from a folded ``AgentEndEvent``, and a
+    # runtime that dies mid-turn never emits one — the follower's socket simply
+    # closes, so the projection is left with the empty field that means "no turn
+    # has ended yet". Measured on three real phone paths (attached with and
+    # without another follower, and a daemon-OWNED session) × two signals
+    # (SIGKILL/SIGTERM): ``stop_reason='' cut_off=False`` at every sample to
+    # t+40 s, while a turn that COMPLETES does fold ``'completed'``. And
+    # ``composer.tsx`` gates its whole resume affordance on
+    # ``stop_reason === "aborted"``, so the notice and the list mark arrived and
+    # the button that D7 exists to word never did — for a cut-off AND for a
+    # deliberate stop issued from the phone (UX round 1, U1).
+    #
+    # The durable outcome this frame's notice is already built from carries the
+    # end for exactly those arms, so the frame fills the MISSING end from it:
+    # one record decides both the sentence and the button, which is what keeps
+    # the word and the affordance from naming one act two ways (D7).
+    # FILL, never override: the fold's own ABORT outranks a durable record. A
+    # record may describe an EARLIER turn than the one the fold last saw, and
+    # the fold is the only party that saw an end event for the current one — so
+    # when it says `aborted`, its word and its `cut_off` flag stand, including
+    # the deliberate stop it classified (`aborted` + `cut_off=False`).
+    #
+    # `"completed"` is NOT such an end for this purpose: a completion cannot be
+    # the end being filled for (a completed turn publishes `kind='complete'`, so
+    # the store would not be carrying an error), and a session that finished a
+    # turn and then had the NEXT one stopped from the phone leaves exactly this
+    # pair — `stop_reason='completed'` from the earlier fold plus an
+    # `interrupted` outcome from the turn the fold never saw end. Requiring an
+    # EMPTY field there silently withheld the button from a deliberate stop.
+    if not projection.streaming and projection.stop_reason != "aborted":
+        kind = str(attention.get("kind") or "")
+        if kind in {"error", "interrupted"}:
+            from local_operator.incidents import is_deliberate_cause
+
+            data["stop_reason"] = "aborted"
+            # WHICH word the button says. ``aborted`` covers both acts; only an
+            # ``error`` kind that is not a recorded deliberate act is the
+            # involuntary one. ``error`` with no cause at all is still a cut-off
+            # — that is the "cause could not be determined" row, whose notice
+            # above already says so.
+            data["cut_off"] = kind == "error" and not is_deliberate_cause(
+                str(attention.get("cause") or "")
+            )
     if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+        # The sentence AND its severity come from `harness/rows.py`, which owns
+        # row decisions for both surfaces: the phone's `NoticeRow` picks its
+        # glyph and ink from `details.severity`, so a frame that carried an empty
+        # `details` painted a cut-off as a routine `·` receipt — the same
+        # flattening the TUI's poller had, on the surface the operator reads from
+        # a phone (design review round 1, D4). The suppression above is unchanged
+        # and still correct: a LIVE mid-turn session banners nothing, regardless
+        # of the last outcome.
+        text, severity = completion_notice(
+            str(attention["kind"]), str(attention.get("reason") or "")
+        )
         data["transcript"] = [
             *data["transcript"],
             TranscriptEntry(
                 id=attention["anchor_id"],
                 kind="notice",
-                text="Stopped with an error" if attention["kind"] == "error" else "Interrupted",
+                text=text,
+                details={"severity": severity},
             ).to_json(),
         ]
     if degraded:
@@ -1033,6 +1187,10 @@ class MobileDaemon:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # Stamp the build THIS process loaded, before any lazy import can meet a
+        # replaced tree: every later comparison in ``_log_import_failure`` is
+        # against this value.
+        _boot_build()
         # False makes this daemon a READ-ONLY observer of the record directory:
         # it lists sessions and serves durable folds, but never dials a
         # registrant's control socket and never reaps a stale claim. A second
@@ -1355,8 +1513,31 @@ class MobileDaemon:
                 # session id) — the socket survives them by design.
                 entry.record = record
             if state == "stale":
+                # ONE classification per discovered death, gated on the TRANSITION
+                # (this branch re-runs every scan for as long as the stale record
+                # stays on disk, and a transcript import per 2 s pass is not a
+                # price a list may pay). Only a daemon that owns sockets writes:
+                # an observer daemon's whole contract is that it lists and serves
+                # and touches nothing durable.
+                first_sighting = not entry.ended
                 entry.ended = True
                 changed = True
+                if first_sighting and self.dial_registrants:
+                    # THE RECORD RIDES ALONG, because `registry.scan` has already
+                    # unlinked it: this branch runs on the tuple scan RETURNED,
+                    # and by the time we classify, the dead record the
+                    # classification depends on is gone from the run directory.
+                    # Re-reading (which is what `_run_record_evidence` does) then
+                    # finds nothing and every discovered death lands the
+                    # no-evidence arm — "the cause could not be determined" for
+                    # the one shape where the daemon just PROVED the pid dead
+                    # (review round 2, MINOR-1; the same sentence was measured on
+                    # the phone by the design round, D6). Passing the record in
+                    # is the evidence, and it is exactly as trustworthy as the
+                    # scan that produced it.
+                    await asyncio.to_thread(
+                        _classify_discovered_death, record.session_id, reaped_owner=record
+                    )
                 # SIGKILL cannot run owner cleanup. Discovery already proved the
                 # record pid dead; the lease helper revalidates generation and
                 # process identity under the recovery lock before removing only
@@ -2636,57 +2817,41 @@ def _past_sessions(limit: int = 20) -> list[dict[str, Any]]:
 def _search_sessions(query: str, limit: int = 40) -> list[dict[str, Any]]:
     """Past sessions matching ``query`` by name, id, or conversation body.
 
-    Mirrors the TUI picker's two channels: a name/id substring match, and a
-    body match through the cached search index (re-digested only for
-    transcripts that changed). A row that matched ONLY on its body is marked
-    ``body_match`` so the UI can say why it surfaced — otherwise it reads as a
-    result the filter had no reason to return.
+    One call into ``session_search.search_store``, which is the SAME admission,
+    soft-matching and ranking the TUI's ``/resume`` picker and the desktop chat
+    search use. Before this it was a private second implementation: name/id and
+    an EXACT body substring only, no typo/prefix tier and no ranking, so a query
+    the picker resolved confidently found nothing on the phone. The phone's own
+    composition is only what it RENDERS from the answer — the dict shape below
+    is the wire format, not a second filter.
+
+    ``body_match`` marks a row the conversation surfaced (exact body, a past
+    name, or a soft match) rather than its visible name, so the phone can say
+    why it is on screen instead of showing a row with no visible reason.
+
+    No try/except around the call, and the honest reason is not "only a broken
+    store raises": the index build degrades on its own (an absent or corrupt
+    cache costs a rebuild, never a raise), and a store whose ``sessions/``
+    directory cannot be read is reported as ZERO matches rather than as an
+    error, because ``resume._scan_sessions`` swallows that ``OSError`` so every
+    listing surface survives it (see ``search_store``). What is NOT caught here
+    is anything else — a bug in the search must not be laundered into a
+    confident "nothing matched".
     """
     from local_operator.paths import config_dir
-    from local_operator.resume import fork_haystack, recent_session_rows
-    from local_operator.session.search_index import build_index, search_digests
+    from local_operator.session.session_search import search_store
 
-    cfg = config_dir()
-    rows = recent_session_rows(cfg, limit=200)
-    needle = query.strip().lower()
-    if not needle:
-        return [
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                "body_match": False,
-                "forked": r.forked,
-            }
-            for r in rows[:limit]
-        ]
-    try:
-        digests = build_index(cfg, [r.id for r in rows])
-        body_hits = search_digests(digests, needle)
-    except Exception:  # noqa: BLE001 — a broken index degrades to name/id only
-        body_hits = set()
-    out = []
-    for r in rows:
-        # Through the picker's own composition, so typing `fork` on the phone
-        # finds the rows the phone visibly tags — the same what-is-shown-is-
-        # searchable invariant `resume.fork_haystack` documents.
-        name_hit = needle in fork_haystack(r).lower() or needle in r.id.lower()
-        body_hit = r.id in body_hits
-        if not (name_hit or body_hit):
-            continue
-        out.append(
-            {
-                "id": r.id,
-                "name": r.name,
-                "mtime": r.mtime,
-                # Marked only when the name/id did NOT explain the match.
-                "body_match": body_hit and not name_hit,
-                "forked": r.forked,
-            }
-        )
-        if len(out) >= limit:
-            break
-    return out
+    matches = search_store(config_dir(), query, limit=limit)
+    return [
+        {
+            "id": match.row.id,
+            "name": match.row.name,
+            "mtime": match.row.mtime,
+            "body_match": match.body_match,
+            "forked": match.row.forked,
+        }
+        for match in matches
+    ]
 
 
 def _tmp_dir() -> str:

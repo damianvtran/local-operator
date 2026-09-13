@@ -112,6 +112,76 @@ def toast_max_width(terminal_width: int) -> int:
     )
 
 
+#: The separator between a failure line's COMMAND and the reason that trails
+#: it. ``McpManager._auth_required_text`` is the one composer that builds this
+#: shape (``/mcp reauth notion — refresh unconfirmed``): the command first, so a
+#: clamp can only ever eat the tail (design review D1/D4/D9), then `` — `` and
+#: the reason.
+_FAILURE_REASON_SEP = " — "
+
+#: What a failure line must LEAD with for its tail to be a droppable REASON.
+#: Deliberately the command prefix rather than "the text contains a dash": the
+#: no-OAuth-endpoint challenge line (``notion rejected our credentials (401) —
+#: set its API key or headers``) is a diagnostic whose second clause is half of
+#: the statement, and it is explicitly out of this change's scope (design review
+#: D10), so it must keep rendering exactly as it does today.
+_COMMAND_LEAD = "/mcp "
+
+
+def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
+    """``failed: <name> — <text>``, composed against the card's real budget.
+
+    WHY a composer rather than the bare clamp that used to sit here: this row is
+    ``failed: `` + name + `` — `` + the failure text, and the auth text names the
+    server a SECOND time inside its command. The unconfirmed form is therefore
+    ``45 + 2n`` cells for an ``n``-cell name against the card's 58 content cells
+    (``60 - TOAST_PADDING_CELLS``, at any terminal 66 cells or wider), so it fits
+    while ``n <= 6`` and the clamp then eats whatever sits at the END of the line
+    — which for ``minerva-qa`` (10 cells) was 7 cells of the REASON at 100
+    columns, and for ``launchdarkly`` (12) the command's own name argument at 44
+    (design review round 3, D11: measured rows ``failed: minerva-qa — /mcp reauth
+    minerva-qa — refresh unc…`` and ``failed: launchdarkly — /mcp reauth…``, the
+    latter a command that errors if the user follows it).
+
+    So the budget decides what gets SHED, not merely where the string is cut:
+
+    * **Rung 1** — the whole row, whenever it fits. Byte-identical to the clamp
+      for the corpus design review D9 verified at 100 columns (57/53/47 cells at
+      a 6-cell name), so the pinned rows are untouched.
+    * **Rung 2** — the command, marked as having shed the reason. The reason is
+      the right part to lose: it is the only piece that is not a command the
+      user has to be able to type, and ``/mcp`` plus the durable transcript
+      notice both carry it whole. The ``…`` is the same cue the 44-column card
+      has always shown (D9 accepted it as marking the shed reason);
+    * **Rung 3** — the command alone, for the widths where even the mark does
+      not fit (a 51-cell terminal has a 43-cell card, exactly the width of
+      ``failed: minerva-qa — /mcp reauth minerva-qa``). Without this rung the
+      clamp cut the name's last character — the same D11 defect, one cell over.
+    * **Backstop** — the clamp, for a text that is not a command-with-reason
+      (every plain diagnostic, the D10 challenge line, a 200-cell error) and for
+      a name so long that not even the command fits on the row. Never worse than
+      the behaviour it replaces.
+
+    The 44-column card is deliberately UNCHANGED for 8+ cell names, and that is
+    a recorded limit rather than an oversight: the command ALONE is ``23 + 2n``
+    cells against a 36-cell card, so no composition of this line puts a whole
+    ``/mcp reauth <name>`` on that card at ``n >= 7`` without a second row or a
+    different card shape. Both are layout decisions this change does not make
+    (D11's resolution 2), so the fall-through keeps the base's pixels there and
+    the named constraint is recorded on the deferral instead.
+    """
+    label = f"failed: {name} — "
+    full = label + text
+    if cell_len(full) <= max_cells:
+        return full
+    if text.startswith(_COMMAND_LEAD) and _FAILURE_REASON_SEP in text:
+        command = text.split(_FAILURE_REASON_SEP, 1)[0]
+        for shed in (f"{label}{command}…", f"{label}{command}"):
+            if cell_len(shed) <= max_cells:
+                return shed
+    return truncate_cells(full, max_cells)
+
+
 def format_mcp_startup(
     outcome: McpStartupOutcome,
     max_cells: int = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS,
@@ -167,12 +237,12 @@ def format_mcp_startup(
             # server the head line meant and read the name twice to do it. Both
             # variants now open on the same word, which is what makes the second
             # line scannable as a failure list rather than as prose.
-            detail = f"failed: {names[0]} — {outcome.failures[names[0]]}"
+            detail = _fit_failure_line(names[0], outcome.failures[names[0]], max(1, max_cells))
         else:
-            detail = "failed: " + ", ".join(names)
+            detail = truncate_cells("failed: " + ", ".join(names), max(1, max_cells))
         text.append("\n")
         text.append(
-            truncate_cells(detail, max(1, max_cells)),
+            detail,
             style=Style(color=theme_mod.semantic_color("danger")),
         )
 
