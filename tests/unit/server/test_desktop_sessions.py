@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import pytest
 import pytest_asyncio
@@ -55,6 +55,25 @@ async def _armed_warm(bridge: Any) -> asyncio.Task[None]:
             return bridge.warm_task
         await asyncio.sleep(0)
     raise AssertionError("a live visible lease did not start a warm")
+
+
+async def _until(predicate: Callable[[], bool], *, why: str, timeout: float = 30.0) -> None:
+    """Poll until ``predicate`` holds, or fail with ``why`` after ``timeout``.
+
+    A LOAD-TOLERANT bound on the state the assertion is about, rather than a
+    fixed count of sleeps or a wait on an attempt COUNT. The loop records an
+    attempt (the fake bind appends it) before it awaits the engage and updates
+    its pace, so a poll on the attempt count can read the pace field inside that
+    window and fail for scheduling reasons rather than for the rule under test
+    (QA round 2, Q1: 6 failures in 21 isolated runs).
+
+    ``time`` here is the REAL clock: these tests patch the MODULE's ``time``,
+    not this module's, so the bound does not move with the frozen clock.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, why
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -2362,8 +2381,8 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
     focused, so a bind that cannot start (credential gone, an MCP hang, an
     unwritable config dir) used to be re-attempted -- a real child spawn each
     time -- once per beat, indefinitely, with no user behind it and nothing on
-    any surface to say so. The retry loop keeps the intent but charges a FAILED
-    attempt a doubling backoff.
+    any surface to say so. The retry loop keeps the intent but charges an
+    attempt that actually ran a doubling backoff.
 
     The module clock is frozen so the assertion is about the rule (a heartbeat
     inside the backoff re-engages nothing) rather than about how fast this
@@ -2401,6 +2420,14 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
         await bridge.watch(watcher.id, visible=True, can_notify=True)
         first = await _armed_warm(bridge)
         await asyncio.wait_for(first, timeout=10)
+        # WAIT ON THE PACE, NOT ON THE ATTEMPT COUNT. The fake bind appends the
+        # attempt before the loop awaits the task and charges the pace, so
+        # `attempts == [False]` is true for a scheduling window before
+        # `warm_backoff_s` is -- which is the race QA round 2, Q1 caught here.
+        await _until(
+            lambda: bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S,
+            why="the first attempt that ran was not paced",
+        )
         assert attempts == [False], attempts
 
         # Three heartbeats, all inside the backoff: the deadline cannot arrive
@@ -2409,23 +2436,18 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
             await bridge.watch(watcher.id, visible=True, can_notify=True)
             await asyncio.sleep(0.05)
         assert attempts == [False], "a heartbeat inside the backoff re-engaged"
-
-        for _ in range(200):
-            if bridge.warm_backoff_s:
-                break
-            await asyncio.sleep(0.01)
         assert bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
 
         # The intent is still there when the backoff expires, with no user
-        # action and no heartbeat in between -- and the second failure grows the
-        # pace rather than resetting it.
+        # action and no heartbeat in between -- and the second attempt grows the
+        # pace rather than resetting it. The predicate is the FIELD the pace is
+        # asserted on, so the poll cannot land between an attempt and its charge.
         now = 100.0 + module._LEASE_WARM_BACKOFF_S + 1
-        for _ in range(200):
-            if len(attempts) > 1:
-                break
-            await asyncio.sleep(0.01)
-        assert attempts == [False, False], "the backoff never re-engaged the intent"
-        assert bridge.warm_backoff_s == 2 * module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
+        await _until(
+            lambda: bridge.warm_backoff_s == 2 * module._LEASE_WARM_BACKOFF_S,
+            why="the backoff never re-engaged the intent",
+        )
+        assert attempts == [False, False], attempts
 
         async def advance(seconds: float) -> None:
             """Move the clock in heartbeat-sized steps, renewing as a window does.
@@ -2444,18 +2466,24 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
                 seconds -= step
                 await bridge.watch(watcher.id, visible=True, can_notify=True)
 
-        # TWO more failures reach and hold the ceiling: 60 -> 120 -> 120, the
+        # TWO more attempts reach and hold the ceiling: 60 -> 120 -> 120, the
         # second of them being the clamp taking `min(2 * 120, 120)` instead of
         # doubling on to 240. Read off the loop's own `min()` that would be an
         # assertion by inspection; the pace is observed here instead.
+        #
+        # `warm_not_before` is the field that moves for BOTH of them (the clamped
+        # attempt leaves `warm_backoff_s` at the value it already had), and the
+        # loop writes it AFTER the pace in one synchronous block, so waiting on
+        # it is waiting for the attempt AND its charge -- even when the attempt
+        # lands in the middle of `advance` rather than after it, which is the
+        # second race QA round 2, Q1 reproduced.
         for _ in range(2):
+            prior = bridge.warm_not_before
             await advance(bridge.warm_backoff_s + 1)
-            target = len(attempts) + 1
-            for _ in range(400):
-                if len(attempts) >= target:
-                    break
-                await asyncio.sleep(0.01)
-            assert len(attempts) == target, "the backoff never re-engaged the intent"
+            await _until(
+                lambda: bridge.warm_not_before > prior,
+                why="the backoff never re-engaged the intent",
+            )
         assert attempts == [False] * 4, attempts
         assert (
             bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_CAP_S
@@ -2466,11 +2494,11 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
         # during the 120 s wait must end the retries within a slice, not after
         # the wait.
         watcher.expires = module.time.monotonic() - 1.0
-        await asyncio.sleep(10 * module._LEASE_WARM_POLL_S)
+        await _until(
+            lambda: bridge.lease_warm_task is not None and bridge.lease_warm_task.done(),
+            why="the retry loop outlived the lease whose intent it was holding",
+        )
         assert len(attempts) == 4, "a withdrawn lease kept re-engaging"
-        assert (
-            bridge.lease_warm_task is not None and bridge.lease_warm_task.done()
-        ), "the retry loop outlived the lease whose intent it was holding"
     await pool.close()
 
 
@@ -2566,4 +2594,249 @@ async def test_a_lease_driven_warm_survives_an_in_flight_bind(tmp_path, monkeypa
                 break
             await asyncio.sleep(0.01)
         assert engages == [False], "the lease's intent did not survive the wait"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_deliberately_stopped_session_is_not_warmed_by_a_visible_lease(
+    tmp_path, monkeypatch
+):
+    """Reviewer round-2 MAJOR-1: a focused viewer must not resurrect a stop.
+
+    `_recover_runtime` already refuses on `session_was_stopped()` -- "it is what
+    keeps the takeover from resurrecting a session a kill switch just ended"
+    (`session/attached.py`) -- and the desktop stop's own copy promises that
+    `/resume` re-opens a stopped conversation. Without the same guard the
+    lease-driven warm did it for free: the user stops a session in the focused
+    window, the runtime exits, and the next beat (<= 15 s, ~82 MB idle) starts a
+    fresh runtime for the session they just ended, clearing the `stopped_at`
+    marker the stop wrote.
+
+    Both halves of the contract are pinned here: the beat that must engage
+    nothing while the session is stopped, and the explicit resume that must
+    behave exactly as before.
+    """
+    engages: list[bool] = []
+
+    async def record_engage(*, foreground: bool = True) -> None:
+        engages.append(foreground)
+
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
+        # Exactly the shape `request_stop` leaves (and the one the reviewer
+        # reproduced): the flag is set BEFORE the op is sent, so
+        # `await remote.session_was_stopped()` answers True from the facade
+        # alone, without consulting the wake store.
+        bridge.remote._deliberate_stop = True
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await asyncio.sleep(0.2)
+        assert engages == [], "a deliberately stopped session was warmed"
+        assert bridge.warm_task is None
+        assert bridge.lease_warm_task is None
+
+        # The resume: `_finish_sync` clears the flag on the sync that re-attaches
+        # the viewer, and the next visible beat must warm as it always has.
+        bridge.remote._deliberate_stop = False
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        task = await _armed_warm(bridge)
+        await asyncio.wait_for(task, timeout=10)
+        assert engages == [False], engages
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_the_lease_warm_that_was_already_retrying(tmp_path, monkeypatch):
+    """The other seam of MAJOR-1: a loop armed before the stop must honour it.
+
+    A loop already pacing an attempt is a warm that is still trying, and the
+    per-pass re-ask is the only place a stop landing mid-pace can end it --
+    otherwise the loop's next attempt resurrects the session the user just
+    ended, seconds after they ended it. The pace goes with the intent too: a
+    later `/resume` is a user action and must not wait out a deadline no live
+    intent is holding.
+    """
+    attempts: list[bool] = []
+
+    async def exploding_bind(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        raise ConnectionError("no runtime")
+
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", exploding_bind)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        first = await _armed_warm(bridge)
+        await asyncio.wait_for(first, timeout=10)
+        await _until(
+            lambda: bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S,
+            why="the attempt that ran was not paced",
+        )
+        assert attempts == [False], attempts
+
+        bridge.remote._deliberate_stop = True
+        await _until(
+            lambda: bridge.lease_warm_task is not None and bridge.lease_warm_task.done(),
+            why="the retry loop outlived the deliberate stop",
+        )
+        assert attempts == [False], "a stopped session was re-attempted"
+        assert bridge.warm_backoff_s == 0.0, "the stopped intent kept its pace"
+
+        # And the next beat does not ARM a fresh loop for the stopped session --
+        # the arm guard, not the loop's re-ask, is what answers here. It is
+        # checked by identity: `lease_warm_task` keeps the last loop once it has
+        # finished (a done task is not None), so a new object is the shape a
+        # missing guard takes.
+        stopped_loop = bridge.lease_warm_task
+        assert stopped_loop is not None and stopped_loop.done()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await asyncio.sleep(0.2)
+        assert bridge.lease_warm_task is stopped_loop, "a stopped session was re-armed"
+        assert attempts == [False], attempts
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_that_boots_then_dies_is_paced_not_respawned_each_beat(
+    tmp_path, monkeypatch
+):
+    """Reviewer round-2 MINOR-1: the pace follows the ATTEMPT, not its outcome.
+
+    A runtime that comes up and then dies -- a late boot failure, an OOM, a
+    build-stamp restart gone wrong -- passes the loop's post-await `is_cold`
+    check. Charging the pace only on the cold side of that check left
+    `warm_backoff_s` at 0.0 and the renderer's next beat started another child
+    (reproduced: 4 beats -> 4 attempts), which is round-1 MAJOR-1's unattended
+    spawn loop one failure shape over.
+
+    `_ensure_bound` stands in for the spawn: it makes the viewer BOUND through
+    the real `is_cold` predicate (the `_client` that property reads), and the
+    test then kills it exactly as a crash does -- `_client` back to None --
+    before the next beat. The clock is frozen and advanced by hand, as in the
+    pacing pin, so the assertions are about the rule rather than machine speed.
+    """
+    attempts: list[bool] = []
+    now = 100.0
+
+    def clock() -> float:
+        return now
+
+    class BoundClient:
+        """Only what `is_cold` and the presence RPC read."""
+
+        connected = True
+
+        def close(self) -> None:
+            pass
+
+        async def desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
+            pass
+
+    async def boot_then_die(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        remote._client = BoundClient()  # type: ignore[assignment]
+        remote._ready_for_events = True
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        # Bound once, as a local: the closure below cannot see the narrowing the
+        # assertion above gives `bridge.remote`.
+        remote = bridge.remote
+        monkeypatch.setattr(remote, "_ensure_bound", boot_then_die)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(
+            lambda: bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S,
+            why="an attempt that left the viewer bound was not charged",
+        )
+        assert attempts == [False], attempts
+
+        # The crash, then three heartbeats inside the pace: the old behaviour
+        # was a real spawn per beat, and the deadline cannot arrive on a frozen
+        # clock, so nothing here may attempt.
+        remote._client = None
+        for _ in range(3):
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            await asyncio.sleep(0.05)
+        assert attempts == [False], "a beat inside the pace re-spawned the runtime"
+        assert bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
+
+        # The intent survives the pace and the second attempt is charged too
+        # (30 -> 60), so a session that keeps crashing keeps backing off rather
+        # than settling into a per-beat cadence.
+        now += module._LEASE_WARM_BACKOFF_S + 1
+        await _until(
+            lambda: bridge.warm_backoff_s == 2 * module._LEASE_WARM_BACKOFF_S,
+            why="the paced intent never re-engaged",
+        )
+        assert attempts == [False, False], attempts
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_intent_does_not_inherit_a_withdrawn_ones_pace(tmp_path, monkeypatch):
+    """QA round-2 Q2: an abandoned intent's pace must not charge the next one.
+
+    `_clear_warm_backoff` promises a fresh cold period starts from the base, but
+    the loop exits on a withdrawn lease without clearing, so a viewer returning
+    12 s into a 30 s pace paid the remaining 15.9 s before its first child
+    appeared (measured; up to the 120 s ceiling on a longer failure). The pace
+    belongs to the intent that earned it, and a withdrawn lease ends that
+    intent: on the frozen clock a wrongly inherited pace shows up as an attempt
+    that never happens at all.
+    """
+    attempts: list[bool] = []
+    now = 500.0
+
+    def clock() -> float:
+        return now
+
+    async def exploding_bind(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        raise ConnectionError("no runtime")
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", exploding_bind)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        first = await _armed_warm(bridge)
+        await asyncio.wait_for(first, timeout=10)
+        await _until(
+            lambda: bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S,
+            why="the attempt that ran was not paced",
+        )
+
+        # The window leaves, well inside the 30 s pace. The beat itself drops
+        # the pace (it is the first with no live visible lease), so the clear
+        # does not wait for the loop to notice.
+        watcher.expires = module.time.monotonic() - 1.0
+        await bridge.refresh_watch()
+        assert bridge.warm_backoff_s == 0.0, "a withdrawn intent kept its pace"
+
+        # It comes back 12 s later, and the fresh intent engages at once.
+        now += 12.0
+        watcher.expires = module.time.monotonic() + module.WATCH_TTL
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await _until(
+            lambda: bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S,
+            why="the fresh intent waited out the abandoned one's deadline",
+        )
+        assert len(attempts) == 2, attempts
     await pool.close()

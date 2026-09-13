@@ -655,6 +655,12 @@ class DesktopSessionBridge:
         second is the change argued in the branch below; the first is the
         existing contract, and the record is written on EVERY beat rather than
         only on the way into a warm (see the comment at the write).
+
+        Two things this beat does NOT do, both of which used to be wrong: it
+        creates nothing for a lease that is not live and visible (unchanged),
+        and it creates nothing for a session someone deliberately STOPPED — a
+        stopped session stays stopped until a user action re-opens it
+        (round-2 review MAJOR-1, argued at the gate below).
         """
         async with self.watch_lock:
             live = self._live_leases()
@@ -675,7 +681,41 @@ class DesktopSessionBridge:
             # while cold (its RPC half is guarded by a connected client), and it
             # keeps `_desktop_seen` fresh as well as truthful.
             await remote.update_desktop_watch(visible=visible, can_notify=can_notify)
-            if not remote.is_cold or not visible:
+            if not visible:
+                # NO LIVE VISIBLE LEASE, so the intent that earned any standing
+                # pace is gone with it and the pace must not charge the next
+                # one. Cleared HERE and not only in the loop, because the loop
+                # that earned it has usually already returned by the time the
+                # viewer leaves: a served attempt keeps its charge standing
+                # (see `_lease_warm_loop`), and this beat — the first with no
+                # live visible lease — is the moment a fresh intent can be told
+                # apart from the last one's continuation (QA round 2, Q2).
+                self._clear_warm_backoff()
+                return
+            if not remote.is_cold:
+                return
+            # A DELIBERATE STOP IS NOT A COLD VIEWER TO BE WARMED (review
+            # round 2, MAJOR-1). `_recover_runtime` already refuses on this
+            # fact, with the rationale "it is what keeps the takeover from
+            # resurrecting a session a kill switch just ended"
+            # (`session/attached.py`), and the desktop stop's own copy promises
+            # the same thing — `/resume` reopens a stopped conversation, so
+            # nothing else may. Without this guard the user stops a session in a
+            # focused window, the runtime exits, and the next beat — within
+            # 15 s, at ~82 MB idle — silently starts a fresh runtime for the
+            # session they just ended, which also clears the `stopped_at`
+            # marker the stop wrote.
+            #
+            # ITS LIMIT, stated so the guard is not read as complete: this is
+            # "not proven stopped", not proof of life — the marker is this
+            # facade's own flag, OR the durable `stopped_at` written only for a
+            # session that HAS wakes (see `session_was_stopped`'s docstring). A
+            # stop this facade issued is always caught; a stop from another
+            # surface on a wake-less session is not. Closing that arm means
+            # stamping the marker unconditionally in the stop path, which is a
+            # change to the stop contract rather than to the warm.
+            if await remote.session_was_stopped():
+                self._clear_warm_backoff()
                 return
             # A VISIBLE LEASED VIEWER CREATES RESIDENCY, it no longer only
             # preserves it, and that is the whole policy change here.
@@ -784,11 +824,23 @@ class DesktopSessionBridge:
         self.lease_warm_task = asyncio.create_task(self._lease_warm_loop(remote))
 
     def _clear_warm_backoff(self) -> None:
-        """Forget a previous failure's pace: the live intent was served.
+        """Forget the pace of an intent that is over, so the next one is fresh.
 
-        Cleared rather than left to expire so the NEXT cold period — a fresh
-        intent, on the same or a new runtime — starts from the base backoff
-        instead of from whatever the last one had grown to.
+        Called when the intent is ABANDONED rather than served: the lease that
+        held it lapsed or withdrew, the facade was replaced, `_detach` dropped
+        the bridge, or a deliberate stop ended it. Cleared rather than left to
+        expire so the NEXT intent — a fresh cold period, on the same or a new
+        runtime — starts from the base backoff instead of from whatever the last
+        one had grown to (QA round 2, Q2: a viewer returning 12 s into a 30 s
+        pace paid the remaining 15.9 s before its first child appeared).
+
+        DELIBERATELY NOT called when an attempt left the viewer bound. That
+        charge is what bounds a runtime that boots and then dies — the
+        crash-loop of review round 2 MINOR-1 — and dropping it on the way out
+        would re-spawn one per heartbeat, which is the unattended loop this
+        pacing exists to prevent. A beat with no live visible lease clears it
+        instead (`refresh_watch`), so a viewer who genuinely leaves is not
+        charged for a runtime that died while it was still looking.
         """
         self.warm_backoff_s = 0.0
         self.warm_not_before = 0.0
@@ -812,25 +864,37 @@ class DesktopSessionBridge:
           held by another subscriber's `attach_existing`, say — so `warm()`
           starts no task and, again, nothing retries for a whole beat.
 
-        A FAILED attempt is the third case and is handled differently, because
-        it DID work: it spawned. Retrying that on the beat is the spawn loop a
-        heartbeat alone could drive, so it waits out a doubling backoff (base
-        and ceiling argued on the constants) and is logged, since a bind that
-        keeps failing has no other surface on this path.
+        AN ATTEMPT THAT ACTUALLY RAN is the third case and is handled
+        differently, because it DID work: it spawned. Retrying that on the beat
+        is the spawn loop a heartbeat alone could drive, so it pays a doubling
+        backoff (base and ceiling argued on the constants) and the failure is
+        logged, since a bind that keeps failing has no other surface on this
+        path. The charge follows the ATTEMPT, not its outcome at the post-await
+        check: a runtime that comes up and then dies passes that check and would
+        otherwise be re-spawned by the next beat, one failure shape over from
+        the case this pacing was built for (review round 2, MINOR-1).
 
         NOT A SECOND SPAWN PATH: every attempt is `warm()`, the ordinary
         background engage through `_ensure_bound` and the one `_bind_lock`. This
         loop decides only WHEN to ask, never how.
 
         BOUNDED BY THE LEASE, WHICH IS THE POINT. It exits the moment the viewer
-        is bound, the facade is replaced, or no live visible lease remains — and
-        it re-asks all three on every pass rather than trusting the state at arm
-        time, which is also why a backoff is waited out in slices rather than in
-        one long sleep: a lease withdrawn during the wait ends the retries
-        within one slice instead of after up to two minutes of them.
+        is bound, the facade is replaced, no live visible lease remains, or the
+        session has been deliberately stopped — and it re-asks all four on every
+        pass rather than trusting the state at arm time, which is also why a
+        backoff is waited out in slices rather than in one long sleep: a lease
+        withdrawn during the wait ends the retries within one slice instead of
+        after up to two minutes of them.
+
+        EVERY EXIT THAT IS NOT "the viewer is bound" IS AN ABANDONED INTENT and
+        drops the pace with it; the bound exit keeps its charge, for the
+        crash-loop reason above.
         """
         while True:
             if self.remote is not remote:
+                # A replacement viewer owns the bridge now: the intent (and its
+                # pace) belonged to the facade that just left.
+                self._clear_warm_backoff()
                 return
             if not remote.is_cold:
                 self._clear_warm_backoff()
@@ -838,6 +902,18 @@ class DesktopSessionBridge:
             async with self.watch_lock:
                 visible = any(s.visible for s in self._live_leases())
             if not visible:
+                # ABANDONED, NOT SERVED: the lease that expressed this intent
+                # has lapsed or withdrawn, so the intent ends and its pace goes
+                # with it — see `_clear_warm_backoff`.
+                self._clear_warm_backoff()
+                return
+            if await remote.session_was_stopped():
+                # The same question `refresh_watch` asks before it arms, where
+                # the rationale and the marker's limit are written (review
+                # round 2, MAJOR-1). Re-asked here because a stop can land while
+                # the loop is still pacing, and a loop armed before the stop
+                # must not be the thing that resurrects the stopped session.
+                self._clear_warm_backoff()
                 return
             remaining = self.warm_not_before - time.monotonic()
             if remaining > 0:
@@ -858,14 +934,28 @@ class DesktopSessionBridge:
                 # end this loop rather than be read as a settled failure.
                 with contextlib.suppress(Exception):
                     await task
-            if not remote.is_cold:
-                self._clear_warm_backoff()
-                return
+            # THE ATTEMPT IS CHARGED, NOT ITS OUTCOME (review round 2, MINOR-1).
+            # Charging only when the post-await check finds the viewer cold let a
+            # runtime that boots and then dies — a late boot failure, an OOM, a
+            # build-stamp restart gone wrong — be re-spawned on every beat, with
+            # `warm_backoff_s` still 0.0 (reproduced: 4 beats -> 4 attempts).
+            # The pace prices the spawn that was actually made, whether or not
+            # the check below happens to catch the shape. A runtime that STAYS
+            # up is unaffected: this loop returns and no other arms until a beat
+            # finds the viewer cold with a live visible lease, and the charge is
+            # dropped by the first beat with no live visible lease
+            # (`refresh_watch`), so a window that leaves and returns starts from
+            # the base.
             self.warm_backoff_s = min(
                 self.warm_backoff_s * 2 if self.warm_backoff_s else _LEASE_WARM_BACKOFF_S,
                 _LEASE_WARM_BACKOFF_CAP_S,
             )
             self.warm_not_before = time.monotonic() + self.warm_backoff_s
+            if not remote.is_cold:
+                # SERVED: the runtime is up. The charge stands (above) so a
+                # runtime that dies in the next few seconds is paced rather than
+                # re-spawned at the next beat.
+                return
             logger.debug(
                 "lease-driven warm for %s left the viewer cold; next attempt in %.0fs",
                 self.session_id,

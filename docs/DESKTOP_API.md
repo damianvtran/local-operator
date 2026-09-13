@@ -162,20 +162,31 @@ on":
   without focus) multiplies the residency by the number of panes and needs a
   real cap.
 * **A failure is paced, not repeated per heartbeat.** The bridge keeps a live
-  lease's warm intent across attempts, but an attempt that failed waits out a
-  backoff (30 s doubling to a 120 s ceiling) before the next one, so a session
-  whose runtime cannot start does not spawn a child every beat. An attempt that
-  was refused before doing any work — the viewer is in owner recovery, or
-  another engage is already in flight — is retried at a 1 s poll instead, which
-  is what carries the warm across the recovery window a single attempt used to
-  lose to.
-* **A visible lease re-creates a stopped session's runtime.** `lop stop` (or a
-  `/stop` from another surface) ends the runtime whatever the presence says,
-  and nothing on the bind path consults the deliberate-stop flag — so a focused
-  viewer's next beat starts a fresh runtime for the session the user just
-  ended, with no user action involved. A command already did this; the lease
-  makes it happen on its own. Recorded here as the accepted cost of the policy
-  above rather than as a bound.
+  lease's warm intent across attempts, but an attempt that actually ran waits
+  out a backoff (30 s doubling to a 120 s ceiling) before the next one, so a
+  session whose runtime cannot start does not spawn a child every beat. The
+  pace follows the ATTEMPT rather than its outcome, which is what covers a
+  runtime that comes up and then dies on every beat (a late boot failure): the
+  charge stands while the window is still looking, and the next beat finds the
+  viewer cold with the deadline still ahead. An attempt that was refused before
+  doing any work — the viewer is in owner recovery, or another engage is
+  already in flight — is retried at a 1 s poll instead, which is what carries
+  the warm across the recovery window a single attempt used to lose to. The
+  pace is dropped as soon as no live visible lease remains (the window was
+  hidden, navigated away from, or closed), so a viewer who returns is not
+  charged for the last intent's failures.
+* **A deliberately stopped session stays stopped.** `lop stop` (or a `/stop`
+  from another surface) ends the runtime whatever the presence says, and the
+  lease-driven warm refuses while the session is stopped — the same fact
+  `_recover_runtime` refuses on, so a focused window's beat cannot resurrect
+  the session the user just ended; `/resume` re-opens it, and only a user
+  action does. The limit of the guard is the marker's own: it is this facade's
+  own flag, OR the durable `stopped_at`, which is written only for a session
+  that HAS wakes — a stop from another surface on a wake-less session leaves no
+  trace, so the guard closes the common cases rather than the whole class. An
+  explicit `POST /warm` is still not gated: it is the keystroke path, a user
+  action, and it is the route that has always kept a stopped session's
+  `/resume` prompt honest by routing the send into it.
 
 `AttachedSession(surface="desktop")` carries this metadata through its existing
 runtime binding/recovery path. It goes cold rather than becoming the runtime
