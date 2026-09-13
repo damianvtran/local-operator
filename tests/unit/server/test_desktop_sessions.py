@@ -2368,7 +2368,13 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
     The module clock is frozen so the assertion is about the rule (a heartbeat
     inside the backoff re-engages nothing) rather than about how fast this
     machine can sleep; the clock is then advanced by hand, which is the only
-    thing that stands in for 30 s of real time.
+    thing that stands in for 30 s of real time, in heartbeat-sized steps so the
+    45 s lease stays live across each one (a retry that stopped because the
+    lease LAPSED would prove nothing about the pace).
+
+    The ceiling and the lease bound are asserted here too, because "paced" is
+    only half of what this finding asks for: an unattended retry is only safe if
+    the pace stops growing and if a lease that stops being renewed ends it.
     """
     attempts: list[bool] = []
 
@@ -2420,6 +2426,51 @@ async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_p
             await asyncio.sleep(0.01)
         assert attempts == [False, False], "the backoff never re-engaged the intent"
         assert bridge.warm_backoff_s == 2 * module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
+
+        async def advance(seconds: float) -> None:
+            """Move the clock in heartbeat-sized steps, renewing as a window does.
+
+            The loop re-asks the lease on every pass, so a single clock jump
+            past `WATCH_TTL` would end the retries for the wrong reason -- the
+            lease lapsing rather than the pace holding. Each step is therefore a
+            genuine heartbeat, which is also the strongest form of the assertion
+            above: MANY beats inside one backoff, and none of them may re-engage
+            the intent or reset the pace it landed in.
+            """
+            nonlocal now
+            while seconds > 0:
+                step = min(15.0, seconds)
+                now += step
+                seconds -= step
+                await bridge.watch(watcher.id, visible=True, can_notify=True)
+
+        # TWO more failures reach and hold the ceiling: 60 -> 120 -> 120, the
+        # second of them being the clamp taking `min(2 * 120, 120)` instead of
+        # doubling on to 240. Read off the loop's own `min()` that would be an
+        # assertion by inspection; the pace is observed here instead.
+        for _ in range(2):
+            await advance(bridge.warm_backoff_s + 1)
+            target = len(attempts) + 1
+            for _ in range(400):
+                if len(attempts) >= target:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(attempts) == target, "the backoff never re-engaged the intent"
+        assert attempts == [False] * 4, attempts
+        assert (
+            bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_CAP_S
+        ), f"the backoff is not clamped at the ceiling: {bridge.warm_backoff_s}"
+
+        # AND THE LEASE ENDS IT. The pace is waited out in poll-sized slices
+        # rather than one long sleep for exactly this case: a lease withdrawn
+        # during the 120 s wait must end the retries within a slice, not after
+        # the wait.
+        watcher.expires = module.time.monotonic() - 1.0
+        await asyncio.sleep(10 * module._LEASE_WARM_POLL_S)
+        assert len(attempts) == 4, "a withdrawn lease kept re-engaging"
+        assert (
+            bridge.lease_warm_task is not None and bridge.lease_warm_task.done()
+        ), "the retry loop outlived the lease whose intent it was holding"
     await pool.close()
 
 
