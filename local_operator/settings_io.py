@@ -1917,6 +1917,19 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help="Base URL of a self-hosted SearXNG instance.",
     ),
+    Setting(
+        key="web_search.deepseek_evidence",
+        path=("web_search", "deepseek_evidence"),
+        section="web_search",
+        label="DeepSeek page evidence",
+        kind=Kind.BOOL,
+        default=False,
+        # Off by default: it is a SECOND model turn (measured 4-11s on top of the
+        # search) that buys a verbatim quote and a relevance score per source,
+        # for the "which page do I fetch next" decision. Only the deepseek
+        # provider consumes it; every other provider already returns snippets.
+        help="Adds a per-page quote and relevance score after a DeepSeek search.",
+    ),
     # -- web fetch ----------------------------------------------------------
     Setting(
         key="web_fetch.enabled",

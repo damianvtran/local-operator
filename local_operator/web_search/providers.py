@@ -455,6 +455,10 @@ DEEPSEEK_BALANCE_ENDPOINT = "https://api.deepseek.com/user/balance"
 DEEPSEEK_SEARCH_MODEL = "deepseek-v4-flash"
 DEEPSEEK_API_VERSION = "2023-06-01"
 DEEPSEEK_SEARCH_MAX_TOKENS = 1_024
+#: The search turn only has to produce the result blocks and a short answer; the
+#: evidence pass does the rest of the work. Measured, trimming the search turn
+#: to 256 tokens still returned all 10 sources and cut its latency to 3.1-3.4s.
+DEEPSEEK_SEARCH_ANSWER_MAX_TOKENS = 256
 DEEPSEEK_SEARCH_MAX_USES = 1
 #: Balance below which a search is not attempted. One search bills a full model
 #: turn, so an account with cents left must be skipped in favour of the free
@@ -464,6 +468,46 @@ DEEPSEEK_MIN_BALANCE_USD = 0.50
 #: burst of searches must not pay it per call; a minute is short enough that a
 #: topped-up or drained account flips on the next real search.
 DEEPSEEK_BALANCE_TTL_SECONDS = 60.0
+
+# ---------------------------------------------------------------------------
+# DeepSeek per-page evidence pass (`web_search.deepseek_evidence`)
+# ---------------------------------------------------------------------------
+#
+# Native search returns `web_search_result` items carrying only url/title (no
+# snippet: measured, `page_age` is always empty and text blocks carry no
+# `citations`), so the model gets nothing to judge WHICH page is worth fetching.
+# The page text is nevertheless reachable: returning the assistant's content
+# blocks verbatim in a follow-up Messages request restores them in the model's
+# context -- DeepSeek honours Anthropic's `encrypted_content` contract, and the
+# restored pages arrive as CACHE READS (input_tokens ~200, cache_read 9-19k), so
+# re-asking about them is cheap. A third turn can keep asking about the same
+# pages with no new search billed.
+#
+# Measured over three queries, replay + triage of the top 5:
+#   * 4.1-7.4s added, $0.0013-0.0021 peak on top of the search turn;
+#   * 5/5 rows returned a url, summary and verbatim quote, 0 malformed lines;
+#   * quotes verified verbatim against the live pages in 4/5-5/5 cases.
+# Asking for all 10 sources in one turn instead truncates at any sane
+# `max_tokens` (measured: JSONL overran 3072 tokens, malformed rows, and the
+# quotes degraded), and asking the SAME turn to emit the evidence was slower
+# (9.1-13.0s) and 2-3x the cost of search-then-triage -- which is why the
+# evidence pass is a separate, bounded, opt-in turn.
+
+#: Sources the evidence pass covers. Bounded because the payload is generated
+#: text: past ~5 rows it overruns the token cap and the later rows degrade.
+DEEPSEEK_EVIDENCE_TOP_N = 5
+#: Sized from measurement, not taste: top-5 JSONL payloads ran 1000-1729 output
+#: tokens across live runs, and a cap below that truncates mid-line, which loses
+#: rows AND makes the retry look like a silent no-op. 2048 leaves headroom.
+DEEPSEEK_EVIDENCE_MAX_TOKENS = 2_048
+DEEPSEEK_EVIDENCE_INSTRUCTION = (
+    "Using the pages already retrieved above, produce per-page evidence.\n"
+    "Reply with JSONL ONLY: one JSON object per line, no array, no prose, no code fence. "
+    'Each line: {"url": "...", "on_topic": true|false, "relevance": 0-100, '
+    '"summary": "<=15 words", "quote": "<=25 words verbatim from that page"}. '
+    f"One line per search result, best first, exactly {DEEPSEEK_EVIDENCE_TOP_N} lines. "
+    "Fields must be valid JSON strings on a single line."
+)
 
 _DEEPSEEK_BALANCE_LOCK = threading.Lock()
 _DEEPSEEK_BALANCE: tuple[float, bool] | None = None
@@ -689,10 +733,86 @@ def _spawn_deepseek_balance_refresh(key: str) -> None:
     task.add_done_callback(_DEEPSEEK_BALANCE_TASKS.discard)
 
 
+def parse_deepseek_evidence(text: str) -> dict[str, dict[str, Any]]:
+    """Parse the evidence pass's JSONL into ``url -> row``, skipping bad lines.
+
+    Tolerant by design: this is generated text on a token budget, so a line that
+    is not valid JSON is dropped rather than failing the whole search. The
+    sources themselves are already in hand; evidence only ever ENRICHES them.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        stripped = line.strip().rstrip(",")
+        if not stripped.startswith("{"):
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        if url and url not in rows:
+            rows[url] = row
+    return rows
+
+
+async def _deepseek_evidence_pass(
+    client: httpx.AsyncClient,
+    key: str,
+    assistant_blocks: list[Any],
+    prompt: str,
+) -> dict[str, dict[str, Any]]:
+    """Replay the search turn and ask for per-page evidence, in one extra turn.
+
+    The assistant blocks are sent back EXACTLY as received, including each
+    result's opaque ``encrypted_content``: that is what makes DeepSeek restore
+    the page text into context. Sending the items stripped of it does not, so
+    this must not "clean" the blocks.
+    """
+    response = await client.post(
+        DEEPSEEK_SEARCH_ENDPOINT,
+        headers={
+            "x-api-key": key,
+            "authorization": f"Bearer {key}",
+            "anthropic-version": DEEPSEEK_API_VERSION,
+            "content-type": "application/json",
+            "accept": "application/json",
+        },
+        json={
+            "model": DEEPSEEK_SEARCH_MODEL,
+            "max_tokens": DEEPSEEK_EVIDENCE_MAX_TOKENS,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": prompt}]},
+                {"role": "assistant", "content": assistant_blocks},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": DEEPSEEK_EVIDENCE_INSTRUCTION}],
+                },
+            ],
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": DEEPSEEK_SEARCH_MAX_USES,
+                }
+            ],
+        },
+    )
+    _ensure_success("DeepSeek evidence", response)
+    payload = response.json()
+    text = "\n".join(
+        str(block.get("text") or "")
+        for block in (payload.get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    return parse_deepseek_evidence(text)
+
+
 async def _search_deepseek(
     client: httpx.AsyncClient,
     credentials: CredentialManager,
-    _settings: WebSearchSettings,
+    settings: WebSearchSettings,
     query: str,
     limit: int,
 ) -> SearchResponse:
@@ -716,6 +836,11 @@ async def _search_deepseek(
     if _cached_deepseek_balance_verdict() is None:
         _spawn_deepseek_balance_refresh(key)
 
+    # One string, reused verbatim by the evidence pass: the replayed conversation
+    # must be exactly what produced these blocks, or the restored pages and the
+    # follow-up question would describe two different searches.
+    prompt = f"Perform a web search for the query: {query}"
+
     response = await client.post(
         DEEPSEEK_SEARCH_ENDPOINT,
         headers={
@@ -730,14 +855,21 @@ async def _search_deepseek(
         },
         json={
             "model": DEEPSEEK_SEARCH_MODEL,
-            "max_tokens": DEEPSEEK_SEARCH_MAX_TOKENS,
+            # With evidence on, the search turn is only a results carrier: the
+            # triage turn supplies the descriptive text, so the answer budget
+            # drops to the minimum that still emits every source.
+            "max_tokens": (
+                DEEPSEEK_SEARCH_ANSWER_MAX_TOKENS
+                if settings.deepseek_evidence
+                else DEEPSEEK_SEARCH_MAX_TOKENS
+            ),
             "messages": [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Perform a web search for the query: {query}",
+                            "text": prompt,
                         }
                     ],
                 }
@@ -752,14 +884,76 @@ async def _search_deepseek(
         },
     )
     _ensure_success("DeepSeek", response)
-    sources, answer = parse_deepseek_search(response.json(), limit)
+    payload = response.json()
+    sources, answer = parse_deepseek_search(payload, limit)
+    if settings.deepseek_evidence:
+        # Enrichment only. A failed, truncated or unparseable evidence pass must
+        # leave the sources exactly as the search returned them, because the
+        # model can still fetch them; losing the search to a triage failure would
+        # trade a usable answer for nothing. The reason is REPORTED rather than
+        # swallowed -- an unenriched result that says why is diagnosable, and one
+        # that silently looks like "this provider has no snippets" is not.
+        try:
+            evidence = await _deepseek_evidence_pass(
+                client, key, payload.get("content") or [], prompt
+            )
+        except Exception as error:  # noqa: BLE001 -- see comment above
+            evidence = {}
+            evidence_failure = f"deepseek evidence pass: {error}"
+        else:
+            evidence_failure = (
+                None if evidence else "deepseek evidence pass: returned no usable rows"
+            )
+        sources = _apply_deepseek_evidence(sources, evidence)
+    else:
+        evidence_failure = None
     return SearchResponse(
         provider="deepseek",
         auth_mode="api-key",
         sources=sources,
         answer=answer,
         request_id=str(response.headers.get("x-request-id") or "").strip() or None,
+        failures=[evidence_failure] if evidence_failure else [],
     )
+
+
+def _apply_deepseek_evidence(
+    sources: list[SearchSource], evidence: dict[str, dict[str, Any]]
+) -> list[SearchSource]:
+    """Merge the evidence rows onto the sources, then rank them by relevance.
+
+    Ordering is the point of the pass: DeepSeek's own result order is opaque,
+    while a judged relevance lets the model fetch the two or three pages that
+    matter instead of reading all ten. Sources the pass did not cover keep their
+    relative order at the END rather than being dropped -- the pass is a top-N
+    view, not a verdict on the rest of the page set.
+    """
+    scored: list[SearchSource] = []
+    unscored: list[SearchSource] = []
+    for source in sources:
+        row = evidence.get(source.url)
+        if not row:
+            unscored.append(source)
+            continue
+        quote = str(row.get("quote") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        relevance = row.get("relevance")
+        if isinstance(relevance, bool) or not isinstance(relevance, (int, float)):
+            relevance = None
+        scored.append(
+            source.model_copy(
+                update={
+                    # A verbatim quote is a real snippet; the summary is the
+                    # fallback when a page could not be quoted.
+                    "snippet": quote or summary or source.snippet,
+                    "relevance": int(relevance) if relevance is not None else None,
+                }
+            )
+        )
+    scored.sort(
+        key=lambda item: item.relevance if item.relevance is not None else -1, reverse=True
+    )
+    return [*scored, *unscored]
 
 
 async def _search_brave(

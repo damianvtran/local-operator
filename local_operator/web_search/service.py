@@ -245,7 +245,12 @@ class WebSearchService:
                 if not response.sources and not (response.answer or "").strip():
                     failures.append(f"{provider_id}: returned no results")
                     continue
-                response.failures = list(failures)
+                # The provider's OWN failures are preserved alongside the
+                # chain's. Replacing them hid a provider's partial degradation
+                # (a search that succeeded but whose optional enrichment pass
+                # failed) at exactly the moment the caller needed to know why
+                # the result looked thinner than expected.
+                response.failures = [*failures, *response.failures]
                 return response
 
         summary = "; ".join(failures) or "no candidates"
