@@ -302,8 +302,20 @@ def _deepseek_payload(
                 "content": items
                 if items is not None
                 else [
-                    {"type": "web_search_result", "url": "https://example.com/a", "title": "A"},
-                    {"type": "web_search_result", "url": "https://example.com/b", "title": "B"},
+                    {
+                        "type": "web_search_result",
+                        "url": "https://example.com/a",
+                        "title": "A",
+                        # DeepSeek always returns this opaque field; the evidence
+                        # pass depends on replaying it untouched.
+                        "encrypted_content": "opaque-page-content",
+                    },
+                    {
+                        "type": "web_search_result",
+                        "url": "https://example.com/b",
+                        "title": "B",
+                        "encrypted_content": "opaque-page-content-b",
+                    },
                 ],
             },
             {"type": "text", "text": answer, "citations": citations},
@@ -496,3 +508,198 @@ async def test_deepseek_transport_requires_a_key(tmp_path, monkeypatch) -> None:
             await PROVIDERS["deepseek"].search(
                 client, credentials, WebSearchSettings(), "query", 5
             )
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek per-page evidence pass (the snippet source for this provider)
+# ---------------------------------------------------------------------------
+
+
+def _deepseek_blocks_payload() -> dict:
+    return _deepseek_payload()
+
+
+def test_deepseek_evidence_parser_skips_unparseable_lines() -> None:
+    from local_operator.web_search.providers import parse_deepseek_evidence
+
+    rows = parse_deepseek_evidence(
+        '```json\n'
+        '{"url": "https://example.com/a", "relevance": 92, "summary": "About A", "quote": "Verbatim A"}\n'
+        '{"url": "https://example.com/b", "relevance": 88, "quote": "Verbatim B"}\n'
+        'not json at all\n'
+        '{"url": "https://example.com/a", "relevance": 10}\n'
+    )
+
+    # First row for a URL wins, and a broken line costs only that line.
+    assert set(rows) == {"https://example.com/a", "https://example.com/b"}
+    assert rows["https://example.com/a"]["relevance"] == 92
+
+
+def test_deepseek_evidence_merge_fills_snippets_and_ranks() -> None:
+    from local_operator.web_search.models import SearchSource
+    from local_operator.web_search.providers import _apply_deepseek_evidence
+
+    sources = [
+        SearchSource(title="A", url="https://example.com/a"),
+        SearchSource(title="B", url="https://example.com/b"),
+        SearchSource(title="C", url="https://example.com/c"),
+    ]
+    merged = _apply_deepseek_evidence(
+        sources,
+        {
+            "https://example.com/b": {"relevance": 95, "quote": "B is the relevant one"},
+            "https://example.com/a": {"relevance": 40, "summary": "A is tangential"},
+        },
+    )
+
+    # Ranked by relevance, and the uncovered source is kept at the end rather
+    # than dropped: the pass is a top-N view, not a verdict on the rest.
+    assert [s.url for s in merged] == [
+        "https://example.com/b",
+        "https://example.com/a",
+        "https://example.com/c",
+    ]
+    assert merged[0].snippet == "B is the relevant one"
+    assert merged[1].snippet == "A is tangential"  # summary is the fallback
+    assert merged[0].relevance == 95
+    assert merged[2].relevance is None
+
+
+@pytest.mark.asyncio
+async def test_deepseek_evidence_pass_runs_a_second_turn_and_replays_blocks(tmp_path) -> None:
+    from local_operator.web_search import providers as module
+
+    module.reset_deepseek_balance_cache_for_tests()
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(200, json=_deepseek_blocks_payload())
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"url": "https://example.com/b", "relevance": 91, '
+                            '"summary": "About B", "quote": "Verbatim from B"}\n'
+                        ),
+                    }
+                ],
+                "usage": {"input_tokens": 240, "output_tokens": 300},
+            },
+        )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["deepseek"].search(
+            client,
+            credentials,
+            WebSearchSettings(deepseek_evidence=True),
+            "latest python",
+            5,
+        )
+
+    assert len(seen) == 2
+    replay = seen[1]["messages"]
+    assert replay[0]["content"][0]["text"] == seen[0]["messages"][0]["content"][0]["text"]
+    # The assistant turn is replayed verbatim -- the opaque encrypted_content is
+    # what makes DeepSeek restore the page text, so it must survive the trip.
+    replayed_items = [
+        item
+        for block in replay[1]["content"]
+        if block["type"] == "web_search_tool_result"
+        for item in block["content"]
+    ]
+    assert replayed_items[0]["encrypted_content"] == "opaque-page-content"
+    # The search turn was trimmed: the triage turn writes the descriptive text.
+    assert seen[0]["max_tokens"] == module.DEEPSEEK_SEARCH_ANSWER_MAX_TOKENS
+    assert response.sources[0].url == "https://example.com/b"
+    assert response.sources[0].snippet == "Verbatim from B"
+    assert response.sources[0].relevance == 91
+
+
+@pytest.mark.asyncio
+async def test_deepseek_evidence_failure_leaves_the_sources_intact(tmp_path) -> None:
+    from local_operator.web_search import providers as module
+
+    module.reset_deepseek_balance_cache_for_tests()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if len(handler.calls) == 0:  # type: ignore[attr-defined]
+            handler.calls.append(1)  # type: ignore[attr-defined]
+            return httpx.Response(200, json=_deepseek_blocks_payload())
+        return httpx.Response(500, json={"error": {"message": "evidence boom"}})
+
+    handler.calls = []  # type: ignore[attr-defined]
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["deepseek"].search(
+            client,
+            credentials,
+            WebSearchSettings(deepseek_evidence=True),
+            "latest python",
+            5,
+        )
+
+    assert len(response.sources) == 2
+    assert all(source.snippet is None for source in response.sources)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_evidence_is_off_by_default(tmp_path) -> None:
+    from local_operator.web_search import providers as module
+
+    module.reset_deepseek_balance_cache_for_tests()
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_deepseek_payload())
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await PROVIDERS["deepseek"].search(
+            client, credentials, WebSearchSettings(), "latest python", 5
+        )
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_evidence_failure_is_reported_not_swallowed(tmp_path) -> None:
+    """A failed evidence pass must say so, while keeping the search usable."""
+    from local_operator.web_search import providers as module
+
+    module.reset_deepseek_balance_cache_for_tests()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if len(handler.calls) == 0:  # type: ignore[attr-defined]
+            handler.calls.append(1)  # type: ignore[attr-defined]
+            return httpx.Response(200, json=_deepseek_payload())
+        return httpx.Response(500, json={"error": {"message": "evidence boom"}})
+
+    handler.calls = []  # type: ignore[attr-defined]
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "sk-test-not-real")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["deepseek"].search(
+            client,
+            credentials,
+            WebSearchSettings(deepseek_evidence=True),
+            "latest python",
+            5,
+        )
+
+    assert len(response.sources) == 2
+    assert any("evidence pass" in note for note in response.failures)

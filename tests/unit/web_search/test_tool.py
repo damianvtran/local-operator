@@ -282,3 +282,46 @@ async def test_a_disabled_search_refuses_per_call(tmp_path, monkeypatch) -> None
     # Already correct before this round, and pinned so it stays the shape
     # `web_fetch`'s refusal was brought into line with (UX round 1, U3).
     assert result.details is None
+
+
+def test_model_reported_evidence_is_rendered_and_labelled_as_such() -> None:
+    """A judged relevance must be visible AND flagged as model-reported.
+
+    Grounding checks put the DeepSeek evidence quotes at roughly three quarters
+    verbatim, so the rendering has to say they are not page text -- otherwise a
+    model will quote them as if they were.
+    """
+    response = SearchResponse(
+        provider="deepseek",
+        auth_mode="api-key",
+        sources=[
+            SearchSource(
+                title="Adverse Media Categories",
+                url="https://docs.example.com/adverse-media-categories",
+                snippet="The Financial Crime Risks group contains 28 AML-relevant themes.",
+                relevance=98,
+            ),
+            SearchSource(title="Unscored", url="https://example.com/unscored"),
+        ],
+    )
+
+    rendered, omitted = _render_response(response)
+
+    assert omitted == 0
+    assert "[relevance 98/100] Adverse Media Categories" in rendered
+    assert "The Financial Crime Risks group contains 28 AML-relevant themes." in rendered
+    assert "model-reported" in rendered
+    assert "Unscored" in rendered
+
+
+def test_sources_without_evidence_keep_the_plain_footer() -> None:
+    response = SearchResponse(
+        provider="duckduckgo",
+        auth_mode="credential-free",
+        sources=[SearchSource(title="Plain", url="https://example.com", snippet="Snippet")],
+    )
+
+    rendered, _ = _render_response(response)
+
+    assert "[relevance" not in rendered
+    assert "Snippets are intentionally capped" in rendered

@@ -36,7 +36,13 @@ PROVIDER_IDS: tuple[SearchProviderId, ...] = (
 
 
 class SearchSource(BaseModel):
-    """One normalized result from any search provider."""
+    """One normalized result from any search provider.
+
+    ``relevance`` is populated only by providers that return a per-page
+    judgement (currently DeepSeek's evidence pass). It is a 0-100 hint for
+    ordering WHICH source to fetch next, never a filter: a provider that does
+    not supply it leaves it ``None`` and the renderer omits it.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -44,6 +50,7 @@ class SearchSource(BaseModel):
     url: str
     snippet: str | None = None
     published_date: str | None = None
+    relevance: int | None = None
 
 
 class SearchResponse(BaseModel):
@@ -76,6 +83,10 @@ class WebSearchSettings(BaseModel):
     providers: list[SearchProviderId] = Field(default_factory=lambda: ["duckduckgo", "tavily"])
     timeout_seconds: float = 20.0
     searxng_endpoint: str = ""
+    #: Run the DeepSeek per-page evidence pass after a native search, so every
+    #: source carries a verbatim quote and a relevance score. Off by default:
+    #: it is a second model turn (~4-11s measured) on top of the search.
+    deepseek_evidence: bool = False
 
 
 DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
@@ -87,4 +98,5 @@ DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
     "providers": ["duckduckgo", "tavily"],
     "timeout_seconds": 20.0,
     "searxng_endpoint": "",
+    "deepseek_evidence": False,
 }

@@ -40,6 +40,16 @@ _SOURCE_FOOTER = (
     "Snippets are intentionally capped. To read one result in full, use "
     "`web_fetch` (or `read <url>`) on its URL."
 )
+#: Used when a provider attached a judged relevance score. Measured on the
+#: DeepSeek evidence pass, quotes verified verbatim against the live page in
+#: about three quarters of checkable cases (two more were unverifiable: a 403 and
+#: a JS-rendered page) -- so they are a fetch-priority signal, not citable page
+#: text, and the wording must say so or a model will quote them as if they were.
+_EVIDENCE_FOOTER = (
+    "Relevance scores and quotes come from the provider's page-evidence pass and "
+    "are model-reported: use them to choose what to fetch, and apply "
+    "`web_fetch` (or `read <url>`) to a page before relying on its exact wording."
+)
 
 
 class WebSearchParams(BaseModel):
@@ -118,6 +128,14 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
     if response.answer:
         sections.append(_clip(response.answer, MODEL_ANSWER_MAX_CHARS))
 
+    # One footer for the whole response: a mixed set of sources would otherwise
+    # suggest some snippets are page text and others are not.
+    footer = (
+        _EVIDENCE_FOOTER
+        if any(source.relevance is not None for source in response.sources)
+        else _SOURCE_FOOTER
+    )
+
     failures = ""
     if response.failures:
         failures = "Fallbacks: " + _clip("; ".join(response.failures), 600)
@@ -139,12 +157,20 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
             continue
         index = len(source_blocks) + 1
         title = _clip(source.title, MODEL_TITLE_MAX_CHARS)
-        lines = [f"{index}. {title}", f"   {source.url}"]
+        # A judged relevance is a fetch-priority signal, so it sits on the title
+        # line where the model reads it before choosing a URL. Providers that do
+        # not judge pages leave it None and render exactly as before.
+        heading = (
+            f"{index}. [relevance {source.relevance}/100] {title}"
+            if source.relevance is not None
+            else f"{index}. {title}"
+        )
+        lines = [heading, f"   {source.url}"]
         if source.snippet:
             lines.append(f"   {_clip(source.snippet, MODEL_SNIPPET_MAX_CHARS)}")
         block = "\n".join(lines)
         trial_sources = "Sources:\n" + "\n".join([*source_blocks, block])
-        tail = "\n\n".join(part for part in (failures, _SOURCE_FOOTER) if part)
+        tail = "\n\n".join(part for part in (failures, footer) if part)
         trial = "\n\n".join([*sections, trial_sources, tail])
         # Reserve enough room for the explicit omission marker so the hard cap
         # never silently cuts a URL or leaves a half-result in model context.
@@ -163,7 +189,7 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
         sections.append(f"… {_omission_note(omitted_url, omitted_budget, more=False)}")
     if failures:
         sections.append(failures)
-    sections.append(_SOURCE_FOOTER)
+    sections.append(footer)
     rendered = "\n\n".join(sections)
     # The source-block budget above should make this unreachable, but the cap is
     # an invariant at the model boundary even if future sections are added.
