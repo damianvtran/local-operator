@@ -607,8 +607,23 @@ input:disabled {
  * estimated. Every string this slot can hold is generated from the SAME
  * template (`protocol.EXTENSION_UPDATE_NOTE`), so the wrap depends only on the
  * digit count of the two versions and not on which versions they are. A version
- * component long enough to push it to a fourth line would resize the card,
- * which is why the test pins the wrap and not just the reserve. */
+ * component long enough to push it to a fourth line would resize the card.
+ *
+ * WHAT PINS EACH HALF, because they are not the same check and an earlier
+ * revision of this comment claimed the wrap was pinned when it was not (review
+ * R1-5 / design D1):
+ *
+ *   * CI pins the RESERVE only — `tests/pure.test.mjs` asserts the declared
+ *     min-height is three line-boxes at the declared line-height, which is
+ *     arithmetic on the CSS and would pass unchanged if the sentence started
+ *     wrapping to four lines.
+ *   * The WRAP and the no-resize invariant are pinned by
+ *     `extension/scripts/popup-states-shot.mjs`, the only place with a layout
+ *     engine: it renders the advisory at 300x600 dpr=2 and FAILS if the
+ *     measured line count differs from `reserve / line-height`, or if the card
+ *     is any taller with the advisory than without it. That script is not run by
+ *     a workflow (it needs a real Chrome), so the wrap is verified whenever
+ *     evidence is reproduced rather than on every push. */
 #connected-advisory {
   min-height: 54px;
 }

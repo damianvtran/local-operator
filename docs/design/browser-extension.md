@@ -230,7 +230,7 @@ plus:
 PROTO_VERSION = 1            # the newest proto this daemon speaks
 MIN_SUPPORTED_PROTO = 1      # the oldest it will still drive — a WINDOW, not equality
 EXPECTED_EXTENSION_VERSION = "0.1.13"   # advisory only; pinned to extension/manifest.json by a test
-OWNERSHIP_MIN_EXTENSION_VERSION = "0.1.10"  # the first release carrying owner_* (PR #798)
+OWNERSHIP_MIN_EXTENSION_VERSION = "0.1.9"  # the first TREE carrying owner_* (PR #798, `ee146fb73`)
 class ErrorCode(StrEnum): ...
 ```
 
@@ -249,6 +249,18 @@ and nothing is blocked. `OWNERSHIP_MIN_EXTENSION_VERSION` is a diagnostic
 discriminator, not a gate: a bare `internal` from `owner_recover` means "this
 extension predates ownership" below it and "this worker has stopped answering"
 at or above it, and the two need opposite remedies.
+
+Its value is the first extension TREE that ships the lifecycle, not the first
+store RELEASE: `git show ee146fb73:extension/manifest.json` reads `0.1.9` while
+the same commit already declares `owner_recover`/`owner_finish`/`owner_retain`/
+`owner_release` in `extension/src/protocol.gen.ts`. 0.1.9 was never submitted to
+the store (see `docs/store/release-record.md` — the manifest stopped naming one
+tree, which is why 0.1.10 exists), but an unpacked build of that tree is a peer
+the runtime can still meet on the sideload path this document treats as
+supported. Classifying it as PRE-ownership would be the worst of both: it would
+hide a real wedge behind a silent degradation AND take its tab off the
+``owner_*`` path. So a `0.1.9` peer is ownership-CAPABLE, and the boundary is
+tested from both sides.
 
 A generator, `python -m local_operator.browser_bridge.gen_ts`, emits
 `extension/src/protocol.gen.ts` (discriminated unions + the ErrorCode enum +
@@ -1163,11 +1175,27 @@ Out of scope v1, and why:
   meaning of an existing frame shape or an existing method's semantics, and that
   commit must state, for the proto it drops, that a peer at that proto either
   behaves correctly or receives a typed refusal on exactly the affected commands
-  — never a silently wrong answer.** Additive optional fields, new `ErrorCode`s
-  the peer only emits, and new events an old peer harmlessly drops keep the
-  floor where it is. The floor is the ONLY thing that may make an older peer stop
-  being driven; `EXPECTED_EXTENSION_VERSION` and every version-comparison
-  advisory are notes and must never be promoted into a refusal.
+  — never a silently wrong answer. AND that commit MUST raise the floor above the
+  proto it breaks, in the same commit, together with the `PROTO_VERSION` bump
+  that expresses the same act from the other side.** The second half is not
+  pedantry: permission alone is a rule a future bumper can follow verbatim —
+  change a frame, bump `PROTO_VERSION` to 2, leave the floor at 1 — and then the
+  window admits a proto-1 peer that receives the changed frame and misreads it,
+  which is the silently-wrong-answer case the rule forbids, reached by obeying
+  the rule. Nothing in code or CI can detect that today; the sentence is the
+  guard. Additive optional fields, new `ErrorCode`s the peer only emits, and new
+  events an old peer harmlessly drops keep the floor where it is. The floor is
+  the ONLY thing that may make an older peer stop being driven;
+  `EXPECTED_EXTENSION_VERSION` and every version-comparison advisory are notes
+  and must never be promoted into a refusal.
+- **`HelloAck(proto=min(hello.proto, PROTO_VERSION))` is a HOOK, not a
+  guarantee.** It tells a peer which proto the pair will speak, and nothing
+  gates on it yet: no daemon→extension frame is restricted by `peer_proto`, so
+  once the window is wider than one the ack names a proto this daemon does not
+  hold itself to. That is deliberate — a width-1 window needs no gating, and
+  inventing a gate nothing exercises would be a promise with no test — but a
+  future frame that must not reach a proto-1 peer has to add that gate here, at
+  the send site, rather than assuming the ack did it.
 - **The trap that decides which of those applies**: the daemon is STRICT about
   frames — `WireModel` is `extra="forbid"` — and a `Response.model_validate`
   failure is a silent `continue` in the receive loop. So an extension that adds

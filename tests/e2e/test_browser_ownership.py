@@ -35,10 +35,13 @@ from tests.e2e.watchdog import bounded
 
 EXTENSION = Path(__file__).resolve().parents[2] / "extension"
 
-#: The version the disposable peer reports. Below `OWNERSHIP_MIN_EXTENSION_VERSION`
-#: (0.1.10) on purpose: `oldExtension=true` makes every `owner_*` method throw a
-#: bare `internal`, which for a PRE-OWNERSHIP build is literally true (it has no
-#: such methods), so the two halves of the fixture agree about what peer it is.
+#: The version the disposable peer reports. Below the floor named by
+#: `OWNERSHIP_MIN_EXTENSION_VERSION` on purpose (`0.1.9` as of review R1-1):
+#: `oldExtension=true` makes every `owner_*` method throw a bare `internal`,
+#: which for a PRE-OWNERSHIP build is literally true (it has no such methods),
+#: so the two halves of the fixture agree about what peer it is. Kept as a
+#: literal rather than imported so the fixture keeps pinning a version that is
+#: genuinely below any floor the runtime may move to.
 EXTENSION_VERSION = "0.1.8"
 
 

@@ -236,6 +236,21 @@ const STATES = {
     extension_expected_version: "0.1.13",
     extension_update_available: true,
   },
+  // The LONGEST realistic pair the sentence can hold, so the wrap assertion
+  // below is made against the worst case rather than the comfortable one: two
+  // three-component versions with the two-digit minor Android-style releases
+  // reach (0.10.x vs 0.10.y) are the longest this template plausibly sees, and
+  // both components are longer than the pair above by one character each. If
+  // the sentence grew past the reserve for any pair, this is the pair that shows
+  // it — and the assertion fails loudly instead of the popup silently resizing.
+  "connected-update-long": {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    extension_version: "0.10.100",
+    extension_expected_version: "0.10.131",
+    extension_update_available: true,
+  },
 };
 
 /** Session-storage fixtures, keyed like STATES.
@@ -354,6 +369,9 @@ async function main() {
           advisoryText: slot ? slot.textContent.trim() : null,
           advisoryHeight: slot ? slot.getBoundingClientRect().height : null,
           advisoryReserve: slot ? getComputedStyle(slot).minHeight : null,
+          // The slot's OWN line-height, so the wrap assertion below compares
+          // against the rendered metric rather than a number repeated here.
+          advisoryLineHeight: slot ? getComputedStyle(slot).lineHeight : null,
           advisoryVisible: !!slot && !slot.classList.contains("hidden") &&
             slot.getBoundingClientRect().height > 0,
           advisoryLines: slot
@@ -386,6 +404,7 @@ async function main() {
       await browser.send("Target.closeTarget", { targetId: page.targetId });
     }
 
+    assertAdvisoryWrap(report);
     console.log(JSON.stringify(report, null, 2));
   } finally {
     teardown();
@@ -420,6 +439,74 @@ function sweepProfile(profile) {
   }
   rmSync(profile, { recursive: true, force: true });
   return true;
+}
+
+/** Fail loudly if the advisory's rendered wrap outgrows its reserved slot.
+ *
+ * The reserved slot is a fixed 54px and has ZERO slack by design: three lines at
+ * 12px/1.5 IS 54px. A fourth line therefore does not merely look cramped, it
+ * grows the Connected card and resizes the popup WINDOW under the user's cursor
+ * at the moment the advisory appears — the exact defect the reservation exists
+ * to prevent. Nothing else measures this: `pure.test.mjs` can only check the
+ * reserve against an assumed line-height (a tautology of the CSS), and the
+ * popup-render harness has no layout engine. So the assertion lives here, where
+ * the real engine is, and it is the ONLY thing that pins the wrap (review R1-5 /
+ * design D1).
+ *
+ * It also asserts the invariant the whole slot exists for, from the same run:
+ * the card height with the advisory is identical to the card height without it.
+ *
+ * Not wired into CI (the script needs a real Chrome on PATH, which the Linux
+ * runners do not have a documented install for), so a wrap regression is caught
+ * by whoever next reproduces evidence — which the comment in popup.css now says
+ * plainly instead of claiming a test does it.
+ */
+function assertAdvisoryWrap(report) {
+  const baseline = report.states["connected"];
+  if (!baseline) {
+    throw new Error("refusing to claim the wrap is pinned: no `connected` state was captured");
+  }
+  // Every state whose slot actually holds the sentence — i.e. every state the
+  // template can be rendered into, LONGEST realistic pair included.
+  const withText = Object.entries(report.states).filter(([, s]) => s.advisoryLines > 0);
+  if (withText.length === 0) {
+    // A build that predates the slot (the before-frame): there is no wrap to
+    // assert, so say so rather than passing silently as if it had been checked.
+    // On STDERR, because stdout is the report: a note that corrupts the JSON a
+    // caller parses is worse than no note.
+    console.error("advisory slot holds no text in this build — wrap assertion skipped");
+    return;
+  }
+  for (const [name, state] of withText) {
+    if (!state.advisoryVisible) {
+      throw new Error(
+        `the advisory did not render in \`${name}\`: ${JSON.stringify(state)}`,
+      );
+    }
+    const reserve = parseFloat(state.advisoryReserve);
+    const lineHeight = parseFloat(state.advisoryLineHeight);
+    const reserveLines = reserve / lineHeight;
+    if (
+      !Number.isFinite(reserveLines) ||
+      state.advisoryLines !== reserveLines ||
+      state.advisoryHeight !== reserve
+    ) {
+      throw new Error(
+        `the advisory no longer fits its reserved slot in \`${name}\` — the wrap is ` +
+          "taller than the reservation, so the card (and the popup window) grows " +
+          `when the sentence appears. advisoryLines=${state.advisoryLines} ` +
+          `reserve=${state.advisoryReserve} lineHeight=${state.advisoryLineHeight} ` +
+          `(${reserveLines} lines) advisoryHeight=${state.advisoryHeight} ` +
+          `text=${JSON.stringify(state.advisoryText)}`,
+      );
+    }
+    if (state.cardHeight !== baseline.cardHeight) {
+      throw new Error(
+        `the advisory RESIZED the card in \`${name}\`: ` +
+          `connected=${baseline.cardHeight} ${name}=${state.cardHeight}`,
+      );
+    }
+  }
 }
 
 /** Open the popup as a page with /health stubbed BEFORE any script runs, so the

@@ -43,10 +43,12 @@ from local_operator.browser_bridge.protocol import (
     extension_older,
     extension_update_note,
     parse_extension_version,
+    proto_supported,
 )
 from local_operator.browser_bridge.resources import (
     BrowserOwnershipError,
     BrowserResource,
+    cleanup_disposition,
     read_inventory,
 )
 
@@ -84,6 +86,28 @@ def test_every_proto_in_the_window_handshakes(tmp_path: Path, proto: int) -> Non
             assert ack["event"] == "hello_ack"
             assert app.state.bridge.link.peer_proto == proto
             assert app.state.bridge.link.extension_version == "0.1.8"
+
+
+def test_the_acceptance_rule_is_a_window_not_an_equality() -> None:
+    """R1-6: at today's width (`MIN_SUPPORTED_PROTO == PROTO_VERSION == 1`) the
+    window and the equality test it replaced accept EXACTLY the same set, so no
+    handshake test can tell them apart — the test above fails under a revert on
+    the absent `peer_proto` attribute, not on window semantics.
+
+    So the rule is pinned where it is decidable: on a synthetic
+    ``(low, proto, high)`` triple, where an equality reintroduced as
+    ``proto != high`` accepts only 3 and fails on 1 and 2. The bounds are passed
+    explicitly rather than read from this module, which is also how `daemon.py`
+    calls it — so a monkeypatched window (as the negotiation test above opens)
+    moves what the daemon accepts.
+    """
+    low, high = 1, 3
+    accepted = [proto for proto in range(-1, 6) if proto_supported(proto, low=low, high=high)]
+    assert accepted == [1, 2, 3], "the window is inclusive on BOTH edges"
+    # The live window, and the shape of a revert.
+    assert proto_supported(PROTO_VERSION, low=MIN_SUPPORTED_PROTO, high=PROTO_VERSION)
+    assert not proto_supported(PROTO_VERSION + 1, low=MIN_SUPPORTED_PROTO, high=PROTO_VERSION)
+    assert not proto_supported(MIN_SUPPORTED_PROTO - 1, low=MIN_SUPPORTED_PROTO, high=PROTO_VERSION)
 
 
 @pytest.mark.parametrize(
@@ -314,6 +338,32 @@ BARE_INTERNAL = BridgeError(
 )
 
 
+def test_the_ownership_floor_is_the_first_tree_that_shipped_the_lifecycle() -> None:
+    """R1-1: the floor named 0.1.10, one release ABOVE the first tree carrying
+    `owner_*`.
+
+    `git show ee146fb73:extension/manifest.json` reads `0.1.9`, and that same
+    commit already declares `owner_recover|owner_finish|owner_retain|
+    owner_release` in `extension/src/protocol.gen.ts`. 0.1.9 was never submitted
+    to the store, but an unpacked build of it is a peer this runtime meets, and
+    classifying it pre-ownership gives it the SILENT degrade instead of the
+    OFF/ON remedy — the misdiagnosis this change removes, mirrored.
+
+    The boundary is asserted from BOTH sides because the arms around it jump
+    0.1.8 -> 0.1.10 and would pass with either value.
+    """
+    assert OWNERSHIP_MIN_EXTENSION_VERSION == "0.1.9", (
+        "the floor must name the first TREE carrying owner_* — see the provenance "
+        "in protocol.py; a value one release high silently degrades a capable peer"
+    )
+    assert extension_older("0.1.8", OWNERSHIP_MIN_EXTENSION_VERSION) is True
+    assert extension_older("0.1.9", OWNERSHIP_MIN_EXTENSION_VERSION) is False
+    assert (
+        extension_older(OWNERSHIP_MIN_EXTENSION_VERSION, OWNERSHIP_MIN_EXTENSION_VERSION) is False
+    )
+    assert extension_older(OWNERSHIP_MIN_EXTENSION_VERSION, EXPECTED_EXTENSION_VERSION)
+
+
 @pytest.mark.asyncio
 async def test_pre_ownership_peer_degrades_instead_of_demanding_an_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -361,15 +411,19 @@ async def test_a_durable_obligation_keeps_the_honest_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "version",
-    ["0.1.10", "0.1.12", EXPECTED_EXTENSION_VERSION],
-    ids=["live-store", "pending", "head"],
+    ["0.1.9", "0.1.10", "0.1.12", EXPECTED_EXTENSION_VERSION],
+    ids=["first-ownership-tree", "live-store", "pending", "head"],
 )
 async def test_a_current_extension_is_reported_as_wedged_not_old(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
-    """The same bare-`internal` shape, opposite remedy. 0.1.10 DOES ship
-    `owner_*`, so telling its owner to update named an action that could not
-    help; the toggle does."""
+    """The same bare-`internal` shape, opposite remedy.
+
+    Every version here IS ownership-capable, so telling its owner to update
+    named an action that could not help; the toggle does. 0.1.9 is included on
+    purpose: it is the FLOOR (R1-1), and the one member of this list that the
+    store never served — a build of that tree must reach the wedge arm, not the
+    silent degrade."""
     peer = _Peer(BARE_INTERNAL)
     _install_peer(monkeypatch, peer)
     _install_peer_identity(monkeypatch, version)
@@ -480,9 +534,103 @@ async def test_degraded_finish_closes_the_recorded_surface(
     closed = await resource.finish(resource.generation, "completed")
     assert closed.state == "closed"
     assert resource.record["surface_id"] == ""
-    assert ("close", {"tab": "bridge:42:capability"}) in peer.calls
+    close_params = next(params for method, params in peer.calls if method == "close")
+    assert close_params["tab"] == "bridge:42:capability"
+    # R1-2: the tab capability ALONE is refused by a released peer on any
+    # surface carrying an allocation, so the close must carry the identity
+    # params the docstring promises are never forked away.
+    assert close_params["owner_proof"], "the identity params are not forked by the fallback"
+    assert close_params["allocation_id"]
     owner_verbs = [method for method, _ in peer.calls if method.startswith("owner_")]
     assert owner_verbs == ["owner_recover"], "only the probe may run: no lifecycle verb exists"
+
+
+@pytest.mark.asyncio
+async def test_degraded_finish_survives_a_peer_that_enforces_the_owner_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2, as a regression rather than a shape assertion.
+
+    The peer below models the RELEASED extension verbatim:
+    `extension/src/commands/nav.ts` throws `owner_refused` / "owner-aware client
+    required" when a `close` names a surface with an `allocationId` and no
+    `owner_proof` — and every surface this flow opens carries one, because
+    `_browser_identity_params` folds `allocation_id` into every command from the
+    same `params()` this method must pass.
+
+    So the one-argument form did not merely look wrong: it left the tab OPEN and
+    the record `pending` on the very peer the fallback exists to keep working
+    (reproduced as `finish='pending'` for 0.1.9 before R1-1, and reachable by any
+    future misclassification after it).
+    """
+
+    class _Guarded(_Peer):
+        #: The peer's OWN surface record carries the allocation — the extension
+        #: opened this tab for an owner, so it wants that owner's proof back.
+        #: The guard is on the SURFACE, not on the close's params: a close that
+        #: repeats neither `allocation_id` nor `owner_proof` is refused all the
+        #: same, which is exactly why dropping the params is fatal.
+        allocated = True
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append((method, params))
+            if method == "owner_recover":
+                raise BARE_INTERNAL
+            if method == "close":
+                if self.allocated and not params.get("owner_proof"):
+                    raise BridgeError(ErrorCode.OWNER_REFUSED, "owner-aware client required", {})
+                return {}
+            raise AssertionError(method)
+
+    peer = _Guarded()
+    _install_peer(monkeypatch, peer)
+    _install_peer_identity(monkeypatch, "0.1.8")
+    directory = tmp_path / "synthetic"
+    resource = BrowserResource(directory, directory.name)
+    resource.initialize()
+    await resource.recover()
+    resource.remember("bridge:42:capability")
+    closed = await resource.finish(resource.generation, "completed")
+    assert closed.state == "closed", closed.detail
+    assert resource.record["surface_id"] == ""
+    # …and the guard really does bite, so this test cannot pass by accident on a
+    # peer that accepts anything.
+    with pytest.raises(BridgeError):
+        await peer.call("close", {"tab": "bridge:42:capability"})
+
+
+@pytest.mark.asyncio
+async def test_degraded_finish_clears_the_unenforceable_retention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: a retention the extension never accepted must not outlive the tab.
+
+    A degraded `retain` is a LOCAL statement of intent, and `finish_degraded`
+    closes the tab — but the record kept `retention` set, so `cleanup_disposition`
+    read a SETTLED row as "retained: … the owning session must release it": a row
+    that is neither cleanable nor true, and the one place the operator looks to
+    find out whether anything was stranded.
+    """
+    peer = _Peer(BARE_INTERNAL)
+    _install_peer(monkeypatch, peer)
+    _install_peer_identity(monkeypatch, "0.1.8")
+    directory = tmp_path / "synthetic"
+    resource = BrowserResource(directory, directory.name)
+    resource.initialize()
+    await resource.recover()
+    resource.remember("bridge:42:capability")
+    resource.record["retention"] = "pending login"
+    resource._save()
+    assert cleanup_disposition(resource.record)[0] is False
+    assert cleanup_disposition(resource.record)[1].startswith("retained:")
+    closed = await resource.finish(resource.generation, "completed")
+    assert closed.state == "closed"
+    assert resource.record["retention"] == ""
+    settled, why = cleanup_disposition(resource.record)
+    assert not why.startswith(
+        "retained:"
+    ), "a settled row must not report a live retention for a tab that is closed"
+    assert settled is False
 
 
 @pytest.mark.asyncio
