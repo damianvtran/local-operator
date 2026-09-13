@@ -1037,6 +1037,25 @@ class AuthStore:
         except AuthStoreError:
             return None
 
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int) -> dict[str, Any] | None:
+        """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
+
+        The probe above collapses every unusable state into ``None``, which is
+        right for a caller that only needs a verdict and wrong for one that must
+        tell an operator WHERE to look: a token endpoint that could not be
+        reached and a grant the IdP rejected arrive as the same ``None``, and
+        they need different remedies. ``None`` still means the row is gone,
+        disabled, or not an OAuth credential; a refresh that failed raises
+        :class:`AuthStoreError` with the underlying transport or IdP error
+        chained on ``__cause__``, so a caller can classify on it.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or row.disabled_cause is not None:
+            return None
+        if row.credential_type != "oauth":
+            return None
+        return await self._ensure_oauth_fresh(row)
+
     # -- selection: stickiness + round-robin -------------------------------------
 
     def deprioritize_credential(self, provider: str, credential_id: int) -> None:

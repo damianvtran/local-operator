@@ -134,7 +134,29 @@ def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> 
             )
 
 
-def describe_authorization_failure(failure: BaseException) -> tuple[str, str]:
+def _could_not_reach_control_plane(failure: BaseException) -> bool:
+    """True when the failure, or anything it was chained from, is a transport error.
+
+    Reading the chain is load-bearing, not defensive: `RadientTunnels.request`
+    raises httpx errors directly for its own request, but a failure to reach the
+    *token endpoint* while refreshing the login arrives wrapped — AuthStore wraps
+    the refresh exception in an `AuthStoreError` with the transport error on
+    `__cause__`. A long outage reaches that path by definition, because the
+    access token always falls inside its refresh skew eventually, and flattening
+    it to "the login expired" is exactly the misdirection this classification
+    exists to remove.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = failure
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.TransportError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
     Only the poller sees the control plane's answer, and swallowing it is what
@@ -143,32 +165,20 @@ def describe_authorization_failure(failure: BaseException) -> tuple[str, str]:
     like a revoked tunnel or a lapsed plan and sent the operator to re-enroll a
     tunnel that was healthy.
 
-    The split rests on `RadientTunnels.request`, which raises httpx errors only
-    for transport trouble (DNS, connect, TLS, timeout) and converts every >=400
-    status, expired login, and unusable envelope into a ValueError. So an httpx
-    error means the control plane could not be *reached*, while a ValueError
-    means it answered and refused. Both details name the operator's own network
-    only when that is where the fault is.
+    So the question is only ever *did we reach Radient?*. `RadientTunnels.request`
+    raises httpx errors for transport trouble and a ValueError for everything the
+    control plane answered — a >=400 status, an unusable login, a malformed
+    envelope — and AuthStore, per `_could_not_reach_control_plane`, preserves the
+    transport error it hit while refreshing. The wording each reason produces
+    lives with the gateway, so one cause cannot drift into two sentences.
     """
-    if isinstance(failure, httpx.TransportError):
-        return (
-            UNREACHABLE,
-            "This computer cannot reach Radient to renew the relay authorization. "
-            "Check this computer's network connection; the tunnel reauthorizes by "
-            "itself once the control plane is reachable again.",
-        )
+    if _could_not_reach_control_plane(failure):
+        return UNREACHABLE
     if isinstance(failure, httpx.HTTPError):
-        return (
-            UNREACHABLE,
-            "The connector's request to Radient did not complete. "
-            "Check this computer's network connection.",
-        )
-    return (
-        REFUSED,
-        "Radient refused the connector's authorization check, so the relay stopped "
-        "serving. Check /login radient and this tunnel's billing in the Radient "
-        "console.",
-    )
+        # An httpx failure that is not a transport error still means no answer
+        # came back from Radient.
+        return UNREACHABLE
+    return REFUSED
 
 
 def active(record: Any) -> bool:
@@ -304,12 +314,24 @@ async def run() -> int:
                 nonlocal restart
                 assert gateway is not None
                 while not stop.is_set():
+                    # Read outside the try: this is this device's own file, not
+                    # Radient's answer, and an unreadable one must not be
+                    # recorded as a refusal. It ends the poll task, which the
+                    # supervisor treats as a restartable crash below.
+                    if config.load().get("stopped"):
+                        gateway.revoked = True
+                        stop.set()
+                        return
                     try:
-                        if config.load().get("stopped"):
-                            gateway.revoked = True
-                            stop.set()
-                            return
                         record = await api.request("GET", tunnel_path(value))
+                    except (ValueError, httpx.HTTPError) as failure:
+                        # The gateway's short authorization lease closes even
+                        # when the control-plane network is unavailable, so the
+                        # failure is recorded rather than discarded: the phone's
+                        # 503 and `lop tunnel status` both report which cause it
+                        # was. authorize() clears it on the next success.
+                        gateway.note_authorization_failure(authorization_failure_reason(failure))
+                    else:
                         # Configuration changes invalidate all signed requests
                         # from the old version. Restart for a new proof context,
                         # without ever guessing how to merge trust boundaries.
@@ -325,13 +347,6 @@ async def run() -> int:
                             stop.set()
                             return
                         gateway.authorize()
-                    except (ValueError, httpx.HTTPError) as failure:
-                        # The gateway's short authorization lease closes even
-                        # when the control-plane network is unavailable, so the
-                        # failure is recorded rather than discarded: the phone's
-                        # 503 and `lop tunnel status` both report which cause it
-                        # was. authorize() clears it on the next success.
-                        gateway.note_authorization_failure(*describe_authorization_failure(failure))
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
                     except TimeoutError:
@@ -342,16 +357,29 @@ async def run() -> int:
             stopping = asyncio.create_task(stop.wait())
             exited = asyncio.create_task(child.wait())
             try:
+                # `scanner` belongs in this set: a poller that dies of a failure
+                # this loop does not classify must stop the unit rather than
+                # leave a gateway serving with a lapsed lease and nothing left to
+                # renew it. Fail closed, then restart.
                 await asyncio.wait(
-                    {serve_task, stopping, exited}, return_when=asyncio.FIRST_COMPLETED
+                    {scanner, serve_task, stopping, exited},
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
                 stopping.cancel()
                 exited.cancel()
                 await asyncio.gather(stopping, exited, return_exceptions=True)
-            # Crashes and remote suspension are restartable. Only an explicit
-            # local stop exits successfully and stays stopped under supervision.
-            return 1 if restart or child.returncode is not None or serve_task.done() else 0
+                # Consume the poller's own failure when that is what ended the
+                # unit, and bound it: teardown must not wait on a poller parked
+                # inside a control-plane request.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.gather(scanner, return_exceptions=True), timeout=5
+                    )
+            # Crashes, a dead poller and remote suspension are restartable. Only
+            # an explicit local stop exits successfully and stays stopped under
+            # supervision.
+            return 1 if restart or not stop.is_set() else 0
     finally:
         if gateway is not None:
             gateway.revoked = True
