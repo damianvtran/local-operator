@@ -271,6 +271,38 @@ def test_a_host_that_does_not_carry_the_server_name_keeps_the_head() -> None:
     assert _detail_row(linear_payload[0]) == "network: cannot reach linear.example.com"
 
 
+def test_a_short_name_that_is_only_in_the_layer_wording_keeps_its_head() -> None:
+    """R4-4: the gate asks the phrase for its HOST, not whether it contains a name.
+
+    ``net``, ``reach`` and ``or`` all occur inside ``network: cannot reach …``, so
+    a substring test over the whole phrase dropped the head for a server the phrase
+    never names — the D2-3 harm one step over, since the card then named a host and
+    no server for its 10-second life. The gate now reads the host token the phrase
+    actually carries (the manager's own lead-ins), so only a name the host holds is
+    treated as already said.
+    """
+    for name in ("net", "reach", "or", "work", "the"):
+        outcome = McpStartupOutcome(
+            configured=(name, "github"),
+            connected=("github",),
+            failures={name: "network: cannot reach mcp.acme.com"},
+            network_failures=frozenset({name}),
+        )
+        payload = format_mcp_startup(outcome)
+        assert payload is not None
+        assert _detail_row(payload[0]) == f"failed: {name} — network: cannot reach mcp.acme.com"
+    # And a name the host DOES hold is still treated as already said (D1-2).
+    linear = McpStartupOutcome(
+        configured=("linear", "github"),
+        connected=("github",),
+        failures={"linear": "network: cannot reach linear.example.com"},
+        network_failures=frozenset({"linear"}),
+    )
+    linear_payload = format_mcp_startup(linear)
+    assert linear_payload is not None
+    assert _detail_row(linear_payload[0]) == "network: cannot reach linear.example.com"
+
+
 def test_a_hostless_transport_line_keeps_its_head() -> None:
     """The other half of D1-2, and the reason the marker selects the rung.
 
