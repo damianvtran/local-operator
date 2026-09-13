@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1094,7 +1095,7 @@ async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> 
     """
     from local_operator.session.transcript import usages_since_newest_shrink
 
-    def both(transcript: Transcript) -> tuple[list[dict], list[dict]]:
+    def both(transcript: Transcript) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         entries = transcript.entries()
         return usages_since_newest_shrink(entries), transcript.usages_since_compaction()
 

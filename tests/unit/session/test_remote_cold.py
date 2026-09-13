@@ -1246,10 +1246,14 @@ async def test_the_seeded_cost_is_a_marked_floor_not_an_exact_total(
     try:
         state = viewer.frontend_state
         assert state.cost_knowledge == CostKnowledge.FLOOR
-        assert state.cumulative_parent_cost == turn_cost("anthropic/claude-opus-5", newest)
-        assert state.cumulative_parent_cost != (
-            turn_cost("anthropic/claude-opus-5", _stamped(90_000))
-            + turn_cost("anthropic/claude-opus-5", newest)
+        newest_cost = turn_cost("anthropic/claude-opus-5", newest)
+        older_cost = turn_cost("anthropic/claude-opus-5", _stamped(90_000))
+        assert (
+            newest_cost is not None and older_cost is not None
+        ), "precondition: both readings must be priceable, or the comparison is vacuous"
+        assert state.cumulative_parent_cost == newest_cost
+        assert (
+            state.cumulative_parent_cost != older_cost + newest_cost
         ), "the floor prices the newest reading, it does not sum the transcript"
     finally:
         await viewer.dispose()
