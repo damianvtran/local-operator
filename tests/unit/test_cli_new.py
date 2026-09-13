@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import socket
 import subprocess
 import sys
 import types
@@ -576,15 +577,88 @@ def test_config_create_command_reports_the_path_it_wrote(
     assert str(created) in capsys.readouterr().out
 
 
-def test_serve_command_preserves_uvicorn_call() -> None:
+def test_serve_command_preserves_the_address_it_was_given() -> None:
     """uvicorn is imported lazily INSIDE serve_command (so `local-operator`
     starts without the server extra), so the patch target is the uvicorn
     module itself, not a `local_operator.cli.uvicorn` attribute that no
-    longer exists."""
-    with patch("uvicorn.run") as mock_run:
+    longer exists.
+
+    The call SHAPE changed when the daemon gained its rendezvous record: the
+    non-reload path binds the listener here and hands uvicorn the OPEN SOCKET
+    (``Server.run(sockets=[sock])``), because only the process that bound it
+    knows the port the kernel granted, and the record has to carry the port
+    actually bound. The assertions therefore moved to the two seams that now
+    carry the address — ``uvicorn.Config`` (host/port, and the ASGI app OBJECT
+    rather than an import string, since there is no reloader to re-import) and
+    the socket handed to ``Server.run``.
+
+    The binder is spied rather than exercised on the requested port on
+    purpose: what this test pins is that the REQUESTED host/port reach the
+    binder unchanged and that the RESOLVED port reaches uvicorn and the
+    announcement, and binding an ephemeral port keeps it independent of
+    whether 8000 happens to be free on the machine.
+    """
+    from local_operator.server import registry as serve_registry
+    from local_operator.server.app import app as asgi_app
+
+    requested: list[tuple[str, int]] = []
+    # Captured BEFORE the patch: a spy that looks the name up on the module at
+    # call time would find itself and recurse.
+    real_bind = cli._bind_serve_socket
+
+    def spy_bind(host: str, port: int) -> socket.socket:
+        requested.append((host, port))
+        return real_bind(host, 0)
+
+    with (
+        patch.object(cli, "_bind_serve_socket", spy_bind),
+        patch("uvicorn.Config") as mock_config,
+        patch("uvicorn.Server.run") as mock_run,
+    ):
         assert serve_command("localhost", 8000, False) == 0
+
+    assert requested == [("localhost", 8000)]
+    args, kwargs = mock_config.call_args
+    assert args[0] is asgi_app, "an explicit socket means no reloader, so the object is served"
+    sockets = mock_run.call_args.kwargs["sockets"]
+    try:
+        resolved_port = sockets[0].getsockname()[1]
+        assert resolved_port > 0, "the socket handed over is bound, not a placeholder"
+        assert kwargs == {
+            "host": "localhost",
+            "port": resolved_port,
+        }, "uvicorn is told the bound port"
+        # And the same number is what the app publishes its record with — read
+        # off the app OBJECT, which is the channel this path announces on (no
+        # environment: nothing this daemon spawns may inherit its address).
+        assert serve_registry.advertised_address(asgi_app) == ("localhost", resolved_port)
+    finally:
+        for listener in sockets:
+            listener.close()
+        # No lifespan runs in this test to consume the announcement, and `app`
+        # is a module-level singleton: clear it so a later test in the worker
+        # does not boot an app still announced on a dead ephemeral port.
+        state = asgi_app.state
+        if serve_registry.ANNOUNCED_STATE_ATTR in state:
+            del state[serve_registry.ANNOUNCED_STATE_ATTR]
+
+
+def test_serve_command_still_routes_reload_through_uvicorn_run() -> None:
+    """``--reload`` keeps ``uvicorn.run`` and the import string.
+
+    uvicorn only reloads an app given as an import string, and the reloader
+    re-imports it in a CHILD process, so the bound socket cannot be handed over
+    on that path — the port is resolved (for the record and the banner) and
+    uvicorn binds it in the child.
+    """
+    with patch("uvicorn.run") as mock_run:
+        assert serve_command("localhost", 8000, True) == 0
     mock_run.assert_called_once_with(
-        "local_operator.server.app:app", host="localhost", port=8000, reload=False
+        "local_operator.server.app:app",
+        host="localhost",
+        port=8000,
+        reload=True,
+        reload_excludes=[".venv"],
     )
 
 

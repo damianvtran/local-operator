@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 #: Bumped on any breaking change to control frames or web payloads. The
 #: runtime and daemon always ship together; the phone UI learns the
@@ -205,10 +205,64 @@ def runtime_must_complete(receipt_type: Any, consumers: Any) -> bool:
 #: literal is a wire constant; treat it as one.
 RUN_DIRNAME = "run/mobile"
 
+#: Directory (under the config root) holding one record per live ``serve``
+#: daemon — the rendezvous record that says WHICH install is listening WHERE.
+#:
+#: A second namespace rather than a second record shape in ``run/mobile``, and
+#: the reason is what a record MEANS to the code that reads it. Every reader of
+#: ``run/mobile`` — ``lop sessions``, the phone daemon, ``find_runtime_record``
+#: — treats each file there as a SESSION, and ``SessionRecord.kind`` is a
+#: ``Literal`` those readers pass through unvalidated, so a daemon record
+#: dropped in beside them would surface as a phantom session with an empty
+#: ``session_id`` and no error anywhere. The dirname is also a WIRE CONSTANT
+#: (see above) whose whole point is that one upgrade window has two binaries
+#: scanning it; widening what a file there may contain is the one change that
+#: constant cannot absorb. A daemon is also not a session: it outlives every
+#: session it hosts, holds no control socket a person attaches to, and is
+#: found by a different question ("which install is serving?").
+#:
+#: Keyed ``<pid>.json`` like the session records, because it is read the same
+#: way and for the same reason: a pid is a process's uniqueness token, and
+#: ``kill -9`` leaves exactly one file behind for the next scan to reap.
+SERVE_RUN_DIRNAME = "run/serve"
+
 #: How often a runtime rewrites its record's ``heartbeat_at``. The daemon
 #: treats a record as wedged (not merely quiet) after ``HEARTBEAT_TIMEOUT_S``.
+#: A ``serve`` daemon beats at the same interval — one freshness budget for
+#: both record kinds, so a reader needs a single rule for "is this alive".
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
+
+
+class DiscoveryRecord(Protocol):
+    """The members the shared publication path actually touches.
+
+    :mod:`local_operator.session.runtime.registry` is the ONE implementation of
+    a staged write at 0600 under a 0700 directory, and both record kinds use
+    it: a session record and a serve record differ in their FIELDS, not in how
+    they are written, read back, or classified. The shared code reads exactly
+    three members — the ``pid`` that keys the file and decides liveness, the
+    ``heartbeat_at`` that decides wedged-ness, and ``to_json`` for the payload
+    — so that, and no more, is the contract.
+
+    Structural rather than inherited, deliberately. The two record types live
+    in different namespaces (``SessionRecord`` here, ``ServeRecord`` in
+    ``local_operator.server.registry``) and the server module must be able to
+    define its own record without this one importing it — a base class would
+    make this startup-path module reach into the daemon's, in one direction or
+    the other. A record type that answers these three members is publishable
+    and scannable without the registry knowing anything about it.
+
+    The deserializer is NOT part of this contract: it is a callable the caller
+    passes (:func:`local_operator.session.runtime.registry.scan`), because a
+    protocol describes an instance while parsing happens before one exists.
+    """
+
+    pid: int
+    heartbeat_at: float
+
+    def to_json(self) -> dict[str, Any]: ...
+
 
 #: Subagent roster statuses that count as a RUNNING trajectory — one agent loop
 #: that can independently make model calls right now.

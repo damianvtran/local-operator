@@ -78,6 +78,15 @@ _AMBIENT_VARS = (
     # practice; scrubbing it keeps the guarantee at the fixture rather than
     # resting on one caller always remembering to set it.
     "LOCAL_OPERATOR_EVAL_SCRUB_FD",
+    # The ``serve`` daemon's announced bind address, read by ``server/app.py``'s
+    # lifespan when it publishes the rendezvous record. ``announce_to_reload_child``
+    # writes it straight to ``os.environ`` (the whole point of that channel is
+    # that it survives into a reloader's child), so without scrubbing, a test
+    # that announced a port would leak it into every later test in the same
+    # xdist worker — and a test asserting a record's address would be asserting
+    # one a stranger chose. The in-process announce is ``app.state`` and needs no
+    # scrubbing; this is the ``--reload``-only channel.
+    "LOCAL_OPERATOR_SERVE_ANNOUNCE",
     "LOP_MOBILE_CHILD_CWD",
     "LOP_MOBILE_PASSWORD",
     # The calling cmux workspace/surface. A headless fork e2e test inherited
