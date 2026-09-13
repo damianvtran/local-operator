@@ -1436,3 +1436,92 @@ def test_a_cut_off_turn_still_offers_the_phones_resume_affordance() -> None:
     clean = ProjectionFold(SessionProjection(session_id="clean-phone", pid=1))
     clean.fold_event(AgentEndEvent(generation=1))
     assert clean.projection.stop_reason == "completed"
+
+
+def test_a_terminal_dictation_frame_queues_the_phone_row_and_the_activity_line() -> None:
+    """The phone is a consumer of the same frames, and it kept the same lie.
+
+    A call queued behind a long sibling was rendered ``dictating <tool>`` on the
+    phone for the sibling's whole run — the row AND the activity line above it —
+    because the compose frame was the last thing that surface heard about the
+    call. The producer now sends one more frame saying the dictation is over,
+    and the phone has to read it as the TUI does: the row is ``queued`` (live,
+    waiting, executing nothing) and the line says what the harness is waiting
+    for rather than what the model finished writing.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_wake", tool_name="wake", argument_bytes=14)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating wake"
+
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_wake",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "queued"
+    assert len([entry for entry in fold.projection.transcript if entry.kind == "tool"]) == 1
+    assert "waiting to run wake" in fold.projection.activity
+
+    # ...and the call still becomes a running row, then a finished one. `queued`
+    # is a state on the way, not a verdict.
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="call_wake", tool_name="wake", args={"text": "30m"})
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "running"
+
+
+def test_a_never_run_verdict_fails_the_phone_row_with_the_reason() -> None:
+    """The phone has no retirement pass, so the verdict has to settle it there.
+
+    A planning failure, a duplicate id or a steering skip leaves the row
+    announcing the call with nothing else coming: no start, no end. The reason
+    rides the terminal compose frame, and it is what the row must show — a row
+    that merely stopped saying ``dictating`` would leave the phone unable to tell
+    "queued" from "dead".
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Tool not found: wake",
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "failed"
+    assert row.error == "Tool not found: wake"
+    assert row.summary == "Tool not found: wake"
+
+
+def test_the_new_compose_fields_absent_on_the_wire_change_nothing() -> None:
+    """BACKWARD COMPATIBILITY: an older runtime omits both new fields.
+
+    The phone's fold reads them off the model, so the older frame arrives with
+    today's defaults and must take exactly today's path: a composing row whose
+    activity line says the model is dictating. This is the control that says the
+    new states are additive rather than a change of meaning.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_old", tool_name="bash", argument_bytes=8)
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "composing"
+    assert fold.projection.activity == "dictating bash"

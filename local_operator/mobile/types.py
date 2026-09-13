@@ -357,7 +357,7 @@ EntryKind = Literal[
     "peer_message",
 ]
 
-ToolState = Literal["composing", "running", "done", "failed", "interrupted"]
+ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]
 
 SubagentStatus = Literal["running", "completed", "failed", "cancelled", "parked"]
 
@@ -379,9 +379,17 @@ class TranscriptEntry:
     # observed — an unanswered call rendered ✓ while the TUI showed it
     # interrupted. This is the same class as the three shipped duration bugs:
     # one path silently defaulting where another is explicit. Every path that
-    # knows the real state sets it (composing/running on the live events,
+    # knows the real state sets it (composing/queued/running on the live events,
     # done/failed when a result pairs), so the default is only ever read by a
     # row that genuinely has no outcome.
+    #
+    # `queued` is the state the compose family was missing: the model stopped
+    # writing the call (the producer's terminal `dictation_complete` frame) and
+    # nothing has started it — it is waiting behind a sibling's execution group,
+    # or for a group the turn never reached. It is distinct from `composing`
+    # (which claims the model is still dictating) and from `running` (which
+    # claims execution), and before it existed the phone kept saying
+    # "dictating <tool>" for the whole of a long sibling's run.
     tool_state: ToolState = "interrupted"
     summary: str = ""  # the one-line args summary (compacted path etc.)
     intent: str = ""  # the model's own narration, when it gave one
