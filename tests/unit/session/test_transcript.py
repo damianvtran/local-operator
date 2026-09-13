@@ -681,7 +681,7 @@ async def test_replay_suffix_matches_whole_file_parse(tmp_path, shape):
     full = Transcript(directory)
     store = AttachmentStore(directory)
 
-    suffix = read_replay_suffix(directory, checkpoint_type="checkpoint")
+    suffix = read_replay_suffix(directory, checkpoint_types="checkpoint")
     assert _dump(replay_entries(suffix.entries, store)) == _dump(full.build_llm_history())
     assert suffix.checkpoint == full.latest_custom("checkpoint")
     if shape != "no-compaction":
