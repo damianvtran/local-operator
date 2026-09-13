@@ -128,6 +128,28 @@ retries every 10 seconds and reconnects once
 eligible. `lop tunnel billing` reports the amount due and current quote. A
 stopped or suspended tunnel does not stop work already running locally.
 
+## When the relay refuses a request
+
+Once the 30-second authorization lease lapses the gateway answers `503` with
+`error: tunnel authorization unavailable`. That body also carries a `reason` and
+a `detail` naming the cause, so a lost network is not mistaken for a withdrawn
+authorization:
+
+- `control_plane_unreachable` — this computer could not reach Radient to renew
+  the lease (DNS, connection, TLS, or timeout). Check this computer's network.
+  The connector reauthorizes by itself once the control plane is reachable
+  again, and no local command is needed.
+- `authorization_refused` — Radient answered and refused the check, typically
+  an expired login or ineligible billing. Check `/login radient` and the
+  tunnel's billing.
+- `tunnel_not_authorized` — the tunnel is revoked, suspended, disabled, stopped
+  on this computer, or its configuration changed. Review it in the console.
+- `authorization_lease_pending` — the lease has not been renewed yet, usually in
+  the first seconds after the service starts.
+
+`lop tunnel status` prints the matching `detail` beside the connector state, and
+reports separately when the local gateway is not answering at all.
+
 ## Trust boundaries and transport
 
 The path is browser → Radient authentication Worker → Cloudflare Tunnel →

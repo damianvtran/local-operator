@@ -313,21 +313,41 @@ async def dispatch(args: argparse.Namespace) -> str:
                 record = await RadientTunnels(value["credential_id"], client).request(
                     "GET", tunnel_path(value)
                 )
-        except (ValueError, httpx.HTTPError):
+        except httpx.HTTPError:
+            # A network fault and an unusable login are different jobs for the
+            # operator, and one shared line sent both to /login radient.
+            return (
+                _summary(record)
+                + "\nCloud status unavailable: this computer cannot reach Radient. "
+                "Check its network connection."
+            )
+        except ValueError:
             return _summary(record) + "\nCloud status unavailable; check /login radient."
         healthy = False
         connected = False
+        refusal = ""
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
                 reply = await client.get(
                     f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
                 )
-                healthy = reply.status_code == 200 and reply.json().get("ok") is True
-                connected = healthy and reply.json().get("connected") is True
+                payload = reply.json()
+                healthy = reply.status_code == 200 and payload.get("ok") is True
+                connected = healthy and payload.get("connected") is True
+                # The gateway names why it is refusing relayed requests
+                # (gateway.unavailable_body). A state alone leaves the operator
+                # with a dark tunnel and no direction; the network cause in
+                # particular needs no local command at all.
+                refusal = "" if healthy else str(payload.get("detail") or "")
         except (httpx.HTTPError, ValueError):
-            pass
+            refusal = (
+                "the local relay gateway is not answering on "
+                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            )
         state = "connected" if connected else "connecting" if healthy else "stopped"
-        return _summary(record) + f"\nLocal connector: {state}"
+        return (
+            _summary(record) + f"\nLocal connector: {state}" + (f" — {refusal}" if refusal else "")
+        )
     if action == "stop":
         value["stopped"] = True
         config.save(value)

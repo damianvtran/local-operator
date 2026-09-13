@@ -21,7 +21,7 @@ import httpx
 from local_operator.mobile.auth import load_password
 from local_operator.tunnels import config
 from local_operator.tunnels.api import RadientTunnels
-from local_operator.tunnels.gateway import Gateway
+from local_operator.tunnels.gateway import REFUSED, UNREACHABLE, Gateway
 
 POLL_SECONDS = 10
 
@@ -132,6 +132,43 @@ def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> 
                 f"Harness port for {harness['id']} changed in the console. "
                 "Run lop tunnel connect again."
             )
+
+
+def describe_authorization_failure(failure: BaseException) -> tuple[str, str]:
+    """Name why the poller could not renew the relay authorization lease.
+
+    Only the poller sees the control plane's answer, and swallowing it is what
+    made every cause indistinguishable: the gateway serves one flat 503 once the
+    lease lapses, so a computer that had merely lost its network looked exactly
+    like a revoked tunnel or a lapsed plan and sent the operator to re-enroll a
+    tunnel that was healthy.
+
+    The split rests on `RadientTunnels.request`, which raises httpx errors only
+    for transport trouble (DNS, connect, TLS, timeout) and converts every >=400
+    status, expired login, and unusable envelope into a ValueError. So an httpx
+    error means the control plane could not be *reached*, while a ValueError
+    means it answered and refused. Both details name the operator's own network
+    only when that is where the fault is.
+    """
+    if isinstance(failure, httpx.TransportError):
+        return (
+            UNREACHABLE,
+            "This computer cannot reach Radient to renew the relay authorization. "
+            "Check this computer's network connection; the tunnel reauthorizes by "
+            "itself once the control plane is reachable again.",
+        )
+    if isinstance(failure, httpx.HTTPError):
+        return (
+            UNREACHABLE,
+            "The connector's request to Radient did not complete. "
+            "Check this computer's network connection.",
+        )
+    return (
+        REFUSED,
+        "Radient refused the connector's authorization check, so the relay stopped "
+        "serving. Check /login radient and this tunnel's billing in the Radient "
+        "console.",
+    )
 
 
 def active(record: Any) -> bool:
@@ -288,10 +325,13 @@ async def run() -> int:
                             stop.set()
                             return
                         gateway.authorize()
-                    except (ValueError, httpx.HTTPError):
+                    except (ValueError, httpx.HTTPError) as failure:
                         # The gateway's short authorization lease closes even
-                        # when the control-plane network is unavailable.
-                        pass
+                        # when the control-plane network is unavailable, so the
+                        # failure is recorded rather than discarded: the phone's
+                        # 503 and `lop tunnel status` both report which cause it
+                        # was. authorize() clears it on the next success.
+                        gateway.note_authorization_failure(*describe_authorization_failure(failure))
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
                     except TimeoutError:

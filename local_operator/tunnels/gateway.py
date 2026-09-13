@@ -34,6 +34,14 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
 AUTHORIZATION_LEASE_SECONDS = 30
 PROOF_HEADER = "x-radient-tunnel-assertion"
+# Why the gateway refused a relayed request. The poller is the only component
+# that sees the control plane's answer, so it records the reason on the gateway
+# and both the phone's 503 and `lop tunnel status` read it back. One flat
+# message for every cause is what made a computer that had merely lost its
+# network read exactly like a revoked tunnel or a lapsed plan, and sent the
+# operator to re-enroll a tunnel that was healthy.
+UNREACHABLE = "control_plane_unreachable"
+REFUSED = "authorization_refused"
 # Only presentation/protocol headers cross the boundary. In particular the
 # owner's Radient cookies and bearer must never reach a local harness,
 # whose plugins/tools may log, reflect, or export request headers.
@@ -181,9 +189,50 @@ class Gateway:
         self.connector_ready = connector_ready or (lambda: False)
         self.authorized_until = time.monotonic() + AUTHORIZATION_LEASE_SECONDS
         self.revoked = False
+        # The last reason the poller could not renew the lease, as
+        # (reason, detail). Every successful renewal clears it.
+        self.authorization_failure: tuple[str, str] | None = None
 
     def authorize(self) -> None:
         self.authorized_until = time.monotonic() + AUTHORIZATION_LEASE_SECONDS
+        self.authorization_failure = None
+
+    def note_authorization_failure(self, reason: str, detail: str) -> None:
+        """Record why the poller could not renew the relay lease.
+
+        Called only from the poller (`service.describe_authorization_failure`),
+        which is the one place the control plane's failure is observable. The
+        reason survives until a renewal succeeds, so the phone and
+        `lop tunnel status` still name the cause after the fact.
+        """
+        self.authorization_failure = (reason, detail)
+
+    def unavailable_body(self) -> dict[str, str]:
+        """Name why an authorized relay request is being refused.
+
+        Served to the phone as the 503 body and to `lop tunnel status` through
+        /_lop_tunnel/health, so the operator reads the cause the phone sees.
+        Every `detail` here is fixed text this module authors: it must never
+        carry an upstream body, a request URL, or a credential, because a phone
+        renders it and an operator may paste it into a support thread.
+        """
+        body = {"error": "tunnel authorization unavailable"}
+        if self.revoked:
+            body["reason"] = "tunnel_not_authorized"
+            body["detail"] = (
+                "Radient is not authorizing this tunnel: it was revoked, suspended, "
+                "disabled, stopped on this computer, or changed in the console. "
+                "Review it in the Radient console."
+            )
+        elif self.authorization_failure is not None:
+            body["reason"], body["detail"] = self.authorization_failure
+        else:
+            body["reason"] = "authorization_lease_pending"
+            body["detail"] = (
+                "The connector has not renewed its relay authorization yet. "
+                "Run lop tunnel status."
+            )
+        return body
 
     @staticmethod
     def target(scope: Mapping[str, Any]) -> str:
@@ -224,14 +273,17 @@ class Gateway:
             request.url.path == "/_lop_tunnel/health"
             and host == f"127.0.0.1:{self.connection['gateway_port']}"
         ):
-            return JSONResponse(
-                {
-                    "ok": not self.revoked and time.monotonic() < self.authorized_until,
-                    "connected": self.connector_ready(),
-                }
-            )
+            payload: dict[str, Any] = {
+                "ok": not self.revoked and time.monotonic() < self.authorized_until,
+                "connected": self.connector_ready(),
+            }
+            if not payload["ok"]:
+                # The same reason the phone is shown, so `lop tunnel status`
+                # prints why the relay is refusing instead of a bare state.
+                payload.update(self.unavailable_body())
+            return JSONResponse(payload)
         if self.revoked or time.monotonic() >= self.authorized_until:
-            return JSONResponse({"error": "tunnel authorization unavailable"}, status_code=503)
+            return JSONResponse(self.unavailable_body(), status_code=503)
         harness = self.harness(host)
         if harness is None:
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
@@ -279,7 +331,7 @@ class Gateway:
         # recheck after consuming/verifying its body, immediately before any
         # harness request or local side effect begins.
         if self.revoked or time.monotonic() >= self.authorized_until:
-            return JSONResponse({"error": "tunnel authorization unavailable"}, status_code=503)
+            return JSONResponse(self.unavailable_body(), status_code=503)
         if request.url.path == "/logout":
             response = RedirectResponse("/_radient/logout", status_code=303)
             response.headers["Clear-Site-Data"] = '"storage"'
