@@ -333,17 +333,18 @@ def restore_upstream_xterm_parser() -> Iterator[None]:
     property the sibling tests rely on.
 
     Directory scope is complete today, and that is checked rather than assumed:
-    the three call sites that await the real ``run_tui`` in this process are
+    the three call sites that await the real ``run_tui`` are
     ``test_app_pilot.py::test_run_tui_forwards_provider_controller``,
-    ``test_logger_silence.py`` and ``test_pixel_mouse_latch.py:644``, all in this
+    ``test_logger_silence.py`` and ``test_pixel_mouse_latch.py:646``, all in this
     directory (``test_cli_new.py``'s ``run_tui`` names are stand-ins installed on
-    a fake TUI module). The third spawns its own subprocess with
-    ``local_operator.tui.app`` stubbed, so it cannot leak the class patch into
-    this process — harmless, and the scope is complete for the same reason as the
-    other two. A new test OUTSIDE ``tests/unit/tui`` that awaits the real
-    ``run_tui`` therefore needs this fixture hoisted to ``tests/conftest.py``,
-    not copied — nothing here would fail, the leaked gate would just start
-    affecting other workers' tests.
+    a fake TUI module). The leaked gate is process-global while this fixture's
+    reach is the directory, and the directory covers all three: the third spawns
+    its own subprocess with ``local_operator.tui.app`` stubbed, so it cannot leak
+    the class patch into this process — harmless, and the scope is complete for
+    the same reason as the other two. A new test OUTSIDE ``tests/unit/tui`` that
+    awaits the real ``run_tui`` therefore needs this fixture hoisted to
+    ``tests/conftest.py``, not copied — nothing here would fail, the leaked gate
+    would just start affecting other workers' tests.
 
     Nothing is asserted here: this is a restore, and a test that wants to prove
     the parser is clean asserts it itself (``gated`` does).
