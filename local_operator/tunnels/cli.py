@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from local_operator.tunnels import config
+from local_operator.tunnels import config, gateway
 from local_operator.tunnels.api import RadientTunnels, credential_id
 from local_operator.tunnels.service import cloudflared_binary, tunnel_path
 
@@ -315,36 +315,61 @@ async def dispatch(args: argparse.Namespace) -> str:
                 )
         except httpx.HTTPError:
             # A network fault and an unusable login are different jobs for the
-            # operator, and one shared line sent both to /login radient.
+            # operator, and one shared line sent both to /login radient. This is
+            # the same sentence the relay reports for this cause, so a lost
+            # network reads identically wherever the operator meets it.
             return (
                 _summary(record)
-                + "\nCloud status unavailable: this computer cannot reach Radient. "
-                "Check its network connection."
+                + "\nCloud status unavailable. "
+                + gateway.TERMINAL_DETAIL[gateway.UNREACHABLE]
             )
         except ValueError:
             return _summary(record) + "\nCloud status unavailable; check /login radient."
         healthy = False
         connected = False
+        served = False
         refusal = ""
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
                 reply = await client.get(
                     f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
                 )
-                payload = reply.json()
-                healthy = reply.status_code == 200 and payload.get("ok") is True
+                served = reply.status_code == 200
+                payload = reply.json() if served else {}
+                if not isinstance(payload, dict):
+                    # A stale or foreign listener on this port can answer 200 with
+                    # any JSON at all. Anything but an object is not a health
+                    # payload, and a status command must not raise over it.
+                    payload = {}
+                healthy = served and payload.get("ok") is True
                 connected = healthy and payload.get("connected") is True
-                # The gateway names why it is refusing relayed requests
-                # (gateway.unavailable_body). A state alone leaves the operator
-                # with a dark tunnel and no direction; the network cause in
-                # particular needs no local command at all.
-                refusal = "" if healthy else str(payload.get("detail") or "")
+                if not healthy:
+                    # The gateway names why it is refusing relayed requests, and
+                    # this is the surface where a command can be offered at all.
+                    # A reason this build does not know falls back to the relay's
+                    # own sentence rather than printing nothing.
+                    refusal = gateway.terminal_detail(
+                        str(payload.get("reason") or ""), str(payload.get("detail") or "")
+                    )
         except (httpx.HTTPError, ValueError):
+            # A stopped connector and a gateway that is not there are also
+            # different jobs: the first is this process, the second is the unit.
             refusal = (
-                "the local relay gateway is not answering on "
+                "The local relay gateway is not answering on "
                 f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
             )
-        state = "connected" if connected else "connecting" if healthy else "stopped"
+        if connected:
+            state = "connected"
+        elif healthy:
+            state = "connecting"
+        elif served:
+            # The gateway answered and is refusing to serve. That is not a stopped
+            # connector — cloudflared may still hold the edge connection — and
+            # "stopped" beside a sentence promising it clears itself would
+            # contradict the payload this command just read.
+            state = "not serving"
+        else:
+            state = "stopped"
         return (
             _summary(record) + f"\nLocal connector: {state}" + (f" — {refusal}" if refusal else "")
         )
