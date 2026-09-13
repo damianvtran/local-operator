@@ -2,6 +2,7 @@
 /** Build the store-ready extension with no dev server or runtime framework. */
 import { build } from "esbuild";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -50,10 +51,27 @@ await cp(resolve(root, "manifest.json"), resolve(dist, "manifest.json"));
 // — a well-known id accepted without pairing is what would turn a public
 // identity into a credential. AGENTS.md carries the same note.
 if (!isStore) {
-  const overlay = JSON.parse(await readFile(resolve(root, "manifest.dev.json"), "utf8"));
-  const target = resolve(dist, "manifest.json");
-  const manifest = JSON.parse(await readFile(target, "utf8"));
-  await writeFile(target, `${JSON.stringify({ ...manifest, ...overlay }, null, 2)}\n`);
+  // OPTIONAL on purpose: this file is a developer convenience, not a
+  // correctness property, and scripts that copy a SUBSET of the extension
+  // source (the real-Chrome rig copies `src/`, `icons/`, `manifest.json`,
+  // `build.mjs`, `package.json` — see scripts/bridge_rig.py) would otherwise
+  // break on a file they never needed. Builds without it get exactly the
+  // pre-overlay behaviour: a path-derived id.
+  const overlayPath = resolve(root, "manifest.dev.json");
+  if (existsSync(overlayPath)) {
+    const overlay = JSON.parse(await readFile(overlayPath, "utf8"));
+    const target = resolve(dist, "manifest.json");
+    const manifest = JSON.parse(await readFile(target, "utf8"));
+    await writeFile(target, `${JSON.stringify({ ...manifest, ...overlay }, null, 2)}\n`);
+    console.log("dev manifest key applied: this build's id is pinned to the dev keypair");
+  } else {
+    // Loud, because the silent version of this is the operator re-pairing on
+    // every worktree and nobody knowing why.
+    console.warn(
+      "no manifest.dev.json beside this manifest: this build's extension id is " +
+        "PATH-DERIVED and will change with the directory",
+    );
+  }
 }
 await cp(resolve(root, "src/popup/popup.html"), resolve(dist, "popup/popup.html"));
 // Copied, never bundled: esbuild would emit it as a module entry and the
