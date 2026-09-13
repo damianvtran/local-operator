@@ -142,6 +142,17 @@ CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
 #: (case-insensitive) wins; order is specificity, not severity.
 _RULES: list[tuple[str, tuple[str, ...]]] = [
     ("context-length", CONTEXT_LENGTH_MARKERS),
+    # The DeepSeek thinking-mode validator's own wording, named before the
+    # generic rules because the refusal arrives RELAYED through an aggregator
+    # ("upstream ...") as often as directly, and a relayed body must not be read
+    # as a provider fault. The harness answers it with a retry that turns
+    # thinking off (``harness/loop.py``), so a user seeing this category means
+    # that recovery did not apply or was refused too -- their model cannot
+    # continue this conversation with thinking on, which only they can resolve.
+    (
+        "reasoning-echo",
+        ("reasoning_content", "must be passed back"),
+    ),
     (
         "rate-limit",
         (
@@ -226,6 +237,11 @@ _HINTS: dict[str, str] = {
     "ask the user to /compact or send fewer and smaller images.",
     "rate-limit": "Back off and retry later; if it persists, tell the user which "
     "provider hit the limit — they may need to switch model or top up quota.",
+    "reasoning-echo": "The provider refused the request because the conversation's "
+    "reasoning was not carried back, and this is the text of a refusal that the "
+    "harness's one retry with thinking disabled did not clear. Do not resend the "
+    "same request unchanged: tell the user the model's thinking mode cannot "
+    "continue this conversation and suggest switching model.",
     "auth": "Credentials were rejected: tell the user which provider and suggest "
     "`local-operator login <provider>`. Do not retry the identical request.",
     "billing": "The provider account cannot pay for this request: report it and "

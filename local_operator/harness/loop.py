@@ -1013,16 +1013,25 @@ class AgentLoop:
                         #
                         # Gated on nothing having been SHOWN: the loop may only
                         # replay a turn whose output the user has not read, and
-                        # a 400 arrives before the first byte. Gated on the model
-                        # capability as well as the wording, so an unrelated
-                        # provider echoing this text cannot disable a rung of its
-                        # own ladder.
+                        # a 400 arrives before the first byte. Gated on the
+                        # provider's OWN WORDS and not on the capability bit:
+                        # the bit is a prediction about which routes run this
+                        # validator, and a prediction that is wrong must not turn
+                        # a recoverable refusal into a dead turn -- which is
+                        # exactly what it did, as an unclassified
+                        # "unknown: invalid request (HTTP 400)" incident on a
+                        # route whose spec never got the bit
+                        # (``model.configure._served_model_family`` records how
+                        # a route can be right and the bit wrong). The wording
+                        # is direct evidence that THIS request lost the echo, so
+                        # it is the wording that decides; the rung check below
+                        # is the real precondition, because a model with no
+                        # thinking-off rung is one the retry cannot help.
                         if (
                             stop_reason == "error"
                             and reasoning_echo_retries < MAX_REASONING_ECHO_RETRIES
                             and not assistant.text.strip()
                             and not assistant.tool_calls
-                            and config.model.requires_reasoning_echo
                             and _is_reasoning_echo_rejection(stream_error)
                         ):
                             thinking_off = _thinking_off_effort(config.model)

@@ -45,6 +45,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     StreamUsageEvent,
     TextContent,
+    ToolCall,
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
@@ -4107,14 +4108,16 @@ async def test_reasoning_echo_recovery_never_replays_output_the_user_read():
 @pytest.mark.parametrize(
     "model",
     [
-        # The capability, not the wording, decides. A route that never sends the
-        # echo must not have a rung of its ladder disabled on the strength of a
-        # message that happens to match.
         _laddered_model(),
         _echo_model("none"),  # already off: the retry could not change the body
     ],
 )
-async def test_reasoning_echo_recovery_needs_the_capability_and_a_rung(model):
+async def test_reasoning_echo_recovery_needs_a_rung_to_retreat_to(model):
+    """With no thinking-off rung there is nothing to retry, so the turn ends.
+
+    The rung is the precondition, not the capability: a model that cannot turn
+    thinking off would spend a call to be told the same thing.
+    """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)]])
     context = LoopContext()
     events = []
@@ -4128,6 +4131,41 @@ async def test_reasoning_echo_recovery_needs_the_capability_and_a_rung(model):
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
     assert end.error is not None and "reasoning_content" in end.error
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_own_words_recover_a_route_the_capability_missed():
+    """A route whose spec lacks the capability is still recovered.
+
+    The capability is a prediction about which routes run DeepSeek's
+    thinking-mode validator, and it CAN be wrong: an aggregator load-balances
+    one model across many endpoints, only one of which runs that validator, so
+    the refusal can arrive on a spec that never got the bit. The provider's own
+    wording is the direct evidence that this request lost the echo; treating
+    the prediction as authoritative over it is what turned a recoverable
+    refusal into a dead turn recorded as an unclassified
+    ``unknown: invalid request (HTTP 400)`` incident.
+    """
+    missed_route = _echo_model().model_copy(update={"requires_reasoning_echo": False})
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="error", error=_REASONING_ECHO_ERROR)],
+            [StreamTextDelta(delta="recovered"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], context, make_config(stream, model=missed_route), None
+    ):
+        events.append(event)
+
+    assert len(stream.requests) == 2
+    assert stream.requests[1].model.reasoning_effort == "none"
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any("thinking disabled" in n.text for n in notices)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
 
 
 @pytest.mark.asyncio
@@ -4154,3 +4192,118 @@ async def test_only_half_the_wording_is_not_the_condition():
     assert len(stream.requests) == 1
     end = events[-1]
     assert isinstance(end, AgentEndEvent) and end.error is not None
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_continued_on_an_aggregator_route_echoes_reasoning():
+    """The failing path, end to end against a server that ENFORCES the rule.
+
+    This is the shape the operator's sessions died on: ``deepseek/deepseek-flash``
+    failed over (or was switched) onto the aggregator's route to the same
+    weights, where the capability used to be off, so a history carrying one
+    assistant turn with nothing recorded went out with a blank echo and came
+    back as ``unknown: invalid request (HTTP 400)``. The stub here implements the
+    refusal itself -- any assistant turn without a non-blank
+    ``reasoning_content`` draws the provider's own 400 -- so a regression is a
+    FAILED REQUEST rather than an assertion about a body nobody sent.
+
+    The spec is DERIVED (``build_model_spec``), not hand-built, because the
+    derivation is half of what this covers: a spec with the capability set by
+    hand would pass even if the registry had gone back to keying it on the
+    hosting.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import OpenAICompatClient
+
+    class _EnforcingServer:
+        def __init__(self) -> None:
+            self.bodies: list[dict[str, Any]] = []
+            self.refusals = 0
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            self.bodies.append(body)
+            blank = [
+                entry
+                for entry in body.get("messages", [])
+                if entry.get("role") == "assistant"
+                and not str(entry.get("reasoning_content") or "").strip()
+            ]
+            if blank:
+                # The provider's OWN words, verbatim: the sentence the
+                # operator's incidents carry.
+                self.refusals += 1
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                "The `reasoning_content` in the thinking mode must be "
+                                "passed back to the API."
+                            )
+                        }
+                    },
+                )
+            payloads: list[dict[str, Any] | str] = [
+                {"id": "cmpl", "choices": [{"delta": {"content": "summarised"}, "index": 0}]},
+                {
+                    "id": "cmpl",
+                    "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
+                },
+                {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 2}},
+            ]
+            lines = [
+                f"data: {payload if isinstance(payload, str) else json.dumps(payload)}\n\n"
+                for payload in payloads
+            ]
+            lines.append("data: [DONE]\n\n")
+            return httpx.Response(
+                200,
+                content="".join(lines).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+    server = _EnforcingServer()
+    spec = build_model_spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert spec.requires_reasoning_echo is True, "the derivation this test covers"
+    client = OpenAICompatClient(
+        spec.base_url or "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return client.stream(request, "sk-test")
+
+    # A history rebuilt from a transcript that carried no reasoning on one of
+    # its assistant turns -- the state every one of those sessions was in.
+    context = LoopContext(
+        system_blocks=["Stable"],
+        tools=[],
+        messages=[
+            Message.user("inspect a"),
+            Message.assistant("", tool_calls=[ToolCall(id="call_a", name="inspect", arguments={})]),
+            Message(role="tool", tool_call_id="call_a", content=[TextContent(text="found")]),
+        ],
+    )
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("now summarise")], context, make_config(stream_fn, model=spec), None
+    ):
+        events.append(event)
+
+    # The server refused nothing: every assistant turn it received echoed.
+    assert server.refusals == 0
+    assistants = [
+        entry for entry in server.bodies[0]["messages"] if entry.get("role") == "assistant"
+    ]
+    assert assistants
+    assert all(str(entry["reasoning_content"]).strip() for entry in assistants)
+    # And the turn finished on the stub's reply rather than surfacing a refusal.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None and not end.aborted
+    replies = [
+        event.message.text
+        for event in events
+        if isinstance(event, TurnEndEvent) and isinstance(event.message, Message)
+    ]
+    assert "summarised" in replies

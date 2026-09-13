@@ -33,6 +33,19 @@ from local_operator.incidents import (
         ("maximum context length is 200000 tokens", "context-length"),
         ("the request was too large", "context-length"),
         ("MCP server 'linear' unavailable", "mcp"),
+        # The DeepSeek thinking-mode validator's refusal, in the rendered form
+        # the operator's own incidents carry (and as an aggregator relays it,
+        # which is why it is named before the generic ``provider`` rule).
+        (
+            "invalid request (HTTP 400): The `reasoning_content` in the thinking "
+            "mode must be passed back to the API.",
+            "reasoning-echo",
+        ),
+        (
+            "invalid request (HTTP 400): upstream error: The `reasoning_content` in "
+            "the thinking mode must be passed back to the API.",
+            "reasoning-echo",
+        ),
         ("something completely novel happened", "unknown"),
     ],
 )
@@ -46,6 +59,21 @@ def test_render_carries_category_source_hint_and_raw():
     assert "429 quota exceeded" in text
     assert "suggested action:" in text
     assert "previous turn ended" in text
+
+
+def test_the_reasoning_echo_refusal_names_a_next_step():
+    """A refusal the harness could not clear must not read as a generic 400.
+
+    It is the one provider refusal whose recovery the harness attempted itself,
+    so a user seeing it needs to know the attempt happened and that re-sending
+    the same request unchanged is not the move.
+    """
+    incident = classify_incident(
+        "invalid request (HTTP 400): The `reasoning_content` in the thinking "
+        "mode must be passed back to the API."
+    )
+    assert incident.category == "reasoning-echo"
+    assert "switching model" in incident.hint
 
 
 def test_unknown_has_no_invented_hint():
