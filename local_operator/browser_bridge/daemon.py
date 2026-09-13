@@ -125,6 +125,36 @@ PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
+
+#: How many links with NO pairing may hold a socket at once before the oldest is
+#: retired. Every token-less dial is admitted, because that is how a second
+#: install asks to pair, and each one holds a socket, a label, a link entry and a
+#: pending-code record — all of it grown by a single unauthenticated frame (review
+#: round 1, m1). Four is generous for the operator's own case (two installed
+#: builds, plus headroom for a reinstall) while keeping the map bounded, and the
+#: OLDEST stranger is the one retired, so a legitimate new install is never
+#: refused because somebody else's stale socket got there first.
+MAX_UNLISTED_LINKS = 4
+
+#: How long a pairing record survives after its code expires. Kept past the
+#: expiry so the honest "that code expired" answer still has a record to read
+#: (`_try_pair` distinguishes expired from wrong), then dropped: the A1 lockout is
+#: the ROTATION itself, not the record, so forgetting a long-dead entry cannot
+#: hand anybody authority — a fresh dial from an unpaired identity mints a fresh
+#: code it must still read off the terminal (review round 1, m1).
+PENDING_RETENTION_S = 2 * PAIR_TTL_S
+
+
+def _prune_pending(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Drop pending records whose code expired more than one TTL ago."""
+    now = time.time()
+    return {
+        extension_id: entry
+        for extension_id, entry in entries.items()
+        if now - float(entry.get("expires_at", 0) or 0) < PENDING_RETENTION_S
+    }
+
+
 #: Ceiling on the supervisor's per-failure backoff. The delay is the number of
 #: CONSECUTIVE failures in seconds (1s, 2s, 3s …), clamped here: linear rather
 #: than exponential on purpose, because these loops recover the moment the
@@ -200,18 +230,40 @@ def _write_pairing(
 
     The top-level ``extension_id``/``token_sha256``/``paired_at`` keys are the
     DOWNGRADE CONTRACT, not redundancy: an older daemon (or an older `lop`)
-    reading this file still finds whichever identity is currently driving, so a
-    rollback degrades to single-identity instead of breaking pairing.
+    reading this file finds exactly ONE identity — the one it will authorise and
+    let drive — so a rollback degrades to single-identity instead of breaking
+    pairing.
 
-    ``driver_id`` falls back to the most recently paired entry because a caller
-    that revokes the identity which happened to be driving must still leave a
-    coherent trio behind rather than an empty one.
+    Which one, in order (review round 1, M2/Q2):
+
+    1. ``driver_id``, when the caller names a listed identity — pairing or
+       driving has just told us who holds the wheel;
+    2. otherwise the identity the trio ALREADY names, if it is still listed.
+       This is the case that was wrong: pairing a second install, or revoking a
+       standby, must not move the record onto the newcomer, because an older
+       daemon reading a NEWER file would then authorise the standby and refuse
+       the install the operator is actually using — a forced re-pair, on the one
+       path decision 1 promises never needs one;
+    3. otherwise the most recently paired survivor. Only reachable when the
+       identity the trio named has just been revoked and nothing has taken the
+       wheel yet, where a coherent trio naming somebody is better than none.
+
+    Every path that MOVES the wheel rewrites the file through
+    ``_record_driver`` (promotion on a driver loss, ``drive``, pairing), so
+    (2) is a *stable* record rather than a stale one.
     """
     chosen: dict[str, Any] | None = None
     if driver_id:
         chosen = next(
             (entry for entry in identities if entry.get("extension_id") == driver_id), None
         )
+    if chosen is None:
+        previous = _read_json(_pairing_path(root)) or {}
+        previous_id = str(previous.get("extension_id", ""))
+        if previous_id:
+            chosen = next(
+                (entry for entry in identities if entry.get("extension_id") == previous_id), None
+            )
     if chosen is None and identities:
         chosen = max(identities, key=lambda entry: float(entry.get("paired_at", 0) or 0))
     payload: dict[str, Any] = {}
@@ -230,6 +282,7 @@ def add_identity(
     token_sha256: str,
     *,
     label: str = "",
+    driver_id: str = "",
 ) -> None:
     """Authorise one extension identity, replacing any existing entry for it.
 
@@ -241,6 +294,12 @@ def add_identity(
     One token per identity, never one shared token: revocation has to be a fact
     about the file rather than a hope about a spoofable Origin header
     (design decision 2), and per-identity hashes cost one dict lookup.
+
+    ``driver_id`` names the identity that is driving AT THIS MOMENT, which is
+    usually NOT ``extension_id``: the second install pairs while the first
+    holds the wheel, and the legacy trio must keep naming the first (M2/Q2).
+    Callers pass ``""`` when nothing is driving, and the trio then names the
+    identity just paired — it took the wheel (``_take_free_wheel``).
     """
     identities = [entry for entry in _identities(root) if entry.get("extension_id") != extension_id]
     identities.append(
@@ -257,10 +316,10 @@ def add_identity(
             "last_seen_at": time.time(),
         }
     )
-    _write_pairing(root, identities, driver_id=extension_id)
+    _write_pairing(root, identities, driver_id=driver_id or extension_id)
 
 
-def revoke_identity(root: Path | None, extension_id: str) -> None:
+def revoke_identity(root: Path | None, extension_id: str, *, driver_id: str = "") -> None:
     """Remove ONE identity, and only that one, from the allow-list.
 
     The remaining identities keep their own hashes, so a revoke is a real
@@ -268,6 +327,11 @@ def revoke_identity(root: Path | None, extension_id: str) -> None:
     makes "revoke the dev build" possible without disturbing the store build.
     Emptying the list removes the file entirely, so "nothing is authorised" has
     one representation rather than two.
+
+    ``driver_id`` is the SURVIVING driver when the caller knows one (a revoke
+    that promotes a standby writes the new driver into the legacy trio);
+    otherwise the existing record is preserved where it is still listed, which
+    is what keeps "revoke the dev build" from renaming the store build.
     """
     identities = [
         entry for entry in _identities(root) if str(entry.get("extension_id", "")) != extension_id
@@ -276,7 +340,7 @@ def revoke_identity(root: Path | None, extension_id: str) -> None:
         with suppress(OSError):
             _pairing_path(root).unlink()
         return
-    _write_pairing(root, identities)
+    _write_pairing(root, identities, driver_id=driver_id)
 
 
 def revoke_all(root: Path | None = None) -> None:
@@ -304,9 +368,9 @@ def _pending_entries(root: Path | None = None) -> dict[str, dict[str, Any]]:
         return {}
     entries = saved.get("pending")
     if isinstance(entries, dict):
-        return {
-            str(key): value for key, value in entries.items() if isinstance(value, dict) and key
-        }
+        return _prune_pending(
+            {str(key): value for key, value in entries.items() if isinstance(value, dict) and key}
+        )
     # Schema 1: the record was the single waiting identity's entry.
     extension_id = str(saved.get("extension_id", ""))
     return {extension_id: saved} if extension_id else {}
@@ -374,6 +438,12 @@ def pairing_status(root: Path | None = None) -> dict[str, Any]:
                 "label": str(entry.get("label", "")),
                 "paired_at": float(entry.get("paired_at", 0) or 0),
                 "last_seen_at": float(entry.get("last_seen_at", 0) or 0),
+                # "This entry is the DRIVER'S RECORD" — the legacy top-level
+                # trio, which every path that moves the wheel now rewrites
+                # (`_record_driver`), so this agrees with /health's
+                # `driver_extension_id` whenever a driver is attached. It was
+                # wrong before that fix: the file named the last-PAIRED install
+                # (QA round 1, Q3), so this flag called a standby the driver.
                 "driving": bool(saved)
                 and str(entry.get("extension_id", "")) == str(saved.get("extension_id", "")),
             }
@@ -868,12 +938,37 @@ class BridgeService:
         return self._generation
 
     def standby_links(self) -> list[ExtensionLink]:
-        """Attached links that are not the driver, oldest attachment first."""
+        """Attached links that are not the driver, oldest attachment first.
+
+        PAIRED ones only (review round 1, m2). An unlisted, token-less dial is
+        admitted so it can PAIR, and it is not a standby in the sense this role
+        means: it holds no authority, receives no commands, and `_promote_standby`
+        will never promote it. Listing it as one told the operator — in the popup
+        and in `lop browser status` — that an install for a peer with no pairing
+        at all "is standing by", which is a false statement about a real thing.
+        The count of attached-and-mute strangers stays observable through
+        `unlisted_links()`.
+        """
+        return [link for link in self.other_links() if link.paired]
+
+    def other_links(self) -> list[ExtensionLink]:
+        """Every attached link that is not the driver, paired or not.
+
+        The role-neutral enumeration. Anything USER-FACING wants
+        ``standby_links`` (a paired install standing by is a fact the operator
+        can act on); role bookkeeping and the bound on unlisted dials want this
+        one, because an admitted-but-unpaired dial is still a link holding a
+        socket that must be tracked and bounded.
+        """
         return [
             link
             for generation, link in sorted(self.links.items())
             if generation != self.driver_generation and link.websocket is not None
         ]
+
+    def unlisted_links(self) -> list[ExtensionLink]:
+        """Attached links with no pairing at all: dials asking to be let in."""
+        return [link for link in self.other_links() if not link.paired]
 
     def _promote_standby(self) -> ExtensionLink | None:
         """Make the longest-attached surviving standby the driver, or give up.
@@ -896,14 +991,17 @@ class BridgeService:
         Decides and publishes with NO await in between (audit A1's discipline):
         the caller may only await the role frame AFTER this returns.
         """
-        candidates = [link for link in self.standby_links() if link.proven and link.paired]
+        candidates = [link for link in self.standby_links() if link.proven]
         if not candidates:
             return None
         promoted = max(candidates, key=lambda link: link.attached_at)
         self.driver_generation = promoted.generation
         promoted.role = "driver"
-        for link in self.standby_links():
+        for link in self.other_links():
             link.role = "standby"
+        # The wheel moved, so the downgrade record moves with it (M2/Q2). Inside
+        # the no-await block: it is a synchronous file write, like `publish`.
+        self._record_driver()
         self.publish_safely()
         return promoted
 
@@ -921,6 +1019,40 @@ class BridgeService:
         with suppress(Exception):
             await link.send(payload)
 
+    def _live_driver_id(self) -> str:
+        """The extension id holding the wheel, or "" when nothing is attached.
+
+        The ONE place the driver's identity becomes an id for the pairing file.
+        ``self.link`` already resolves to the driver (#996's property), and the
+        idle link carries no id, so an idle wheel reports "" rather than a stale
+        connection's id.
+        """
+        driver = self.link
+        if driver.websocket is None:
+            return ""
+        return str(driver.extension_id or "")
+
+    def _record_driver(self) -> None:
+        """Rewrite the legacy trio so it names the LIVE driver (decision 1).
+
+        Called from every path that MOVES the wheel: a promotion on a driver
+        loss, `_take_free_wheel`, and `POST /driver`. Without this the trio named
+        whichever identity was paired last, so a rollback (or an older `lop`)
+        reading the file authorised the STANDBY — refusing the install the
+        operator was actually using with 4004, which is exactly the forced
+        re-pair decision 1 promises never to need (review round 1, M2 / QA Q2).
+
+        No-op when no pairing file exists (nothing to keep coherent) and when the
+        file lists nobody. Cheap and synchronous on purpose: callers run it
+        inside the no-await decision blocks (audit A1).
+        """
+        if not _pairing_path(self.root).exists():
+            return
+        identities = _identities(self.root)
+        if not identities:
+            return
+        _write_pairing(self.root, identities, driver_id=self._live_driver_id())
+
     def _take_free_wheel(self, link: ExtensionLink) -> ExtensionLink | None:
         """Give a newly PAIRED link the wheel when nothing else holds it.
 
@@ -936,6 +1068,7 @@ class BridgeService:
             return None
         link.role = "driver"
         self.driver_generation = link.generation
+        self._record_driver()
         return link
 
     def _retire_link(self, link: ExtensionLink) -> ExtensionLink | None:
@@ -1096,7 +1229,7 @@ class BridgeService:
         # SURVIVING standby — could never promote anybody. Keeping standbys
         # proven is what makes `_promote_standby`'s proof test meaningful
         # instead of vacuously false.
-        for standby in self.standby_links():
+        for standby in self.other_links():
             if standby.websocket is None:
                 continue
             if not standby.proven:
@@ -1418,6 +1551,12 @@ class BridgeService:
             promoted = self._retire_link(target)
             if promoted is not None:
                 await self._tell_role(promoted)
+        # A revoke CAN move the wheel (revoking the driver promotes a standby), so
+        # the record is refreshed from the surviving driver once every socket has
+        # been dealt with. `revoke_identity` above deliberately preserved the
+        # existing record rather than renaming it, which is right for the usual
+        # case — revoking a standby must not rename the store build.
+        self._record_driver()
         self.publish_safely()
 
     async def _revocation_tick(self) -> None:
@@ -1616,6 +1755,12 @@ class BridgeService:
             extension_id,
             hashlib.sha256(token.encode()).hexdigest(),
             label=_browser_label(link.browser, link.extension_version),
+            # Who holds the wheel RIGHT NOW. Pairing a second install must leave
+            # the legacy trio naming the first, or a rollback would authorise the
+            # newcomer and refuse the install in use (M2/Q2). "" when the wheel is
+            # idle, and then the identity just paired takes both (it is about to,
+            # via _take_free_wheel).
+            driver_id=self._live_driver_id(),
         )
         self._drop_pending(extension_id)
         link.paired = True
@@ -1744,9 +1889,52 @@ class BridgeService:
         # commands. Deliberately not a configured priority: a preferred install
         # that reclaimed the wheel on EVERY reconnect would reproduce the
         # eviction war at the alarm period instead of at 1 Hz.
+        demoted: ExtensionLink | None = None
         if self.link.websocket is None:
             self.driver_generation = generation
+        elif link.paired and not self.link.paired:
+            # A PAIRED install outranks an incumbent that cannot serve a single
+            # command (review round 1, M1). The free-wheel rule above is right for
+            # a cold start — but it is also reachable with an UNPAIRED dial, since
+            # a token-less peer is admitted so it can pair: whoever completes
+            # `hello` first takes the wheel, and if that is a freshly loaded,
+            # not-yet-paired install, the authorised+paired install that dials
+            # next is told `standby` and every session reads `not_paired` while a
+            # perfectly good browser sits idle. `_promote_standby` and
+            # `POST /driver` both already refuse to hand the wheel to a link that
+            # cannot serve a command; this is the third place that hands it out.
+            #
+            # The reverse — an unpaired dial taking the wheel FROM a paired
+            # incumbent — stays impossible: that case falls to `standby` below,
+            # which is the whole point of decision 4.
+            demoted = self.link
+            self.driver_generation = generation
         link.role = "driver" if self.driver_generation == generation else "standby"
+        if demoted is not None:
+            # The demoted incumbent holds a live socket and still believes it is
+            # driving. The daemon already refuses it commands (it is `self.link`
+            # no longer), and the honest role frame is sent below, outside the
+            # no-await block, exactly as `drive` and `_promote_standby` do.
+            demoted.role = "standby"
+        # Bound the UNPAIRED population (review round 1, m1). Collected here —
+        # no awaits — because the decision belongs inside the install block; the
+        # closes that carry it out happen below, with the superseded peer's.
+        surplus: list[tuple[ExtensionLink, WebSocket]] = []
+        if not link.paired:
+            strangers = sorted(
+                (
+                    entry
+                    for entry in self.links.values()
+                    if entry is not link and not entry.paired and entry.websocket is not None
+                ),
+                key=lambda entry: entry.attached_at,
+            )
+            while len(strangers) >= MAX_UNLISTED_LINKS:
+                victim = strangers.pop(0)
+                wire = victim.websocket
+                if wire is None:  # pragma: no cover - the filter above excludes it
+                    continue
+                surplus.append((victim, wire))
         if not link.paired:
             self._ensure_pending(extension_id, _browser_label(link.browser, link.extension_version))
         self.publish_safely()
@@ -1757,6 +1945,15 @@ class BridgeService:
         if previous_wire is not None:
             with suppress(Exception):
                 await asyncio.wait_for(previous_wire.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        for victim, wire in surplus:
+            # 4004, the same answer the pre-change daemon gave a second identity:
+            # this peer holds no pairing and the bridge already has as many
+            # unpaired dials as it will track. Retiring first drops its link
+            # entry and any parked futures, so the map is bounded either way the
+            # close lands.
+            self._retire_link(victim)
+            with suppress(Exception):
+                await asyncio.wait_for(wire.close(code=4004), timeout=LINK_CLOSE_TIMEOUT_S)
         if not link.is_authoritative(websocket, generation):
             # A newer handshake installed itself while the superseded socket was
             # being closed, so this one is now the superseded side. It must not
@@ -1796,6 +1993,11 @@ class BridgeService:
             if promoted is not None:
                 await self._tell_role(promoted)
             return
+        if demoted is not None:
+            # AFTER the ack: a handshake that turned out to be superseded returns
+            # above without speaking, and this frame is a statement about the
+            # wheel that only the current handshake may make.
+            await self._tell_role(demoted)
         try:
             while True:
                 frame = await websocket.receive_json()
@@ -1986,6 +2188,9 @@ class BridgeService:
         # frame, and until it does, the daemon is already refusing it commands.
         self.driver_generation = link.generation
         link.role = "driver"
+        # The pin is a wheel move like any other, so the downgrade record
+        # follows it (M2/Q2) — before the awaits below, per the audit-A1 rule.
+        self._record_driver()
         self.publish_safely()
         for entry in [link, previous]:
             if entry.websocket is not None:
@@ -2759,6 +2964,11 @@ class BridgeService:
                 # more asks for it by name.
                 "driver_extension_id": driver_id,
                 "standby_extension_ids": [link.extension_id for link in self.standby_links()],
+                # Admitted dials with NO pairing. Not standbys — they hold no
+                # authority and can never be promoted — but the operator (and the
+                # bound in MAX_UNLISTED_LINKS) needs them countable rather than
+                # invisible in the one place a reader already looks.
+                "unlisted_extension_count": len(self.unlisted_links()),
                 "authorized_extension_ids": sorted(_identity_ids(self.root)),
                 # The driver's human label, so the standby popup can NAME the
                 # install holding the wheel rather than saying "another one".

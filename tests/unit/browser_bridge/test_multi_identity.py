@@ -28,8 +28,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from local_operator.browser_bridge import daemon as daemon_module
 from local_operator.browser_bridge.daemon import (
+    MAX_UNLISTED_LINKS,
     BridgeService,
     _identities,
+    _pending_entries,
+    _pending_path,
+    _write_pending,
     add_identity,
     create_app,
     pairing_status,
@@ -73,14 +77,17 @@ def _legacy_record(tmp_path: Path, extension_id: str, token: str) -> None:
 
 
 def _schema_two(tmp_path: Path, *, driver: str = STORE_ID) -> None:
-    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN), label="Chrome 0.1.13")
-    add_identity(tmp_path, UNPACKED_ID, _digest(UNPACKED_TOKEN), label="Chrome 0.1.10")
-    if driver != UNPACKED_ID:
-        # `add_identity` names the identity it just added as the driver record;
-        # re-write so the top-level trio describes the driver we want to test.
-        from local_operator.browser_bridge.daemon import _write_pairing
+    """Two authorised identities, with the legacy trio naming ``driver``.
 
-        _write_pairing(tmp_path, _identities(tmp_path), driver_id=driver)
+    Through the REAL writers, and with no repair step: keeping the trio on the
+    driver is a property of `add_identity`/`_write_pairing` themselves (review
+    round 1, M2/Q2), and a fixture that rewrote the file afterwards would hide
+    exactly the defect these rows exist to catch.
+    """
+    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN), label="Chrome 0.1.13", driver_id=driver)
+    add_identity(
+        tmp_path, UNPACKED_ID, _digest(UNPACKED_TOKEN), label="Chrome 0.1.10", driver_id=driver
+    )
 
 
 class _FakePeer:
@@ -837,3 +844,256 @@ def test_u19_drive_requires_the_session_key(tmp_path: Path) -> None:
             ).status_code
             == 401
         )
+
+
+# --- U20-U25: remediation round 1 (M1, M2/Q2, m1, m2) ------------------------
+#
+# Every row below fails on the head the review examined. They are grouped here
+# rather than folded into U1-U19 so the next reader can see which defects the
+# round found, and because each one pins a claim the fix makes about the FILE or
+# about the wheel — not a re-assertion of the rule it already covered.
+
+
+def test_u20_pairing_a_second_install_leaves_the_drivers_record_alone(tmp_path: Path) -> None:
+    """M2/Q2 — the legacy trio names the DRIVER, not the newest arrival.
+
+    The second install pairs through its OWN socket while the first holds the
+    wheel (design §3.5.1: `pair` must be served on a standby link, or pairing a
+    second install deadlocks). What must not happen is the downgrade record
+    moving to it: an older daemon reading that file would authorise the standby
+    and refuse the install the operator is using — a forced re-pair, on the one
+    path decision 1 promises never needs one.
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{STORE_ID}"}
+        ) as store:
+            store.send_json(_hello_frame(STORE_TOKEN))
+            assert store.receive_json()["role"] == "driver"
+            # A third, unlisted install: it has no token, so it is admitted and
+            # given a code (that is what makes a second install addable).
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
+            ) as third:
+                third.send_json(_hello_frame(""))
+                ack = third.receive_json()
+                assert ack["paired"] is False and ack["role"] == "standby"
+                code = next(
+                    entry["code"]
+                    for entry in pairing_status(tmp_path)["pending"]
+                    if entry["extension_id"] == THIRD_ID
+                )
+                third.send_json({"event": "pair", "code": code})
+                result = third.receive_json()
+                assert result["event"] == "pair_result" and result["ok"] is True
+
+                # The DRIVER's record is untouched, and the new identity's token
+                # is a real credential of its own (decision 2).
+                saved = json.loads(_pairing_file(tmp_path).read_text(encoding="utf-8"))
+                assert (
+                    saved["extension_id"] == STORE_ID
+                ), "pairing a standby moved the downgrade record off the driver"
+                assert saved["token_sha256"] == _digest(STORE_TOKEN)
+                status = pairing_status(tmp_path)
+                driving = {
+                    entry["extension_id"]: entry["driving"] for entry in status["identities"]
+                }
+                assert driving == {STORE_ID: True, UNPACKED_ID: False, THIRD_ID: False}
+                # ... and /health agrees with the file (QA round 1, Q3).
+                health = client.get("/health").json()
+                assert health["driver_extension_id"] == STORE_ID
+
+                # Revoking the standby must not rename the record either.
+                assert revoke_identity(tmp_path, THIRD_ID) is None
+                saved = json.loads(_pairing_file(tmp_path).read_text(encoding="utf-8"))
+                assert saved["extension_id"] == STORE_ID
+
+
+@pytest.mark.asyncio
+async def test_u21_promotion_moves_the_record_onto_the_promoted_install(tmp_path: Path) -> None:
+    """M2/Q2, the other direction: when the wheel REALLY moves, so does the file.
+
+    Preserving the record while the driver is unchanged is only half the
+    contract. If the driver's link ends and a standby is promoted, the trio must
+    name the promoted install — otherwise the rollback path authorises an
+    install that is not driving, which is how QA Q2 measured the old daemon
+    refusing the store build with 4004.
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    service = BridgeService(root=tmp_path)
+    store = _FakePeer(STORE_ID)
+    unpacked = _FakePeer(UNPACKED_ID)
+    tasks = [_connect(service, store, STORE_TOKEN), _connect(service, unpacked, UNPACKED_TOKEN)]
+    assert await _settles(lambda: len(service.links) == 3)
+    before = json.loads(_pairing_file(tmp_path).read_text(encoding="utf-8"))
+    assert before["extension_id"] == STORE_ID
+
+    # The driver dies WITHOUT a close frame, as a dying MV3 worker does.
+    store.push(None)
+    assert await _settles(lambda: service.link.extension_id == UNPACKED_ID)
+    saved = json.loads(_pairing_file(tmp_path).read_text(encoding="utf-8"))
+    assert (
+        saved["extension_id"] == UNPACKED_ID
+    ), "the promoted install is not the one the downgrade record names"
+    assert saved["token_sha256"] == _digest(UNPACKED_TOKEN)
+    await _shutdown(*tasks)
+
+
+def test_u22_a_paired_install_takes_the_wheel_from_an_unpaired_incumbent(
+    tmp_path: Path,
+) -> None:
+    """M1 — the third place the wheel is handed out now applies its own rule.
+
+    `_promote_standby` and `POST /driver` already refuse to give the wheel to a
+    link that cannot serve a command. The handshake did not, and the new
+    admission of token-less dials makes that reachable without anybody being
+    hostile: load a fresh unpacked build against a restarting daemon, and it can
+    complete `hello` first. The authorised, paired install that dials next was
+    told `standby`, and every session answered `not_paired` while a perfectly
+    good browser sat idle.
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        # The stranger gets there first and takes the cold-start wheel.
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
+        ) as stranger:
+            stranger.send_json(_hello_frame(""))
+            first = stranger.receive_json()
+            assert first["role"] == "driver" and first["paired"] is False
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{STORE_ID}"}
+            ) as store:
+                store.send_json(_hello_frame(STORE_TOKEN))
+                ack = store.receive_json()
+                assert ack["paired"] is True
+                assert (
+                    ack["role"] == "driver"
+                ), "a paired install was made a standby by an unpaired incumbent"
+                # The demoted incumbent is told, not merely dropped: it holds
+                # debugger attachments it must release.
+                assert stranger.receive_json() == {"event": "role", "role": "standby"}
+                health = client.get("/health").json()
+                assert health["driver_extension_id"] == STORE_ID
+                assert health["paired"] is True
+                # The user-visible outcome: a session can be served at all.
+                served = client.post(
+                    "/rpc",
+                    headers={"X-Bridge-Key": app.state.bridge.state.session_key},
+                    json={"id": "r-1", "method": "status", "params": {}},
+                )
+                assert served.status_code == 200, served.text
+
+
+def test_u23_an_unpaired_dial_is_not_reported_as_a_standby(tmp_path: Path) -> None:
+    """m2 — "standby" is a role, and an admitted stranger does not hold it.
+
+    The stranger is admitted so it can pair; it receives no commands and
+    `_promote_standby` will never promote it. Listing it under
+    `standby_extension_ids` told the operator — in the popup and in
+    `lop browser status` — that a peer with no pairing at all "is standing by".
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{STORE_ID}"}
+        ) as store:
+            store.send_json(_hello_frame(STORE_TOKEN))
+            assert store.receive_json()["role"] == "driver"
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
+            ) as stranger:
+                stranger.send_json(_hello_frame(""))
+                assert stranger.receive_json()["role"] == "standby"
+                health = client.get("/health").json()
+                assert health["standby_extension_ids"] == []
+                # Counted rather than invisible, so the bound below is checkable
+                # from outside and an operator can see a dial that is not paired.
+                assert health["unlisted_extension_count"] == 1
+            # The paired install's own standby still reports as one.
+            with client.websocket_connect(
+                "/extension", headers={"origin": f"chrome-extension://{UNPACKED_ID}"}
+            ) as unpacked:
+                unpacked.send_json(_hello_frame(UNPACKED_TOKEN))
+                assert unpacked.receive_json()["role"] == "standby"
+                assert client.get("/health").json()["standby_extension_ids"] == [UNPACKED_ID]
+
+
+@pytest.mark.asyncio
+async def test_u24_unpaired_dials_are_bounded_and_the_oldest_is_retired(
+    tmp_path: Path,
+) -> None:
+    """m1 — the link map is bounded, and a legitimate install is still admitted.
+
+    Every token-less dial is admitted (that is how a second install pairs) and
+    each holds a socket, a link entry and a pending-code record — all grown by
+    one unauthenticated frame. The OLDEST stranger gives way, so the bound can
+    never refuse the operator's own install because somebody's stale socket got
+    there first.
+    """
+    _schema_two(tmp_path, driver=STORE_ID)
+    service = BridgeService(root=tmp_path)
+    drive = _FakePeer(STORE_ID)
+    tasks = [_connect(service, drive, STORE_TOKEN)]
+    assert await _settles(lambda: len(service.links) == 2)
+
+    strangers: list[_FakePeer] = []
+    for index in range(MAX_UNLISTED_LINKS):
+        # A valid Chrome extension id: 32 characters from a-p, which the
+        # Origin check enforces before anything below it runs.
+        peer = _FakePeer("a" * 31 + chr(ord("a") + index))
+        strangers.append(peer)
+        tasks.append(_connect(service, peer, ""))
+        assert await _settles(
+            lambda peer=peer: bool(peer.acks()), seconds=3.0
+        ), "a stranger was not admitted to pair"
+    assert len(service.unlisted_links()) == MAX_UNLISTED_LINKS
+
+    overflow = _FakePeer("b" * 32)
+    tasks.append(_connect(service, overflow, ""))
+    assert await _settles(lambda: bool(overflow.acks()), seconds=3.0)
+    assert await _settles(
+        lambda: bool(strangers[0].closed), seconds=3.0
+    ), "the oldest unpaired link was not retired to make room"
+    assert strangers[0].closed[0] == 4004
+    assert len(service.unlisted_links()) <= MAX_UNLISTED_LINKS
+    assert service.link.extension_id == STORE_ID, "the bound disturbed the driver"
+    await _shutdown(*tasks)
+
+
+def test_u25_a_long_dead_pending_record_is_dropped(tmp_path: Path) -> None:
+    """m1 — expired codes stop accumulating, without becoming a way in.
+
+    The record is kept one TTL past expiry so the honest "that code expired"
+    answer still has something to read, then dropped. The A1 lockout is the
+    ROTATION, not the record, so forgetting a long-dead entry hands nobody
+    authority: a fresh dial mints a fresh code the user must still read off the
+    terminal.
+    """
+    now = time.time()
+    pending = _pending_path(tmp_path)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text(
+        json.dumps(
+            {
+                "pending": {
+                    STORE_ID: {"code": "111111", "expires_at": now + 60, "attempts": 0},
+                    UNPACKED_ID: {"code": "222222", "expires_at": now - 10_000, "attempts": 5},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    entries = _pending_entries(tmp_path)
+    assert set(entries) == {STORE_ID}, "a long-dead record was still live"
+    # The sweep reaches the FILE the next time anything writes it.
+    _write_pending(tmp_path, entries)
+    on_disk = json.loads(pending.read_text(encoding="utf-8"))
+    assert set(on_disk["pending"]) == {STORE_ID}
+    # And an identity with no record simply asks again: no authority is inherited.
+    service = BridgeService(root=tmp_path)
+    assert service._valid_saved_token(UNPACKED_ID, UNPACKED_TOKEN) is False
