@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -884,3 +885,158 @@ async def test_a_chain_of_empty_providers_fails_loudly(tmp_path, monkeypatch) ->
 
     message = str(caught.value)
     assert "duckduckgo" in message and "perplexity" in message
+
+
+# ---------------------------------------------------------------------------
+# Refusal shape matrix (round-1 review: MAJOR-1 and MINOR-1)
+# ---------------------------------------------------------------------------
+
+#: The in-thread sign-in NUDGE. Live probes of the anonymous endpoint found this
+#: on refusals too, so it must keep raising; it is not, on its own, proof that
+#: nothing was served -- that is what the served-block test settles.
+SOFT_UPSELL = {
+    "name": "logged_out_thread_sign_in",
+    "upsell_type": "LOGIN",
+    "app_location": "IN_THREAD_INPUT",
+    "title": "Sign in to save your history and access more features",
+}
+WALL_UPSELL = {
+    "name": "fraud_authwall_upsell",
+    "upsell_type": "LOGIN",
+    "app_location": "MODAL",
+    "title": "Sign in to continue using Perplexity",
+}
+_ASK_ONLY_BLOCKS = [
+    {
+        "intended_usage": "ask_text",
+        "markdown_block": {"answer": "Sign up and repeat your request."},
+    }
+]
+
+
+def _sse(*events: dict[str, object]) -> str:
+    return "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n"
+
+
+def _wall(body: str) -> str | None:
+    from local_operator.web_search.providers import (
+        _parse_perplexity_sse,
+        _perplexity_authwall,
+    )
+
+    return _perplexity_authwall(_parse_perplexity_sse(body))
+
+
+def test_refusal_carrying_only_the_soft_marker_is_still_a_refusal() -> None:
+    """Three live refusals carried ONLY this marker, so it has to raise.
+
+    Narrowing the test to ``fraud_authwall_upsell`` would reopen the original
+    bug for that shape (round-1 review MAJOR-1).
+    """
+    body = _sse({"upsell_information": SOFT_UPSELL, "blocks": _ASK_ONLY_BLOCKS})
+    assert _wall(body) is not None
+
+
+def test_a_served_block_beside_a_soft_marker_is_a_result_not_a_refusal() -> None:
+    """MAJOR-1: "no recognised sources" is not "nothing was served".
+
+    A shopping, hotels, maps or media answer is served content that the source
+    extractor has no rows for. Raising on its absence discarded a real answer
+    that happened to carry a sign-in nudge.
+    """
+    for block_key in (
+        "shopping_block",
+        "hotels_mode_block",
+        "maps_mode_block",
+        "media_block",
+        "web_result_block",
+    ):
+        body = _sse(
+            {
+                "upsell_information": SOFT_UPSELL,
+                "blocks": [
+                    {"intended_usage": "web_results", block_key: {"items": [{"name": "x"}]}}
+                ],
+            }
+        )
+        assert _wall(body) is None, f"a served {block_key} was mistaken for a refusal"
+
+
+def test_a_double_encoded_wall_is_still_a_refusal() -> None:
+    """MINOR-1: the JSON-string branch had one unwrap, and two escaped it.
+
+    A wall arriving as a double-encoded string was served to the model as a
+    search result -- this fix's own bug, in the shape the stream sometimes uses.
+    """
+    body = _sse(
+        {
+            "upsell_information": json.dumps(json.dumps(WALL_UPSELL)),
+            "blocks": _ASK_ONLY_BLOCKS,
+        }
+    )
+    assert _wall(body) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_served_shopping_answer_survives_the_chain(tmp_path) -> None:
+    """The end-to-end half of MAJOR-1, through the provider entry point."""
+    body = _sse(
+        {
+            "upsell_information": SOFT_UPSELL,
+            "blocks": [
+                {
+                    "intended_usage": "web_results",
+                    "shopping_block": {"products": [{"name": "marathon shoe"}]},
+                },
+                {
+                    "intended_usage": "ask_text",
+                    "markdown_block": {"answer": "Here are the best marathon shoes."},
+                },
+            ],
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response = await PROVIDERS["perplexity"].search(
+            client, _credentials(tmp_path), WebSearchSettings(), "query", 3
+        )
+
+    # Not raised away: the answer is the served one, and the sign-in nudge is
+    # not treated as the reason to discard it.
+    assert response.answer == "Here are the best marathon shoes."
+
+
+@pytest.mark.asyncio
+async def test_a_forced_provider_failure_names_only_that_provider(tmp_path, monkeypatch) -> None:
+    """Round-1 design review D2: the message described a chain that never ran.
+
+    With one candidate -- a forced provider, or the only one enabled -- the old
+    text said "All configured web search providers failed" while the others had
+    not been asked.
+    """
+
+    from local_operator.web_search.service import WebSearchService
+
+    manager = _credentials(tmp_path)
+    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"], strategy="ordered")
+    service = WebSearchService(settings, manager)
+
+    async def walled(*_args: object, **_kwargs: object):
+        raise RuntimeError("Fetch a page directly, or set PERPLEXITY_API_KEY: refused")
+
+    # Replace the whole registry ENTRY: ``PROVIDERS`` maps ids to provider
+    # DEFINITIONS (objects, not dicts), and only ``.search`` is reached here.
+    monkeypatch.setitem(PROVIDERS, "perplexity", SimpleNamespace(search=walled))
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("query", forced_provider="perplexity")
+
+    message = str(raised.value)
+    assert "all configured web search providers failed" not in message.lower()
+    assert "only provider tried" in message
+    assert "duckduckgo" not in message
+    # D1: the provider's actionable sentence leads, so it survives the card's
+    # single-line crop; the scope note follows it rather than preceding it.
+    assert message.index("Fetch a page directly") < message.index("only provider tried")

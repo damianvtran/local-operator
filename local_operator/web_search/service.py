@@ -263,6 +263,35 @@ class WebSearchService:
                 return response
 
         summary = "; ".join(failures) or "no candidates"
+        # Name only what was TRIED. With a forced provider (or one enabled
+        # provider) the candidate list is a single entry, and "all configured
+        # web search providers failed" then describes a chain that was never
+        # run: a design review reproduced it on a forced Perplexity call, where
+        # the message told the reader that every provider had failed while the
+        # other two had not been asked.
+        # One candidate covers both the forced call and the one-provider install,
+        # and this function cannot tell them apart -- so the message says what is
+        # true of either: this provider failed and no other was tried.
+        #
+        # TWO REVIEW FINDINGS MEET HERE, which is why it is worded this way and
+        # not more naturally. The provider's own sentence leads with the move the
+        # reader can act on, and the operator's card renders the whole thing on
+        # ONE line that it crops and never wraps (design review D1): anything
+        # this prefix puts in front of that sentence is what the reader sees
+        # instead. So the prefix is the shortest true one -- and the scope note
+        # that used to be the prefix ("all configured web search providers
+        # failed") was also FALSE for a single candidate, describing a chain that
+        # was never run (design review D2). It goes last, where diagnostics
+        # belong, phrased so it is true of both cases.
+        if len(candidates) == 1:
+            only = candidates[0]
+            detail = summary
+            redundant = f"{only}: "
+            if detail.startswith(redundant):
+                detail = detail[len(redundant) :]
+            raise RuntimeError(
+                f"Web search failed: {detail} ({only!r} was the only provider tried)"
+            )
         raise RuntimeError(f"All configured web search providers failed: {summary}")
 
 
