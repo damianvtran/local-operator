@@ -402,7 +402,7 @@ async def test_task_refuses_an_unconfigured_tier_with_zero_tiers(config_dir, tmp
     assert result.is_error
     assert "invalid arguments" in result.text
     assert "effort tier 'hi' is unavailable" in result.text
-    assert "no tiers are configured under values.subagents.models" in result.text
+    assert "no tiers are configured under subagents.models" in result.text
     assert "omit 'effort' to inherit this session's model and reasoning effort" in result.text
     # Refused at validation: the launcher was never reached.
     assert "job:" not in result.text
@@ -799,14 +799,20 @@ async def test_operator_mode_refuses_a_role_pin_and_accepts_the_sentinel(
         {"op": "create", "name": "r1", "description": "d", "instructions": "i", "effort": "hi"},
     )
     assert refused.is_error
-    assert "effort is the operator's to choose" in refused.text
-    assert "a pin runs that role on a different MODEL ('hi' → anthropic/claude-opus-5)" in (
+    assert "pin runs that role on a different MODEL ('hi' → anthropic/claude-opus-5)" in (
         refused.text
     )
     assert "pass 'inherit' to clear a pin" in refused.text
     # U2's other half: the person who wants one strong reviewer is told where a
     # pin properly lives, not only how to stop asking for it.
-    assert "pins it in the role's profile" in refused.text
+    assert "role's own profile" in refused.text
+    # U8's half, and the reason this refusal was reordered: past the card's
+    # per-line cut the message is unreadable even expanded, so the ownership AND
+    # the operator's next step have to sit inside the ~69 cells that survive at
+    # 100 columns. Measured before: the route sentence began at cell ~260.
+    window = refused.text.split("Value error, ", 1)[1][:69]
+    assert "effort is the operator's" in window
+    assert "pin a role via subagents.model_choice" in window
 
     for value in ("inherit", ""):
         ok = await _call(

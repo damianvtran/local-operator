@@ -1252,7 +1252,7 @@ def _effort_pin_description(model_choice: bool) -> str:
     tiers = configured_effort_tiers()
     if not tiers:
         return (
-            "create/update: no model tiers are configured (values.subagents.models); "
+            "create/update: no model tiers are configured (subagents.models); "
             "'inherit' clears a pin and every role inherits the launching session's model."
         )
     return (
