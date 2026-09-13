@@ -6396,12 +6396,17 @@ class AttachedSession:
 
         Declared and implemented rather than left to a duck-probe, because the
         TUI reads it on the resume path and an absent member there degrades the
-        band to a silently-short figure. An empty tuple is the honest answer: a
-        viewer cannot read the owner's transcript, so it recovers nothing and the
-        ledger stays as it is. (The owner's own search spend reaches the band
-        through the shared ledger; a viewer in ANOTHER process has no ledger
-        rows to read, which is a pre-existing property of a process-wide ledger
-        rather than something this member can fix.)
+        band to a silently-short figure -- the shape of the /team and /agent
+        regressions.
+
+        An empty tuple is a SCOPE decision, not a capability limit: the search
+        spend a viewer would show comes from a process-wide ledger keyed by
+        session id (``web_search.cost.SEARCH_SPEND``), and the viewer's own
+        process holds no rows for the owner's searches, so recovering rows from
+        the journal here would not reach the screen this member feeds. Routing a
+        viewer's search spend from the runtime is its own change; until then an
+        empty tuple leaves the ledger untouched, which renders as absence rather
+        than as a confident ``$0.0000``.
         """
         return ()
 
