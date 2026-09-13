@@ -22544,13 +22544,15 @@ class OperatorApp(App[None]):
         still wanted it.
 
         So the safety moved from the TIMING into the SHAPE of the request, which
-        is what ``session.complete_once`` now builds: one attempt, no fallback
-        chain, no credential rotation, no sticky-route read or write, no quota
-        preflight, no boundary classification, not the session's prompt cache
-        key, a 1024-token cap, the cheapest route the session can reach, and a
-        15-second ceiling. A 429 here is swallowed by ``generate_title`` and
-        cannot have touched anything the turn depends on — see
-        ``ChatRequest.isolated`` for the enumeration.
+        is what ``session.complete_once`` now builds: at most two attempts (the
+        second only when a bearer was rejected outright and a read-only
+        re-resolve hiding it produced a different one), no fallback chain, no
+        credential rotation, no sticky-route read or write, no quota preflight,
+        no boundary classification, not the session's prompt cache key, a
+        1024-token cap, the cheapest route the session can reach, and a 15-second
+        ceiling. A 429 here is swallowed by ``generate_title`` and cannot have
+        touched anything the turn depends on — see ``ChatRequest.isolated`` for
+        the enumeration.
 
         What the user sees: the opener's excerpt the instant they submit, then
         the model's title about five seconds later (measured against

@@ -39,7 +39,7 @@ import threading
 import time
 import uuid
 import zlib
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -1488,6 +1488,7 @@ class AuthStore:
         ignore_demotions: bool = False,
         model_id: str = "",
         session_id: str | None = None,
+        exclude_keys: Collection[str] | None = None,
     ) -> list[StoredCredential]:
         # ``model_id`` scopes the block filter: an account blocked only for a
         # model family (a spent scoped weekly cap) still serves every other
@@ -1507,6 +1508,14 @@ class AuthStore:
         ]
         if source is not None:
             rows = [r for r in rows if r.data.get("source") == source]
+        if exclude_keys:
+            # Rows serving a bearer the CALLER already saw rejected are hidden
+            # from THIS resolve alone: nothing is blocked, demoted or repointed,
+            # so the pick comes back exactly as it went in for every other
+            # resolver. This is the read-only half of "an isolated errand may
+            # serve ITSELF from a sibling" — the write half (blocking the
+            # failing row) belongs to the turn's rotation, not to decoration.
+            rows = [r for r in rows if not any(self._row_matches_key(r, k) for k in exclude_keys)]
         # Drop demoted rows from the TIER, not merely sort them last, when some
         # other credential is still reachable.
         #
@@ -1590,6 +1599,7 @@ class AuthStore:
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade.
 
@@ -1597,7 +1607,8 @@ class AuthStore:
         :meth:`_resolve`. ``model_id`` names the model the request will run,
         so model-family-scoped quota blocks (see
         :meth:`is_blocked_for_model`) only exclude the accounts that cannot
-        serve THAT model.
+        serve THAT model. ``exclude_keys`` hides the rows serving those
+        bearers from THIS resolve alone — see :meth:`_resolve`.
         """
         key, _row = await self._resolve(
             provider,
@@ -1605,6 +1616,7 @@ class AuthStore:
             force_refresh=force_refresh,
             read_only=read_only,
             model_id=model_id,
+            exclude_keys=exclude_keys,
         )
         return key
 
@@ -1616,6 +1628,7 @@ class AuthStore:
         force_refresh: bool = False,
         read_only: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -1629,6 +1642,8 @@ class AuthStore:
         stickiness, for a decorative call running beside a live turn — see
         :meth:`_resolve` and
         :attr:`~local_operator.harness.types.ChatRequest.isolated`.
+        ``exclude_keys`` hides the rows serving those bearers from THIS
+        resolve alone — see :meth:`_resolve`.
         """
         if self._runtime_overrides.get(provider) or self._config_overrides.get(provider):
             return None
@@ -1638,6 +1653,7 @@ class AuthStore:
             force_refresh=force_refresh,
             read_only=read_only,
             model_id=model_id,
+            exclude_keys=exclude_keys,
         )
         if key is None:
             return None
@@ -1832,6 +1848,7 @@ class AuthStore:
         read_only: bool = False,
         ignore_demotions: bool = False,
         model_id: str = "",
+        exclude_keys: Collection[str] | None = None,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -1851,6 +1868,14 @@ class AuthStore:
         OAuth refresh still persists the rotated token: that is the same
         account's own bookkeeping, not a decision about where requests go, and
         dropping it would throw away a single-use refresh token.
+
+        ``exclude_keys`` hides the rows serving those bearers from this ONE
+        resolve — a read-only way to ask for a SIBLING after a bearer was
+        rejected, leaving every block, demotion and the sticky pointer exactly
+        as they were. Threaded only by the failover driver's isolated auth
+        re-resolve; the ordinary rotation path hides the failing row by
+        blocking it instead (``rotate_sibling``), which a decorative call must
+        not do.
         """
 
         def pin(credential_id: int | None) -> None:
@@ -1877,6 +1902,7 @@ class AuthStore:
             ignore_demotions=ignore_demotions,
             model_id=model_id,
             session_id=session_id,
+            exclude_keys=exclude_keys,
         )
         for row in self._selection_order(
             oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -1907,6 +1933,7 @@ class AuthStore:
             ignore_demotions=ignore_demotions,
             model_id=model_id,
             session_id=session_id,
+            exclude_keys=exclude_keys,
         )
         for row in self._selection_order(
             login_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -1936,6 +1963,7 @@ class AuthStore:
                 ignore_demotions=ignore_demotions,
                 model_id=model_id,
                 session_id=session_id,
+                exclude_keys=exclude_keys,
             )
             if row.data.get("source") != "login"
         ]
@@ -1977,6 +2005,7 @@ class AuthStore:
                 read_only=read_only,
                 ignore_demotions=True,
                 model_id=model_id,
+                exclude_keys=exclude_keys,
             )
 
         return None, None
