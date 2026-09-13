@@ -583,12 +583,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # -- unlink/remove of FILES the same function owns (locks, caches, sidecars,
     #    temp files, install artefacts). A session directory is never the arg.
+    # The pairing/pending files are daemon-owned state under the config root
+    # (`browser/pairing.json`, `run/browser/pairing-pending.json`), never a
+    # session directory. Since the allow-list landed these three calls replaced
+    # the two that used to sit in `BridgeService._try_pair` (which now calls
+    # `_drop_pending`) and `reset_pairing` (which now delegates to `revoke_all`),
+    # so the keys moved with the code: revoking the last authorised identity
+    # removes the pairing FILE, revoking everything removes both, and writing an
+    # empty waiting-code map removes the pending FILE. Keyed per call rather than
+    # per function, which is why a key that no longer has a call site fails the
+    # audit.
     (
-        "local_operator/browser_bridge/daemon.py::BridgeService._try_pair",
+        "local_operator/browser_bridge/daemon.py::revoke_identity",
         "<path>.unlink",
-        "pending-pair FILE",
+        "pairing FILE, when the last identity is removed",
     ),
-    ("local_operator/browser_bridge/daemon.py::reset_pairing", "<path>.unlink", "pairing FILE"),
+    (
+        "local_operator/browser_bridge/daemon.py::revoke_all",
+        "<path>.unlink",
+        "pairing + pending-pair FILEs (`pair --reset`)",
+    ),
+    (
+        "local_operator/browser_bridge/daemon.py::_write_pending",
+        "<path>.unlink",
+        "pending-pair FILE, when the last waiting code is retired",
+    ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
         "<path>.unlink",
