@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from local_operator.harness.types import (
     StreamTextDelta,
     Usage,
 )
+from local_operator.session import frontend_state as frontend_state_module
 from local_operator.session import session as session_module
 from local_operator.session import spend as spend_module
 from local_operator.session.frontend_state import CostKnowledge
@@ -177,25 +179,39 @@ def test_record_round_trip_and_malformed_degradation() -> None:
 
 
 def test_correct_converges_an_estimate_and_adjust_is_not_a_call() -> None:
-    """The one-tick path: paint-grade first, authoritative later (design §5.2)."""
+    """The one-tick path: paint-grade first, authoritative later (design §5.2).
+
+    ``correct`` returns the DELTA it applied, not a bare bool, because the front
+    end has to know how much of the accumulator arrived as a re-price rather than
+    as a new call (review R1-1). The delta stays truthy, so it also still reads as
+    "something changed"; ``0`` is the no-op.
+    """
     spend = SessionSpend()
     index = spend.accrue(1_000, None)
     assert spend.micro == 1_000
-    assert spend.correct(index, 2_500) is True  # the full resolver's answer
+    assert spend.correct(index, 2_500) == 1_500  # the full resolver's answer
     assert spend.micro == 2_500 and spend.calls == 1
-    assert spend.correct(index, 9_999) is False  # a call is corrected once
+    assert spend.correct(index, 9_999) == 0  # a call is corrected once
 
-    # An unpriced call that the full resolver CAN price stops being a bound.
+    # An unpriced call that the full resolver CAN price stops being a bound, and
+    # the delta is the whole price because the call contributed nothing before.
     unknown_index = spend.accrue(None, None)
     assert spend.knowledge() is CostKnowledge.PARTIAL
-    assert spend.correct(unknown_index, 750) is True
+    assert spend.correct(unknown_index, 750) == 750
     assert spend.micro == 3_250 and spend.priced_calls == 2
     assert spend.knowledge() is CostKnowledge.EXACT
+
+    # A downward re-price reports a NEGATIVE delta: the paint answer can be
+    # dearer than the resolved one, and the front end must be able to tell that
+    # apart from a call that simply added nothing.
+    down = spend.accrue(5_000, None)
+    assert spend.correct(down, 2_000) == -3_000
+    assert spend.micro == 5_250
 
     # A turn-end remainder moves the total without inventing a provider call.
     before = spend.calls
     assert spend.adjust(250) is True
-    assert spend.micro == 3_500 and spend.calls == before
+    assert spend.micro == 5_500 and spend.calls == before
 
 
 def test_price_call_agrees_with_price_snapshot() -> None:
@@ -598,10 +614,20 @@ def test_suffix_reader_serves_two_types_in_one_pass(tmp_path: Path) -> None:
 # -- T6: the one-time rebuild -----------------------------------------------
 
 
-def test_rebuild_sums_every_row_and_marks_floor_only_when_rows_were_dropped(
+def test_rebuild_sums_every_row_and_never_claims_a_floor_from_a_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§2.2 and §5.4: no compaction boundary for money; ``floor`` from shrinkage."""
+    """§2.2 and §5.4: no compaction boundary for money — and no marker-based ``≥``.
+
+    Review R1-4: a compaction or a prune REWRITES rows and hides them from the
+    context replay, but it removes no money. ``_pruned_entry`` replaces only
+    ``payload["content"]`` (``usage`` survives, and a pruned tool result's
+    ``search_cost`` is outside ``content``), and ``compact_file`` drops prune
+    entries and superseded collapsible customs, never a message row. So a
+    journal full of markers whose every row is still readable must rebuild
+    EXACT, not ``≥`` — the mark is for money the file cannot show, which is the
+    unpriced-call case (PARTIAL, covered by the sibling test).
+    """
     directory = tmp_path / "sess"
     directory.mkdir()
     transcript = Transcript(directory)
@@ -639,11 +665,14 @@ def test_rebuild_sums_every_row_and_marks_floor_only_when_rows_were_dropped(
         ]
 
     monkeypatch.setattr(session_module, "price_rows", fake_price)
-    asyncio.run(session._rebuild_spend(session._transcript.all_usage_rows(), True))
+    asyncio.run(session._rebuild_spend())
     spend = session.spend
     assert len(rebuilt["rows"]) == 3  # every row, boundary ignored
-    assert spend.floor is True and spend.rebuilt is True
+    assert spend.rebuilt is True
+    assert spend.floor is False, "a compaction marker is not evidence of lost money"
     assert spend.micro == 12_000_000  # $10 + $2 + the unpriced call's zero
+    # The unpriced call is what bounds this total, and it bounds it by name.
+    assert spend.knowledge() is CostKnowledge.PARTIAL
     assert (spend.calls, spend.priced_calls, spend.unpriced_calls) == (3, 2, 1)
     assert spend.knowledge() is CostKnowledge.PARTIAL
 
@@ -668,8 +697,8 @@ def test_rebuild_is_once_per_session_per_process(
         session = make_session(tmp_path)
         calls: list[int] = []
 
-        async def spy(rows, shrunk):
-            calls.append(len(rows))
+        async def spy() -> None:
+            calls.append(1)
 
         session._rebuild_spend = spy  # type: ignore[method-assign]
         for _ in range(5):
@@ -683,7 +712,13 @@ def test_rebuild_is_once_per_session_per_process(
 def test_rebuild_pricing_runs_off_the_event_loop_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Structural, not timing: the price computation is on a worker thread."""
+    """Structural, not timing: the whole rebuild body is on a worker thread.
+
+    The SCAN counts as much as the price here (review R1-5): ``all_usage_rows``
+    copies a dict per usage row and ``journal_shrank`` walks the entries again,
+    so asserting thread identity for ``price_rows`` alone would let an O(rows)
+    walk back onto the loop with the test still green. Both spies are checked.
+    """
     directory = tmp_path / "sess"
     directory.mkdir()
     transcript = Transcript(directory)
@@ -704,13 +739,20 @@ def test_rebuild_pricing_runs_off_the_event_loop_thread(
             seen.append(threading.get_ident())
             return price_rows(rows)
 
+        original_scan = Transcript.all_usage_rows
+
+        def scan_spy(self):
+            seen.append(threading.get_ident())
+            return original_scan(self)
+
         monkeypatch.setattr(session_module, "price_rows", spy)
+        monkeypatch.setattr(Transcript, "all_usage_rows", scan_spy)
         session.rebuild_spend_if_needed()
         for _ in range(200):
             await asyncio.sleep(0.01)
             if not session._spend_tasks:
                 break
-        assert seen, "the rebuild never priced anything"
+        assert len(seen) >= 2, "the rebuild did not scan AND price"
         assert threading.get_ident() not in seen
 
     asyncio.run(main())
@@ -785,6 +827,26 @@ def test_format_usd_ladder_and_exact_figure() -> None:
     from local_operator.tui.widgets.status_line import format_cost as band_cost
 
     assert band_cost(1_897_843 / 1_000_000) == format_usd(1_897_843)
+
+    # R1-3: the mark and the sub-resolution spelling DO co-occur — an unpriced
+    # call makes the total a lower bound whatever the digits say, and the digits
+    # round to zero whatever the mark says. Both are owed, and the cell must
+    # carry both (9 cells, not the 8 the design's table claimed).
+    from local_operator.tui.app import RESTORED_COST_PREFIX
+
+    assert RESTORED_COST_PREFIX + format_usd(1) == "\u2265<$0.0001"
+    assert len(RESTORED_COST_PREFIX + format_usd(1)) == 9
+
+    # R1-7: a float the ladder cannot take renders instead of RAISING. Both
+    # wrappers still hold a float, and ``int(round(nan))`` raises, so a corrupt
+    # restored total could have taken a frame down.
+    from local_operator.tui.costs import micro_from_usd
+
+    assert micro_from_usd(float("nan")) is None
+    assert micro_from_usd(float("inf")) is None
+    assert micro_from_usd(None) is None
+    assert micro_from_usd(2.5) == 2_500_000
+    assert band_cost(float("nan")) == "$nan"
 
 
 # -- R11/T5 extras ----------------------------------------------------------
@@ -931,5 +993,114 @@ def test_a_reconstruction_below_the_seed_is_refused(
         assert session.spend is before
         assert session._spend_recorded is False, "a smaller figure must not be persisted"
         assert session.restored_spend() is None
+
+    asyncio.run(main())
+
+
+def test_a_mid_turn_correction_is_not_billed_twice_by_the_remainder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: the correction must move the turn's already-accrued figure too.
+
+    The turn-end remainder is ``max(0, aggregate_price - accrued_this_turn)``,
+    and ``accrued_this_turn`` was fed ONLY by the paint prices. A correction that
+    lands mid-turn therefore moved the durable accumulator while leaving that
+    counter at the paint figure, so the remainder re-billed the whole correction:
+    paint $1.00, corrected $2.00, aggregate $2.00 → persisted $3.00, published
+    EXACT.
+
+    Invisible to every other accrual test because they price through a provider
+    receipt, and a receipt suppresses the correction entirely
+    (``spend.price_call`` returns the receipt and reports it known). This test
+    therefore uses the receipt-LESS path, which is the ordinary one for a
+    provider that reports no cost.
+    """
+    from local_operator.harness.types import MessageEndEvent
+
+    session = make_session(tmp_path)
+    store = session._frontend_state_store
+    usage = Usage(provider="deepseek", model_id="deepseek-chat", input_tokens=1_000)
+    message = Message.assistant("a", usage=usage)
+
+    # Paint grade for the call is $1.00; the turn's AGGREGATE is $2.00 (a
+    # different object, so the fake can tell them apart); the full resolver
+    # agrees with the aggregate at $2.00 — which is what the correction lands.
+    monkeypatch.setattr(
+        frontend_state_module,
+        "turn_cost",
+        lambda label, value: 1.0 if value is usage else 2.0,
+    )
+    monkeypatch.setattr(
+        session_module, "price_call", lambda provider, model_id, u: (2_000_000, True)
+    )
+
+    async def main() -> None:
+        store.observe_event(session, MessageEndEvent(message=message))
+        assert session.spend.micro == 1_000_000, "the paint price is the first tick"
+        async with asyncio.timeout(30):
+            while session._spend_tasks:
+                await asyncio.sleep(0.01)
+        assert session.spend.micro == 2_000_000, "the correction converged the call"
+        store.observe_event(session, AgentEndEvent(messages=[message]))
+        assert session.spend.micro == 2_000_000, "the remainder re-billed the correction"
+        assert store.state.cumulative_parent_cost == pytest.approx(2.0)
+        assert store.state.cost_knowledge is CostKnowledge.EXACT
+        # The record is what a resume reads, so the double bill must not reach it.
+        assert session.spend.micro == 2_000_000
+
+    asyncio.run(main())
+
+
+def test_a_cheaper_re_price_does_not_log_a_backwards_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R1-6: the record may legitimately shrink, and the log must not cry wolf.
+
+    ``_write_spend_record`` warns when the total goes backwards, because that is
+    the observability for a broken attach invariant (two processes on one
+    session directory). A downward CORRECTION is not that: the paint resolver's
+    answer can be staler and dearer than the resolved one, and the correction
+    exists to replace it. Warning on every such re-price spends the one signal
+    the design names.
+
+    The complement is asserted too — an unexplained decrease still warns — so
+    the fix cannot be "delete the check".
+    """
+    session = make_session(tmp_path)
+
+    async def main() -> None:
+        await session._transcript.append_message(Message.user("hello"))
+        index = session.accrue_spend(
+            5_000_000, {"provider": "deepseek", "model_id": "deepseek-chat"}
+        )
+        await session._write_spend_record()
+        assert session._spend_persisted_micro == 5_000_000
+
+        monkeypatch.setattr(session_module, "price_call", lambda *a: (1_000_000, True))
+        with caplog.at_level(logging.DEBUG, logger="local_operator.session.session"):
+            await session._price_spend_call(
+                index,
+                Usage(provider="deepseek", model_id="deepseek-chat", input_tokens=10),
+                "deepseek",
+                "deepseek-chat",
+            )
+            # Await the SCHEDULED write rather than calling ``_write_spend_record``
+            # a second time: two concurrent writers would race on
+            # ``_spend_persisted_micro`` and warn twice, which is a property of
+            # this test rather than of the code under test.
+            assert session._spend_persist_task is not None
+            await session._spend_persist_task
+        assert session.spend.micro == 1_000_000
+        assert session._spend_persisted_micro == 1_000_000
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [
+            r.getMessage() for r in caplog.records
+        ]
+
+        # An unexplained decrease is still the broken-attach signal.
+        caplog.clear()
+        session._spend_persisted_micro = 9_000_000
+        with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+            await session._write_spend_record()
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     asyncio.run(main())

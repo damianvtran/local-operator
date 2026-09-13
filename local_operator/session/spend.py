@@ -6,7 +6,11 @@ as a fat, UI-gated checkpoint (7.7% of the real store), so a resumed session
 priced ONE restored provider reading and painted it as a FLOOR (``≥``) — a mark
 that said "this is a lower bound" for a reason that had nothing to do with the
 money. Measured over the operator's store, that one reading is a median 64x
-below the session's own turn rows.
+below the session's own turn rows — and, because the store keeps growing, that
+factor is a SNAPSHOT of one quantity rather than a constant: the same
+measurement read 81.6x on the 2,053-session store the PR's census walked. Both
+figures are reproducible with ``scripts/spend_ledger_probe.py --census``, and
+the command is the authority rather than either number.
 
 The fix is not a second store: it is this accumulator, made durable as one
 small ``session_spend.v1`` transcript row and RECALLED in O(1) instead of
@@ -284,34 +288,39 @@ class SessionSpend:
                 }
         return index
 
-    def correct(self, index: int, micro: int | None) -> bool:
+    def correct(self, index: int, micro: int | None) -> int:
         """Replace an accrued call's estimate with its authoritative price.
 
         The one-tick path: the band paints the paint-resolver's answer
         immediately, and this converges it to the price computed off-loop with
-        the full resolver (design §5.2). Returns whether anything changed, so
-        the caller only republishes on a real correction.
+        the full resolver (design §5.2). Returns the DELTA the correction moved
+        this total by, in micro-USD (0 for a no-op), so a caller can tell how
+        much of the accumulator arrived as a re-price rather than as a new call:
+        the front end's turn-end remainder measures the turn against the prices
+        it already counted, and a correction it cannot see there is billed a
+        second time (review R1-1). The delta stays truthy, so
+        ``if spend.correct(...)`` keeps meaning "something changed".
         """
         if index not in self._estimates:
-            return False
+            return 0
         previous = self._estimates.pop(index)
         value = _as_int(micro) if micro is not None else None
         if value == previous:
-            return False
+            return 0
         if previous is None:
             if value is None:
-                return False
+                return 0
             self.unpriced_calls -= 1
             self.priced_calls += 1
             self.micro += value
-            return True
+            return value
         if value is None:
             self.priced_calls -= 1
             self.unpriced_calls += 1
             self.micro -= previous
-            return True
+            return -previous
         self.micro += value - previous
-        return True
+        return value - previous
 
     def adjust(self, delta_micro: int) -> bool:
         """Apply a turn-level remainder, which is not a call.

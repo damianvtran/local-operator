@@ -171,9 +171,13 @@ def format_cost(aggregate: "_CostLike") -> str:
     # ``$1234.56``, and the panel has no chart axis to move it to — a table
     # cell and a headline are exactly where a rounded magnitude lies most.
     micro = getattr(aggregate, "cost_micro", None)
-    body = format_usd(
-        int(micro) if isinstance(micro, int) else int(round(aggregate.cost_usd * 1_000_000))
-    )
+    if isinstance(micro, int):
+        body = format_usd(micro)
+    else:
+        maybe = micro_from_usd(aggregate.cost_usd)
+        # ``None`` = a figure the ladder cannot take (non-finite); print what the
+        # accounting holds rather than raising mid-render (review R1-7).
+        body = format_usd(maybe) if maybe is not None else f"${aggregate.cost_usd:.2f}"
     return body + ("+" if aggregate.cost_is_partial else "")
 
 
