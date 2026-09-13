@@ -2455,7 +2455,11 @@ class ProviderModelClient:
                 if event.argument_delta:
                     state["arg_parts"].append(event.argument_delta)
             elif event.type == "usage":
-                usage, cost_micros = _usage_from(event.usage)
+                usage, cost_micros = _usage_from(
+                    event.usage,
+                    requested_provider=self._model_spec.provider,
+                    requested_model_id=self._model_spec.model_id,
+                )
                 context_tokens = _context_tokens_from(event.usage)
             elif event.type == "end":
                 # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
@@ -2464,7 +2468,11 @@ class ProviderModelClient:
                 # the exact misdiagnosis the allow-list below exists to stop.
                 stop_reason = event.stop_reason or _UNSPECIFIED_STOP
                 if event.usage is not None:
-                    usage, cost_micros = _usage_from(event.usage)
+                    usage, cost_micros = _usage_from(
+                        event.usage,
+                        requested_provider=self._model_spec.provider,
+                        requested_model_id=self._model_spec.model_id,
+                    )
                     context_tokens = _context_tokens_from(event.usage)
                 # The provider's own request id is the only handle that ties a
                 # bundle's model_response back to the provider's records, so it
@@ -2780,19 +2788,35 @@ def _provider_request_id(provider_payload: Any) -> str:
     return raw
 
 
-def _usage_from(usage: Any) -> tuple[ModelUsage, int]:
-    """Copy provider counts and cost, clamped to the non-negative evidence range.
+def _usage_from(
+    usage: Any,
+    *,
+    requested_provider: str = "",
+    requested_model_id: str = "",
+) -> tuple[ModelUsage, int]:
+    """Copy provider counts and price the call, clamped to the evidence range.
 
     ``reasoning_tokens`` is a SUBSET of ``output_tokens`` in the harness's
     accounting, and the evidence payloads treat it the same way, so it is
-    carried across unchanged rather than added on top.
+    carried across unchanged rather than added on top -- which is also why it
+    is NOT priced separately: ``cost_for_usage`` bills ``output_tokens``, and
+    the thinking slice is already inside that count.
 
     ``usd_cost`` is the provider's OWN billing figure, which the harness treats
-    as ground truth over any token-times-rate reconstruction. Dropping it made
-    every reconciliation report a free episode. An unreported cost stays 0 here
-    because the evidence payload has no "unknown" encoding -- the distinction
-    upstream between ``None`` and a real ``0.0`` cannot be represented, and
-    inventing a number would be worse than under-reporting one.
+    as ground truth over any token-times-rate reconstruction, so a reported
+    amount (including a real ``0.0``, a route the provider billed as free) is
+    taken verbatim and the table is never consulted. Dropping it made every
+    reconciliation report a free episode.
+
+    An UNREPORTED cost falls back to the shared price table for the SERVED
+    route (see :func:`_table_cost_micros`). This is the difference between a
+    wrong zero and an honest one: only aggregators precompute ``usage.cost``,
+    so reading the receipt alone priced every DIRECT-provider request at 0
+    while its token counts were real -- and the episode's budget caps key on
+    this figure. An unpriced model still yields 0, because the evidence payload
+    has no "unknown" encoding: the distinction upstream between ``None`` and a
+    real ``0.0`` cannot be represented here, and inventing a price would be
+    worse than under-reporting one.
     """
 
     model_usage = ModelUsage(
@@ -2802,6 +2826,74 @@ def _usage_from(usage: Any) -> tuple[ModelUsage, int]:
         cache_read_tokens=max(0, int(usage.cache_read_tokens or 0)),
         cache_write_tokens=max(0, int(usage.cache_write_tokens or 0)),
     )
-    cost = getattr(usage, "usd_cost", None)
-    cost_micros = 0 if cost is None else max(0, round(float(cost) * 1_000_000))
-    return model_usage, cost_micros
+    # The shared receipt predicate, not a bare ``float()``: it rejects negative
+    # and non-finite amounts (``json.loads`` accepts the non-standard
+    # ``Infinity``/``NaN`` literals, and ``inf`` would poison every summed
+    # total forever) so a malformed report falls through to the table instead
+    # of aborting the stream.
+    from local_operator.model.configure import _usage_cost
+
+    reported = _usage_cost(usage)
+    if reported is not None:
+        return model_usage, max(0, round(reported * 1_000_000))
+    # The stamp is the spec that ACTUALLY served (``stream_with_failover``
+    # rewrites the request to a fallback and stamps the on-the-wire spec onto
+    # the usage for exactly this reason); the request is the honest fallback
+    # when nothing stamped one.
+    provider = getattr(usage, "provider", None) or requested_provider
+    model_id = getattr(usage, "model_id", None) or requested_model_id
+    return model_usage, _table_cost_micros(usage, provider=provider, model_id=model_id)
+
+
+def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
+    """Micro-USD for one call the provider did not bill, from the shared table.
+
+    WHY this exists: only some routes state a dollar amount on the wire
+    (OpenRouter's ``usage.cost``). Every DIRECT provider -- DeepSeek, Anthropic,
+    OpenAI, Gemini, Kimi, xAI -- states only tokens, so pricing off the receipt
+    alone recorded 0 on each request of an episode whose token counts were
+    real. The episode's ``--max-usd`` cap, the per-cycle ceiling and
+    ``BudgetCapGuard`` all key on this figure, so a runaway direct-provider
+    episode was bounded only by its step count.
+
+    Uses the SAME money computation as every other surface
+    (:func:`local_operator.model.configure.cost_for_usage`, which owns the
+    provider cache-token conventions and is what the status band and the
+    analytics ledger price with), so the evidence cannot disagree with the
+    spend a user sees for the same call.
+
+    The resolution is the PAINT-SAFE one, deliberately. This runs on the event
+    loop while a stream is being consumed, and the full resolver IS the
+    discovery path (measured up to 13s for an unlisted model); the paint-safe
+    resolver answers from the warm memo or the static registry and schedules an
+    off-loop refresh on a miss, which is the same policy the TUI prices with.
+    The registry row is not a guess dressed as data: a row with no prices
+    returns 0 here, exactly as a failed lookup does.
+
+    TOTAL and NON-RAISING: an unpriced or unknown model is legitimate (the
+    evidence reads 0, which the payload's missing "unknown" encoding already
+    requires), while a wrong zero for a route the registry prices is not -- so
+    "unknown" must degrade here rather than abort an episode.
+    """
+
+    if not provider or not model_id:
+        return 0
+    try:
+        from local_operator.model.configure import (
+            cost_for_usage,
+            refresh_model_info_background,
+            resolve_model_info_paint,
+        )
+
+        info, memo_hit = resolve_model_info_paint(provider, model_id)
+        if not memo_hit:
+            # Cold memo: the registry row answers this cycle and the real
+            # answer lands for the next one. Fire-and-forget by contract, so a
+            # pricing concern can never delay or fail the episode's stream.
+            refresh_model_info_background(provider, model_id)
+        if not (info.input_price or info.output_price):
+            return 0
+        return max(0, round(cost_for_usage(provider, info, usage) * 1_000_000))
+    except Exception:  # noqa: BLE001 -- an unpriceable call is not an episode error
+        logger.debug("eval evidence: cost table lookup failed for %s/%s", provider, model_id)
+        return 0
