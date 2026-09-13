@@ -1237,3 +1237,60 @@ async def test_a_second_warm_never_orphans_the_first_task(tmp_path):
             release.set()
             await started[1]
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_event_payload_still_carries_inline_base64(tmp_path):
+    """The out-of-repo renderer is the one consumer we cannot change.
+
+    The runtime now externalizes an oversized image on the live wire, leaving the
+    same ``{"attachment": <digest>}`` block the durable transcript writes. The
+    viewer resolves it inside its wire callback — BEFORE the bridge's
+    ``model_dump`` — so the published payload here is the exact inline-base64
+    shape Electron already consumes. Resolution anywhere later (or not at all)
+    would publish the raw reference instead, and this test is what stands in for
+    a renderer no test in this repository can read.
+    """
+    import base64
+
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.attachments import AttachmentStore
+
+    raw = bytes(range(256)) * 16
+    stored = base64.b64encode(raw).decode("ascii")
+    ref = AttachmentStore(tmp_path / "attachments").put(stored, "image/png")
+    assert ref is not None
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    remote = AttachedSession(
+        config_dir=tmp_path, session_id="s1", takeover_factory=module._no_takeover
+    )
+    remote._ready_for_events = True
+    bridge.remote = remote
+    remote.subscribe(bridge._event)
+
+    remote._on_wire_event(
+        {
+            "type": "tool_execution_end",
+            "tool_call_id": "call_image",
+            "tool_name": "screenshot",
+            "is_error": False,
+            "result": {
+                "tool_call_id": "call_image",
+                "tool_name": "screenshot",
+                "content": [
+                    {"type": "text", "text": "PAGE"},
+                    {"type": "image", "attachment": ref.digest, "mime_type": "image/png"},
+                ],
+                "is_error": False,
+            },
+        }
+    )
+
+    frames = [frame for frame, _ in bridge.replay]
+    assert frames, "the bridge published nothing"
+    payload = frames[-1]["payload"]
+    assert payload["type"] == "tool_execution_end"
+    block = payload["result"]["content"][1]
+    assert block["data"] == stored
+    assert "attachment" not in block
