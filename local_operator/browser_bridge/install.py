@@ -438,9 +438,14 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
                 body_text = error.read().decode()
             named = _ids_from_payload(body_text)
             if named or "unknown_extension" in body_text:
+                # "no SINGLE" rather than "no" (copy review C1): the daemon
+                # refuses an AMBIGUOUS target as well as an unmatched one, and
+                # saying "nothing matched" about a target two installs matched
+                # sends the user to re-check an id that is not the problem. Same
+                # formulation `pair --revoke` already uses for the same refusal.
                 return {
                     "ok": False,
-                    "error": f"no connected extension matches '{target}'.",
+                    "error": f"no single connected extension matches '{target}'.",
                     "authorized_extension_ids": named,
                 }
             # An older daemon answers /health but has no /driver. Saying so beats
@@ -455,6 +460,18 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
         body_text = ""
         with suppress(Exception):
             body_text = error.read().decode()
+        # A daemon sentence written FOR the reader beats a JSON dump around it
+        # (copy review C5): `not_paired`/`not_connected`/`not_driving` all carry a
+        # `message` that says what to do, and it arrived as the middle of a blob.
+        # Parsed, not matched: a body without one falls through to the dump, which
+        # is still better than swallowing an answer nobody predicted.
+        message = _message_from_payload(body_text)
+        if message:
+            return {
+                "ok": False,
+                "error": message,
+                "authorized_extension_ids": _ids_from_payload(body_text),
+            }
         return {
             "ok": False,
             "error": f"daemon returned HTTP {error.code} on port {resolved_port}: {body_text}",
@@ -472,6 +489,23 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
         "ok": bool(payload.get("ok")),
         "driver_extension_id": payload.get("driver_extension_id", ""),
     }
+
+
+def _message_from_payload(body_text: str) -> str:
+    """The human sentence a failed /driver response carries, or "" if it has none.
+
+    Only the daemon's own `message` field is used: it is written for the operator
+    and is the actionable half of an otherwise machine-shaped body. Anything
+    unexpected (no field, wrong type, unparseable) returns "" so the caller keeps
+    printing the raw response rather than an invented error.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        if isinstance(parsed, dict):
+            message = parsed.get("message")
+            if isinstance(message, str):
+                return message.strip()
+    return ""
 
 
 def _ids_from_payload(body_text: str) -> list[str]:

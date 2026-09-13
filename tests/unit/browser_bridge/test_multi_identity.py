@@ -17,8 +17,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import secrets
+import signal
+import socket
+import subprocess
+import sys
 import time
+import urllib.request
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +32,7 @@ from typing import Any, Callable
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from websockets.sync.client import connect as sync_connect
 
 from local_operator.browser_bridge import daemon as daemon_module
 from local_operator.browser_bridge.daemon import (
@@ -242,34 +249,96 @@ def test_u3_the_downgrade_contract_holds_for_a_schema_two_file(tmp_path: Path) -
 # --- U4: the gate ------------------------------------------------------------
 
 
-def test_u4_an_unlisted_identity_presenting_a_token_is_closed_4004_before_attach(
+def test_u4_an_unlisted_identity_presenting_a_token_is_admitted_unpaired(
     tmp_path: Path,
 ) -> None:
-    """A peer CLAIMING a pairing it does not have is refused, before any link.
+    """A token that cannot match is not an authorisation, and refusing it was a dead end.
 
-    The token is what makes the claim: a revoked identity dialling back in with
-    its old secret, or an install pointed at a daemon that never authorised it.
-    This is the one case the 4004 gate still covers, and it must fire BEFORE
-    `attach()` so a refused peer cannot install a link and then be severed — the
-    unbounded-close rule #996's audit pinned.
+    This row asserted a pre-attach 4004 until round 3. That gate was a DEAD END
+    rather than a defence (design D1 / UX U3): a revoked install keeps the token
+    it was issued, so it re-dialled with it, was closed before ``attach()``, and
+    therefore never reached ``_ensure_pending`` — no code was ever minted, ``lop
+    browser pair`` answered "already paired … use --reset", and the pairing form
+    its own popup showed could not be completed by any code on earth.
+
+    What the gate is replaced with is the rule the rest of the daemon already
+    follows: authority comes from the FILE's entry for THIS id, and an id with no
+    entry has nothing that can match. So the dial is admitted as an ASKER —
+    ``paired: false``, offered a code, refused every RPC — and the file is
+    untouched until that code is entered. Presenting a token that belongs to
+    ANOTHER identity must not change that: the token is not a bearer credential.
     """
     _schema_two(tmp_path)
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
         service = app.state.bridge
-        before = dict(service.links)
-        with pytest.raises(WebSocketDisconnect) as refusal:
-            with client.websocket_connect(
-                "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
-            ) as socket:
-                socket.send_json(_hello_frame(STORE_TOKEN))
-                socket.receive_json()
-        assert refusal.value.code == 4004
-        # Refused BEFORE any link state exists: an unknown identity must not be
-        # able to install a link and then be severed, because the install is what
-        # the 4004 rule exists to prevent.
-        assert service.links == before
-        assert service.link.websocket is None
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{THIRD_ID}"}
+        ) as socket:
+            socket.send_json(_hello_frame(STORE_TOKEN))
+            ack = socket.receive_json()
+            # STORE_TOKEN is a REAL token in this file — for the store build. It
+            # buys the third identity nothing.
+            assert ack["paired"] is False, ack
+            assert ack["authorized_count"] == 2
+            assert service._valid_saved_token(THIRD_ID, STORE_TOKEN) is False
+            assert {entry["extension_id"] for entry in _identities(tmp_path)} == {
+                STORE_ID,
+                UNPACKED_ID,
+            }
+            # ...and a code exists for it, which is the whole point: this is the
+            # only route back for a revoked install.
+            codes = pairing_status(tmp_path)["pending"]
+            assert [entry["extension_id"] for entry in codes] == [THIRD_ID]
+            # An unpaired link cannot serve: asking for the wheel for it is
+            # refused exactly as it would be for a stranger.
+            key = service.state.session_key
+            refused = client.post(
+                "/driver", headers={"X-Bridge-Key": key}, json={"target": THIRD_ID}
+            )
+            assert refused.status_code == 409, refused.json()
+            assert refused.json()["error"] == "not_paired"
+            # And entering ITS code is what authorises it — the file grows by one
+            # identity, with its own token, and nothing else changes.
+            socket.send_json({"event": "pair", "code": codes[0]["code"]})
+            result = socket.receive_json()
+            assert result["ok"] is True, result
+            assert service._valid_saved_token(THIRD_ID, result["token"]) is True
+            assert service._valid_saved_token(STORE_ID, result["token"]) is False
+            assert service._valid_saved_token(STORE_ID, STORE_TOKEN) is True
+
+
+def test_u4d_the_never_pairable_dead_end_needs_no_storage_wipe(
+    tmp_path: Path,
+) -> None:
+    """A REVOKED install re-pairs with the token it still holds, no reset, no wipe.
+
+    The reproduction UX U3 and design D1 both filed, reduced to its essentials:
+    two identities are paired, one is revoked (`revoke_identity` — what `pair
+    --revoke` calls), and that install dials back with the token it still has. It
+    must get a fresh code rather than a close, because ``--reset`` (which revokes
+    the WORKING install too) and Settings → unpair were the only ways out.
+    """
+    _schema_two(tmp_path)
+    revoke_identity(tmp_path, UNPACKED_ID)
+    assert {entry["extension_id"] for entry in _identities(tmp_path)} == {STORE_ID}
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/extension", headers={"origin": f"chrome-extension://{UNPACKED_ID}"}
+        ) as socket:
+            socket.send_json(_hello_frame(UNPACKED_TOKEN))  # its now-dead token
+            ack = socket.receive_json()
+            assert ack["paired"] is False
+            codes = pairing_status(tmp_path)["pending"]
+            assert [entry["extension_id"] for entry in codes] == [UNPACKED_ID], codes
+            socket.send_json({"event": "pair", "code": codes[0]["code"]})
+            result = socket.receive_json()
+            assert result["ok"] is True, result
+            assert {entry["extension_id"] for entry in _identities(tmp_path)} == {
+                STORE_ID,
+                UNPACKED_ID,
+            }
 
 
 def test_u4c_an_unlisted_identity_with_no_token_may_enter_the_pairing_flow(
@@ -1337,3 +1406,229 @@ def test_u31_startup_reconciles_a_record_that_names_nobody_authorised(tmp_path: 
     before = _pairing_file(tmp_path).read_bytes()
     service._reconcile_driver_record()  # type: ignore[attr-defined]
     assert _pairing_file(tmp_path).read_bytes() == before
+
+
+# --- Round 3: the runner path, the free-wheel rule, /driver's two refusals ---
+
+#: The daemon as `create_app()` documents it being served — plain `uvicorn.run`,
+#: no `watch_server_exit`, no injected shutdown. This is the runner QA round 3
+#: reproduced 9/12 on (Q3-1): uvicorn closes connections BEFORE it fires the
+#: lifespan shutdown, so a lifespan-only guard promoted the standby and wrote it
+#: into the downgrade record on the way out.
+_RUNNER_CHILD = """
+import sys
+
+import uvicorn
+
+from local_operator.browser_bridge.daemon import create_app
+
+port = int(sys.argv[1])
+# `create_app(port)` sets the SERVICE's port; the socket is uvicorn's, so it has
+# to be told separately. Nothing here wires `should_exit` for the service — that
+# absence is the whole point of the row.
+uvicorn.run(create_app(port), host="127.0.0.1", port=port, log_level="warning")
+"""
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _health(port: int) -> dict[str, Any]:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2.0) as response:
+        return json.loads(response.read().decode())
+
+
+def _runner_shutdown_moved_the_record(root: Path, port: int) -> bool:
+    """Run one real `uvicorn.run(create_app(...))` daemon, SIGTERM it, and report.
+
+    Two identities are attached over the REAL wire (a driver and a standby), then
+    the process is signalled exactly as launchd or a shell would. Returns whether
+    the durable record ended up naming the standby — the harm itself, measured on
+    the artifact a rollback reads, rather than inferred from the code path.
+    """
+    _schema_two(root, driver=STORE_ID)
+    environment = {**os.environ, "LOCAL_OPERATOR_CONFIG_DIR": str(root)}
+    child = subprocess.Popen(
+        [sys.executable, "-c", _RUNNER_CHILD, str(port)],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            with suppress(Exception):
+                if _health(port)["status"] == "ok":
+                    break
+            time.sleep(0.1)
+        else:  # pragma: no cover - a daemon that never came up is a broken test, not a finding
+            raise AssertionError("the child daemon never answered /health")
+
+        with (
+            sync_connect(
+                f"ws://127.0.0.1:{port}/extension",
+                additional_headers={"Origin": f"chrome-extension://{STORE_ID}"},
+                open_timeout=5.0,
+            ) as driver,
+            sync_connect(
+                f"ws://127.0.0.1:{port}/extension",
+                additional_headers={"Origin": f"chrome-extension://{UNPACKED_ID}"},
+                open_timeout=5.0,
+            ) as standby,
+        ):
+            driver.send(json.dumps(_hello_frame(STORE_TOKEN)))
+            assert json.loads(driver.recv())["role"] == "driver"
+            standby.send(json.dumps(_hello_frame(UNPACKED_TOKEN)))
+            assert json.loads(standby.recv())["role"] == "standby"
+            assert _record(root) == STORE_ID, "precondition: the record names the driver"
+            child.send_signal(signal.SIGTERM)
+            # WAIT for the child to finish while BOTH sockets are still open. A
+            # `with` that exits first closes both clients and the daemon then has
+            # no proven standby to promote — which is how this row passed on the
+            # broken tree the first time it was written, i.e. as a vacuous test.
+            child.wait(timeout=30.0)
+        child.wait(timeout=30.0)
+    finally:
+        if child.poll() is None:  # pragma: no cover - only on a hung child
+            child.kill()
+            child.wait(timeout=10.0)
+    return _record(root) == UNPACKED_ID
+
+
+def test_u32_a_plain_uvicorn_runner_does_not_move_the_record_on_sigterm(
+    tmp_path: Path,
+) -> None:
+    """QA round 3, Q3-1: the guard must hold on the runner path, not only ours.
+
+    `create_app()` is the public factory, and it is served in the wild the way its
+    own docstring shows — `uvicorn.run(app)` — by embedders and by this repo's
+    harnesses. Nothing on that path wires `should_exit` for the service, and
+    uvicorn tears connections down BEFORE the lifespan shutdown event, so a
+    lifespan-only guard promoted the standby on the way out and persisted it into
+    the record a rollback reads (QA measured 9/12: 4/6 then 5/6).
+
+    Deliberately the BLUNT instrument: a real subprocess running
+    `uvicorn.run(create_app(...))`, two real websocket clients, a real SIGTERM,
+    and the answer read out of the pairing file. The signal it relies on is the
+    one the receive loop sees — uvicorn's `websocket.disconnect` carrying code
+    1012, delivered before the lifespan — and it is repeated, because the harm was
+    FLAKY and a single lucky pass is exactly what hid this gap before.
+    """
+    moved = [
+        _runner_shutdown_moved_the_record(tmp_path / f"run-{index}", _free_port())
+        for index in range(3)
+    ]
+    assert moved == [False, False, False], f"a runner-path shutdown moved the record: {moved}"
+
+
+@pytest.mark.asyncio
+async def test_u33_pairing_takes_the_wheel_from_an_unpaired_incumbent(tmp_path: Path) -> None:
+    """Review R3-3: a PAIRED install outranks one that cannot serve a command.
+
+    Reachable without an attacker, and the shape is routine: the wheel is free, an
+    install that is loaded but NOT yet paired dials first and takes it (the
+    handshake gives a free wheel to whoever completes `hello`, because a token-less
+    dial has to be admitted so it CAN pair), and only then does the authorised
+    install dial — as a tokenless standby, since the M1 rule ranks a *paired* dial
+    above it and this one is not paired yet. Entering the code then makes it
+    paired while an unpaired dial still holds the wheel.
+
+    The handshake and the promotion path both refuse to leave the wheel with a
+    link that cannot answer a command; `_take_free_wheel` did not, so the install
+    that had just proved it could serve sat as a standby until the other one's
+    next dial — up to the alarm floor, which is a user watching a dead agent.
+    """
+    _schema_two(tmp_path)
+    service = BridgeService(root=tmp_path)
+    stranger = _FakePeer(THIRD_ID)
+    unpacked = _FakePeer(UNPACKED_ID)
+    tasks = [_connect(service, stranger, ""), _connect(service, unpacked, "")]
+    assert await _settles(lambda: len(service.links) == 3)
+    # Precondition, asserted rather than assumed: the unpaired dial holds the
+    # wheel and the authorised-but-tokenless install is the standby.
+    assert stranger.acks()[0]["role"] == "driver"
+    assert unpacked.acks()[0]["role"] == "standby"
+
+    codes = pairing_status(tmp_path)["pending"]
+    # Both unpaired dials have a code of their own (per-identity pending, §1.3):
+    # pick THIS install's rather than the stranger's.
+    mine = [entry for entry in codes if entry["extension_id"] == UNPACKED_ID]
+    assert len(mine) == 1, codes
+    unpacked.push({"event": "pair", "code": mine[0]["code"]})
+    assert await _settles(lambda: unpacked.roles() == ["driver"]), unpacked.roles()
+
+    assert unpacked.roles() == ["driver"], "the install that just proved it can serve was left idle"
+    assert stranger.roles() == ["standby"], "the unpaired incumbent was left holding the wheel"
+    assert service.link.extension_id == UNPACKED_ID
+    _assert_invariant(service, tmp_path, "after a pairing took the free wheel")
+    await _shutdown(*tasks)
+
+
+def test_u34_drive_names_an_authorised_install_that_is_not_connected(tmp_path: Path) -> None:
+    """UX U4: `drive <id>` must not answer "nothing matched" about a listed install.
+
+    After a handover, the demoted install reads "paired, not connected" in
+    `status`, so the natural next command is `drive <its id>`. Resolution is
+    against live LINKS, so it answered 404 "no single connected extension
+    matches" with an empty candidate list — contradicting the listing the user
+    had just read, and reading as a typo'd id.
+    """
+    _schema_two(tmp_path)
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        key = app.state.bridge.state.session_key
+
+        absent = client.post("/driver", headers={"X-Bridge-Key": key}, json={"target": UNPACKED_ID})
+        assert absent.status_code == 409, absent.json()
+        assert absent.json()["error"] == "not_connected"
+        assert "not connected right now" in absent.json()["message"]
+
+        # An unknown target is still an unknown target.
+        unknown = client.post("/driver", headers={"X-Bridge-Key": key}, json={"target": "deadbeef"})
+        assert unknown.status_code == 404
+        assert unknown.json()["error"] == "unknown_extension"
+
+
+def test_u35_the_label_says_which_thing_the_version_belongs_to(tmp_path: Path) -> None:
+    """Copy review C3: `Chrome 0.1.10` reads as an ancient BROWSER version.
+
+    Chrome itself is at 153 in the reported case, and the string's job is to say
+    which Local Operator build in which browser holds the wheel.
+    """
+    label = daemon_module._browser_label(
+        "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/153.0.0.0 Safari/537.36", "0.1.13"
+    )
+    assert label == "Chrome extension 0.1.13", label
+    # No version reported: the browser name alone, unchanged from before.
+    assert daemon_module._browser_label("Mozilla/5.0 ... Chrome/153", "") == "Chrome"
+    # No browser recognised: still say WHICH extension, never a bare number.
+    assert daemon_module._browser_label("", "0.1.13") == "extension 0.1.13"
+
+
+def test_u36_two_identical_labels_refuse_rather_than_guess(tmp_path: Path) -> None:
+    """UX U2 / copy review C1: the daemon declines an ambiguous label, and says so.
+
+    Two installs of the SAME build share a label byte for byte, which is the case
+    a single label cannot address. The CLI words this as "no single connected
+    extension matches" and lists candidates with their labels, so the refusal has
+    to carry them.
+    """
+    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN), label="Chrome extension 0.1.13")
+    add_identity(tmp_path, UNPACKED_ID, _digest(UNPACKED_TOKEN), label="Chrome extension 0.1.13")
+    app = create_app(root=tmp_path)
+    with TestClient(app) as client:
+        ambiguous = client.post(
+            "/driver",
+            headers={"X-Bridge-Key": app.state.bridge.state.session_key},
+            json={"target": "Chrome extension 0.1.13"},
+        )
+        assert ambiguous.status_code == 404, ambiguous.json()
+        assert ambiguous.json()["error"] == "unknown_extension"
+        # Both candidates, so the caller can print `id  label` rows and the user
+        # has something to paste that resolves (the id prefix).
+        assert sorted(ambiguous.json()["authorized_extension_ids"]) == sorted(
+            [STORE_ID, UNPACKED_ID]
+        )

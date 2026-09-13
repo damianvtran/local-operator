@@ -37,6 +37,7 @@ import functools
 import math
 import os
 import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -1694,6 +1695,72 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+#: The extension build that first ACTS on the `role` frame (the standby card and
+#: the ability to let go of one's own tabs). An install older than this keeps its
+#: debugger attachments when told it is a standby, so the operator sees
+#: "Local Operator is debugging this browser" bars nothing but that build can
+#: release — the one rollout cost no daemon-side fix can remove. Used to gate the
+#: `note:` line on the STANDBY's recorded build rather than printing it for any
+#: standby at all (copy review C4).
+_ROLE_AWARE_EXTENSION_VERSION = (0, 1, 13)
+
+
+def _extension_version_in(label: str) -> tuple[int, ...]:
+    """The version inside a pairing label (`Chrome extension 0.1.13`), or (0,).
+
+    Labels are produced by `_browser_label` and always end in the extension
+    version when the peer reported one; an entry paired before labels carried a
+    version (or by a peer that sent none) parses to (0,), which compares below
+    every real version — the conservative direction, since a build we cannot
+    identify might be any age.
+    """
+    match = re.search(r"(\d+(?:\.\d+)*)\s*$", label)
+    if not match:
+        return (0,)
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _seen_line(entry: dict[str, Any]) -> str:
+    """ "paired <when>, last seen <when>" for one identity record.
+
+    Design §8.1 asks `pair --list` to carry both, and they are the only fields
+    that still tell two installs apart when every other one collides (UX U2).
+    Epoch floats from the pairing file; anything missing or malformed prints as
+    "unknown" rather than as a 1970 date.
+    """
+    return f"paired {_ago(entry.get('paired_at'))}, last seen {_ago(entry.get('last_seen_at'))}"
+
+
+def _ago(stamp: object) -> str:
+    """A compact "how long ago" for a unix timestamp, or "unknown"."""
+    try:
+        seconds = max(0.0, time.time() - float(stamp))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "unknown"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _waiting_label(item: dict[str, Any]) -> str:
+    """The `(label · short id)` suffix that identifies one waiting install.
+
+    Both halves matter (copy review C6): the label names the browser, and the id
+    prefix is the only part that stays unique when two installs run the same
+    build and their labels are byte-identical. Falls back to whichever half the
+    record has rather than printing an empty pair of brackets.
+    """
+    extension_id = str(item.get("extension_id", ""))
+    label = str(item.get("label", "")) or "unnamed install"
+    if not extension_id:
+        return f"({label})"
+    return f"({label} · {_short_extension_id(extension_id)})"
+
+
 def _short_extension_id(extension_id: str) -> str:
     """The 8-character prefix of an extension id, with an ellipsis.
 
@@ -1731,13 +1798,20 @@ def _resolve_pairing_target(target: str, identities: list[dict[str, Any]]) -> di
     return labelled[0] if len(labelled) == 1 else None
 
 
-def _print_identities(pairing: dict[str, Any], health: dict[str, Any] | None) -> None:
+def _print_identities(
+    pairing: dict[str, Any], health: dict[str, Any] | None, *, verbose: bool = False
+) -> None:
     """Print which extensions are authorised, and which one has the wheel.
 
     The role comes from the live daemon (`/health`) when it answers, because
     only the daemon knows which socket is driving; the FILE can only say who is
     authorised. With no daemon running the list is still printed, without roles,
     rather than implying a connection state nobody observed.
+
+    ``verbose`` adds when each install was paired and last seen (design §8.1's
+    `pair --list`), which is the only field left that can tell two installs apart
+    once their labels collide — two profiles of one unpacked build, or any two
+    builds at one version. `status` keeps the compact form.
     """
     identities = pairing.get("identities") or []
     if not identities:
@@ -1759,19 +1833,63 @@ def _print_identities(pairing: dict[str, Any], health: dict[str, Any] | None) ->
         else:
             role = "paired, not connected"
         print(f"                     - {label} ({_short_extension_id(extension_id)}) {role}")
+        if verbose:
+            print(f"                       {_seen_line(entry)}")
+    if len(identities) > 1:
+        # The lever for "the wrong one is driving" (UX U7): with two installs up
+        # this panel is exactly where the operator notices, and the command that
+        # fixes it was discoverable only from `--help` or the docs.
+        print(
+            "                     tip: 'lop browser drive <id|label>' chooses which"
+            " install drives (approvals stay per install)."
+        )
     if standby:
         # The rollout cost, stated where it is felt (design §10 risk 2, review
-        # round 1 m3). An install whose build PREDATES the role event cannot act
-        # on being told `standby`: it keeps its debugger attachments and its
-        # surface map, so it leaves "Local Operator is debugging this browser"
-        # banners on tabs only it can release, while its popup still reads as
-        # connected. No daemon-side fix exists for a build that cannot hear the
-        # role frame, so the honest thing is to say so at the moment an operator
-        # looks at two installs and wonders why one is not driving.
-        print(
-            "note:                a standby install built before 0.1.13 cannot release its"
-            " own tabs; close those tabs (or remove that build) if it stops driving"
-        )
+        # round 1 m3): an install whose build PREDATES the role event cannot act
+        # on being told `standby`, so it keeps its debugger attachments and
+        # leaves "Local Operator is debugging this browser" bars on tabs only it
+        # can release.
+        #
+        # Gated on the STANDBY's own build, from the live labels `standby_labels`
+        # carries (copy review C4 / UX U7): the note used to print for any
+        # standby at all — including a pair where both installs are current —
+        # leaving the operator to evaluate a version condition the daemon already
+        # knew. The symptom is named too, because otherwise the reader cannot
+        # connect the note to the bars on their screen.
+        labels = (health or {}).get("standby_labels")
+        if labels is None:
+            # A daemon from this branch's own earlier build lists standbys but not
+            # their builds, so the condition cannot be evaluated at all: say the
+            # version-unknown form rather than a pre-0.1.13 claim nobody checked.
+            print(
+                "note:                if a standby stops driving, close that browser's tabs or"
+                " remove that build, or 'Local Operator is debugging this browser' bars"
+                " stay on them"
+            )
+        else:
+            stale = [
+                str(label)
+                for label in labels
+                if _extension_version_in(str(label)) < _ROLE_AWARE_EXTENSION_VERSION
+            ]
+            if stale:
+                print(
+                    "note:                the standby build predates 0.1.13 and cannot release"
+                    " its own tabs: if it stops driving, close that browser's tabs or remove"
+                    " that build, or 'Local Operator is debugging this browser' bars stay on"
+                    " them"
+                )
+        # U6, with the cost stated rather than hidden: site approvals are
+        # per-install by design (§6) and do NOT move with the wheel, so a
+        # handover can ask again for a site the previous driver already had. A
+        # pending request is visible only in the NEW driver's popup, which is the
+        # one surface the operator has no reason to look at — hence the line
+        # here, in the panel that just told them the wheel moved.
+        if len(identities) > 1:
+            print(
+                "                     approvals:           per install; they do not move with"
+                " the wheel"
+            )
 
 
 def browser_command(args: argparse.Namespace) -> int:
@@ -2119,13 +2237,18 @@ def browser_command(args: argparse.Namespace) -> int:
             # /health is a plain dict when the daemon answered and None when it
             # did not; the printer takes the second case as "unknown", which is
             # what a file-only listing must say rather than inventing a driver.
-            _print_identities(pairing, live_health if isinstance(live_health, dict) else None)
+            _print_identities(
+                pairing, live_health if isinstance(live_health, dict) else None, verbose=True
+            )
             pending = pairing.get("pending") or []
-            for item in pending:
-                label = str(item.get("label", "")) or _short_extension_id(
-                    str(item.get("extension_id", ""))
-                )
-                print(f"                     waiting: {item.get('code')}  ({label})")
+            if pending:
+                # Its own block, on a line of its own (copy review C7): indented
+                # under the identity rows the waiting codes read as part of the
+                # `note:` above them, which is a different subject.
+                print("")
+                print("waiting:             these installs have asked to pair")
+                for item in pending:
+                    print(f"                     {item.get('code')}  {_waiting_label(item)}")
             return 0
         if getattr(args, "revoke", None):
             pairing = pairing_status()
@@ -2185,12 +2308,12 @@ def browser_command(args: argparse.Namespace) -> int:
             # Two installs waiting at once cannot be told apart by a bare code:
             # the user is looking at two popups and a terminal. Name the install
             # each code belongs to, from the label the daemon recorded when the
-            # code was minted (design §3.4).
+            # code was minted (design §3.4) — and the short id as well, because
+            # two installs running the SAME build share a label byte for byte
+            # (copy review C6), which is precisely when "the matching popup" has
+            # no referent and the id prefix is the only token that resolves.
             for item in pending:
-                label = str(item.get("label", "")) or _short_extension_id(
-                    str(item.get("extension_id", ""))
-                )
-                print(f"pairing code: {item.get('code')}   ({label})")
+                print(f"pairing code: {item.get('code')}   {_waiting_label(item)}")
             print("enter each code in the matching Local Operator extension popup.")
             return 0
         code = pair.get("pending_code")
@@ -2199,9 +2322,17 @@ def browser_command(args: argparse.Namespace) -> int:
             print("enter this 6-digit code in the Local Operator extension popup.")
             return 0
         if pair.get("paired"):
+            # Names BOTH routes, because the old wording offered only `--reset`
+            # (UX round 3, U3): a second install whose popup is showing the
+            # pairing form reaches here too, and `--reset` — which revokes the
+            # WORKING install as well — is not the answer the user wants. The
+            # code for that install appears here once its worker dials, so the
+            # honest line points at its popup first.
             print(
-                "browser extension is already paired. Use --list to see which, or "
-                "--reset to pair another profile."
+                "a browser is already paired. To pair another, open ITS popup and enter the"
+                " code that appears here (that install's code is minted when its worker"
+                " dials). 'lop browser pair --list' lists every authorised install;"
+                " '--reset' revokes them all."
             )
             return 0
         print("no extension is waiting to pair. Open the extension popup, then retry.")
@@ -2210,8 +2341,18 @@ def browser_command(args: argparse.Namespace) -> int:
         result = browser_install.pin_driver(args.target)
         if not result.get("ok"):
             print(f"\033[1;31m{result.get('error', 'could not pin the driver')}\033[0m")
+            # Candidates arrive as ids; the LABEL is what makes a list of ids
+            # actionable when two installs share one (copy review C1), and it is
+            # the string `status` itself printed a moment earlier. Read from the
+            # pairing file, so an id with no label still lists as a bare id.
+            labels = {
+                str(entry.get("extension_id", "")): str(entry.get("label", ""))
+                for entry in (pairing_status().get("identities") or [])
+            }
             for extension_id in result.get("authorized_extension_ids") or []:
-                print(f"  {_short_extension_id(str(extension_id))}")
+                label = labels.get(str(extension_id), "")
+                suffix = f"  {label}" if label else ""
+                print(f"  {_short_extension_id(str(extension_id))}{suffix}")
             return 1
         print("now driving: " f"{_short_extension_id(str(result.get('driver_extension_id', '')))}")
         return 0

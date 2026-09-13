@@ -123,6 +123,17 @@ PING_PROBE_TIMEOUT_S = 5.0
 REVOKE_WATCH_S = 3.0
 PAIR_TTL_S = 120.0
 PAIR_MAX_ATTEMPTS = 5
+
+#: WebSocket close codes that mean "the SERVER is going down", as opposed to
+#: "this peer went away". uvicorn's websocket protocols put 1012 ("service
+#: restart") on every live connection while the server shuts down; 1001 ("going
+#: away") is the same signal from other ASGI servers. Neither is ever sent by a
+#: peer here — the extension's own closes carry no code, so they arrive as 1000 —
+#: which is what makes the code safe to read as "we are the ones closing".
+#: Recognising it in the receive loop is how a daemon served straight from
+#: `create_app()` learns it is leaving before the lifespan fires (QA round 3,
+#: Q3-1); see `_daemon_leaving`.
+SERVER_GOING_DOWN_CODES = frozenset({1001, 1012})
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
 
@@ -406,6 +417,35 @@ def _write_pending(root: Path | None, entries: dict[str, dict[str, Any]]) -> Non
     _private_write(_pending_path(root), {"pending": entries})
 
 
+def _resolve_authorised_target(
+    target: str, identities: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Resolve a target against the FILE's identities, for messages only.
+
+    Mirrors `lop browser`'s own rules (exact id, then id prefix, then label
+    substring) so a target the CLI printed resolves the same way in both places,
+    and returns None on ambiguity: guessing which of two identical labels the
+    operator meant is not this daemon's decision to make. Deliberately used only
+    to choose BETWEEN error messages — authorisation never flows through a
+    string a user typed.
+    """
+    wanted = target.strip().lower()
+    if not wanted:
+        return None
+    for entry in identities:
+        if str(entry.get("extension_id", "")).lower() == wanted:
+            return entry
+    prefixed = [
+        entry
+        for entry in identities
+        if str(entry.get("extension_id", "")).lower().startswith(wanted)
+    ]
+    if len(prefixed) == 1:
+        return prefixed[0]
+    labelled = [entry for entry in identities if wanted in str(entry.get("label", "")).lower()]
+    return labelled[0] if len(labelled) == 1 else None
+
+
 def _browser_label(user_agent: str, extension_version: str) -> str:
     """A short, human-recognisable name for one install's pairing entry.
 
@@ -425,9 +465,14 @@ def _browser_label(user_agent: str, extension_version: str) -> str:
     )
     agent = user_agent or ""
     name = next((label for token, label in order if token in agent), "")
+    # "Chrome extension 0.1.13", never "Chrome 0.1.13" (copy review C3): Chrome
+    # itself is at 153 in the reported case, so the bare form reads as an ancient
+    # or broken BROWSER, and the string's whole job is to say which LOCAL OPERATOR
+    # build in which browser holds the wheel. The word costs one line and removes
+    # the misreading; the version still does the disambiguating work.
     if not name:
         return f"extension {extension_version}" if extension_version else "extension"
-    return f"{name} {extension_version}" if extension_version else name
+    return f"{name} extension {extension_version}" if extension_version else name
 
 
 def pairing_status(root: Path | None = None) -> dict[str, Any]:
@@ -1112,25 +1157,40 @@ class BridgeService:
         _write_pairing(self.root, identities, driver_id=self._live_driver_id())
 
     def _daemon_leaving(self) -> bool:
-        """True once this daemon has been asked to stop.
+        """True once this daemon has been asked to stop, from ANY of three sources.
 
-        Two sources, because they cover different callers: the HTTP server's own
-        `should_exit` (uvicorn sets it BEFORE it closes listeners or connection
-        sockets — see `Server.shutdown` — which is what makes "we are closing
-        sockets" distinguishable from a live driver loss at the moment a
-        promotion happens), and `begin_shutdown`, set by `shutdown()` for
-        embedders and tests with no server object of their own.
+        Three, because the first two do not cover every way the service is run —
+        and the third is the one that makes the property hold for a daemon served
+        straight from `create_app()` by a runner that wires nothing for us:
+
+        1. `begin_shutdown()`, set by the lifespan `shutdown()` handler;
+        2. the HTTP server's own `should_exit`, when a runner called
+           `watch_server_exit()` (uvicorn sets it before it closes listeners or
+           connection sockets, see `Server.shutdown`);
+        3. `begin_shutdown()` again, this time from the RECEIVE LOOP: uvicorn's
+           websocket protocols deliver a `websocket.disconnect` with code 1012
+           to every live connection when the server is going down, and they do
+           it BEFORE the lifespan shutdown event (QA round 3, Q3-1: with sources
+           1 and 2 alone, a `uvicorn.run(create_app(...))` daemon promoted on the
+           way out in 9 of 12 runs and wrote the standby into the downgrade
+           record, which is how a rollback ends up refusing the install in use).
+
+        Sources 1 and 2 are still worth keeping: 1 covers a runner that never
+        touches the socket (a test client), 2 covers a runner that programmatically
+        stops without a signal reaching Python's socket layer.
         """
         if self._shutting_down:
             return True
         return bool(getattr(self._server, "should_exit", False))
 
     def begin_shutdown(self) -> None:
-        """Mark the daemon as going down; called by `shutdown()` and any runner.
+        """Mark the daemon as going down; called by the lifespan, a runner, or the
+        receive loop (a server-initiated close — see `_daemon_leaving`).
 
         Public because a runner that owns the server object may know earlier than
         the lifespan does (uvicorn fires the lifespan shutdown only AFTER it has
-        finished tearing connections down).
+        finished tearing connections down), and because the receive loop learns it
+        from the close itself even when nobody wired the server for us.
         """
         self._shutting_down = True
 
@@ -1161,8 +1221,8 @@ class BridgeService:
             return
         _write_pairing(self.root, identities, driver_id="")
 
-    def _take_free_wheel(self, link: ExtensionLink) -> ExtensionLink | None:
-        """Give a newly PAIRED link the wheel when nothing else holds it.
+    def _take_free_wheel(self, link: ExtensionLink) -> list[ExtensionLink]:
+        """Give a newly PAIRED link the wheel when nothing that can SERVE holds it.
 
         A link can become paired while standing by — the second install pairing
         through its own socket, or re-pairing after a revoke — and the wheel can
@@ -1171,13 +1231,30 @@ class BridgeService:
         will not promote). Without this the install would sit paired and
         stationary while the daemon answered `extension_disconnected` to every
         session: reachable by doing exactly what the popup tells the user to do.
+
+        The same "paired outranks unpaired" rule the handshake and the promotion
+        path apply (review round 3, R3-3), and the reason this is not just an
+        idle check: an UNPAIRED dial can hold the wheel — the handshake gives it
+        to whoever dials when nothing else does — and it cannot answer a single
+        command, so the install that just proved it can (the code was entered)
+        takes the wheel from it here rather than waiting for that dial's own next
+        handshake to demote it. Bounded either way, but "until the next dial" can
+        be the ~1 minute alarm floor, which is a user watching a dead agent.
+
+        Returns every link that must be TOLD about the move (the new driver, and
+        the demoted one when there was one): a decision made here is published in
+        the same no-await block by the caller, and the role frames follow after.
         """
-        if self.link.websocket is not None:
-            return None
+        holder = self.link
+        if holder.websocket is not None and holder.paired:
+            return []
+        demoted = holder if holder.websocket is not None else None
         link.role = "driver"
         self.driver_generation = link.generation
+        if demoted is not None:
+            demoted.role = "standby"
         self._record_driver()
-        return link
+        return [link, demoted] if demoted is not None else [link]
 
     def _retire_link(self, link: ExtensionLink) -> ExtensionLink | None:
         """Retire a link whose socket has ended; promote a standby if it drove.
@@ -1888,10 +1965,12 @@ class BridgeService:
         )
         self._drop_pending(extension_id)
         link.paired = True
-        promoted = self._take_free_wheel(link)
+        # Decision and publish stay in one no-await block (audit A1); the role
+        # frames are awaited only after the wheel state is visible.
+        told = self._take_free_wheel(link)
         self.publish_safely()
-        if promoted is not None:
-            await self._tell_role(promoted)
+        for entry in told:
+            await self._tell_role(entry)
         return PairResult(ok=True, token=token)
 
     def _set_pending_attempts(self, extension_id: str, attempts: int) -> None:
@@ -1910,7 +1989,7 @@ class BridgeService:
             _write_pending(self.root, entries)
 
     async def extension(self, websocket: WebSocket) -> None:
-        # The four rejections below (and the ORIGIN one above) close WITHOUT a
+        # The three rejections below (and the ORIGIN one above) close WITHOUT a
         # deadline, and that is correct rather than an oversight: every one of
         # them returns BEFORE `attach()`, so no link state exists yet and no
         # recovery is in flight — there is nothing for a stalled close to park.
@@ -1932,24 +2011,26 @@ class BridgeService:
         if hello.proto != PROTO_VERSION:
             await websocket.close(code=4001)
             return
-        listed = _identity_ids(self.root)
-        if listed and extension_id not in listed and hello.token:
-            # 4004 still refuses BEFORE `attach()`, so the unbounded-close rule
-            # above is preserved verbatim — what changed is WHO it refuses.
-            #
-            # A peer that presents a TOKEN is claiming a pairing it does not
-            # have (a revoked identity coming back with its old secret, or an
-            # install pointed at the wrong daemon), and refusing it is the whole
-            # point of the gate. A peer that presents NO token is not claiming
-            # anything: it is asking to pair, which is exactly what the first
-            # install did, and it must stay admissible or a SECOND install could
-            # never be added once the first is authorised — the operator's own
-            # case (a store build already paired, then a locally loaded build),
-            # and the case this change exists for. Refusing it here produced a
-            # dial-refuse-redial loop against the running daemon and left the
-            # second install with no code to enter at all (see PR evidence).
-            await websocket.close(code=4004)
-            return
+        # An UNLISTED identity is admitted whether or not it presents a token,
+        # and no token it carries is ever consulted: `link.paired` below is
+        # `_valid_saved_token`, which selects the entry for THIS id and can only
+        # answer for a listed one. So an unlisted dial is an ASKER in every case
+        # — it cannot drive, cannot answer a command, and still needs the
+        # terminal code, which is the property decision 3 keeps for every
+        # identity.
+        #
+        # A pre-attach 4004 for the token-bearing case was here, and it was a
+        # dead end rather than a defence (design D1 / UX U3): a revoked install
+        # keeps the token it was issued (`worker.ts` does not clear it on the
+        # 4003 close), so it re-dialled with it, was closed BEFORE `attach()`,
+        # and therefore never reached `_ensure_pending` — no code was ever
+        # minted for it, `lop browser pair` answered "already paired … use
+        # --reset", and the form its popup showed could not be completed. The
+        # only escapes were `--reset` (which revokes the working install too) or
+        # Settings → unpair. Since being unlisted already means "cannot be
+        # authorised", the refusal bought nothing the admission does not:
+        # refusing a token that could never match is not an authorization
+        # boundary, it is a locked door in front of an empty room.
 
         # A later extension wins WITHIN an identity; incumbency holds ACROSS
         # identities. Two profiles can therefore both stay connected instead of
@@ -2241,8 +2322,21 @@ class BridgeService:
                 future = link.pending.pop(response.id, None)
                 if future is not None and not future.done():
                     future.set_result(response)
-        except WebSocketDisconnect:
-            pass
+        except WebSocketDisconnect as exc:
+            # A SERVER-initiated close is not a driver loss, and the finally
+            # below must not read it as one. uvicorn's websocket protocols send
+            # 1012 ("service restart") on every live connection while the server
+            # is going down, and they send it BEFORE the lifespan shutdown event
+            # that sets `_shutting_down` via `shutdown()` — see `_daemon_leaving`
+            # for the measurement and for why detecting it here is what makes the
+            # no-handover-during-teardown rule hold for embedders too.
+            #
+            # 1001 ("going away") is accepted as the same signal: it is what
+            # other ASGI servers use for the same situation, and no peer in this
+            # system sends either — the extension's own closes carry no code, so
+            # they arrive as 1000.
+            if exc.code in SERVER_GOING_DOWN_CODES:
+                self.begin_shutdown()
         finally:
             if link.websocket is websocket:
                 # The peer ended this link itself (worker died, browser closed,
@@ -2286,6 +2380,27 @@ class BridgeService:
         target = str(payload.get("target", "") if isinstance(payload, dict) else "")
         link = self._resolve_extension(target)
         if link is None:
+            # An identity that is AUTHORISED but has no live link is a different
+            # answer from an unknown target, and conflating them is what made
+            # `drive <id>` contradict `status` (UX round 3, U4): the listing said
+            # "(cmadnonj…) paired, not connected" while the command said nothing
+            # matched — reading as a typo'd id, in the state a handover leaves
+            # behind, which is exactly when the operator reaches for this
+            # command. Resolution against live links first is unchanged; this
+            # only names the reason when the target IS known here.
+            authorised = _resolve_authorised_target(target, _identities(self.root))
+            if authorised is not None:
+                return JSONResponse(
+                    {
+                        "error": "not_connected",
+                        "message": (
+                            "that install is authorised but not connected right now — "
+                            "open its browser, then retry"
+                        ),
+                        "extension_id": str(authorised.get("extension_id", "")),
+                    },
+                    status_code=409,
+                )
             return JSONResponse(
                 {
                     "error": "unknown_extension",
@@ -3097,6 +3212,18 @@ class BridgeService:
                 # more asks for it by name.
                 "driver_extension_id": driver_id,
                 "standby_extension_ids": [link.extension_id for link in self.standby_links()],
+                # The standby LABELS, in the same order as the ids above, so a
+                # reader can act on a property of the install rather than asking
+                # the operator to evaluate it (copy review C4 / UX U7: the
+                # pre-0.1.13 note used to print for ANY standby, including an
+                # all-current pair, because the only version data on hand was the
+                # driver's). Live link values, not the file's recorded label, so
+                # an install that updated since pairing reports the build it is
+                # actually running.
+                "standby_labels": [
+                    _browser_label(link.browser, link.extension_version)
+                    for link in self.standby_links()
+                ],
                 # Admitted dials with NO pairing. Not standbys — they hold no
                 # authority and can never be promoted — but the operator (and the
                 # bound in MAX_UNLISTED_LINKS) needs them countable rather than
@@ -3108,6 +3235,14 @@ class BridgeService:
                 # Empty when the file has no label for it (an entry paired
                 # before labels existed), which the card words accordingly.
                 "driver_label": driver_label,
+                # The driver's SHORT id. The label alone stops answering "so
+                # which one is it?" when both installs run the same build — the
+                # collision is routine for two profiles of one unpacked build, or
+                # any two builds at one version — and the id prefix is the one
+                # token that always resolves in `lop browser drive` (UX U2 /
+                # design D3). Sent whole rather than truncated so the reader
+                # decides how much of it to show.
+                "driver_short_id": driver_id[:8] if driver_id else "",
             }
         )
 
