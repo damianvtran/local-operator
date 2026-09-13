@@ -2115,7 +2115,6 @@ def browser_command(args: argparse.Namespace) -> int:
 
     from local_operator.browser_bridge import install as browser_install
     from local_operator.browser_bridge.daemon import (
-        normalise_target,
         pairing_status,
         reset_pairing,
         revoke_identity,
@@ -2384,10 +2383,13 @@ def browser_command(args: argparse.Namespace) -> int:
             matches = result.get("matches")
             message = str(result.get("error", "could not pin the driver"))
             if isinstance(matches, int):
+                # Echo the target AS TYPED, not the normalised form (review round 5,
+                # NIT 5): `drive 'ohcmfhja…'` used to answer "…matches 'ohcmfhja'.",
+                # editing the very token the user is looking at.
                 message = (
-                    f"no connected extension matches '{normalise_target(args.target)}'."
+                    f"no connected extension matches '{args.target}'."
                     if matches == 0
-                    else f"no single connected extension matches '{normalise_target(args.target)}'."
+                    else f"no single connected extension matches '{args.target}'."
                 )
             print(f"\033[1;31m{message}\033[0m")
             # Candidates arrive as ids; the LABEL is what makes a list of ids

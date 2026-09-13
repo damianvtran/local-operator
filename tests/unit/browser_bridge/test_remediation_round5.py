@@ -369,3 +369,86 @@ async def test_r5_5_the_silent_wheel_exposes_a_takeover_bound(tmp_path: Path) ->
     severed = json.loads((await service.health(None)).body)  # type: ignore[arg-type]
     assert severed["takeover_within_s"] is None, "a wheel nobody holds has no takeover pending"
     await _shutdown(task)
+
+
+# --- Review finding 3: assertions for the CLI refusal wording -----------------
+
+
+def _drive_output(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any], capsys: Any) -> str:
+    from local_operator import cli
+    from local_operator.browser_bridge import install as install_module
+
+    monkeypatch.setattr(install_module, "pin_driver", lambda target: result)
+    # `browser_command` imports `pairing_status` from the daemon INSIDE the function
+    # (so `lop` does not pay the daemon's import cost at startup), so the stub has
+    # to be installed on the module it imports from, not on `cli`.
+    monkeypatch.setattr(daemon_module, "pairing_status", lambda *a, **k: {"identities": []})
+    code = cli.browser_command(  # type: ignore[attr-defined]
+        _args(target=result.pop("_target", "whatever"))
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    return out
+
+
+def _args(target: str) -> Any:
+    import argparse
+
+    # The dispatcher reads `args.browser_command`; `target` is the drive subcommand's
+    # own positional.
+    return argparse.Namespace(browser_command="drive", target=target)
+
+
+@pytest.mark.parametrize(
+    ("matches", "expected"),
+    [
+        (0, "no connected extension matches 'zzzz'."),
+        (2, "no single connected extension matches 'zzzz'."),
+        (None, "no single connected extension matches 'zzzz'."),
+    ],
+)
+def test_r5_6_the_refusals_are_asserted(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, matches: int | None, expected: str
+) -> None:
+    """Review round 5, finding 3: the branch this delta added had no assertion.
+
+    `test_r4_4c` asserted `_print_identities`, not the `matches`-driven choice of
+    sentence, so a later edit could have collapsed the two refusals back into one
+    without failing anything. The third row pins the degraded case too: an older
+    daemon sends no `matches`, and the sentence must stay the actionable "no single".
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "error": "no single connected extension matches 'zzzz'.",
+        "authorized_extension_ids": [STORE_ID],
+        "_target": "zzzz",
+    }
+    if matches is not None:
+        result["matches"] = matches
+    out = _drive_output(monkeypatch, result, capsys)
+    assert expected in out
+    assert "authorised installs:" in out
+    assert "omibaecb\u2026" in out, "the candidate rows must be pasteable handles"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('{"error": "unknown_extension", "matches": 2}', 2),
+        ('{"error": "unknown_extension", "matches": 0}', 0),
+        ('{"error": "unknown_extension"}', None),
+        ('{"matches": "two"}', None),
+        ('{"matches": true}', None),
+        ("not json at all", None),
+    ],
+)
+def test_r5_6b_int_from_payload(body: str, expected: int | None) -> None:
+    """`_int_from_payload` decides between two user-facing sentences, so it is pinned.
+
+    The bool case matters: `True` is an `int` in Python and would otherwise render
+    "no single connected extension matches" for a payload that says nothing about
+    how many matched.
+    """
+    from local_operator.browser_bridge.install import _int_from_payload
+
+    assert _int_from_payload(body, "matches") == expected
