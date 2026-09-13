@@ -46,10 +46,68 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, see ``SearchSpendSnapshot.o
 __all__ = [
     "SearchSpendRow",
     "SearchSpendSnapshot",
+    "format_usd",
+    "format_usd_exact",
     "turn_cost",
     "job_cost",
     "cost_summary",
 ]
+
+
+#: Below this many micro-USD a 4dp figure round-trips to ``$0.0000``, which
+#: reads as FREE — the more expensive of the two lies ``turn_cost`` warns about.
+#: 50 µ$ is $0.00005, the rounding boundary of ``{"$%.4f"}``.
+_SUB_CENT_VISIBLE_MICRO = 50
+
+
+def format_usd(micro: int) -> str:
+    """The ONE dollar ladder, from an EXACT integer micro-USD amount.
+
+    Takes micro-USD rather than a float because the ladder's edge cases are
+    decided on the true value: a float that arrived already rounded to ``0.0``
+    cannot be told from a real zero, and the one reading the ladder must never
+    print is ``$0.0000`` for money that was spent. INTEGER in, so the decision
+    is about the money rather than about a rounded copy of it.
+
+    Ladder (rounding, never truncation — an f-string rounds):
+
+    - ``$1.90`` above a dollar, ``$0.213`` above a cent, ``$0.0042`` below it;
+    - a NONZERO amount under half a ten-thousandth of a dollar renders
+      ``<$0.0001`` — the one spelling where the ladder would otherwise lie, and
+      8 cells wide, in a state that cannot co-occur with a ``≥`` (design §8.2);
+    - zero renders ``$0.0000``, unchanged: for a genuine zero that spelling is
+      correct, and the band's zero policy already drops the segment entirely.
+
+    Every money surface reads THIS function for its digits; the callers keep
+    their own mark handling (``≥`` on the band, a dim ``+`` in the panels). Two
+    ladders is how ``/analytics`` came to print ``$1.2k`` beside the band's
+    ``$1234.56`` for the same money.
+    """
+    if micro < _SUB_CENT_VISIBLE_MICRO:
+        return "<$0.0001" if micro > 0 else "$0.0000"
+    cost = micro / 1_000_000.0
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    if cost < 1.0:
+        return f"${cost:.3f}"
+    return f"${cost:.2f}"
+
+
+def format_usd_exact(micro: int) -> str:
+    """The exact micro-USD at full precision: ``$1.897843``.
+
+    What ``/session`` shows on demand, so the reader can see that the cents on
+    the band are not the whole number. Six decimal places is the record's own
+    resolution (micro-USD), trailing zeros trimmed to at least the cents, so an
+    exact ``$2.10`` still reads as ``$2.10`` rather than ``$2.1``.
+    """
+    if micro < 0:
+        return f"-{format_usd_exact(-micro)}"
+    whole, _, fraction = f"{micro / 1_000_000:.6f}".partition(".")
+    fraction = fraction.rstrip("0")
+    if len(fraction) < 2:
+        fraction = (fraction + "00")[:2]
+    return f"${whole}.{fraction}"
 
 
 def _resolve_for_paint(provider: str, model_id: str):
