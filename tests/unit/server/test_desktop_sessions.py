@@ -40,23 +40,6 @@ from local_operator.session.transcript import (
 )
 
 
-async def _armed_warm(bridge: Any) -> asyncio.Task[None]:
-    """The engage task the lease-warm loop starts, after its first step.
-
-    The lease-driven warm is ARMED by `/watch` rather than started inside it,
-    because the retry and its backoff have to live in one place and that place
-    is the loop -- so the task appears one event-loop turn after the heartbeat
-    that armed it. Everything the ordering promises is unchanged: the presence
-    record still lands before the engage, and `/watch` still returns without
-    awaiting either.
-    """
-    for _ in range(64):
-        if bridge.warm_task is not None:
-            return bridge.warm_task
-        await asyncio.sleep(0)
-    raise AssertionError("a live visible lease did not start a warm")
-
-
 async def _until(predicate: Callable[[], bool], *, why: str, timeout: float = 30.0) -> None:
     """Poll until ``predicate`` holds, or fail with ``why`` after ``timeout``.
 
@@ -74,6 +57,31 @@ async def _until(predicate: Callable[[], bool], *, why: str, timeout: float = 30
     while not predicate():
         assert time.monotonic() < deadline, why
         await asyncio.sleep(0.01)
+
+
+async def _armed_warm(bridge: Any) -> asyncio.Task[None]:
+    """The engage task the lease-warm loop starts, after its first step.
+
+    The lease-driven warm is ARMED by `/watch` rather than started inside it,
+    because the retry and its backoff have to live in one place and that place
+    is the loop -- so the task appears after the heartbeat that armed it, once
+    the loop has taken its first pass. Everything the ordering promises is
+    unchanged: the presence record still lands before the engage, and `/watch`
+    still returns without awaiting either.
+
+    WAITED ON WITH A REAL-CLOCK BOUND, NOT A TURN COUNT. This used to spin 64
+    `sleep(0)` turns, which is a budget in event-loop turns rather than in time
+    -- and the loop's first pass now hops to a worker thread for the
+    deliberate-stop marker, so 64 turns can expire while that thread runs
+    (measured: this helper went red under CI's 4-worker shard while the same
+    file passed 6/6 locally at default parallelism).
+    """
+    await _until(
+        lambda: bridge.warm_task is not None,
+        why="a live visible lease did not start a warm",
+    )
+    assert bridge.warm_task is not None
+    return bridge.warm_task
 
 
 @pytest.mark.asyncio
@@ -2544,10 +2552,10 @@ async def test_a_lease_driven_warm_survives_the_facades_recovery_window(tmp_path
         # Recovery releases the facade -- what `_give_up_recovery` ends in, minus
         # the flags this test does not exercise.
         bridge.remote._recovering = False
-        for _ in range(200):
-            if engages:
-                break
-            await asyncio.sleep(0.01)
+        await _until(
+            lambda: bool(engages),
+            why="the lease's intent did not survive the recovery window",
+        )
         assert engages == [False], "the lease's intent did not survive the recovery window"
     await pool.close()
 
@@ -2589,10 +2597,10 @@ async def test_a_lease_driven_warm_survives_an_in_flight_bind(tmp_path, monkeypa
             assert bridge.warm_task is None
         finally:
             bridge.remote._bind_lock.release()
-        for _ in range(200):
-            if engages:
-                break
-            await asyncio.sleep(0.01)
+        await _until(
+            lambda: bool(engages),
+            why="the lease's intent did not survive the wait",
+        )
         assert engages == [False], "the lease's intent did not survive the wait"
     await pool.close()
 
