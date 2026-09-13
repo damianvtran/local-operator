@@ -154,6 +154,12 @@ def test_a_keyed_sonar_request_is_priced_and_never_free() -> None:
     assert floored.usd == pytest.approx(0.005)
     assert floored.priced_from_usage is False
 
-    # The free tier is the ANONYMOUS one, and it is still free.
-    anonymous = estimate_search_cost("perplexity", None)
+    # The free tier is the ANONYMOUS one, and the tier flag -- not the absence of
+    # usage -- is what says so. A ``None`` usage cannot distinguish the free tier
+    # from a keyed call whose usage was lost, so it is UNPRICED: guessing "free"
+    # is the claim this whole path was fixed for (round-2 review R2-MINOR-1).
+    anonymous = estimate_search_cost("perplexity", SearchUsage(keyless=True))
     assert anonymous.usd == 0.0
+
+    unknown = estimate_search_cost("perplexity", None)
+    assert unknown.usd is None, "no usage and no tier flag is unknown, not free"
