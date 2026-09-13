@@ -48,9 +48,9 @@
       "mixed"
     ],
     "dock_band_shot.py": [
-    "failed",
-    "connecting"
-  ],
+      "failed",
+      "connecting"
+    ],
   "fallback_shot.py": [
       "before",
       "after"

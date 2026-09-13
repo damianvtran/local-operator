@@ -162,11 +162,38 @@ async def main() -> None:
         dock = region(app, "#input-dock")
         shell = region(app, "#input-shell")
         band = region(app, "#status-band")
+        lane_right = dock[0] + dock[2]
+        # The bound this frame has to satisfy, and it is the LANE rather than the
+        # screen edge. A screen-edge bound is satisfied by a row that has already
+        # overrun the composer's own lane whenever the drawer is docked on the
+        # RIGHT: the compositor crops the band at the main lane, so the ink is cut
+        # mid-word with every cell still inside the terminal (QA round 1, Q1 —
+        # measured on the base's 72-cell row, which overran its lane by 8 cells
+        # while a `content.x + held <= terminal_width` check passed).
+        # Both terms come from the widget, never from arithmetic on its region:
+        # `#status-band`'s padding is `1 1 0 0`, so its content box is one cell
+        # narrower than its region and starts ON the region's left edge, where a
+        # hand-derived `region.width - 3` / `region.x + 1` reported 60 cells held
+        # at x=36 for the row that holds 62 at x=35 — a bound looser than the one
+        # the compositor enforces, and looser in the direction that misses a crop.
+        # `content_region` is the layout engine's own answer to "the box this row
+        # is drawn in", and it is read on a settled frame (the pauses above), the
+        # same discipline the tests use.
+        content = app.query_one("#status-band").content_region
+        held = content.width
+        ink_right = content.x + held
+        slack = lane_right - ink_right
         print(f"state={state} size={columns}x{rows} out={out}")
         print(f"  dock={dock} shell={shell} band={band}")
         print(
             f"  shell_right={shell[0] + shell[2]} band_right={band[0] + band[2]} "
-            f"screen={columns} screen_content={columns - 2}"
+            f"screen={columns} screen_content={columns - 2} lane_right={lane_right}"
+        )
+        print(
+            f"  row_bound (band content box vs dock lane right edge): "
+            f"content.x({content.x}) + held({held}) = {ink_right} "
+            f"<= lane_right({lane_right}) -> slack={slack} "
+            f"{'OK' if slack >= 0 else 'CROPPED'}"
         )
         print(
             f"  boot-card={app.screen.has_class('boot-card')} overlay="
