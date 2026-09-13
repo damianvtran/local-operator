@@ -23,9 +23,31 @@ to spare — and it is cached because holding a wheel-scroll issues about 30
 cursor moves a second. There is NO full-transcript parse, ever, and no per-row
 read per keystroke.
 
-THE READ RULE: TAIL FIRST, HEAD ONLY AS A FALLBACK. ``condensed`` reads the
-tail window. If that window holds no USER turn — or no turns at all — it reads
-a HEAD window of the same byte budget and condenses from there instead.
+THE READ RULE: HEAD AND TAIL, WITH THE MIDDLE MARKED AS UNREAD. A session is
+read from BOTH ends of the transcript — a head window and a tail window of the
+same byte budget — and the two are joined in the pane by an explicit
+:data:`GAP_ROLE` marker when the file is longer than both windows together.
+A file that fits inside one window is read whole and needs no marker; a file
+that fits inside two is read whole too (bounded at :data:`PREVIEW_TAIL_BYTES`
+× 2), because two overlapping windows would otherwise draw the same turns
+twice.
+
+What this replaced, and why. The rule used to be "tail first, head only as a
+fallback", i.e. the window was read from the END and the head was consulted
+only when the tail held no user turn. On any conversation longer than the
+window whose tail did contain a user turn — the common shape, by this module's
+own store figures (median 294 KB, p90 730 KB) — the pane therefore opened on a
+mid-session turn and drew it with a clean role gutter, indistinguishable from
+the start. QA reproduced it on a 557 KB, 39-turn transcript: header
+``burst 0: …`` (the row's name, the true opening message), first body line
+``▸ you / burst 22: …``, ``preview_offset`` 0 and still 0 after 400 ``ctrl+u``,
+2,229 wrapped lines behind a ~9-line pane and nothing saying so. A middle
+slice passed for a beginning and the beginning was unreachable.
+
+The pane now reads from the start AND the end, so the first body line is the
+session's real first user turn (the D18 contract, now literally true at every
+file size), the newest turns are still what a tail-first reader sees, and the
+turns in neither window are stated rather than silently absent.
 
 That fallback is deliberate and was added against an earlier version of this
 docstring which forbade it. The prohibition was written to protect the cost
@@ -47,10 +69,12 @@ of 162 rows take it, and 60 mixed previews cost 1.20 ms per session against
 1.12 ms when every row used the tail alone.
 
 WHAT IS STILL NOT CLOSED, so a caller does not assume otherwise: the preview
-shows the head and the tail, never the middle. A turn in neither window is not
-visible, and ``ctrl+g``/``ctrl+d`` scroll what was read rather than paging the
-file. That is the same bounded-read bargain ``resume.session_preview``
-established; only the "first user turn" guarantee is restored here.
+shows the head window and the tail window, never the middle of a long file. A
+turn in neither window is not visible, and ``ctrl+g``/``ctrl+d`` scroll what
+was read rather than paging the file — but the gap is DRAWN (:data:`GAP_ROLE`),
+so the reader is told, and the surface no longer presents a middle slice as a
+beginning. That is the same bounded-read bargain ``resume.session_preview``
+established; the "first user turn" guarantee is restored, and made visible.
 """
 
 from __future__ import annotations
@@ -69,6 +93,17 @@ from local_operator.session.creation import session_created_at
 #: window is always one partial line longer than it looks and that first line
 #: is dropped. Mirrors ``resume.session_preview``'s established pattern.
 PREVIEW_TAIL_BYTES = 256_000
+
+#: The role of the SYNTHETIC turn that stands in for the turns neither window
+#: could reach. No transcript entry can carry it: :func:`condense_entries` and
+#: :func:`verbose_entries` only ever admit ``role`` values from a message
+#: payload, and this one is inserted by :meth:`SessionPreviews._window_turns`.
+GAP_ROLE = "window-gap"
+
+#: What the gap marker draws. Short enough for the narrowest pane that still
+#: has room for one, and explicit about WHICH turns are missing — a reader who
+#: sees only "…" cannot tell an unread middle from an elided single line.
+GAP_TEXT = "… turns in the middle were not read"
 
 #: The checkpoint discriminator, used with ``entry["type"] == "custom"``.
 #:
@@ -192,6 +227,13 @@ def wrap_turns(turns: Sequence[PreviewTurn], width: int, height: int) -> list[tu
 
     out: list[tuple[str, str]] = []
     for turn in turns:
+        if turn.role == GAP_ROLE:
+            # A MARKER, not a gutter: it names something the reader cannot see
+            # rather than introducing a turn, and the pane inks it apart from
+            # the role gutters so it cannot be read as someone speaking (D-b).
+            out.append(("marker", turn.text))
+            out.append(("blank", ""))
+            continue
         out.append(("gutter", GUTTERS.get(turn.role, f"▪ {turn.role}")))
         for paragraph in demark(turn.text).splitlines():
             if not paragraph.strip():
@@ -222,7 +264,13 @@ def wrap_turns(turns: Sequence[PreviewTurn], width: int, height: int) -> list[tu
 def clip_to_height(
     lines: Sequence[tuple[str, str]], top: int, height: int
 ) -> list[tuple[str, str]]:
-    """``height`` lines from ``top``, never ending on an orphan role label (D30)."""
+    """``height`` lines from ``top``, never ending on an orphan role label (D30).
+
+    A ``marker`` line is NOT dropped here. It states that turns are missing, and
+    a window whose last row is that statement is telling the truth about why the
+    pane ends there — unlike a trailing gutter, which reads as a turn that
+    failed to load.
+    """
     window = list(lines[top : top + max(1, height)])
     while window and window[-1][0] == "gutter":
         window.pop()
@@ -297,10 +345,45 @@ class SessionPreviews:
         self._checkpoint: dict[str, dict[str, Any]] = {}
         self._created: dict[str, float] = {}
         # Head windows are cached separately and on the same terms as the tail:
-        # the fallback is rare, but a cursor resting on one of those rows must
-        # not re-read on every repaint.
+        # a cursor resting on a long row must not re-read on every repaint.
         self._head_lines: dict[str, list[str]] = {}
         self._head_entries_cache: dict[str, list[dict[str, Any]]] = {}
+        # Whole-file reads, for the band where the head and tail windows would
+        # OVERLAP (``size <= 2 * PREVIEW_TAIL_BYTES``). Concatenating two
+        # overlapping windows draws the same turns twice, and the band is
+        # bounded at 512 KB, so reading it once is both correct and cheap.
+        self._whole_lines: dict[str, list[str]] = {}
+        self._whole_entries_cache: dict[str, list[dict[str, Any]]] = {}
+        #: Session ids whose transcript could not be READ (``OSError``: missing,
+        #: deleted under the cursor, mode 000). Distinct from an empty one, and
+        #: the pane says which — "no prose in this transcript" asserted a fact
+        #: about a file nobody had managed to open.
+        self._unreadable: set[str] = set()
+        #: ``stat`` sizes, so the window decision costs one syscall per session.
+        self._sizes: dict[str, int] = {}
+
+    def unreadable(self, session_id: str) -> bool:
+        """True when this session's transcript exists but could not be read."""
+        self._size(session_id)
+        return session_id in self._unreadable
+
+    def _size(self, session_id: str) -> int:
+        """The transcript's size in bytes, or 0 when it cannot be stat-ed.
+
+        A 0 is ambiguous on its own (an empty file and an unreadable one both
+        stat to nothing useful), which is why an ``OSError`` is recorded in
+        :attr:`_unreadable` as well: the pane says "could not read" rather than
+        claiming the conversation is empty.
+        """
+        if session_id not in self._sizes:
+            try:
+                self._sizes[session_id] = (
+                    (self._sessions / session_id / TRANSCRIPT_NAME).stat().st_size
+                )
+            except OSError:
+                self._sizes[session_id] = 0
+                self._unreadable.add(session_id)
+        return self._sizes[session_id]
 
     def _tail(self, session_id: str) -> list[str]:
         """The last :data:`PREVIEW_TAIL_BYTES` of the transcript, as whole lines."""
@@ -320,14 +403,43 @@ class SessionPreviews:
                     window = handle.read()
         except OSError:
             window = b""
+            self._unreadable.add(session_id)
         self._lines[session_id] = window.decode("utf-8", errors="replace").splitlines()
         return self._lines[session_id]
+
+    def _whole(self, session_id: str) -> list[str]:
+        """The WHOLE transcript as lines, for files up to two windows long.
+
+        Bounded by construction: only called when ``size <= 2 *
+        PREVIEW_TAIL_BYTES``, where the head and tail windows overlap and the
+        file is at most 512 KB. Reading it once is the only way to get its
+        turns in order without drawing the overlap twice.
+        """
+        if session_id in self._whole_lines:
+            return self._whole_lines[session_id]
+        transcript = self._sessions / session_id / TRANSCRIPT_NAME
+        window = b""
+        try:
+            with transcript.open("rb") as handle:
+                window = handle.read(2 * PREVIEW_TAIL_BYTES)
+        except OSError:
+            window = b""
+            self._unreadable.add(session_id)
+        self._whole_lines[session_id] = window.decode("utf-8", errors="replace").splitlines()
+        return self._whole_lines[session_id]
+
+    def _whole_entries(self, session_id: str) -> list[dict[str, Any]]:
+        """Parsed entries for a file read whole (see :meth:`_whole`)."""
+        if session_id not in self._whole_entries_cache:
+            self._whole_entries_cache[session_id] = _parse(self._whole(session_id))
+        return self._whole_entries_cache[session_id]
 
     def _head(self, session_id: str) -> list[str]:
         """The FIRST :data:`PREVIEW_TAIL_BYTES` of the transcript, as whole lines.
 
-        Read only when the tail window cannot answer "what did the user ask?"
-        — see :meth:`condensed`. The last line is dropped rather than the
+        Read for every session longer than twice the window, so the pane can
+        show the conversation's START as well as its end (see
+        :meth:`_window_turns`). The last line is dropped rather than the
         first: reading a prefix ends mid-line, and a truncated JSON object is
         not recoverable.
         """
@@ -340,6 +452,7 @@ class SessionPreviews:
                 window = handle.read(PREVIEW_TAIL_BYTES)
         except OSError:
             window = b""
+            self._unreadable.add(session_id)
         lines = window.decode("utf-8", errors="replace").splitlines()
         # A short file was read whole, so its final line is complete; a file
         # longer than the window was cut, so its final line is a fragment.
@@ -362,44 +475,64 @@ class SessionPreviews:
         self._entries[session_id] = _parse(self._tail(session_id))
         return self._entries[session_id]
 
+    def _window_turns(self, session_id: str, *, verbose: bool) -> list[PreviewTurn]:
+        """The turns a pane can show, from BOTH ends, with the gap marked.
+
+        Three shapes, chosen by size alone, and each one is a bounded read:
+
+        * **Inside one window** — the file is read whole (that is what the tail
+          read IS for a file this short) and no marker is drawn;
+        * **Inside two** — read whole as well, bounded at 512 KB, because a head
+          and a tail window that overlap would otherwise draw the same turns
+          twice;
+        * **Longer than two** — the head window, then :data:`GAP_ROLE`, then the
+          tail window. The first body line is the session's real first turn (the
+          D18 contract) and the middle is STATED as unread rather than silently
+          absent or, worse, presented as the beginning.
+
+        Cost is unchanged in kind: at most two bounded reads and two window
+        parses, independent of file size, cached per session id like every other
+        read here. A file inside one window still opens once.
+        """
+        convert = verbose_entries if verbose else condense_entries
+        size = self._size(session_id)
+        if size <= 2 * PREVIEW_TAIL_BYTES:
+            return convert(self._whole_entries(session_id))
+        head = convert(self._head_entries(session_id))
+        tail = convert(self.entries(session_id))
+        # The marker is DROPPED when neither side produced a turn: a lone
+        # "… turns in the middle were not read" over an empty pane names a gap
+        # with nothing on either side of it, and the picker's own empty wording
+        # is the honest answer there.
+        if not head and not tail:
+            return []
+        return [*head, PreviewTurn(GAP_ROLE, GAP_TEXT, 0.0), *tail]
+
     def condensed(self, session_id: str) -> list[PreviewTurn]:
         """Human turns only — the picker's DEFAULT view.
 
-        TAIL FIRST, HEAD ONLY WHEN THE TAIL CANNOT ANSWER THE QUESTION. The
-        preview exists to answer "which session is this?", and §4.2's rule is
-        that it opens on the first USER turn. A tail window holding no user
-        turn cannot satisfy that rule from what it has: it can only show
-        mid-session assistant narration, which is precisely the D18 defect —
-        resurfaced past the window rather than fixed differently.
-
-        QA measured the shape on the real store: 24 of 159 rows opened on
-        ``▪ lop``, rank 0 among them, and a further 3 condensed to NOTHING
-        because their tail was all tool traffic. Three design rounds could not
-        see it because every transcript they measured fit inside the window.
-
-        The fallback is bounded by the SAME byte budget as the tail, cached per
-        session id like every other read here, and taken only on the minority
-        of sessions that need it — a tail carrying a user turn never opens the
-        file twice. Cost when it does fire: one extra ``seek(0)`` + 256 KB read
-        and a parse of that window, so the worst case is exactly twice the
-        fast path and still independent of file size.
+        HEAD AND TAIL, joined by an explicit gap marker on files longer than
+        both windows; see :meth:`_window_turns` for the three shapes and why the
+        old tail-first rule was wrong on the common case. §4.2's rule is that
+        the pane opens on the first USER turn, and with the head window in hand
+        that is now true at every file size — QA's 557 KB repro opened on
+        ``burst 22`` with ``burst 0`` unreachable, which is the defect this
+        replaced.
         """
         if session_id not in self._condensed:
-            turns = condense_entries(self.entries(session_id))
-            if not any(turn.role == "user" for turn in turns):
-                head = condense_entries(self._head_entries(session_id))
-                # Only when the head actually improves matters. A session with
-                # no user turn anywhere — and there are such rows — keeps the
-                # tail's turns rather than trading them for an empty list.
-                if any(turn.role == "user" for turn in head) or not turns:
-                    turns = head or turns
-            self._condensed[session_id] = turns
+            self._condensed[session_id] = self._window_turns(session_id, verbose=False)
         return self._condensed[session_id]
 
     def verbose(self, session_id: str) -> list[PreviewTurn]:
-        """Every message entry, behind ``ctrl+e``."""
+        """Every message entry, behind ``ctrl+e``.
+
+        The same window as :meth:`condensed`, so the chord changes WHICH turns
+        are shown and not which part of the file was read — otherwise
+        ``ctrl+e`` would quietly move the pane to a different region and the
+        gap marker would disagree with the body under it.
+        """
         if session_id not in self._verbose:
-            self._verbose[session_id] = verbose_entries(self.entries(session_id))
+            self._verbose[session_id] = self._window_turns(session_id, verbose=True)
         return self._verbose[session_id]
 
     def checkpoint(self, session_id: str) -> dict[str, Any]:

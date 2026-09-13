@@ -8,10 +8,12 @@ answer with a choice — is what these tests pin.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
+from rich.color import Color
 from rich.style import Style
 from textual import events
 from textual.app import App, ComposeResult
@@ -25,6 +27,7 @@ from local_operator.resume import (
     recent_session_rows,
     session_name,
 )
+from local_operator.session.preview import GAP_TEXT, PREVIEW_TAIL_BYTES
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.session_picker import (
     _EXEC_LEGEND,
@@ -1475,7 +1478,9 @@ def test_footer_legend_appears_only_when_a_row_is_marked() -> None:
         without = _meta_legends(74, has_marked=False, has_exec=False, counter_cells=counter_cells)
         assert _MARKER_LEGEND not in without
     # The key row is untouched either way — legends no longer buy space from it.
-    assert ("pgup/pgdn", "page") in _footer_hints(74)
+    # (``scrolls=True``: a list that fits one page does not advertise paging at
+    # all any more, so the existence of the hint is asserted where it applies.)
+    assert ("pgup/pgdn", "page") in _footer_hints(74, scrolls=True)
 
 
 def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
@@ -1490,7 +1495,7 @@ def test_footer_legend_drops_before_the_movement_and_action_keys() -> None:
     # Wide: legend shown, and the full key row survives beside it.
     wide = _meta_legends(74, has_marked=True, has_exec=False)
     assert _MARKER_LEGEND in wide
-    assert ("pgup/pgdn", "page") in _footer_hints(74)
+    assert ("pgup/pgdn", "page") in _footer_hints(74, scrolls=True)
     # Narrow: the legend is gone entirely — not reduced to a lone glyph — and
     # the essential keys survive.
     narrow = _meta_legends(30, has_marked=True, has_exec=False, counter_cells=19)
@@ -1842,14 +1847,23 @@ def test_the_empty_state_footer_offers_only_what_works() -> None:
 
     `backspace` is what widens the query and is the key a user in this state is
     already reaching for; `esc` stays because leaving is still available.
+
+    `enter` ALSO STAYS, because it does something here: it closes the picker
+    (``action_choose`` dismisses with ``None`` on an empty result set). That is
+    deliberate, and it was the one thing the row did not say — pressing Enter to
+    "accept" a filter looked like a silent crash (UX round 1, U8).
     """
     hints = _footer_hints(74, empty=True)
     keys = [key for key, _ in hints]
-    assert keys == ["backspace", "esc"], keys
+    assert keys == ["backspace", "enter", "esc"], keys
 
     # Fits the narrow cards too, where the tally has already shed.
     for width in (50, 56, 60):
-        assert [key for key, _ in _footer_hints(width, empty=True)] == ["backspace", "esc"]
+        assert [key for key, _ in _footer_hints(width, empty=True)] == [
+            "backspace",
+            "enter",
+            "esc",
+        ]
 
     # And the populated footer is untouched.
     populated = [key for key, _ in _footer_hints(74, empty=False)]
@@ -2543,5 +2557,410 @@ async def test_a_filter_that_fits_one_page_reports_the_match_count() -> None:
     assert 0 < matches <= plan_layout(120, 30).list_rows, "fixture must fit one page"
 
     footer = screen.render_footer_for_test()
-    assert f"{matches:,} session" in footer, footer
+    # ...and the noun is MATCHES while a filter is active (design round 5, D4):
+    # over a filtered list, "session(s)" reads as a statement about the store —
+    # which is how the zero-match frame came to say `0 sessions` beside
+    # `no session matches that filter`.
+    assert f"{matches:,} match" in footer, footer
     assert f"{len(rows):,} sessions" not in footer, footer
+
+
+# --- remediation round: the preview's window, its affordances, and the mouse --
+#
+# Four streams batched into one round (agent review 3, design 5, UX 1, QA 1).
+# Every test here fails on the head they reviewed; each names the finding it
+# closes so a later round can tell what is still load-bearing.
+
+
+@pytest.mark.asyncio
+async def test_the_preview_opens_on_the_true_first_turn_and_marks_the_unread_middle(
+    tmp_path: Path,
+) -> None:
+    """UX U1 = QA Q2, the MAJOR this round exists for.
+
+    The pane used to read the TAIL window and open on whatever turn it found
+    there, drawing it with a clean role gutter: a 557 KB / 39-turn transcript
+    showed a header naming ``burst 0`` over a first body line of ``burst 22``,
+    with the opening turns unreachable (``preview_offset_for_test() == 0`` after
+    400 ``ctrl+u``) and nothing on screen saying so. The pane reads BOTH ends
+    now, so the first body turn is the session's real one and the turns in
+    neither window are stated.
+    """
+    filler = "y" * 8_000
+    entries = [
+        _message("user", f"burst {index}: open the file {filler}", ts=float(index))
+        for index in range(80)
+    ]
+    _write_transcript(tmp_path, "aa0000000001", entries)
+    transcript = tmp_path / "sessions" / "aa0000000001" / "transcript.jsonl"
+    assert transcript.stat().st_size > 2 * PREVIEW_TAIL_BYTES, "fixture is not over-window"
+
+    app = _PickerHost([_row("aa0000000001", "burst 0: open the file")])
+    async with app.run_test(size=(120, 36)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        pane = screen.render_preview_for_test()
+
+        body = [line.strip() for line in pane if line.strip()]
+        first_turn = next(index for index, line in enumerate(body) if line.startswith("▸"))
+        # The FIRST body turn is the session's opening message, not a
+        # mid-session one wearing the same gutter.
+        assert body[first_turn + 1].startswith("burst 0:"), body[first_turn : first_turn + 3]
+
+        # ...and the turns this bounded read could not reach are STATED rather
+        # than silently absent or, worse, presented as a beginning. The head
+        # window is thousands of wrapped lines here, so the marker is driven
+        # into view rather than looked for in the frame the cursor opens on.
+        lines = screen._preview_lines()
+        marker = next(index for index, (kind, _) in enumerate(lines) if kind == "marker")
+        assert lines[marker][1] == GAP_TEXT
+        screen._pane_top = marker
+        screen._repaint()
+        await pilot.pause()
+        scrolled = screen.render_preview_for_test()
+    assert any("not read" in line for line in scrolled), scrolled
+
+
+@pytest.mark.asyncio
+async def test_the_clipped_pane_states_its_position_and_names_the_chords(tmp_path: Path) -> None:
+    """Design D1 = UX U2: an overflowing pane with no affordance at all.
+
+    A 202-line conversation through an 8-line window drew no ellipsis, no
+    "more below", no position and no scrollbar, and the three chords that
+    scroll it — ``ctrl+u``/``ctrl+d``/``ctrl+g``, bound ``show=False`` so
+    Textual's footer cannot reveal them either — appeared in **0 of 36**
+    rendered footers.
+    """
+    _write_transcript(
+        tmp_path,
+        "cc0000000001",
+        [_message("user", f"turn {index} " + "conversation body " * 12) for index in range(40)],
+    )
+    app = _PickerHost([_row("cc0000000001", "a long conversation")])
+    async with app.run_test(size=(120, 36)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        pane = screen.render_preview_for_test()
+        assert len(screen._preview_lines()) > screen._pane_height(), "fixture is not clipped"
+        # ...the chords are named ON SCREEN, in the pane that they move...
+        assert any("ctrl+u/ctrl+d scroll" in line for line in pane), pane
+        assert any("ctrl+g newest" in line for line in pane), pane
+        # ...and so is where you are in it.
+        assert any(re.search(r"\d+–\d+ of \d+", line) for line in pane), pane
+
+        # The marker costs one body row and is reserved for the SESSION, not for
+        # the offset: scrolling does not add or remove it.
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        scrolled = screen.render_preview_for_test()
+        assert any("ctrl+u/ctrl+d scroll" in line for line in scrolled), scrolled
+
+
+@pytest.mark.asyncio
+async def test_the_wheel_over_the_preview_scrolls_the_preview_not_the_list(tmp_path: Path) -> None:
+    """UX U3: the wheel over the new pane moved the LIST cursor.
+
+    At 120x36 one notch over the preview took the selection 1 → 2 (and at
+    200x50 it reset the pane's offset 50 → 0), so the gesture a mouse user
+    reaches for on the pane CHANGED WHICH CONVERSATION WAS BEING PREVIEWED.
+    """
+    _write_transcript(
+        tmp_path,
+        "dd0000000001",
+        [_message("user", f"turn {index} " + "body text " * 12) for index in range(40)],
+    )
+    rows = [_row("dd0000000001", "first"), _row("ee0000000001", "second")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(120, 36)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+
+        class _Wheel:
+            def __init__(self, x: int, y: int) -> None:
+                self.screen_x = x
+                self.screen_y = y
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        preview = screen._preview.region
+        before_cursor = screen.selected_index
+        before_offset = screen.preview_offset_for_test()
+        event = _Wheel(preview.x + 2, preview.y + 2)
+        screen.on_mouse_scroll_down(event)
+        assert event.stopped, "the gesture must not also scroll the transcript behind"
+        assert screen.selected_index == before_cursor, "the wheel moved the LIST cursor"
+        assert screen.preview_offset_for_test() > before_offset, "the wheel did not scroll the pane"
+
+        # The same gesture over the LIST still moves the cursor: one gesture,
+        # one meaning, decided by where the pointer is.
+        results = screen.query_one("#session-picker-results").region
+        screen.on_mouse_scroll_down(_Wheel(results.x + 2, results.y + 1))
+        assert screen.selected_index == before_cursor + 1
+
+        # A click in the pane is inert — and stopped, so it cannot fall through
+        # to the transcript behind the modal.
+        chosen: list[str | None] = []
+        screen.dismiss = chosen.append  # type: ignore[method-assign]
+        click = _Wheel(preview.x + 2, preview.y + 2)
+        click.button = 1  # type: ignore[attr-defined]
+        screen.on_click(click)
+        assert click.stopped and chosen == [], "a click in the preview must choose nothing"
+
+
+@pytest.mark.asyncio
+async def test_the_painted_name_field_equals_the_plan_across_the_id_gap_band() -> None:
+    """QA Q1 = design D2, asserted where the defect lived: the PAINT.
+
+    At 52-71 columns every row reserved 14 cells for an id nobody drew, so the
+    painted name field went 29 (48 cols) → **17** (52) → 36 (71) → 37 (72, the
+    id appears) while ``plan_layout.name_width`` rose monotonically throughout,
+    and 18 cells sat blank at the right edge of every row. The existing sweep
+    asserts ``plan_layout`` alone and is monotone across the band, so it could
+    not see the plane the user reads.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.session_picker import GUTTER_CELLS
+    from local_operator.tui.widgets.session_picker import plan_layout as planner
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    # 64 cells, no digits and no "ago", so nothing in the name can be confused
+    # with the age or the id when the painted row is measured.
+    name = ("alpha tenant " * 6).strip()
+    rows = [_row(f"aa{index:010d}", name) for index in range(4)]
+    painted: list[tuple[int, int]] = []
+    for width in (44, 48, 52, 56, 60, 64, 68, 71, 72, 80, 100):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            screen = SessionPickerScreen(rows, NOW)
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.pause()
+            plan = planner(width, 30)
+            assert plan.mode == "stacked"
+            row0 = screen.render_lines_for_test()[0]
+            # The name field, measured off the PAINTED row: everything to the
+            # right of it is the two-cell gap plus the age column, plus the id
+            # column on the widths where the plan draws one.
+            trailing = 2 + plan.age_width + (2 + len(rows[0].id) if plan.show_id else 0)
+            name_cells = cell_len(row0) - trailing - GUTTER_CELLS
+            painted.append((width, name_cells))
+            assert name_cells == plan.name_width, (
+                width,
+                name_cells,
+                plan.name_width,
+                row0,
+            )
+            assert cell_len(row0) <= screen._usable(), (width, cell_len(row0), screen._usable())
+
+    # THE INVARIANT, AT THE PAINTED LEVEL: the name field never narrows as the
+    # terminal grows, with the id flip as the one pinned exception.
+    for (width, cells), (next_width, next_cells) in zip(painted, painted[1:]):
+        if next_cells < cells:
+            assert width == 71 and next_width == 72, (width, next_width, cells, next_cells)
+
+
+def test_no_word_on_the_filter_row_is_painted_at_faint() -> None:
+    """Design D5: the row the legends were moved onto was painted at 1.49:1.
+
+    ``render_rows``' own docstring cites 1.49:1 as why the ids, the ages and the
+    keys were moved off ``faint`` on this raised ground; the keys moved and the
+    words explaining them did not, so every frame at every size carried ink the
+    module explicitly rejects. Separators stay ``faint`` — that is the step's
+    stated job — and every WORD is asserted to be at least ``dim``.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(40)]
+    screen = SessionPickerScreen(rows, NOW)
+    screen.set_query("session")
+    text = screen._filter_text()
+    faint_ink = theme_mod.semantic_color("faint")
+    faint = (faint_ink if isinstance(faint_ink, Color) else Color.parse(faint_ink)).get_truecolor()
+
+    def painted_faint(style: Style | str) -> bool:
+        # `Text.spans` carries `Style | str`, and the string form is a style
+        # NAME — no colour to compare, so it cannot be the step under test.
+        if not isinstance(style, Style) or style.color is None:
+            return False
+        colour = style.color
+        return (
+            colour if isinstance(colour, Color) else Color.parse(colour)
+        ).get_truecolor() == faint
+
+    offenders = [
+        text.plain[span.start : span.end]
+        for span in text.spans
+        if painted_faint(span.style)
+        and any(character.isalnum() for character in text.plain[span.start : span.end])
+    ]
+    assert not offenders, offenders
+
+
+def test_the_preview_mode_status_survives_where_the_row_has_room() -> None:
+    """Design D3: the status was dropped by exactly one cell, 4 states in 36.
+
+    The key row prefixes its first hint with the same three cells it joins them
+    with, and ``_footer_hints`` measures only the hints — so a block that
+    exactly filled ``room`` was ``room + 3`` wide and the mode hint's fit test
+    compared 55 cells against 54. Measured effect: at 100x30 with ONE match the
+    row read ``/ asteroids   1 session   ↑↓ move · type to filter · enter resume
+    · esc cancel`` with 18 cells idle and no statement of the preview mode
+    anywhere on screen.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(40)]
+    rows[0] = _row(f"{0:012x}", "asteroids game")
+    screen = SessionPickerScreen(rows, NOW)
+    screen.set_query("asteroids")
+    assert len(screen.visible_rows) == 1, "fixture must be the one-match state"
+    footer = screen.render_footer_for_test()
+    assert "ctrl+e condensed" in footer, footer
+    assert cell_len(footer) <= plan_layout(100, 30).screen_width, footer
+
+
+def test_a_zero_match_filter_says_matches_and_names_the_filter_in_the_pane() -> None:
+    """Design D4: one fact, three vocabularies, one of them about the store.
+
+    The zero-match frame read ``no session matches that filter`` / ``0
+    sessions`` / preview ``no session`` — the last of which is the same
+    "there are no sessions" misreading ``RESUME_EMPTY_NOTICE`` exists to avoid,
+    and the middle of which is a statement about the store beside a filtered
+    list.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(5)]
+    screen = SessionPickerScreen(rows, NOW)
+    screen.set_query("qqqzzz")
+    assert screen.visible_rows == []
+    footer = screen.render_footer_for_test()
+    assert "0 matches" in footer, footer
+    assert "0 sessions" not in footer, footer
+    pane = "\n".join(screen.render_preview_for_test())
+    assert "no session" not in pane, pane
+    assert "qqqzzz" in pane, pane
+
+
+def test_a_soft_only_match_is_glossed_as_fuzzy() -> None:
+    """UX U4: the new ``~`` glyph shipped with no legend at all.
+
+    A fuzzy query drew a tilde on both matched rows while the footer glossed only
+    ``” matched inside``, so the one mark meaning "there is no literal substring
+    to show you" was the one mark nothing explained.
+    """
+    rows = [_row("aaa111aaa111", "the classifier work"), _row("bbb222bbb222", "unrelated")]
+    digests = {"aaa111aaa111": "a digest about classifier tuning and the classifier"}
+    app = _PickerHost(rows, digests)
+    screen = SessionPickerScreen(rows, NOW, digests)
+    screen.set_query("classifer")  # one transposition: a soft hit, not a substring
+    assert [row.id for row in screen.visible_rows] == ["aaa111aaa111"], "fixture must be soft-only"
+    assert screen.body_matched_ids - screen._body_matches == {"aaa111aaa111"}
+    footer = screen.render_footer_for_test()
+    assert "~ fuzzy" in footer, footer
+    assert app is not None
+
+
+def test_an_unreadable_transcript_says_so_instead_of_no_prose(tmp_path: Path) -> None:
+    """Design D6 = UX U6: a permission error reported as an empty conversation.
+
+    A transcript at mode 000 rendered ``(no prose in this transcript)`` — a claim
+    about prose nobody could read — under a header showing the bare hex id. A
+    permission problem, a file deleted at that moment and a genuinely empty
+    conversation are three different states.
+    """
+    directory = tmp_path / "sessions" / "aa0000000009"
+    directory.mkdir(parents=True)
+    transcript = directory / "transcript.jsonl"
+    transcript.write_text(json.dumps(_message("user", "readable once")) + "\n", encoding="utf-8")
+    transcript.chmod(0o000)
+    try:
+        screen = SessionPickerScreen([_row("aa0000000009", "unreadable")], NOW)
+        screen.use_previews_for_test(tmp_path / "sessions")
+        pane = "\n".join(screen.render_preview_for_test())
+    finally:
+        transcript.chmod(0o600)
+    assert "could not be read" in pane, pane
+    assert "no prose" not in pane, pane
+
+
+def test_a_name_match_draws_no_context_line_under_it() -> None:
+    """Design D7: the pane printed the row's own name twice.
+
+    A row's name IS its opening user message, so a query in the name is in the
+    body digest too: the frame drew the name as the row and again as a quote
+    beneath it, with no ``”`` marker and no legend — correctly, since the row
+    did not match *inside* the conversation. The quote cost a line and taught
+    nothing.
+    """
+    rows = [_row("bb0000000002", "Make an asteroids game in pygame")]
+    digests = {"bb0000000002": "Make an asteroids game in pygame draw the ship, then the rocks"}
+    screen = SessionPickerScreen(rows, NOW, digests)
+    screen.set_query("asteroids")
+    assert screen.visible_rows, "the name match must still be offered"
+    assert screen._context_for(rows[0]) is None
+    assert screen._row_costs() == [1], "a context line was drawn for a name-only match"
+
+
+def test_a_short_terminal_drops_the_preview_and_gives_the_rows_to_the_list() -> None:
+    """UX U5: four rows spent on a header and zero on the conversation.
+
+    At 30x12 the pane drew its name, both clocks and its rule, then nothing —
+    while ``plan_layout``'s own short-height branch said it existed precisely so
+    the preview would not collapse that way. Below the height at which it can
+    draw a header and one body line, the preview is not drawn at all and the
+    list takes the rows.
+    """
+    from local_operator.tui.widgets.session_picker import PREVIEW_DRAW_MIN
+
+    assert PREVIEW_DRAW_MIN == 5
+    short = plan_layout(30, 12)
+    assert short.preview_rows == 0
+    # The rows the preview would have taken are the LIST's: chrome is still
+    # reserved first, so the list gets everything above the filter row.
+    assert short.list_rows == 12 - 3
+    assert plan_layout(40, 14).preview_rows == PREVIEW_DRAW_MIN
+
+
+@pytest.mark.asyncio
+async def test_the_short_terminal_hides_the_pane_in_the_real_app() -> None:
+    """The plan saying zero is only half of it: the widget must not be drawn."""
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(20)]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(30, 12)) as pilot:
+        await pilot.pause()
+        screen = SessionPickerScreen(rows, NOW)
+        app.push_screen(screen)
+        await pilot.pause()
+        await pilot.pause()
+        assert screen._preview.display is False
+        # ...and the list, not the pane, holds the rows that freed.
+        assert len(screen.render_lines_for_test()) > plan_layout(30, 12).preview_rows
+
+
+@pytest.mark.asyncio
+async def test_the_context_line_carries_the_query_in_both_layouts() -> None:
+    """Agent review R-MINOR-1: the drawn context line's CONTENT was unasserted.
+
+    The one test that touched it asserted its COST (two lines), so truncating the
+    line to 12 cells rendered ``'    …xxxxxxxxxx…'`` with no query in it and 136
+    tests stayed green — the PR's headline claim ("the filter's matches quoted
+    in place") guarded by nothing.
+    """
+    body = "the incident began quietly and then " + "retention window " * 4
+    rows = [_row("cc0000000001", "an unrelated title")]
+    digests = {"cc0000000001": body}
+    for size in ((100, 30), (200, 50)):
+        app = _PickerHost(rows, digests)
+        async with app.run_test(size=size) as pilot:
+            screen = await app.open_picker()
+            await pilot.pause()
+            screen.set_query("retention")
+            await pilot.pause()
+            drawn = screen.render_lines_for_test()
+            context = [line for line in drawn[1:] if "retention" in line]
+            assert context, (size, drawn)
+            assert any("retention" in line for line in context), (size, context)
