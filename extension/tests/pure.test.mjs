@@ -1007,6 +1007,17 @@ test("no FOURTH hello sender can appear without failing this suite", async () =>
   // rewrote the popup, the worker and the pairing flow, so a fourth sender is a
   // live risk rather than a theoretical one — assert the SET of files that send
   // a hello equals the set asserted above.
+  //
+  // SCOPE: every `.ts` AND `.js` under `src/`, because both can reach a bundle
+  // (review R2-1). `build.mjs` bundles three `.ts` entry points with esbuild and
+  // `bundle: true`, and esbuild's default resolution imports `.js` as readily as
+  // `.ts` — so a `.js` module any of the three entries imports is compiled into
+  // `dist/` like any other. `src/popup/first-paint.js` is the live precedent
+  // rather than a hypothetical: it is copied into `dist/popup/` and loaded by
+  // `popup.html` (`<script src="first-paint.js">`). Filtering to `*.ts` alone
+  // therefore left a real hole, which is what this widening closes. Generated
+  // files (`*.gen.ts`) stay excluded: they are emitted from Python and contain
+  // no senders.
   const src = new URL("../src/", import.meta.url);
   const walk = async (dir, prefix = "") => {
     const found = [];
@@ -1014,7 +1025,10 @@ test("no FOURTH hello sender can appear without failing this suite", async () =>
       const rel = `${prefix}${entry.name}`;
       if (entry.isDirectory()) {
         found.push(...(await walk(new URL(`${entry.name}/`, dir), `${rel}/`)));
-      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".gen.ts")) {
+      } else if (
+        (entry.name.endsWith(".ts") || entry.name.endsWith(".js")) &&
+        !entry.name.endsWith(".gen.ts")
+      ) {
         found.push(rel);
       }
     }
