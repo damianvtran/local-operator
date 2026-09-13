@@ -1031,6 +1031,30 @@ ranking by asking.
 rather than one `to_thread` per row. The resolver's expensive path is per MODEL,
 not per row, and a batch is what makes "every price in a rebuild happened off
 the event loop" a single, assertable fact.
+6. **The rebuild may never DECREASE the figure already on the band.** §6.2 says
+the rebuild must not walk the total backwards; this is what that costs, and the
+two paths priced different things. The seed prices ONE restored reading through
+the session's own effective model, which always resolves; the reconstruction
+needs every ROW to carry a serving identity of its own, and a row carrying none —
+written before that field, or by a provider reporting neither — is unpriceable at
+full-resolver grade (`_usage_cost` covers only the 30.1% of rows carrying the
+provider's own receipt). Without the guard the accumulator took the
+reconstruction's `$0.00` as authoritative and replaced a priced `$2.10`, so a
+resumed conversation opened claiming NO spend — the defect the restore path
+exists to prevent, reached through the repair path
+(`tests/unit/tui/test_usage_continuity.py`, two tests). The richer figure now
+wins and no record is written for the smaller number, so the rebuild fires again
+on a later resume rather than persisting a downgrade. In the direction that
+matters this changes nothing: a real reconstruction is far larger than one
+restored reading (§2.2's own store: `$0.0038` restored against `$324.99` of turn
+rows), so the guard only ever blocks a downgrade.
+7. **Live accruals are counted separately from the seed** (`_spend_live_calls`).
+The first version guarded the rebuild on `spend.calls`, which `seed_spend_floor`
+also increments — so a pre-ledger session that had already been opened never
+rebuilt, i.e. the rebuild was disabled for exactly the population it exists for
+(92.3% of the store). Only a call that accrued LIVE in this process makes a
+reconstruction redundant, because only its message may be missing from the
+journal a reconstruction reads.
 
 ## 13. What I could not settle from the code, and what would settle it
 

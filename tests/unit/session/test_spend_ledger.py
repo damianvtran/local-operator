@@ -888,3 +888,48 @@ def test_rebuild_replaces_a_seeded_accumulator(
         assert session._spend_recorded is True
 
     asyncio.run(main())
+
+
+def test_a_reconstruction_below_the_seed_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rebuild must never DECREASE the figure already on the band.
+
+    The seed prices one restored reading through the session's own effective
+    model; the reconstruction needs every ROW to carry a serving identity, and a
+    row that carries none is unpriceable at full-resolver grade. So a rebuild can
+    legitimately come out BELOW an already-priced figure — and replacing $2.10
+    with $0.00 would be a silent downgrade wearing the ledger's authority.
+    Reached through the REAL app: `tests/unit/tui/test_usage_continuity.py`
+    caught this, and the store's `refresh_from_session` path is what publishes
+    the accumulator to the band.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir()
+    transcript = Transcript(directory)
+
+    async def seed() -> None:
+        await transcript.append_message(Message.user("hello"))
+        await transcript.append_message(
+            Message.assistant("a", usage=receipt("openrouter", "x", 2.1))
+        )
+
+    asyncio.run(seed())
+
+    async def main() -> None:
+        session = make_session(tmp_path, has_ui=True)
+        before = session.spend
+        assert before.micro == 2_100_000 and session._spend_seeded
+        # A reconstruction that priced NOTHING (a row with no identity, and no
+        # receipt to read) plus one it could not size.
+        monkeypatch.setattr(session_module, "price_rows", lambda rows: [(0, False) for _ in rows])
+        session.rebuild_spend_if_needed()
+        async with asyncio.timeout(30):
+            while session._spend_tasks:
+                await asyncio.sleep(0.01)
+        assert session.spend.micro == 2_100_000, "the rebuild downgraded the band"
+        assert session.spend is before
+        assert session._spend_recorded is False, "a smaller figure must not be persisted"
+        assert session.restored_spend() is None
+
+    asyncio.run(main())
