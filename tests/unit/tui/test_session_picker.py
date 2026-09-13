@@ -3613,6 +3613,16 @@ async def test_every_body_budget_the_plan_draws_paints_a_line_and_counts_it(
 
             if state != "mid":
                 assert frame.conversation, (size, state, frame)
+            # A read the pane cannot show in full is a read whose position the
+            # pane OWES the reader (D1), wherever the pane is tall enough to have
+            # a row to spare — and it is precisely the promise a header line that
+            # silently wraps takes away, because the row it steals is this one
+            # (design round 6's rider (a) was pinned by a single case; this is the
+            # band that asserts it at every width). One body row is the
+            # documented exception: there the conversation line wins and the
+            # pane paints no position at all.
+            if total > budget and screen._pane_height(total) >= 2:
+                assert status is not None, (size, state, frame)
             # ...and on a gapped read the statement is painted at the TOP only,
             # and only where there is room for it AND a line of conversation
             # under it: at one body row the conversation wins the row, which is
