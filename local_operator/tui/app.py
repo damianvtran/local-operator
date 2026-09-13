@@ -152,6 +152,7 @@ from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
     SearchSpendSnapshot,
     job_cost,
     search_spend_is_floor,
@@ -396,7 +397,12 @@ LISTED_STATUSES = frozenset({"ok", "cached", "stale", "empty"})
 #: figure only becomes exactly known for a session whose spend was accrued
 #: entirely in this process, so the mark is sticky for the life of the
 #: conversation and clears when the ledger it qualifies does.
-RESTORED_COST_PREFIX = "≥"
+#:
+#: ALIASED to ``costs.LOWER_BOUND_MARK`` rather than restated, because the band
+#: and ``/session`` both draw this mark and review R2-1 found them disagreeing
+#: about the same money: the panel printed an unmarked figure for a state the
+#: band marked. One literal, two readers.
+RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 
 #: The states of a mid-turn message, as one set so they cannot drift apart.
 #:

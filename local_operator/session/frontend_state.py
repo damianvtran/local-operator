@@ -3147,6 +3147,16 @@ class FrontendStateStore:
         #: next turn's remainder, because the closed turn's aggregate was priced
         #: over the same calls and the delta on top of it IS the right total.
         self._turn_spend_calls: set[int] = set()
+        #: The last CLOSED turn's reconciliation, as integer micro-USD: what the
+        #: turn had accrued (paint prices plus any corrections mirrored while it
+        #: was open) and the aggregate price it was billed at. A correction that
+        #: outlives its turn is clamped against these so the total does not depend
+        #: on WHEN it landed (review R2-2): the turn-end remainder makes the
+        #: aggregate a FLOOR for the turn, so a re-price may only move the total
+        #: to the extent it lifts the turn above that floor. ``None`` before any
+        #: turn has closed, when the delta stands on its own.
+        self._closed_turn_accrued_micro: int | None = None
+        self._closed_turn_agg_micro: int | None = None
 
     @property
     def state(self) -> FrontendSessionState:
@@ -3878,7 +3888,7 @@ class FrontendStateStore:
             cast("ScheduleSpendFn", schedule)(index, usage, identity)
         return spend
 
-    def note_spend_correction(self, index: int, delta_micro: int) -> None:
+    def note_spend_correction(self, session: Any, index: int, delta_micro: int) -> None:
         """Move the turn's already-accrued figure with a call's re-price.
 
         The turn-end remainder is ``max(0, aggregate_price - accrued_this_turn)``
@@ -3891,16 +3901,36 @@ class FrontendStateStore:
         they are moved together rather than merged.
 
         Scoped to the turn by ``index``. For a call the current turn did not
-        accrue (the correction outlived its turn), the counter is left alone on
-        purpose: that turn's aggregate already claimed the call at paint grade,
-        so the delta on top of it is the corrected total, not a second bill.
+        accrue (the correction outlived its turn), the delta is clamped against
+        the CLOSED turn's snapshot instead: the remainder made that turn's
+        aggregate a floor (``accrued + remainder == max(accrued, aggregate)``),
+        so the re-price may only move the total as far as it lifts the turn above
+        that floor. Without this the persisted total depended on WHEN the
+        correction landed — paint $2.00, re-priced $1.00, aggregate $2.00 gave
+        $2.00 mid-turn and $1.00 after the turn closed (review R2-2). Both
+        orderings now take the same branch of the same formula, and a correction
+        that raises the true cost above the aggregate still counts in full.
         """
-        if not delta_micro or index not in self._turn_spend_calls:
+        if not delta_micro:
             return
-        state = self._state
-        self.mutate(
-            current_turn_accrued_cost=state.current_turn_accrued_cost + delta_micro / 1_000_000.0
-        )
+        if index in self._turn_spend_calls:
+            state = self._state
+            accrued_now = state.current_turn_accrued_cost + delta_micro / 1_000_000.0
+            self.mutate(current_turn_accrued_cost=accrued_now)
+            return
+        accrued = self._closed_turn_accrued_micro
+        aggregate = self._closed_turn_agg_micro
+        if accrued is None or aggregate is None:
+            # No turn has closed here, so there is no floor to clamp against and
+            # the authoritative re-price stands on its own.
+            return
+        applied = max(accrued + delta_micro, aggregate) - max(accrued, aggregate)
+        self._closed_turn_accrued_micro = accrued + delta_micro
+        # ``Session.correct_spend`` has already moved the accumulator by the full
+        # delta; this undoes the part the closed turn's floor absorbs. Negative
+        # adjustments are legal: the clamp can also hold a DOWNWARD re-price back.
+        if applied != delta_micro:
+            self._spend_remainder(session, (applied - delta_micro) / 1_000_000.0)
 
     def _spend_remainder(self, session: Any, remainder: float) -> SessionSpend:
         """Apply a turn-end remainder to the accumulator, if it is worth one."""
@@ -4248,6 +4278,15 @@ class FrontendStateStore:
                 total = turn_cost(_label(getattr(session, "effective_model", None)), aggregate)
                 if total is not None:
                     remainder = max(0.0, total - state.current_turn_accrued_cost)
+                    # Snapshot what this turn accrued and what it is being billed
+                    # at, BEFORE the remainder moves the accumulator: a correction
+                    # for one of these calls that lands after the turn closed must
+                    # be clamped against the same pair the open turn would have
+                    # used, or the persisted total depends on the race (R2-2).
+                    self._closed_turn_accrued_micro = int(
+                        round(state.current_turn_accrued_cost * 1_000_000)
+                    )
+                    self._closed_turn_agg_micro = int(round(total * 1_000_000))
                     # The remainder is MONEY, not another provider call: it
                     # reconciles the aggregate's price with the sum of its
                     # calls' prices, so it moves the total without moving the

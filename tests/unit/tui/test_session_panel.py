@@ -2078,6 +2078,41 @@ def test_nested_calls_are_shown_but_named_as_outside_the_rates():
     assert not any("nested" in r for r in section)
 
 
+def test_a_bound_record_wears_the_mark_the_band_wears():
+    """R2-1: an exact-looking figure must never stand for a lower bound.
+
+    A record can be a bound (a persisted ``floor: true``, or any ``partial``), and
+    the band marks that state. The row is not allowed to disagree with the band
+    about the same money: it wears the SAME constant, from the same module, and
+    names the state in its note. An exact record is unmarked, because the mark on
+    a whole figure is the same lie in the other direction.
+    """
+    from local_operator.tui.app import RESTORED_COST_PREFIX
+    from local_operator.tui.costs import LOWER_BOUND_MARK
+
+    # One literal, two readers.
+    assert RESTORED_COST_PREFIX == LOWER_BOUND_MARK
+
+    report = _tree_report()
+    bounded = replace(runtime(), spend_micro=2_100_000, spend_knowledge="floor")
+    row = next(
+        line
+        for line in build_session_report(report, bounded, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "≥$2.10" in row, row
+    assert "floor" in row, row
+
+    exact = replace(runtime(), spend_micro=2_100_000, spend_knowledge="exact")
+    plain_row = next(
+        line
+        for line in build_session_report(report, exact, width=120).plain.split("\n")
+        if "Record total" in line
+    )
+    assert "≥" not in plain_row, plain_row
+    assert "exact" in plain_row, plain_row
+
+
 def test_exact_figure_and_reconciliation_are_readable_on_demand():
     """§8.3/§8.4: the band rounds, so `/session` must not.
 

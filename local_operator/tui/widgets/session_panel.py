@@ -57,6 +57,7 @@ from local_operator.analytics.model import (
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
 from local_operator.tui.costs import (
+    LOWER_BOUND_MARK,
     MoneyFigure,
     SearchSpendSnapshot,
     combined_spend,
@@ -192,20 +193,19 @@ class SessionDiagnostics:
         # tokenize history just to fill a missing diagnostic.
         state = getattr(session, "frontend_state", None)
         model = session.effective_model
-        # ``restored_spend`` is the durable record recalled in O(1); absent it,
-        # the session's live accumulator is the same number once it has any
-        # calls, so an in-flight session shows its exact total too. A host with
-        # neither (a reduced facade) reports ``None`` and the panel simply omits
-        # the exact row rather than inventing a figure.
+        # ``restored_spend`` is the DURABLE record, and only that: it answers
+        # ``None`` for a session with no record on disk. The live accumulator is
+        # deliberately NOT a fallback for these two fields (review R2-1): a
+        # pre-ledger session's accumulator holds a SEEDED lower bound, so
+        # printing it under a row named "Record total" showed an unmarked,
+        # exact-looking figure for the same state the band marks ``≥`` — two
+        # surfaces disagreeing about one sum. The band owns that state; this
+        # screen simply has nothing durable to add until a record exists.
         restored_spend = getattr(session, "restored_spend", None)
         # ``cast`` because the declaration lives on ``SessionProtocol`` while this
         # probe is duck-typed: pyright sees ``object`` here, and the ``callable``
         # guard is the actual runtime contract.
         spend = cast("SessionSpend | None", restored_spend()) if callable(restored_spend) else None
-        if spend is None:
-            live = getattr(session, "spend", None)
-            if isinstance(live, SessionSpend) and live.calls:
-                spend = live
         return cls(
             session_id=session.session_id,
             name=session.conversation_name,
@@ -1150,12 +1150,22 @@ def _draw_recorded_usage(
     # cents or noise. Labelled "Record" and not "Ledger": this screen IS the
     # ledger, and two rows calling different sums by the same name is how a
     # reader concludes one of them is wrong.
+    #
+    # A record can be a LOWER BOUND -- a persisted ``floor: true`` record, or any
+    # ``partial`` one -- so the row wears the same mark the band does, from the
+    # same constant, and names the state in its note (review R2-1). An exact
+    # record is unmarked, because a mark on a whole figure is the same lie in the
+    # other direction.
     if runtime.spend_micro is not None:
+        bound = runtime.spend_knowledge in {"floor", "partial"}
+        state = runtime.spend_knowledge or "unknown"
+        micro_text = f"{runtime.spend_micro:,} μ$"
         body.kv(
             "Record total",
-            format_usd_exact(runtime.spend_micro),
+            f"{LOWER_BOUND_MARK if bound else ''}{format_usd_exact(runtime.spend_micro)}",
             notes=(
-                f"{runtime.spend_micro:,} μ$ · this session",
+                f"{state} · {micro_text} · this session",
+                f"{micro_text} · this session",
                 "this session",
             ),
         )
@@ -1176,15 +1186,21 @@ def _draw_recorded_usage(
             # (D3). The first version printed the ledger at 2dp and the Δ from the
             # unrounded value, so 1.897843 - 1.20 could not produce +0.6984.
             delta_micro = runtime.spend_micro - ledger_micro
-            delta_text = f"{delta_micro / 1_000_000:+.6f}"
+            # R2-4: the sign alone was ambiguous -- "Δ +0.500750 vs the record"
+            # on the Ledger row left the reader to guess which operand was
+            # subtracted from which. The word names the minuend, so the sign has
+            # a direction without the reader reconstructing it.
+            delta_text = (
+                f"record {'+' if delta_micro >= 0 else '-'}{abs(delta_micro) / 1_000_000:.6f}"
+            )
             body.kv(
                 # ONE name for one figure (D2): "all calls" is the SCOPE and lives
                 # in the notes, where the ledger's own vocabulary names the sum.
                 "Ledger total",
                 format_usd_exact(ledger_micro),
                 notes=(
-                    f"Δ {delta_text} vs the record · all calls",
-                    f"Δ {delta_text} vs record",
+                    f"Δ {delta_text} vs this row · all calls",
+                    f"Δ {delta_text}",
                     "all calls",
                 ),
             )
