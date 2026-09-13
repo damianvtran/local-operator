@@ -1068,7 +1068,7 @@ class InstructionBlock(UserBlock):
         more = f"{EXPAND_HINT} {self._hidden_rows} more line"
         return [*rows[:INSTRUCTION_ROWS], f"{more}{'' if self._hidden_rows == 1 else 's'}"]
 
-    def _build(self) -> RenderableType:
+    def _build(self, width: int | None = None) -> RenderableType:
         """The brief behind its gutter, with the affordance row as CHROME.
 
         The base class paints every row in one ink (``TEXT_TOKEN``), which is
@@ -1083,11 +1083,22 @@ class InstructionBlock(UserBlock):
         The height pin is kept for the reason its own docstring gives: a block
         that authors its own rows KNOWS its height, and letting the layout
         engine measure this one is what left a hole mid-transcript.
+
+        ``width`` is a lane the caller published
+        (:meth:`TranscriptBlock.refit_width`), used verbatim so a rebuild and the
+        ``_built_width`` the inherited guard reads describe the same build; the
+        override has to accept it because the walk reaches every block that
+        authors a width. This is the one place that did NOT record
+        ``_built_width``, which left the inherited guard permanently open (it
+        compared against ``-1``) and made every lane change rebuild it twice —
+        once through its own ``Resize`` and once through the walk.
         """
         rule_style = Style(color=theme_mod.semantic_color(self.RULE_TOKEN))
         text_style = Style(color=theme_mod.semantic_color(self.TEXT_TOKEN))
         chrome_style = Style(color=theme_mod.semantic_color("dim"))
-        body = max((self.size.width or 80) - self.RULE_COLS, self.MIN_BODY)
+        lane = width if width is not None and width > 0 else self.fold_width(80)
+        body = max(lane - self.RULE_COLS, self.MIN_BODY)
+        self._built_width = lane
         gutter = self.RULE + " " * (self.RULE_COLS - cell_len(self.RULE))
         rows = self._rows(body)
         self.styles.height = len(rows)
@@ -1127,6 +1138,11 @@ class InstructionBlock(UserBlock):
         The same dance :meth:`UserBlock.on_resize` does, and for the same
         reason: this block's row count IS its content, so a toggle is a height
         change and the block below it may need its gap re-decided.
+
+        FORCED rather than routed through :meth:`TranscriptBlock.refit_width`:
+        a toggle changes the rows at an unchanged width, so the width guard that
+        makes the lane walk cheap is exactly wrong here — it would skip the
+        rebuild the click asked for.
         """
         was_finalized = self._finalized
         self._finalized = False

@@ -473,6 +473,21 @@ class ImageBlock(TranscriptBlock):
         width (see :meth:`_receipt_row`), so a receipt built at 100 columns
         and left alone would clip rather than ellipsize at 44.
         """
+        self.refit_width(self.fold_width(80))
+
+    def refit_width(self, width: int) -> None:
+        """Re-fit the image when the lane moved — its cell grid is a function of it.
+
+        Reached by the container's lane walk
+        (:meth:`TranscriptView._refit_authored_blocks`), and reruns exactly what
+        ``on_resize`` does, including the gap re-ask (a changed grid is a height
+        change). Unconditional, like ``on_resize``: :meth:`_grid` fits against
+        the ladder — which answers the new lane in the pass this runs in — and
+        there is no cheaper staleness test, because the grid depends on the
+        image's aspect ratio as well as the lane. One image per turn at most, so
+        the unconditional rebuild is not the O(rows) cost the lane funnel is
+        careful about elsewhere.
+        """
         self._repaint()
         parent = self.parent
         refresh = getattr(parent, "refresh_gap_around", None)
