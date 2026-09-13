@@ -240,16 +240,19 @@
              receiving no commands for.
 
              The copy states the arrangement, the failover, and the COST in the
-             reader's terms (copy review round 1, C2). The previous wording —
-             "another Local Operator install is driving the agent … because a tab
-             handle belongs to the install that opened it" — inverted the subject
-             (the agent drives the browser, not the reverse), spent the word
-             "driving" in the opposite sense to the Connected card's "Driving"
-             label, and explained the cost with an internal noun ("handle") that
-             its reader has no way to look up; the em dash joining the two
-             clauses was the surface's one AI-ism tell. What a user actually
-             needs to know is that the tab they were on stays put and a new one
-             appears, which is what it now says.
+             reader's terms (copy review round 1, C2; round 2, C12/C14). The
+             previous wording — "another Local Operator install is driving the
+             agent … because a tab handle belongs to the install that opened it" —
+             inverted the subject (the agent drives the browser, not the reverse),
+             spent the word "driving" in the opposite sense to the Connected
+             card's "Driving" label, and explained the cost with an internal noun
+             ("handle") that its reader has no way to look up; the em dash joining
+             the two clauses was the surface's one AI-ism tell. Round 2 then
+             pointed out the composition still used "driving" twice on one card
+             with two subjects — the agent drove one browser while an extension
+             drove the wheel — so the paragraph says "connected to" and leaves
+             "driving" to mean exactly one thing everywhere; "it" in the last
+             clause is named rather than inferred.
 
              The second line names the other install when /health reports a
              label for it — plus its id prefix, because with two installs of the
@@ -260,9 +263,9 @@
         <section id="standby" class="state hidden" role="status">
           <h1 class="title">Standing by.</h1>
           <p class="sub">
-            This browser is paired, but the agent is driving another browser right now.
-            If that one disconnects, this browser takes over and the agent opens a new
-            tab; the tab it was using stays open where it is.
+            This browser is paired, but the agent is connected to another browser right now.
+            If that one disconnects, this browser takes over and the agent opens a new tab;
+            the tab the agent was using stays open where it is.
           </p>
           <p class="sub" id="standby-driver"></p>
         </section>
