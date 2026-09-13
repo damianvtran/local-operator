@@ -55,16 +55,19 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
+from local_operator.tui.costs import SearchSpendSnapshot
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
     METRIC_TOKENS,
+    _CostLike,
     append_cost,
     format_cost,
     format_percent,
     format_tokens,
     proportion_bar,
     scope_needs_cost_legend,
+    search_spend_section,
     section_header,
     semantic_style,
 )
@@ -148,6 +151,19 @@ class SessionDiagnostics:
     #: transcript-restoration concept it has no way to know about (and which the
     #: desktop HTTP route that also consumes it has no notion of).
     spend_is_floor: bool = False
+    #: This session's web-search spend, frozen, or ``None`` when the host has no
+    #: search ledger to read (a test double, a reduced facade). App state read
+    #: from the process-wide ledger rather than session state, which is why it
+    #: arrives at the call site beside ``spend_is_floor`` rather than from
+    #: ``capture``.
+    #:
+    #: A different ledger from everything else on this screen: ``SessionReport``
+    #: and every figure in it come off the persisted analytics ledger, while this
+    #: is ``web_search``'s own in-memory total -- a search is not a model call
+    #: and the model accounting never saw it. Held as its own section rather than
+    #: folded into ``Est. cost`` for that reason: the two are separately truthful
+    #: and a merged row could state neither.
+    search_spend: SearchSpendSnapshot | None = None
 
     @classmethod
     def capture(cls, session: SessionProtocol) -> SessionDiagnostics:
@@ -798,6 +814,14 @@ def build_session_report(
         body.header("Loading usage records")
         body.note("Reading the local ledger. Esc or q cancels.")
         body.note("No model request is made.")
+        # Drawn on the loading frame too, and before the blank the ledger sections
+        # would have added: search spend is not awaiting that read, so holding it
+        # back would make the one number on this screen that is already final the
+        # only one that appears late. The blank goes ABOVE the block for the same
+        # reason every settled section has one -- without it the section header
+        # abuts the loading notes and reads as a fourth note about the ledger.
+        body.blank()
+        _draw_search_spend(body, runtime)
         return body.to_text()
 
     aggregate = report.aggregate
@@ -820,8 +844,41 @@ def build_session_report(
     else:
         _draw_recorded_usage(body, report, runtime, gauge, width, metric)
 
+    _draw_search_spend(body, runtime)
     _draw_runtime_and_scope(body, report, runtime)
     return body.to_text()
+
+
+def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
+    """This session's search spend, as its own attributed block.
+
+    Drawn from the RUNTIME snapshot rather than from ``report``, so it survives
+    a frame whose ledger read failed or found nothing: it is not in that ledger
+    (see :class:`SessionDiagnostics.search_spend`), and a session that spent
+    money on retrieval must not read as free because a different read broke.
+
+    Nothing at all is drawn when the session has no searches, which is the
+    ordinary case for most sessions, and matches the screen's rule of shedding a
+    row whose only content is the absence of a problem.
+    """
+    snapshot = runtime.search_spend
+    # ``count``, not ``searches``: a conversation whose only retrieval spend is
+    # READS has money to show, and guarding on searches drew nothing here while
+    # the band above kept the figure.
+    if snapshot is None or not snapshot.count:
+        return
+    body.extend(
+        search_spend_section(
+            snapshot,
+            body.width,
+            meta="this session · live",
+            note=(
+                "Read from the live search ledger, plus any rows recovered from this "
+                "conversation's transcript on resume. The status band's figure shows it "
+                "added to the model estimate; this screen keeps the two apart."
+            ),
+        )
+    )
 
 
 def _gauge_row(runtime: SessionDiagnostics) -> _BarRow | None:
@@ -1037,7 +1094,18 @@ def _draw_recorded_usage(
     # own aggregate: a tree whose child used an unpriced model draws a ``+`` the
     # own scope has no reason to report, and omitting it here would put that
     # mark on screen with its footnote suppressed.
-    scopes = [aggregate, subtree, *report.by_model.values(), *report.by_purpose.values()]
+    # The search-spend block's own marks are NOT in this list: it draws its
+    # footnote beside itself (``search_spend_section``), because the screens that
+    # render the block are not always the screens that render these totals --
+    # `/session`'s loading frame draws the block with no totals at all -- and a
+    # footnote here would both miss that frame and sit far from the marks on
+    # `/analytics`.
+    scopes: list[_CostLike] = [
+        aggregate,
+        subtree,
+        *report.by_model.values(),
+        *report.by_purpose.values(),
+    ]
     if any(scope_needs_cost_legend(scope) for scope in scopes):
         body.note(COST_LEGEND)
         body.blank()

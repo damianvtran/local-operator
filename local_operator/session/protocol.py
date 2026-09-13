@@ -560,7 +560,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 108 public members and a POSITIVE
+    than stylistic. This protocol carries 109 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -570,7 +570,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     so it is larger than the viewer-only population
     ``test_viewer_protocol.py`` pins; the two answer different questions and
     must not be reconciled. It read 84 for some time while the protocol grew
-    past it (106 before the warm members were added, 108 with them), so recompute
+    past it (106 before the warm members were added, 108 with them, 109 once
+    ``restored_search_spend`` joined ``restored_usage``), so recompute
     it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1231,6 +1232,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def restored_usage(self) -> Usage | None:
         """The provider's own last usage reading for this conversation."""
+        ...
+
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """Search-spend rows this conversation's transcript carries, oldest first.
+
+        The search twin of :meth:`restored_usage`, and DECLARED for the same
+        reason: the TUI reads it off the session to seed a resumed
+        conversation's ledger, and a duck-typed ``getattr`` would make a rename
+        degrade the band to a silently-short figure instead of an error.
+        """
         ...
 
     async def record_shell(self, command: str, result: ToolResult) -> None:

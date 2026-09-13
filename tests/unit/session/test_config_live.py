@@ -498,6 +498,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         "http://searx.local",
         lambda s, w: _search_settings(w).searxng_endpoint,
     ),
+    # The evidence pass and the read tool are read through the SAME per-call
+    # loader the search settings above use, so the probe goes through it.
+    "web_search.deepseek_evidence": (True, lambda s, w: _search_settings(w).deepseek_evidence),
+    # Defaults to True, so the probe disables it -- the tuple is (value written,
+    # reader), and a reader that negated would report the BASELINE as the change.
+    "web_search.read_enabled": (False, lambda s, w: _search_settings(w).read_enabled),
     "web_fetch.timeout_seconds": (5.0, lambda s, w: _fetch_settings(w).timeout_seconds),
     "web_fetch.max_bytes": (1_048_576, lambda s, w: _fetch_settings(w).max_bytes),
     "web_fetch.max_redirects": (1, lambda s, w: _fetch_settings(w).max_redirects),

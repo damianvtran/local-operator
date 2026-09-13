@@ -126,7 +126,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: whole of the increase, with 41 tokens of headroom left. The trade is not
 #: close: one avoided blind retry of an edit batch costs far more than 42
 #: tokens, and the observed session paid that retry nine times.
-BUDGET_BILLED_TOKENS = 27_320
+#:
+#: RAISED 27,320 -> 27,800 for the ``web_read`` tool, stated here because the
+#: guard exists to make this an explicit decision. Measured on this branch's base
+#: (``origin/main`` 37f3494fd) the figure is 27,274 — 46 tokens of headroom, so no
+#: usable tool description fits under the old ceiling: the new tool is 552
+#: characters of description plus a 684-character schema, ~445 billed tokens at
+#: 2.78 chars/token, and the branch measures 27,729. The alternative to paying it
+#: is not a smaller number but a second tool the model cannot use correctly: the
+#: description is where "only pages a previous search in THIS session captured"
+#: and "refuses rather than fetching" are stated, and a model that does not know
+#: the second will call ``web_fetch`` instead and pay a network round trip for
+#: every page. Headroom at 27,800 is 71 tokens, and the next context reduction
+#: tightens it.
+BUDGET_BILLED_TOKENS = 27_800
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
