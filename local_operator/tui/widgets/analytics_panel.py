@@ -423,8 +423,17 @@ def search_spend_section(
     #: and for an unpriced-provider ledger the note is long enough that the bar
     #: pushed the count onto its own line at terminal 77-81 -- the exact orphan the
     #: policy was added to remove, at the canonical 80-column frame. So the
-    #: decision is taken from THIS ledger's own widest note: the bar is drawn only
-    #: when the row it costs still fits beside it with that note.
+    #: decision is taken from THIS ledger's own notes: the bar is drawn only when
+    #: every row it costs still fits beside it.
+    #:
+    #: The condition is each ladder's SHORTEST rung (issue #1073), not its widest:
+    #: ``row`` below only reaches its continuation line when NO rung fits, so a
+    #: rung that is too long for the row simply yields to a shorter one and the
+    #: row still paints one line. A widest-rung rule therefore suppresses the bar
+    #: in frames where every row would in fact have fitted -- and it does so
+    #: asymmetrically, because ``/analytics`` draws a reference row (``This
+    #: session ... of search spend``) whose long rungs ``/session`` never renders,
+    #: so one policy produced two thresholds on two screens.
     #:
     #: ``0`` means "no bar at all", and it must not reach ``proportion_bar``, whose
     #: ``max(1, width)`` floor turns a zero into a one-cell bar, which says nothing
@@ -443,10 +452,15 @@ def search_spend_section(
         if share is not None and bar_cells and notes:
             # Belt-and-braces on the section threshold (round-3 MAJOR-2): no row
             # may spend the bar's cells and then push its own count onto a
-            # continuation line. Measured with the WIDEST rung, because a note
-            # that has to wrap is the thing this guards against.
+            # continuation line. Measured with the SHORTEST rung (issue #1073),
+            # which is the one the wrap is actually conditioned on -- see the
+            # collection site at the foot of this function. It must be the same
+            # rung family as that threshold: measuring the widest here zeroed the
+            # bar on a row that would have rendered on one line, and on the
+            # reference rows that also removes the blank bar gutter their counts
+            # share with the providers' (round-2 design D11).
             with_bar = width - (line.cell_len + 2 + bar_cells + 2)
-            if len(notes[0]) > with_bar:
+            if len(notes[-1]) > with_bar:
                 row_bar = 0
         if share is None and row_bar:
             # The reference rows have no share to draw, but they still SPEND the
@@ -563,13 +577,22 @@ def search_spend_section(
     # Every note-ladder the block will render, not just the providers':
     # ``default=0`` keeps an empty ledger (which returns before this point) out of
     # the arithmetic, and ``session`` is measured only when its row is drawn.
+    #
+    # ``[-1]``, the SHORTEST rung, and not ``[0]`` (issue #1073): the ladders are
+    # widest-first, and the wrap the bar guards against happens when no rung fits
+    # at all, so the threshold has to clear the rung that would be drawn LAST. On
+    # ``/analytics`` the widest rung belonged to the ``This session ... of search
+    # spend`` reference row -- a row ``/session`` does not draw -- so for the
+    # frames' ledger the widest rule held the bar back to body 90 while
+    # ``/session`` drew it from 67. One policy producing two thresholds is the
+    # defect; one policy needs one condition.
     _notes_to_fit = [
-        len(search_notes(row.count, row.unpriced_searches, kind=row.kind)[0])
+        len(search_notes(row.count, row.unpriced_searches, kind=row.kind)[-1])
         for row in snapshot.rows
     ]
-    _notes_to_fit.append(len(total_notes()[0]))
+    _notes_to_fit.append(len(total_notes()[-1]))
     if session is not None and session.count:
-        _notes_to_fit.append(len(session_notes(session)[0]))
+        _notes_to_fit.append(len(session_notes(session)[-1]))
     bar_cells = 8 if width >= _base_cells + 2 + 8 + 2 + max(_notes_to_fit, default=0) else 0
 
     lines.append(
