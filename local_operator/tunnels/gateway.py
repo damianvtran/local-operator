@@ -95,7 +95,7 @@ TERMINAL_DETAIL = {
         f"{CONSOLE_URL}."
     ),
     LEASE_PENDING: (
-        "The relay has not renewed its authorization yet — it retries every 10 seconds "
+        "The relay has not renewed its authorization yet. It retries every 10 seconds "
         "and usually clears a few seconds after the connector starts. Run lop tunnel "
         "status again shortly; if it persists, run lop tunnel install."
     ),

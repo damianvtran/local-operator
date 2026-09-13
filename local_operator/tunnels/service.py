@@ -147,12 +147,19 @@ def _could_not_reach_control_plane(failure: BaseException) -> bool:
     exists to remove.
     """
     seen: set[int] = set()
-    current: BaseException | None = failure
-    while current is not None and id(current) not in seen:
+    pending: list[BaseException] = [failure]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         if isinstance(current, httpx.TransportError):
             return True
-        current = current.__cause__ or current.__context__
+        # Both links, deliberately, including a context Python would otherwise
+        # suppress: this asks whether anything in the failure was a transport
+        # error, and the cost of missing one is an operator sent to /login for a
+        # network fault.
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
     return False
 
 

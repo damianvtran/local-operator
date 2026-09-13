@@ -152,11 +152,11 @@ normally clears by itself within a few seconds.
 
 `lop tunnel status` prints the same cause beside the connector state, worded for
 a terminal: it names the commands a phone cannot run (`/login radient`, `lop
-tunnel install`), where the relay's own sentence carries the console link
-instead. The states it reports are `connected`, `connecting`, `not serving` (the
-gateway answered and is refusing, with cloudflared possibly still attached to
-the edge), and `stopped` — with the line saying so when nothing answered on the
-gateway port at all.
+tunnel install`), which the relay's own sentence leaves out, and links the
+console wherever the console is the remedy. The states it reports are
+`connected`, `connecting`, `not serving` (the gateway answered and is refusing,
+with cloudflared possibly still attached to the edge), and `stopped` — with the
+line saying so when nothing answered on the gateway port at all.
 
 ## Trust boundaries and transport
 
