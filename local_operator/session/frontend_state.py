@@ -3250,6 +3250,21 @@ class FrontendStateStore:
             # a bound placed only at the snapshot boundary holds for the first
             # frame and leaks on every one after it.
             _bound_launch_prompts_across_jobs(summaries)
+            # ...and the same is true of the per-ROW text bound, which lived only
+            # in ``sync_wire_payload``: a child whose ``result_text`` (or prompt,
+            # or error) was a whole transcript page rode out unbounded on every
+            # live delta while the reconnecting snapshot clipped it. Free text is
+            # the field that can be arbitrarily large on a row that is otherwise
+            # kilobytes, so it is the one that can put a delta over the socket
+            # line on its own. ``share`` is computed exactly as the snapshot
+            # computes it, off the same budget and floor, so a viewer cannot see
+            # two different previews of one child depending on whether it
+            # arrived live or in the seed.
+            text_share = max(
+                JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, len(summaries))
+            )
+            for summary in summaries:
+                _bound_job_text_in_place(summary, share=text_share)
             for summary in summaries:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)

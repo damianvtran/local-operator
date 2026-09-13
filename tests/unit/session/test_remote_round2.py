@@ -911,3 +911,152 @@ async def test_a_takeover_target_without_the_seam_is_not_handed_an_id() -> None:
     modern._takeover_target = _ModernTarget()  # type: ignore[assignment]
     await modern.prompt("hello", message_id="an-id")
     assert calls == [("hello", {"message_id": "an-id"})], "the id must reach a capable target"
+
+
+# ---------------------------------------------------------------------------
+# The wire can now carry an attachment REFERENCE instead of base64.
+#
+# The owner externalizes a live frame's oversized images (see
+# ``runtime/server.py::fit_frame_for_wire``) and leaves the same
+# ``{"attachment": <digest>, "mime_type": ...}`` block the durable transcript
+# has always written. These drive the viewer's one resolution seam: the raw dict
+# must be resolved BEFORE validation, because the key is deliberately not a
+# pydantic field, so an unresolved frame parses as an image with an EMPTY
+# payload and the bytes are gone with nothing raised anywhere.
+# ---------------------------------------------------------------------------
+
+
+def _referenced_tool_end(digest: str) -> dict[str, Any]:
+    return {
+        "type": "tool_execution_end",
+        "tool_call_id": "call_image",
+        "tool_name": "screenshot",
+        "is_error": False,
+        "result": {
+            "tool_call_id": "call_image",
+            "tool_name": "screenshot",
+            "content": [
+                {"type": "text", "text": "PAGE"},
+                {"type": "image", "attachment": digest, "mime_type": "image/png"},
+            ],
+            "is_error": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_client_resolves_a_reference_before_parsing(tmp_path: Path) -> None:
+    """A naive implementation passes this only by accident: pydantic DROPS the key.
+
+    ``ImageContent`` has no ``attachment`` field and allows no extras, so an
+    unresolved block validates into an image whose ``data`` is ``""`` — no
+    exception, no log, no image. The assertion is on the parsed payload's bytes,
+    not on the raw dict, because that silent drop is the whole hazard.
+    """
+    import base64
+
+    from local_operator.harness.types import ToolExecutionEndEvent
+    from local_operator.session.attachments import AttachmentStore
+
+    raw = bytes(range(256)) * 16
+    stored = base64.b64encode(raw).decode("ascii")
+    ref = AttachmentStore(tmp_path / "attachments").put(stored, "image/png")
+    assert ref is not None
+
+    remote = _bare_remote(tmp_path)
+    seen: list[Any] = []
+    remote.subscribe(seen.append)
+
+    remote._on_wire_event(_referenced_tool_end(ref.digest))
+
+    assert len(seen) == 1
+    event = seen[0]
+    assert isinstance(event, ToolExecutionEndEvent)
+    block = event.result.content[1]
+    assert isinstance(block, ImageContent)
+    assert block.data == stored, "the referenced bytes did not survive the parse"
+    assert block.mime_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_attachment_degrades_to_the_placeholder(tmp_path: Path) -> None:
+    """An interrupted write or a hand-pruned store must not cost the attach.
+
+    ``AttachmentStore.get`` documents ``None`` as ordinary. The viewer degrades
+    the block to an empty payload that still parses as an image — the TUI paints
+    its "no longer in the transcript" receipt for exactly this — and the event
+    itself is still delivered, because the event is what settles the tool card.
+    """
+    from local_operator.harness.types import ToolExecutionEndEvent
+
+    # A digest of the right SHAPE that no store was ever asked to write.
+    remote = _bare_remote(tmp_path)
+    seen: list[Any] = []
+    remote.subscribe(seen.append)
+
+    remote._on_wire_event(_referenced_tool_end("0" * 32))
+
+    assert len(seen) == 1, "the event must still be delivered"
+    event = seen[0]
+    assert isinstance(event, ToolExecutionEndEvent)
+    block = event.result.content[1]
+    assert isinstance(block, ImageContent)
+    assert block.data == ""
+
+
+@pytest.mark.asyncio
+async def test_a_canonical_delta_resolves_its_references_too(tmp_path: Path) -> None:
+    """The other frame grade carries payload-bearing shapes as well.
+
+    A ``frontend_update`` holds tool results in ``changes["live_events"]`` and in
+    a job's trajectory appends, and the runtime's fit pass is deliberately
+    op-agnostic. Resolving only raw events would leave the raw ``attachment``
+    key flowing into the frontend store AND into the desktop bridge's published
+    payload — the one consumer whose contract cannot be renegotiated.
+    """
+    import base64
+
+    from local_operator.session.attachments import AttachmentStore
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    raw = bytes(range(256)) * 16
+    stored = base64.b64encode(raw).decode("ascii")
+    ref = AttachmentStore(tmp_path / "attachments").put(stored, "image/png")
+    assert ref is not None
+
+    remote = _bare_remote(tmp_path)
+    remote._frontend_store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    remote._on_frontend_update(
+        {
+            "epoch": "e1",
+            "sequence": 1,
+            "changes": {
+                "live_events": [
+                    {
+                        "type": "tool_execution_end",
+                        "tool_call_id": "call_image",
+                        "tool_name": "screenshot",
+                        "result": {
+                            "tool_call_id": "call_image",
+                            "tool_name": "screenshot",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "attachment": ref.digest,
+                                    "mime_type": "image/png",
+                                }
+                            ],
+                            "is_error": False,
+                        },
+                    }
+                ]
+            },
+        }
+    )
+
+    block = remote._frontend_store.state.live_events[0]["result"]["content"][0]
+    assert block["data"] == stored
+    assert "attachment" not in block
