@@ -330,3 +330,42 @@ async def test_r5_4b_an_unpaired_WHEEL_HOLDER_still_latches(tmp_path: Path) -> N
         "the wheel-holder's close no longer latches: the teardown rule is disarmed"
     )
     await _shutdown(task)
+
+
+# --- UX round 3, U9: which of the two cases is the user in -------------------
+
+
+@pytest.mark.asyncio
+async def test_r5_5_the_silent_wheel_exposes_a_takeover_bound(tmp_path: Path) -> None:
+    """UX round 3, U9 — the fact copy needs, so no surface has to hardcode a minute.
+
+    A peer close promotes immediately (0.07 s measured on a real rig); a silent
+    wedge is only discoverable by silence and takes the deadline plus one ping tick
+    (61.2 s measured). `/health` now says which case the reader is in and how long
+    the daemon's own bound is, while it is pending — and says nothing (`null`) when
+    there is nothing pending, so "takeover coming" is never inferred from a zero.
+    """
+    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN), label="Chrome extension 0.1.13")
+    service = BridgeService(root=tmp_path)
+    store = _Peer(STORE_ID)
+    store.push(_hello(STORE_TOKEN))
+    task = asyncio.create_task(service.extension(store))  # type: ignore[arg-type]
+    assert await _settles(lambda: service.link.extension_id == STORE_ID)
+
+    healthy = json.loads((await service.health(None)).body)  # type: ignore[arg-type]
+    assert healthy["takeover_within_s"] is None, "a healthy driver is not a pending takeover"
+
+    # Age the link past the proof deadline without sending anything: exactly the
+    # state the standby install sits in for a minute before the daemon acts.
+    service.link.last_frame_at = time.monotonic() - (LINK_SILENCE_TIMEOUT_S + 1.0)
+    pending = json.loads((await service.health(None)).body)  # type: ignore[arg-type]
+    assert pending["extension_unresponsive"] is True
+    assert pending["takeover_within_s"] is not None
+    assert 0.0 < float(pending["takeover_within_s"]) <= LINK_SILENCE_TIMEOUT_S + PING_INTERVAL_S
+
+    service.latch_drop(service.link, 51.0)
+    store.push(None)
+    assert await _settles(lambda: service.link.websocket is None)
+    severed = json.loads((await service.health(None)).body)  # type: ignore[arg-type]
+    assert severed["takeover_within_s"] is None, "a wheel nobody holds has no takeover pending"
+    await _shutdown(task)

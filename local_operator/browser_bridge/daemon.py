@@ -3411,6 +3411,32 @@ class BridgeService:
                     if self.link.websocket is not None
                     else self.drop_silence_value()
                 ),
+                # How long until the daemon acts on a mute wheel-holder, or null
+                # when nothing is pending (UX round 3, U9). Present ONLY while the
+                # wheel-holding link is attached and not answering — the state a
+                # standby install sees for ~a minute before the daemon severs it
+                # and promotes somebody. Without a number here the standby card can
+                # only either promise an immediate takeover (false for this event:
+                # measured 61.2 s on a real rig, 60.1-60.2 s on the isolated one)
+                # or say nothing about the event it is actually in.
+                #
+                # Derived, not authoritative: `LINK_SILENCE_TIMEOUT_S` is the
+                # deadline `proven` measures and `PING_INTERVAL_S` is the tick that
+                # notices it, so this is the upper bound for an ordinary event loop
+                # and a delayed tick pushes it later. It answers "which of the two
+                # cases is the user in" — a value means silence (takeover pending),
+                # null means either a healthy driver or a wheel nobody holds.
+                "takeover_within_s": (
+                    round(
+                        max(
+                            0.0,
+                            LINK_SILENCE_TIMEOUT_S + PING_INTERVAL_S - self.link.silent_for(),
+                        ),
+                        1,
+                    )
+                    if self.link.websocket is not None and not connected
+                    else None
+                ),
                 # How many tabs are driven, and their URLs. `current_url` alone
                 # framed a multi-tab world as one binding, so a stale value
                 # read as a system-wide lock; the count lets `status` say "no
