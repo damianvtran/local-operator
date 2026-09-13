@@ -3856,6 +3856,17 @@ INSET_SIZES: tuple[tuple[int, int], ...] = (
     (19, 30),
     (18, 30),
     (16, 30),
+    # The 26-28-CELL BOXES (34-36 columns), where the row builder's age column
+    # disagreed with the plan's about how wide it would be drawn. Every rung of
+    # the ladder was consistent and the guard's sizes all skipped this band, so
+    # the assertion below ran nowhere it failed while 34-36 composed 29-cell
+    # rows into 26-28-cell panes (agent review round 2, MAJOR). 37x30 is the
+    # boundary where the drawn age column starts fitting beside a 16-cell name
+    # again, so the band and its edge are both pinned.
+    (36, 30),
+    (35, 30),
+    (34, 30),
+    (37, 30),
 )
 
 
@@ -3868,10 +3879,10 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
     ``padding: 1 2`` on ``.session-picker`` in ``local_operator.tcss``, and
     ``PICKER_INSET_ROWS``/``PICKER_INSET_COLS`` in ``session_picker.py`` —
     because the sheet moves the box and ``plan_layout`` has to know how large it
-    is. Textual CLIPS SILENTLY: a plan one cell optimistic paints a row that
-    wraps onto a second line and pushes a row off the bottom, and nothing reads
-    back that it happened. The sheet is therefore not allowed to be the only
-    witness, and this is the test that reads the frame instead:
+    is. Textual CLIPS SILENTLY: a plan one cell optimistic paints a row the
+    container wraps onto a second line and pushes a row off the bottom, and
+    nothing reads back that it happened. The sheet is therefore not allowed to be
+    the only witness, and this is the test that reads the frame instead:
 
     * NOTHING IS PAINTED IN THE OUTER BAND — as a CHARACTER assertion, which is
       what it can be: ``ink`` is every cell whose glyph is not a space, so a
@@ -3883,6 +3894,18 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
       ``Screen`` gives it (measured identical on base and head, ``x1..x98`` /
       ``y1..y28`` at 100x30), and the sheet says so — see agent review round 1
       MINOR-2 and the design round's reading of the frame.
+    * THE FRAME READ IS A SETTLED ONE, and that is asserted rather than assumed:
+      the test refreshes and then reads the compositor's strips twice, one pause
+      apart, and requires them identical. Before that, a read taken three pauses
+      after the push could still be the pre-measurement layout — a 61-cell row
+      where the live composition was 90 at 100x30 (agent review round 2,
+      MINOR) — which would have made the containment assertion above pass on a
+      frame narrower than the one it witnesses. What it does NOT check: that the
+      painted row is the composed row cell for cell. It checks that the list
+      paints exactly one line per composed row and that no glyph leaves the
+      content box; the composed rows themselves are checked against the plan by
+      the model assertions above, and the two planes are tied together by the
+      row COUNT, not by a string comparison per row.
     * THE PLAN'S NUMBERS ARE THE PANES' BOXES. ``screen_width``, ``list_width``,
       ``preview_width`` and both row budgets are compared against the resolved
       widget boxes — the equality every other guard in this file rests on.
@@ -3901,6 +3924,21 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
         app.push_screen(screen)
         for _ in range(3):
             await pilot.pause()
+        # SETTLE THE FRAME BEFORE READING IT, and then prove it is settled. The
+        # compositor's strips are what the terminal was SENT, but at this point
+        # in the sequence they can still be the layout from BEFORE the panes
+        # measured themselves: measured at 100x30, the strip read here was a
+        # 61-cell row while the live composition was 90, so the containment
+        # assertion below was passing on a NARROWER frame than the one it
+        # claims to witness (agent review round 2, MINOR). An explicit refresh
+        # plus a pause repaints from the resolved geometry; reading twice and
+        # comparing makes "settled" a checked property rather than an
+        # assumption, so a future sequence that reads mid-relayout fails here.
+        app.refresh()
+        await pilot.pause()
+        settled = [strip.text for strip in app.screen._compositor.render_strips()]
+        await pilot.pause()
+        assert settled == [strip.text for strip in app.screen._compositor.render_strips()], size
 
         plan = screen._layout()
         panel = screen.query_one(".session-picker")
@@ -3945,10 +3983,14 @@ async def test_the_inset_matches_the_painted_frame(size: tuple[int, int]) -> Non
         assert panel.content_region.height + 2 * OUTER_INSET_ROWS == app.size.height, size
 
         # ...AND NOTHING THE PANE BUILDS IS WIDER THAN THE PANE. A row wider than
-        # the box does not clip, it WRAPS: one budgeted row becomes two painted
-        # lines, and the row the window counted is spent twice. Measured at the
-        # painted level as well as the composed one, because the composed length
-        # is the model and the painted count is what the user sees.
+        # the box is not clipped by the ROW, which is
+        # ``Text(no_wrap=True, overflow="ellipsis")``: it is the container
+        # ``Text()`` the rows are appended into — which wraps by default — that
+        # takes the overflow onto a second painted line, and where it does not
+        # wrap it cuts the row instead. Either way one budgeted row stops being
+        # the one line the window counted. Measured at the painted level as well
+        # as the composed one, because the composed length is the model and the
+        # painted count is what the user sees.
         composed = screen.render_lines_for_test()
         assert composed, size
         assert max(cell_len(line) for line in composed) <= results.size.width, size

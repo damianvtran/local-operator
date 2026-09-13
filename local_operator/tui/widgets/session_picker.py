@@ -275,8 +275,8 @@ PREVIEW_DRAW_MIN = 5
 #:
 #: Stated rather than left as the literals this arithmetic used to carry,
 #: because an inset that drifts from the sheet is INVISIBLE: Textual clips
-#: silently, so a plan one cell optimistic paints a row that wraps onto a second
-#: line and pushes a row off the bottom, and nothing reads back that it
+#: silently, so a plan one cell optimistic paints a row the container wraps onto
+#: a second line and pushes a row off the bottom, and nothing reads back that it
 #: happened. ``test_the_inset_matches_the_painted_frame`` is what reads the sheet
 #: back and fails when the two disagree.
 SCREEN_INSET = 1
@@ -715,8 +715,11 @@ def plan_layout(width: int, height: int, *, querying: bool = False) -> PickerLay
     # it may not do is EXCEED the box: below the width that can hold the floor
     # plus the caret, a name at the floor is a row wider than the pane, and
     # Textual wraps it onto a second painted line that the row budget never
-    # counted (measured on the inset head at 25 columns: an 18-cell row in a
-    # 17-cell box, three sessions painted as six lines).
+    # counted: the row is built `Text(no_wrap=True, overflow="ellipsis")` and
+    # it is the container ``Text()`` the rows are appended into — which wraps by
+    # default — that takes the overflow onto a second painted line, or cuts it
+    # where it does not (measured on the inset head at 25 columns: an 18-cell row
+    # in a 17-cell box, three sessions painted as six lines).
     #
     # ``room_without_age`` is the budget the name may borrow UP TO, and it is the
     # age's cells it borrows: ``plan_columns`` drops the age before it cuts the
@@ -924,6 +927,7 @@ def plan_columns(
     stated: bool = False,
     tagged: bool = False,
     show_id: bool | None = None,
+    age_width: int | None = None,
 ) -> tuple[int, int, int]:
     """``(name, age, id)`` cell budgets for ``width``, dropping before cutting.
 
@@ -971,6 +975,16 @@ def plan_columns(
     to hold, broken between the plan and the paint where a plan-level sweep
     cannot see it (Q1 = design D2).
 
+    ``age_width`` is the AGE COLUMN'S WIDTH AS IT WILL BE DRAWN — the screen's
+    planned ``AGE_CELLS`` — and it is reserved HERE, before the name is derived,
+    rather than stamped over the ladder's answer afterwards. The ladder measures
+    the widest age in view when it is not given one, which is what a caller with
+    no plan to hand wants (a test, a one-page list); stamping the planned width
+    over the measured one afterwards is the D16 defect one column over — at a
+    26-28-cell box the ladder measured a 6-cell ``1m ago`` and spent a 16-cell
+    name beside it, and the screen then widened that column to 9, composing
+    29-cell rows into a 26-cell pane (agent review round 2, MAJOR).
+
     Reserved as FIXED CHROME rather than subtracted from the name afterwards,
     which is what keeps the drop ladder honest — the id surrenders its cells
     before the age, and the age before the name, and a marker that helped
@@ -985,7 +999,23 @@ def plan_columns(
     # running row scrolls into view makes every name jump sideways on one
     # arrow press.
     marker_col += STATE_COL_CELLS if stated else 0
-    age_col = max((cell_len(age) for age in ages), default=0)
+    # THE AGE COLUMN IS THE WIDTH THAT WILL BE DRAWN, and it is reserved BEFORE
+    # the name is derived rather than stamped over the result. ``age_width`` is
+    # the screen's planned column (``AGE_CELLS``); without it the widest age in
+    # view is used, which is what a caller with no plan to hand (a test, the
+    # one-page list) wants.
+    #
+    # Stamping the planned width over the measured one AFTER this ladder had
+    # already spent the budget (``render_rows`` did) is the D16 defect one column
+    # over: at a 26-28-cell box the ladder measured a 6-cell `1m ago`, drew the
+    # age with a 16-cell name into a 26-cell box, and the screen then widened
+    # that age column to 9 — 29 cells in a 26-28-cell pane, so every row wrapped
+    # onto a second painted line (agent review round 2, MAJOR). Reserved here,
+    # the ladder sees the true cost and drops the age (its documented order)
+    # instead of overflowing the pane.
+    age_col = (
+        age_width if age_width is not None else max((cell_len(age) for age in ages), default=0)
+    )
     # Measured rather than assumed at 12: an id written by an older build with
     # a different length must still line up instead of ragging the column.
     id_col = max((cell_len(row.id) for row in rows), default=0)
@@ -1003,8 +1033,10 @@ def plan_columns(
     # caret and the pre-name columns leave — INCLUDING the cells the floor asks
     # for, if they are there, and no more if they are not. Flooring this at
     # ``NAME_MIN_CELLS`` (it did) built rows wider than the pane at every width
-    # where `GUTTER + marker + the floor` exceeds the box, which Textual wraps
-    # onto a second painted line the row budget never counted. The plan's
+    # where `GUTTER + marker + the floor` exceeds the box, which the container
+    # ``Text()`` the rows are appended into (the row itself is
+    # ``Text(no_wrap=True, overflow="ellipsis")``) then takes onto a second
+    # painted line the row budget never counted. The plan's
     # ceiling is the binding value in that band (see ``plan_layout``); this
     # rung states the same room so the two models cannot disagree about it.
     return max(1, width - GUTTER_CELLS - marker_col), 0, 0
@@ -1098,15 +1130,20 @@ def render_rows(
         # clamped to a budget that included it is exactly how 18 cells per row
         # came to be reserved and never painted (Q1 = design D2).
         show_id=show_id,
+        # And ``age_width`` for the same reason, the other way round: the age
+        # column the row will DRAW is part of what the name has to fit beside,
+        # so it is reserved inside the ladder rather than stamped over the
+        # ladder's own answer after the fact (agent review round 2, MAJOR —
+        # that stamp is what composed 29-cell rows into 26-28-cell panes at
+        # 34-36 columns).
+        age_width=age_width,
     )
     # The SCREEN's layout overrides the drop-ladder's own arithmetic when it
     # supplies one, so the two panes agree about where the name ends. The
     # ladder still runs first and still owns the narrow cases — this only caps
-    # what it produced (D16's saturation) and fixes the age column, which must
-    # be one right-aligned column across every drawn row rather than sized to
-    # whichever ages happen to be in view (D3: 13 distinct start columns).
-    if age_width is not None:
-        age_col = age_width if age_col else 0
+    # what it produced (D16's saturation). The age column is NOT overwritten
+    # here any more: it went into the ladder above, where the name can be
+    # derived against it.
     if name_max is not None:
         name_col = min(name_col, name_max)
     # The soft-match ``~`` gets a RESERVED gutter: appending it unreserved
