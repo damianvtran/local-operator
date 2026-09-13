@@ -1139,9 +1139,16 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # back. An owner ``Session`` binds by running the loop in this process, so
     # it has no un-bindable state to report and must not grow a predicate for
     # one.
-    assert len(viewer_only) == 51, (
+    #
+    # 51 → 52 is the same direction again, and for the sibling question:
+    # ``session_was_stopped`` tells a host that never saw the disconnect whether
+    # the owner was STOPPED (a durable marker, plus this viewer's own stop) —
+    # which is what decides whether re-dialling a clicked row is worth anything.
+    # An owner ``Session`` is the thing that ends, so there is no record to read
+    # back about itself and no un-bindable state to classify.
+    assert len(viewer_only) == 52, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 51, and the aggregate floor is set at 40 against that number. A "
+        "says 52, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
