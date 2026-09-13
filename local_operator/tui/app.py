@@ -1448,14 +1448,9 @@ STOP_ALL_WINDOW_S = 10.0
 #: ``HEARTBEAT_TIMEOUT_S``) — so the case this exists for reports.
 START_ENGAGE_PATIENCE_S = 10.0
 
-#: The latch token for a binding that cannot name itself. A sentinel rather
-#: than the empty string, because the empty string is also the "nothing has been
-#: reported" value of ``_start_engage_reported_for`` — collapsing the two would
-#: silence every report on a reduced host, which is the opposite of what this
-#: latch is for. No production session reaches here without an id (the facade
-#: takes its id as a constructor argument), so this lane is a formality, but it
-#: is a formality that keeps the rule total.
-UNIDENTIFIED_BINDING = "<unidentified>"
+#: The token that used to be a bare session id (and, before that, a sentinel for
+#: hosts that could not name themselves) is now minted by ``OperatorApp._bind_viewer``
+#: as ``(epoch, session_id)`` — see that method for why a conversation is not a binding.
 
 #: The working line's PHASE while a turn is parked on something the USER owes —
 #: a tool-approval prompt, or an `ask` picker waiting for a decision. One phase
@@ -3993,15 +3988,19 @@ class OperatorApp(App[None]):
         #: binding. Reset by a session swap (`/new`, `/resume`), because the
         #: new binding is cold again and owes its own warm-up.
         self._warm_engage_started = False
-        #: Which BINDING's failed engage has already been reported, by session id —
-        #: cleared only by an explicit user attempt (`_claim_start_engage_notice`),
-        #: never by a keystroke's warm-up and never by a swap route. Keyed by
-        #: identity rather than reset by each caller that changes the binding:
-        #: the routes that swap `_session` are several (a sidebar switch parks the
-        #: outgoing facade rather than cancelling its engage), and a boolean would
-        #: need every one of them to remember — with the failure mode of the one
-        #: that forgets being a notice that names the wrong conversation.
-        self._start_engage_reported_for = ""
+        #: The BINDING whose failed engage has already been reported, as
+        #: ``(epoch, session_id)`` — minted by :meth:`_bind_viewer`, the only
+        #: writer of ``self._session``. A token rather than a boolean reset by
+        #: each route that moves the binding: the routes are several (a sidebar
+        #: switch parks the outgoing facade rather than cancelling its engage),
+        #: and the one that forgets leaves a notice naming the wrong
+        #: conversation. A bare conversation id is not enough either —
+        #: `/resume <the id you are already on>` re-binds the SAME id, and the
+        #: departing binding's engage must not answer for the arriving one.
+        #: `None` means nothing has been reported for the current binding.
+        self._start_engage_reported_for: tuple[int, str] | None = None
+        #: The mutable half of that token; see :meth:`_bind_viewer`.
+        self._binding_epoch = 0
         #: What build THIS process loaded. App construction is process start
         #: for a TUI, so this is the honest "what is running in here" token,
         #: and it can never be refreshed — already-imported modules do not get
@@ -8101,7 +8100,7 @@ class OperatorApp(App[None]):
             disarm_steer = getattr(outgoing, "set_steer_failure", None)
             if callable(disarm_steer):
                 disarm_steer(None)
-        self._session = session
+        self._bind_viewer(session)
         # The id of the session this VIEWER is looking at, kept beside the
         # binding rather than derived from it. `self._session` is dropped by
         # every swap/reload/reconnect path while the underlying session keeps
@@ -8666,7 +8665,7 @@ class OperatorApp(App[None]):
         self._unsubscribe_frontend = None
         self._invalidate_pending_frontend_state()
         self._rebind_takeover_source(source, session)
-        self._session = session
+        self._bind_viewer(session)
         self._controller = source.controller
         self._mobile_adopted(session)
         subscribe_frontend = getattr(session, "subscribe_frontend", None)
@@ -9126,6 +9125,30 @@ class OperatorApp(App[None]):
             self._spend_is_floor = True
             self._status.update(cost=self._spend_text())
 
+    def _bind_viewer(self, session: SessionProtocol | None) -> None:
+        """Move ``self._session`` and mint a new BINDING token.
+
+        The engage worker and its report key on WHICH BINDING they belong to,
+        and a conversation is not a binding: ``/resume <the id you are already
+        on>`` arrives on the same ``session_id`` as the facade it replaces, and
+        a warm engage from the outgoing one must not answer for the incoming
+        one (nor paint its failure as the incoming one's).
+
+        ONE WRITER, deliberately. A route that assigned ``self._session``
+        directly would keep the old token and so inherit exactly the class the
+        token exists to close, and there are several such routes (adopt,
+        takeover, the boot-built handoff, and the unbind that three teardown
+        paths share) — auditing every present and future one is the fragile
+        per-callsite reasoning the refresh announcement's comment rejects. The
+        epoch therefore moves HERE and nowhere else. The counter is the token's
+        mutable half: the id alone cannot distinguish two bindings of one
+        conversation, and ``id(session)`` cannot outlive a parked facade.
+        """
+        self._session = session
+        #: Monotonic and never reset: a token from any earlier binding is simply
+        #: unequal to the current one, which is all the comparison needs.
+        self._binding_epoch += 1
+
     def _park_unadopted_session(self, built: asyncio.Future[Any]) -> None:
         """Hand a built-but-never-adopted session to teardown, if there is one.
 
@@ -9151,7 +9174,7 @@ class OperatorApp(App[None]):
             return
         except Exception:
             return  # construction failed as well; _on_boot_failed owns that
-        self._session = session
+        self._bind_viewer(session)
 
     def _measure_preloaded_context(self, session: Any) -> None:
         """Fill the context segment before the first turn, off the boot path.
@@ -11345,7 +11368,7 @@ class OperatorApp(App[None]):
         # reference or constructing/adopting its replacement.
         async with self._turn_provider_lock:
             pass
-        self._session = None
+        self._bind_viewer(None)
         # THE WATCHED ID DELIBERATELY SURVIVES THIS WINDOW. It is the only
         # lever a stranded viewer has, and clearing it here disarmed the kill
         # switch on the exact path this feature exists to serve: if anything
@@ -13044,7 +13067,7 @@ class OperatorApp(App[None]):
                 await self._session.dispose()
             except Exception:
                 pass
-        self._session = None
+        self._bind_viewer(None)
         # Same reason as `_reload_session`: the watched id must OUTLIVE this
         # window. This is the strand path itself — the remote runs in another
         # process, so a raise before the adopt below leaves it billing with the
@@ -16217,13 +16240,15 @@ class OperatorApp(App[None]):
         # (NTP, a laptop waking from sleep) must not turn a one-second blip
         # into a notice, or a genuine 30 s wait into a silent one.
         engage_started = time.monotonic()
-        # WHO the band belongs to, captured beside ``ensure`` for the same reason
-        # and read at report time for the same reason `_announce_refresh_completed`
-        # compares a captured id: an engage worker can outlive its binding (the
-        # sidebar route parks the outgoing facade and cancels only the "session"
-        # worker group, not "warm-engage"), so the failure arm must be able to
-        # tell whose failure it is holding before it paints anything.
-        binding_id = str(getattr(session, "session_id", "") or "")
+        # WHO the band belongs to, captured beside ``ensure`` and read at report
+        # time for the same reason `_announce_refresh_completed` compares a
+        # captured id: an engage worker can outlive its binding (the sidebar
+        # route parks the outgoing facade and cancels only the "session" worker
+        # group, not "warm-engage"), so the failure arm must be able to tell
+        # whose failure it is holding before it paints anything. The token —
+        # epoch AND id, both minted by `_bind_viewer` — is what makes that
+        # "whose" survive a re-bind of the SAME conversation.
+        binding_token = (self._binding_epoch, str(getattr(session, "session_id", "") or ""))
         self._set_starting(True)
 
         async def run() -> None:
@@ -16256,7 +16281,7 @@ class OperatorApp(App[None]):
                     reason=reason,
                     error=error,
                     elapsed=time.monotonic() - engage_started,
-                    binding_id=binding_id,
+                    binding_token=binding_token,
                 )
                 return
             finally:
@@ -16281,7 +16306,7 @@ class OperatorApp(App[None]):
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
     def _report_start_engage_failure(
-        self, *, reason: str, error: Exception, elapsed: float, binding_id: str
+        self, *, reason: str, error: Exception, elapsed: float, binding_token: tuple[int, str]
     ) -> None:
         """Admit a speculative engage's failure — once per binding, when it was watched.
 
@@ -16296,15 +16321,18 @@ class OperatorApp(App[None]):
         Six gates, and each one is a way this could lie to the wrong person or
         about the wrong thing:
 
-        * **binding identity** (``binding_id`` vs what is bound now) — first,
-          before the latch is even read. An engage worker can outlive the
-          binding it was started for, so "a failure happened" and "THIS session
+        * **binding identity** (``binding_token`` vs the token bound now) —
+          first, before the latch is even read. An engage worker can outlive the
+          binding it was started for, so "a failure happened" and "THIS binding
           failed" are different statements; painting the first as the second
           tells the user their current conversation cannot start when nothing
           about it failed, and it consumes the current binding's one notice on
           the departed one's behalf (the sidebar route reaches this state — it
           parks the outgoing facade and cancels only the `"session"` worker
-          group). One comparison closes the class, exactly as
+          group). The token is ``(epoch, session_id)`` because a CONVERSATION is
+          not a binding: `/resume <the id you are already on>` arrives on the
+          same id, which a bare-id comparison would treat as the same binding
+          and silence. One comparison closes the class, exactly as
           :meth:`_announce_refresh_completed` closes it for the refresh stamp.
         * ``elapsed >= START_ENGAGE_PATIENCE_S`` — the filter above. A refused
           socket that fails in 200 ms stays silent, which is the existing
@@ -16352,16 +16380,16 @@ class OperatorApp(App[None]):
         attempt ("send a message to retry") rather than an outcome — the same
         register as the sibling arm's "did not answer".
         """
-        if binding_id != str(getattr(self._session, "session_id", "") or ""):
+        bound_now = (self._binding_epoch, str(getattr(self._session, "session_id", "") or ""))
+        if binding_token != bound_now:
             logger.debug(
-                "%s engage failure dropped: report belongs to %s, %s is bound",
+                "%s engage failure dropped: its binding is %s, %s is bound",
                 reason,
-                binding_id or UNIDENTIFIED_BINDING,
-                getattr(self._session, "session_id", "") or "<none>",
+                binding_token,
+                bound_now,
             )
             return
-        token = binding_id or UNIDENTIFIED_BINDING
-        if self._start_engage_reported_for == token:
+        if self._start_engage_reported_for == binding_token:
             return
         if getattr(self._session, "_deliberate_stop", False):
             return
@@ -16384,7 +16412,7 @@ class OperatorApp(App[None]):
             body = "the runtime is not answering yet — send a message to retry"
         else:
             body = "no runtime yet — it may still be starting; send a message to retry"
-        self._start_engage_reported_for = token
+        self._start_engage_reported_for = binding_token
         # INFO, not DEBUG: this line is the one record that the user was told
         # something, and the two ceilings it covers are exactly what an operator
         # reading a support capture is looking for. The elapsed time lives here
@@ -16410,7 +16438,7 @@ class OperatorApp(App[None]):
         (:meth:`_start_turn_for`) and the command path that runs a typed command
         (:meth:`_bind_then_dispatch`) — never from a keystroke's warm-up.
         """
-        self._start_engage_reported_for = ""
+        self._start_engage_reported_for = None
 
     def _needs_runtime_first(self, command: str, arg: str) -> bool:
         """Keep owner mutations behind initial sync, including non-picker routes.
@@ -26894,7 +26922,7 @@ class OperatorApp(App[None]):
         # ``TuiSessionHandle.request_stop`` racing a local ``/stop all``),
         # and the second entry must find nothing to stop rather than dispose
         # twice and paint two receipts.
-        self._session = None
+        self._bind_viewer(None)
         resumable_id = getattr(session, "session_id", "") or ""
         # Set here, beside the detach: between this and the receipt below, a
         # prompt or second /stop hits `_no_session_notice` with no session

@@ -2237,8 +2237,20 @@ def _fire_mcp_sink(session: Session) -> None:
             logger.debug("session _on_mcp_startup_settled raised", exc_info=True)
     # The store is the other front end, and the one a bound viewer reads. Same
     # call the settle path makes, for the same reason.
-    if hasattr(session, "_frontend_state_store"):
-        session.refresh_frontend_state()
+    #
+    # GUARDED, and deliberately not like the eager path's unguarded call: this
+    # runs inside the deferred wiring task, whose caller swallows the exception
+    # with a warning, so a raising refresh here would skip the `attach_mcp_dispose`
+    # that follows on the manager arm — no `disconnect_all` hook, no incident or
+    # recovery callbacks — and leave that as one line in a log. A front end hook
+    # must not be able to take the wiring down with it, which is the same rule
+    # the sink above states.
+    refresh = getattr(session, "refresh_frontend_state", None)
+    if callable(refresh):
+        try:
+            refresh()
+        except Exception:  # noqa: BLE001 — see above: a UI hook must not break the wiring
+            logger.warning("MCP outcome refresh of the frontend store failed", exc_info=True)
 
 
 async def wire_mcp_into_session(
