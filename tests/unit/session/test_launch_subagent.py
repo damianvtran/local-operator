@@ -1092,9 +1092,14 @@ async def test_child_activation_keeps_the_rebuilt_effort_tier_tools(tmp_path, mo
     child = await build_child(parent)
     # What the process watcher does when a tier is configured mid-run: swap
     # the ``task``/``agent`` objects in place with freshly rebuilt schemas.
+    # ``model_choice: model`` because this test is about the REBUILD surviving an
+    # MCP activation, and the built object it looks for afterwards is the one
+    # with an ``effort`` field on it — which the shipped default (the operator
+    # owns the choice) deliberately removes. The policy itself is covered in
+    # ``tests/unit/tools/test_effort_tier_schema.py``.
     child_watcher = ConfigWatcher(tmp_path / "config")
     ConfigManager(tmp_path / "config").set_config_value(
-        "subagents", {"models": {"med": "anthropic/claude-sonnet-4-5"}}
+        "subagents", {"model_choice": "model", "models": {"med": "anthropic/claude-sonnet-4-5"}}
     )
     change = child_watcher.poll_now()
     assert change is not None
