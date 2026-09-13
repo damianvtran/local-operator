@@ -2465,24 +2465,25 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     )
 
 
-#: The delta fields this filter REPLACES outright, excluded when measuring how much
-#: of the frame the rest of the payload already costs.
+#: The one delta field this filter replaces outright, excluded when measuring how
+#: much of the frame the rest of the payload already costs.
 #:
-#: ``job_todo_updates`` is deliberately not in here: it rides the same frame and
-#: nothing in this module bounds it, so excluding it would overstate the room the
-#: appends may spend by exactly the todo payload — the failure mode this file is
-#: about, a bound that does not count what actually ships.
-_TRAJECTORY_APPEND_KEYS = frozenset({"job_trajectory_appends", "job_trajectory_replacements"})
+#: Deliberately just this one. ``job_trajectory_replacements`` and
+#: ``job_todo_updates`` ride the same frame and nothing in this module bounds them,
+#: so both are measured: excluding them overstated the room by exactly the payload
+#: that ships — including the producer's own markers for watched jobs that have no
+#: rows in this delta, which no charge inside the bound would ever see.
+_APPENDS_FIELD = "job_trajectory_appends"
 
 #: Room reserved for the frame's own envelope — the ``{"op": "frontend_update",
-#: "data": …}`` wrapper — and for the rounding in the measurement itself, when the
-#: ceiling is derived from the socket's line limit. The wrapper plus the excluded
-#: field names measure 111 B (review measured the identity `others + Σ row costs +
-#: 111 = exact wire bytes` on this path, where the relay writes default JSON
-#: separators, so the row costs are exact rather than an over-estimate); the rest is
-#: deliberate slack for the per-job keys and marker ids the trim itself adds, which
-#: the bound charges explicitly before it spends anything. Kept small on purpose: a
-#: needlessly large reservation drops rows that would have fitted.
+#: "data": …}`` wrapper — and for round-off, when the ceiling is derived from the
+#: socket's line limit. The wrapper plus the field name measure 111 B on a
+#: single-job frame (review measured that identity on this path, where the relay
+#: writes default JSON separators, so the row costs are exact rather than an
+#: over-estimate); the rest is round-off. It is NOT the accounting for the appends
+#: object's keys or the marker ids — those are charged explicitly against the room
+#: before any row spends it, because a reservation that silently absorbs them stops
+#: binding once a roster is deep enough.
 TRAJECTORY_FRAME_ENVELOPE_BYTES = 4_096
 
 
@@ -2538,15 +2539,18 @@ def _bound_trajectory_appends_in_place(
         return False
     room = budget_bytes if ceiling_bytes is None else max(0, ceiling_bytes)
     # The rows are not the only thing this object costs. Every job that keeps rows
-    # contributes its own KEY to the appends object, and every job the trim marks
-    # contributes an id to the marker list, and both ride the same JSON. QA measured
-    # the difference on a 200-job roster: 2,799 B of keys plus 2,398 B of markers,
-    # which was enough to push the frame 1,535 B past the line — where the wire
-    # pass then repaired it by EMPTYING the row payloads it had just kept, i.e. the
-    # silent cut this module exists to prevent. Charged up front, worst case (a key
-    # per job with rows, a marker id for each of them), so the room the rows spend
-    # is the room that is genuinely left.
-    room = max(0, room - sum(len(str(job_id)) + 16 for job_id in job_ids))
+    # contributes its own KEY to the appends object and every job the trim marks
+    # contributes an id to the marker list, and both ride the same JSON; so do the
+    # separators between rows. Measured by QA on a 200-job roster: those keys and
+    # markers alone were 5,197 B, the difference between a frame that fit and one the
+    # wire pass repaired by EMPTYING the rows it had just kept — the silent cut this
+    # module exists to prevent. Review then measured the first version of this charge
+    # to be 8 B per job short at the runtime's 12-char ids, which is what the
+    # 2 * len(id) + 12 covers: `"<id>":[` for the key and `"<id>",` for the marker,
+    # with their punctuation, plus 2 B per row for its separator. Charged before any
+    # row spends room, so the reservation stays round-off rather than accounting.
+    overhead = sum(2 * len(str(job_id)) + 12 + 2 * len(appends[job_id]) for job_id in job_ids)
+    room = max(0, room - overhead)
     costs = {job_id: [_live_row_cost(row) for row in appends[job_id]] for job_id in job_ids}
     counts = {job_id: 0 for job_id in job_ids}
     budget_left = min(budget_bytes, room)
@@ -2652,7 +2656,7 @@ def filter_update_trajectories(
     ceiling: int | None = None
     if line_limit_bytes is not None:
         others = _live_row_cost(
-            {key: value for key, value in payload.items() if key not in _TRAJECTORY_APPEND_KEYS}
+            {key: value for key, value in payload.items() if key != _APPENDS_FIELD}
         )
         ceiling = line_limit_bytes - others - TRAJECTORY_FRAME_ENVELOPE_BYTES
     dropped = _bound_trajectory_appends_in_place(

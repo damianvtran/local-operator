@@ -5564,8 +5564,12 @@ def test_a_deep_roster_charges_for_its_own_keys_and_markers() -> None:
     spends room now, so the frame fits with the rows intact.
     """
     jobs, rows_per_job, row_chars = 200, 4, 24_000
+    # Ids the length the runtime actually mints (``uuid4().hex[:12]``): the charge
+    # under test is per job, so a shorter synthetic id would not reach the band
+    # this test exists for (measured by review: 8-char ids made the pre-fix head
+    # fit at 223 B under the line, i.e. this test would not have discriminated).
     appends = {
-        f"job-{index:04d}": [
+        f"{index:012x}": [
             _payload_event(row, payload_chars=row_chars) for row in range(rows_per_job)
         ]
         for index in range(jobs)
