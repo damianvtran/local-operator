@@ -6,6 +6,7 @@ compatibility fields, not a claim that it advertises those capabilities today.
 """
 
 import asyncio
+import base64
 import json
 from dataclasses import asdict
 
@@ -44,6 +45,10 @@ from local_operator.providers.replay import (
 #: spelled out because ``native_payload`` records it in the replay provenance
 #: and a mismatch there silently drops the recorded reasoning.
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
+
+#: A minimal PNG payload for the frame turns above, so the frame prune has
+#: something to drop. Base64 of the same 8-byte header the other suites use.
+PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode("ascii")
 
 
 @pytest.fixture(autouse=True)
@@ -729,12 +734,12 @@ def test_thinking_route_counts_the_echo_as_the_input_it_is():
 
 @pytest.mark.parametrize("provider", ["openrouter", "openai", "kimi", "xai"])
 def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch):
-    """No other route gains the field: the flag, not the provider, decides.
+    """A spec WITHOUT the capability keeps the old body, byte for byte.
 
-    This is the regression guard. Every other provider's body must be exactly
-    what it was before the capability existed, on the same history that DeepSeek
-    would fill in -- including a route fronting the SAME weights, where the
-    aggregator normalises the echo itself (measured 200 without it).
+    This is the regression guard. The FIELD decides, and it only ever arrives by
+    derivation: a hand-built spec (every test double and embedder), a local
+    server, and a model from another family must all get exactly the body they
+    got before the capability existed, on the same history DeepSeek fills in.
     """
     client = OpenAICompatClient(f"https://{provider}.invalid/v1")
     scope = credential_scope("fixture")
@@ -757,6 +762,51 @@ def test_routes_without_the_capability_are_byte_identical(provider, monkeypatch)
     capable = client._build_body(
         req.model_copy(
             update={"model": req.model.model_copy(update={"requires_reasoning_echo": True})}
+        ),
+        scope=scope,
+    )
+    assert all(str(entry["reasoning_content"]).strip() for entry in assistant_entries(capable))
+
+
+@pytest.mark.parametrize(
+    "provider,model_id",
+    [
+        ("openrouter", "openai/gpt-5.2"),
+        ("openrouter", "anthropic/claude-opus-4.6"),
+    ],
+)
+def test_a_derived_unrelated_aggregator_route_keeps_the_old_body(provider, model_id):
+    """The DERIVED spec, not a hand-flipped field, keeps the old body.
+
+    The sibling test above pins the body builder's field gating by flipping
+    ``requires_reasoning_echo`` by hand, which leaves the DERIVER's own
+    contribution to an unrelated route uncovered: nothing asserted that
+    ``build_model_spec`` on a live aggregator row for another family yields the
+    body that route got before the capability existed. On a route whose every
+    other field is decided by the same registry, that is the composition the
+    regression would actually arrive through.
+    """
+    client = OpenAICompatClient(f"https://{provider}.invalid/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(tool_calls=[ToolCall(id="call_e", name="inspect", arguments={})]),
+        Message(role="tool", tool_call_id="call_e", content=[TextContent(text="found")]),
+        native_turn(text="done"),
+    ]
+    derived = configure.build_model_spec(provider, model_id)
+    assert derived.requires_reasoning_echo is False, "this family must not gain the field"
+    req = ChatRequest(model=derived, messages=history, system_blocks=["Stable"])
+
+    body = client._build_body(req, scope=scope)
+
+    assert all("reasoning_content" not in entry for entry in assistant_entries(body))
+    # Sensitive rather than vacuous: the SAME request on the SAME derived history
+    # does gain the key once the field is set, so a deriver that flipped an
+    # unrelated family would fail here instead of passing quietly.
+    capable = client._build_body(
+        req.model_copy(
+            update={"model": derived.model_copy(update={"requires_reasoning_echo": True})}
         ),
         scope=scope,
     )
@@ -843,3 +893,172 @@ def test_a_blank_echo_is_treated_as_missing():
         REASONING_ECHO_PLACEHOLDER,
         REASONING_ECHO_PLACEHOLDER,
     ]
+
+
+@pytest.mark.asyncio
+async def test_the_echo_is_replayed_after_a_compaction_rebuild():
+    """A conversation continued across a compaction boundary still echoes.
+
+    Compaction is the one place the harness REBUILDS a prefix: the tool-output
+    prune and the frame prune rewrite messages in place, and a summarising pass
+    replaces the summarised prefix wholesale. The wire contract is about the
+    body that goes out AFTER that, so both strategies are driven here and the
+    body built from the result is checked turn by turn -- with the reasoning
+    that survived the rebuild echoed as the REAL thing, and a turn whose native
+    state no longer binds echoed as the placeholder.
+
+    Compaction was a live suspect for the blank echo that kills a session, and
+    it is innocent by construction (neither strategy removes or blanks an
+    ASSISTANT turn); this pins that, so a later compaction change that starts
+    rebuilding assistant turns brings the refusal straight back.
+    """
+    from local_operator.compaction.pass_ import run_compaction_pass
+    from local_operator.compaction.pruning import prune_stale_frames, prune_tool_outputs
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.compaction.tokens import estimate_messages_tokens
+
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    now = 10_000_000
+
+    def frame(text: str) -> Message:
+        """An observation turn carrying an image: what the frame prune counts."""
+        return Message.user(text, [ImageContent(data=PNG, mime_type="image/png")])
+
+    keep = ToolCall(id="call_keep", name="inspect", arguments={"path": "a"})
+    stale = ToolCall(id="call_stale", name="inspect", arguments={"path": "b"})
+    bulk = "content " * 900
+    history = [
+        # The summarised prefix: bulk far past the cut, including one assistant
+        # turn the rebuild does not keep.
+        frame("frame 0 " + "state " * 120),
+        native_turn(reasoning="summarised away", tool_calls=[keep]),
+        Message(role="tool", tool_call_id="call_keep", content=[TextContent(text=bulk)]),
+        # The kept tail: one turn whose native state still binds, one whose state
+        # was recorded under ANOTHER credential scope (so it cannot be replayed),
+        # and the user message the request continues from.
+        frame("frame 1 " + "state " * 120),
+        native_turn(text="kept finding", reasoning="read it first", tool_calls=[stale]),
+        Message(role="tool", tool_call_id="call_stale", content=[TextContent(text="found b")]),
+        native_turn(
+            text="stale finding",
+            reasoning="scope-bound thought",
+            scope=credential_scope("another-account"),
+        ),
+        Message.user("please continue"),
+    ]
+
+    # Both prune strategies, in the order a session runs them, then the pass.
+    pruned, _ = prune_tool_outputs(history, now_ms=now, last_activity_ms=now)
+    pruned, dropped = prune_stale_frames(pruned, keep_recent_frames=1)
+    assert dropped, "the fixture must actually compress a frame"
+    summarizer_calls: list[str] = []
+
+    async def summarize(prompt: str) -> str:
+        summarizer_calls.append(prompt)
+        return "Everything so far."
+
+    post_prune = estimate_messages_tokens(pruned)
+    result = await run_compaction_pass(
+        pruned,
+        model=ModelSpec(
+            provider="deepseek", model_id="deepseek-flash", context_window=int(post_prune / 0.9)
+        ),
+        settings=CompactionSettings(
+            strategy="context-full", keep_recent_tokens=300, keep_recent_frames=1
+        ),
+        summarize=summarize,
+        now_ms=now,
+        last_activity_ms=now,
+    )
+    assert result.ran is True and summarizer_calls, "the fixture must actually rebuild"
+    assert len(result.messages) < len(history)
+
+    body = client._build_body(
+        ChatRequest(model=echo_spec(), messages=result.messages, system_blocks=["Stable"]),
+        scope=scope,
+    )
+    entries = assistant_entries(body)
+    rendered = [entry.get("reasoning_content") for entry in entries]
+    assert entries, "the rebuilt prefix must still render the conversation's turns"
+    # The contract: nothing left blank, on the body that continues the rebuild.
+    assert all(str(value).strip() for value in rendered)
+    # The reasoning that survived the rebuild is echoed as ITSELF...
+    assert "read it first" in rendered
+    # ...and the turn whose native state no longer binds takes the placeholder.
+    assert REASONING_ECHO_PLACEHOLDER in rendered
+
+
+def test_an_unchanged_conversation_counts_only_the_reasoning_it_replays():
+    """The calibration must not double-count a conversation the echo left alone.
+
+    Every assistant turn here already carries its recorded reasoning, so the
+    builder fills NOTHING: ``native_context_tokens`` is the replayed reasoning
+    alone. If the echo's placeholder term were added unconditionally -- or the
+    replayed bytes were counted twice -- this is the measurement that would
+    drift, and it is the one the context window is sized from.
+    """
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    history = [
+        Message.user("go"),
+        native_turn(text="one", reasoning="first thought", scope=scope),
+        Message.user("again"),
+        native_turn(text="two", reasoning="second thought, longer", scope=scope),
+    ]
+    req = ChatRequest(model=echo_spec(), messages=history, system_blocks=["Stable"])
+    req.context_binding = ContextBinding(ContextTokenTracker(), measure_request(req))
+    body = client._build_body(req, scope=scope)
+
+    expected = len("first thought") // 4 + len("second thought, longer") // 4
+    assert expected > 0
+    assert req.context_binding.measured.native_tokens == expected
+    assert REASONING_ECHO_PLACEHOLDER not in [
+        entry.get("reasoning_content") for entry in assistant_entries(body)
+    ]
+
+
+def test_private_reasoning_is_replayed_as_provider_state_never_as_content():
+    """The echo is provider STATE; it must not become a message anyone reads.
+
+    Replaying reasoning is a different act from showing it (see
+    ``StreamReasoningDelta``'s docstring): it rides the wire as
+    ``reasoning_content`` and must never appear in a message's ``content``, in
+    the transcript the model is shown, or in what the user is handed -- which is
+    the one thing a naive "put it back in the history" fix would get wrong.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.providers.clients import OpenAICompatClient
+    from local_operator.providers.replay import credential_scope, native_payload
+
+    spec = build_model_spec("deepseek", "deepseek-flash")
+    scope = credential_scope("fixture")
+    private = "the operator's private reasoning"
+    endpoint = f"{spec.base_url}/chat/completions"
+    reasoned = Message.assistant(
+        "here is the answer",
+        provider_payload=native_payload(
+            spec,
+            endpoint,
+            "openai-chat",
+            [{"reasoning_content": private}],
+            "here is the answer",
+            [],
+            scope,
+        ),
+    )
+    client = OpenAICompatClient(spec.base_url or "https://api.deepseek.com/v1")
+    body = client._build_body(
+        ChatRequest(model=spec, system_blocks=["sys"], messages=[Message.user("go"), reasoned]),
+        scope=scope,
+    )
+
+    assistant = [entry for entry in body["messages"] if entry.get("role") == "assistant"][0]
+    assert assistant["reasoning_content"] == private
+    # Content carries the answer and only the answer. Nothing a later turn (or a
+    # UI) reads as prose has the reasoning welded into it, and the harness
+    # message the transcript holds never gained it either.
+    assert private not in json.dumps(assistant.get("content") or "")
+    assert private not in json.dumps(body["messages"][:-1])
+    assert private not in repr(reasoned.text)
+    assert private not in json.dumps(reasoned.content, default=str)

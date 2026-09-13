@@ -1981,11 +1981,28 @@ class ModelSpec(BaseModel):
     #
     # Derived in ``build_model_spec`` like every other capability here, so no
     # wire client has to recognise a model name: it is set for the
-    # DeepSeek-HOSTED thinking-mode family on the direct ``deepseek`` route, and
-    # deliberately not for OpenRouter's route to the same weights (measured: an
-    # OpenRouter request of exactly this shape answers 200, the aggregator does
-    # not run this validator) nor for the legacy ``deepseek-chat`` /
+    # DeepSeek-hosted thinking-mode family -- which is a property of the
+    # WEIGHTS, so it is set on every route that can serve them, the aggregator
+    # routes included -- and it stays off for the legacy ``deepseek-chat`` /
     # ``deepseek-reasoner`` rows.
+    #
+    # It is NOT route-keyed, and an earlier revision's decision to key it on
+    # the direct ``deepseek`` hosting was wrong on its own evidence. That
+    # revision excluded OpenRouter's route to the same weights on the strength
+    # of ONE 200: measured there, the SAME body the direct route answers 200 to
+    # on one attempt answers 400 to on another, so a 200 is not a property of
+    # the route -- and re-measured 2026-09-13, the provider that served that
+    # 200 was ``Together``, one of THIRTEEN endpoints OpenRouter lists for
+    # ``deepseek/deepseek-v4.1-flash``. DeepSeek's own endpoint is on that list
+    # (with the others: DeepInfra, Fireworks, Morph, Together, SiliconFlow,
+    # Modal, Wafer, Parasail, GMICloud, Io Net, Novita, Venice), the default
+    # routing load-balances across them, and only the vendor's own runs this
+    # validator -- so a conversation can be served by a lenient host on one turn
+    # and refused on the next, with nothing in the request to tell them apart.
+    # A capability the app can neither predict nor verify per request must fall
+    # the safe way: the echo is one short sentence per assistant turn, measured
+    # accepted on that route as well, where being wrong the other way kills a
+    # turn hundreds of messages deep.
     requires_reasoning_echo: bool = False
     base_url: str | None = None  # override for OpenAI-compatible endpoints
     # ``None`` means OMIT: send no key at all and let the vendor's own default

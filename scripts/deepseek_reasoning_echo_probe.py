@@ -39,6 +39,15 @@ network call, which is the reproducible half of the byte-identity claim: run it
 under ``PYTHONPATH`` against a clean ``origin/main`` worktree and against this
 branch and compare, to show the capability-off body is what ``main`` builds.
 
+**The OFF body does not refuse on every attempt, and that is the API's
+behaviour rather than this probe's.** Measured 2026-09-13 on ``deepseek-flash``:
+the SAME echo-OFF body answered 400 on one request and 200 on another minutes
+later, while the echo-ON body answered 200 on both. The verdict depends on
+server-side state the request does not carry (the harness reaches the same
+conclusion: see ``ModelSpec.requires_reasoning_echo``), so a run that reports
+``200 echo OFF`` is not evidence that the fix is unnecessary -- re-run it, and
+read the ``blank=`` counts, which are a property of the body and are stable.
+
 Exit status is 0 when every expectation holds, 1 otherwise, so the run can be
 quoted as evidence rather than eyeballed.
 """
