@@ -273,6 +273,28 @@ def row_indent(width: int) -> int:
     return ROW_INDENT if width >= ROW_INDENT_MIN_WIDTH else 0
 
 
+def row_body_width(width: int) -> int:
+    """Cells a ledger row's CONTENT is built in, given the width it is given.
+
+    The card's own 1-cell inner padding each side and the ledger inset come off
+    the budget before anything is measured, which is why this is a named
+    derivation rather than a subtraction repeated in a builder and again in the
+    question "would a rebuild change this row's name column?". Those two must
+    answer with the SAME number: the name column is gated on width
+    (``NAME_GROWTH_MIN_ROW``), and the gate is applied to the width the row
+    builds at — the reduced one — while the row's own width is what a resize
+    reports. Recording the column of the outer width and then asking the
+    question of the outer width measures a row that does not exist: at a 72-cell
+    row the outer width clears the gate (14) while the painted content is built
+    in 69 cells and floors at 8, so the record and the paint disagree and the
+    guard cannot see it.
+
+    ``max(..., 10)`` is the builder's own floor, kept here so the two callers
+    cannot drift apart on the degenerate widths either.
+    """
+    return max(width - 2 - row_indent(width), 10)
+
+
 NAME_COL = TOOL_NAME_COL
 #: The ceiling that widening respects. Past roughly this width the eye stops
 #: scanning a column of names and starts reading a list of them.
@@ -2119,7 +2141,7 @@ class ToolCard(ExpandableActionBlock):
         # the one a parentless build cannot read, so it bakes the floor. Recorded
         # beside the width because `ExpandableActionBlock._layout_moved` reads the
         # pair to decide whether this row still fits the ledger it landed in.
-        self._built_name_col = self._name_col(width)
+        self._built_name_col = self._name_col(row_body_width(width))
         moved = self._row_count != self._applied_rows
         self._applied_rows = self._row_count
         was_finalized = self._finalized
@@ -2493,7 +2515,10 @@ class ToolCard(ExpandableActionBlock):
         # (`_row_indent`), against the width being BUILT rather than the last
         # one built, because this runs before `_built_width` is updated.
         indent = row_indent(width)
-        width = max(width - 2 - indent, 10)  # 1-cell inner padding each side (kit rule)
+        # The content box this row is built in — the SAME derivation
+        # `_refresh_row` records the name column against, so the guard's question
+        # and the builder's answer cannot be asked of two different widths (R2).
+        width = row_body_width(width)
 
         # Status segment (right-aligned), capped at width // 3 (D8) and then
         # hard-clamped so no state can ever push the row past its card.
