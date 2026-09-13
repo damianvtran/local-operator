@@ -1696,8 +1696,9 @@ class ServingSessionHandle(SessionHandle):
     async def _name_conversation_worker(self, text: str) -> None:
         """Ask the model for a title once, cheaply, off the turn's lock.
 
-        ``session.complete_once`` is the same isolated, single-attempt, cheap
-        completion the TUI's naming worker uses — a 429 here is swallowed by
+        ``session.complete_once`` is the same isolated, cheap completion the
+        TUI's naming worker uses (one attempt, plus one auth re-resolve if the
+        bearer it drew is rejected outright) — a 429 here is swallowed by
         ``generate_title`` and cannot touch the turn. On success the title is
         stored on the session (which persists it), then the projection is
         refreshed and pushed so the phone's header and list update live.
