@@ -2061,10 +2061,20 @@ class TestAuthRequiredHandling:
         REFRESH_CONTENTION.record(url)
         with pytest.raises(McpRefreshContendedError):
             await manager._connect_server("dd", cfg)
-        # Second attempt, same server, nothing armed: the cancellation stays a
-        # cancellation (the abandoned-grant arm finds no flow either).
-        with pytest.raises(asyncio.CancelledError):
+        # Second attempt, same server, nothing armed: the record really was
+        # single-use — the cancellation is NOT re-voiced as a retry. What it IS
+        # re-voiced as changed with the settle fix: a bare, unarmed cancellation
+        # with no cancelling count is anyio's own delivery (the transport's
+        # reader/writer dying), so ``_connect_server`` now converts it to
+        # ``McpTransportError`` so it is REPORTED instead of dropped by
+        # ``_finish_pending``. The assertion that matters here is the negative
+        # one: it is not a contention retry.
+        from local_operator.mcp.manager import McpTransportError
+
+        with pytest.raises(McpTransportError) as second_attempt:
             await manager._connect_server("dd", cfg)
+        assert not isinstance(second_attempt.value, McpRefreshContendedError)
+        assert second_attempt.value.url == url
 
     @pytest.mark.asyncio
     async def test_login_resets_the_breaker_and_scopes_the_timeout(
