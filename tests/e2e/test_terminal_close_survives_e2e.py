@@ -220,10 +220,11 @@ class _Pty:
                 self._eof = True
                 return
             if not chunk:
-                # EOF on the master: every descriptor on the slave side is
-                # closed. Recorded rather than just returned, because it is a
-                # witness to the interface's death that does not depend on the
-                # parent being scheduled to reap it — see `at_eof`.
+                # EOF on the master: the interface's terminal is closed. Recorded
+                # rather than just returned, because it is a witness to the death
+                # that does not depend on the parent being scheduled to reap it.
+                # See `at_eof` for what it certifies, what QA showed it cannot
+                # certify, and why the reap is preferred over it.
                 self._eof = True
                 return
             self.output.extend(chunk)
@@ -251,30 +252,35 @@ class _Pty:
 
     @property
     def at_eof(self) -> bool:
-        """Whether the master has read EOF — read as a fact about the interface.
+        """Whether the master has read EOF — the interface's terminal is CLOSED.
 
-        AN EOF HERE MEANS THE INTERFACE (the pty's session leader) IS GONE, and
-        that implication is what makes it a witness. Measured on this repo's
-        macOS host with a probe that forks a HOLDER inside the pty child and lets
-        it outlive the child: the master reads EOF as soon as the session leader
-        exits, and the holder's stdio shows ``(revoked)`` in ``lsof`` — the kernel
-        takes the terminal away from everyone else rather than waiting for their
-        descriptors to close. On Linux the EOF waits for every slave descriptor,
-        which is a strictly stronger condition. Either way the implication the
-        arm needs holds, and it is one-sided: an EOF cannot appear while the
-        interface is still running and painting (it holds its own stdio).
+        WHAT IT CERTIFIES, EXACTLY: that the slave side of this pty has no usable
+        stdio left. On macOS that happens as soon as the pty's session leader
+        exits — measured with a probe that forks a holder inside the pty child and
+        lets it outlive the child: the master reads EOF immediately and the
+        holder's stdio reads ``(revoked)`` in ``lsof``, i.e. the kernel takes the
+        terminal away from the other holders instead of waiting for their
+        descriptors. On Linux the EOF waits for every slave descriptor, a strictly
+        stronger condition.
 
-        Because it is one-sided it can never fake a death — the worst it can do
-        is fail to arrive, and the reap covers that. It is still checked in place
-        on the `sigkill-group` arm (`_await_pty_eof`), so a future spawn or a
-        platform whose master never EOFs fails loudly instead of silently losing
-        the second witness.
+        WHY THAT IS A DEATH WITNESS *FOR THESE ARMS*, AND ONLY AS A PREMISE. A
+        live interface paints into this terminal continuously, so it cannot be in
+        this state; and the ``pty-close`` arm cannot set this flag at all because
+        the test closes the master itself (see below). The premise is about the
+        INTERFACE rather than the pty, though, and QA round 1 falsified the
+        stronger version of it: a live child that closes its own stdio is reported
+        dead (`await_death=True, alive=True, reaped=False, at_eof=True`). No arm
+        here does that, and the reap is preferred over this witness wherever both
+        are available (`_await_interface_death` polls it first), so the residual is
+        recorded rather than papered over. `_await_pty_eof` requires this witness
+        in place on the ``sigkill-group`` arm so a platform or spawn shape that
+        stops producing it fails loudly instead of quietly reducing the arm to one
+        witness.
 
-        The ``pty-close`` arm closes the master itself, so EOF is unavailable to
-        it by construction and stays ``False``: that arm's witness is the reap
-        alone. (Deliberately not set by ``close()`` — a witness derived from the
-        test's own teardown would make that arm's precondition vacuous.)
+        (Deliberately not set by ``close()`` — a witness derived from the test's
+        own teardown would make the ``pty-close`` arm's precondition vacuous.)
         """
+        return self._eof
         return self._eof
 
     def tail(self, limit: int = 1200) -> str:
@@ -389,8 +395,14 @@ def _alive(pid: int) -> bool:
 def _reaped(pid: int) -> bool:
     """One non-blocking poll of the primary death witness: the child is reaped.
 
-    A child already reaped by anything else raises ``ChildProcessError``, which
-    is the same fact reported from the other side.
+    A child already reaped by anything else raises ``ChildProcessError``, which is
+    the same fact reported from the other side — and that is the documented
+    consequence, not an oversight: a pid that was **never** ours answers ``True``
+    here too, because "no such child" and "already collected" are one answer to
+    the question this asks. Both call sites poll a pid this process forked itself
+    (`_launch_tui`, and the unit rig's `_pty_child`), which is what keeps the two
+    readings the same in practice; a future caller holding a pid from somewhere
+    else must not use this as an existence check (`_alive` is that function).
     """
     try:
         done, _status = os.waitpid(pid, os.WNOHANG)
@@ -424,11 +436,16 @@ def _interface_state(pid: int) -> str:
     try:
         sid = str(os.getsid(pid))
     except ProcessLookupError:
-        sid = "gone"
+        # A ZOMBIE answers `_alive` yes and `getsid` with nothing: it has no
+        # session of its own any more, so an unlabelled "gone" here would read as
+        # "the process is gone" beside a `kill(pid, 0) => yes`. Labelled, the two
+        # facts stay distinguishable, and `ps` on the same line still shows the
+        # zombie state.
+        sid = "unavailable (exited, not yet reaped?)" if exists == "yes" else "gone"
     try:
         pgid = str(os.getpgid(pid))
     except ProcessLookupError:
-        pgid = "gone"
+        pgid = "unavailable (exited, not yet reaped?)" if exists == "yes" else "gone"
     try:
         result = subprocess.run(
             [
@@ -511,9 +528,15 @@ def _await_interface_death(
         # Drain first, every pass: the interface paints until it dies, and a master
         # nobody reads fills its buffer and parks the painter in write(). This loop
         # must not manufacture the state it then reports.
+        #
+        # The REAP is consulted first, deliberately. Both witnesses are polled on
+        # every pass anyway (`or` only short-circuits the second), and the reap is
+        # the one that answers "the process exited" rather than "its terminal is
+        # closed" — see `at_eof` for why those differ. Where both are available the
+        # stronger fact should be the one that returns.
         step = time.monotonic()
         terminal.drain(_DEATH_POLL_S)
-        if terminal.at_eof or _reaped(pid):
+        if _reaped(pid) or terminal.at_eof:
             return True
         attempts += 1
         if rearm_kill and attempts % _DEATH_REARM_EVERY == 0:
@@ -525,15 +548,15 @@ def _await_interface_death(
 
 
 def _await_pty_eof(terminal: _Pty, *, timeout: float) -> bool:
-    """Whether the master has read EOF — the interface is gone, by its own witness.
+    """Whether the master has read EOF — the interface's terminal is closed.
 
     Required in place, not merely argued, on the arm whose death is a bare signal.
-    `_Pty.at_eof` carries the measurement behind the claim (on macOS the kernel
-    revokes the terminal from every other holder when the session leader exits;
-    on Linux the EOF waits for every slave descriptor). What this in-place check
-    buys is that the claim stays TRUE of the real process: a spawn shape that
-    inherited this pty, or a platform whose master does not EOF the way these two
-    do, fails the arm loudly instead of quietly reducing it to one witness.
+    `_Pty.at_eof` carries what this certifies and what QA round 1 showed it does
+    NOT (a live process that closes its own stdio reads the same way). What this
+    in-place check buys is that the witness stays PRODUCIBLE on the real process:
+    a spawn shape that inherited this pty, or a platform whose master does not EOF
+    the way these two do, fails the arm loudly instead of quietly reducing it to
+    one witness.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -650,7 +673,7 @@ def test_a_closed_terminal_does_not_cancel_the_turn(headless_tui_env: Path, deat
                 rearm_kill=death == "sigkill-group",
             ), (
                 f"the interface ({death}) never died, so the runtime surviving proves "
-                f"nothing; {DEATH_S:.0f}s after the kill: "
+                f"nothing; {DEATH_S:.0f}s after the {death} shape: "
                 f"{_interface_state(interface_pid)}; pty eof={terminal.at_eof}; "
                 f"pty tail:\n{terminal.tail()}"
             )
