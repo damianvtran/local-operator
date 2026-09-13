@@ -422,19 +422,27 @@ def search_spend_section(
         share = (
             format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
         )
-        word = "search" if session.searches == 1 else "searches"
+        # The noun follows the KIND this session actually has: a read-only
+        # conversation guards its way into this row now, and `0 searches · 100%`
+        # would be both wrong-sounding and less informative than `1 read`.
+        if session.searches:
+            word = "search" if session.searches == 1 else "searches"
+            counted = f"{session.searches} {word}"
+        else:
+            word = "read" if session.reads == 1 else "reads"
+            counted = f"{session.reads} {word}"
         row(
             "This session",
             session,
             (
-                f"{session.searches} {word} · {share} of search spend",
+                f"{counted} · {share} of search spend",
                 # The compact rung keeps a referent: a bare ``· 100%`` says a
                 # proportion of nothing, which is the failure the denominator
                 # rule above already calls out. ``of search`` is shorter than
                 # ``of search spend`` and still names what the share is OF.
-                f"{session.searches} {word} · {share} of search",
-                f"{session.searches} {word} · {share} share",
-                f"{session.searches} {word}",
+                f"{counted} · {share} of search",
+                f"{counted} · {share} share",
+                counted,
             ),
         )
     # A dim sub-label rather than a section header: the rows under it PARTITION

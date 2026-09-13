@@ -467,3 +467,13 @@ async def test_the_tool_dispatches_in_the_harness_order(monkeypatch) -> None:
 
     assert result.is_error is False
     assert "Answer." in _text(result)
+
+    # ...and the LEDGER, through the same call: the money is booked as a read
+    # and not as a search. Asserted here rather than only through a direct
+    # ``execute_web_read`` call, because a direct call cannot catch a defect in
+    # the dispatch path -- which is where the original one lived.
+    totals = SEARCH_SPEND.session("s1")
+    assert totals.searches == 0
+    assert totals.reads == 1
+    assert totals.by_provider["deepseek:read"].kind == "read"
+    assert _read_cost(result)["ledger_provider"] == "deepseek:read"
