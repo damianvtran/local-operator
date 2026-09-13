@@ -1074,7 +1074,19 @@ def test_a_top_level_row_with_no_url_is_not_served_content() -> None:
     name-only or empty row beside a wall left the wall's own sentence as the
     response -- the original bug, reached through the new check.
     """
-    for row in ({"name": "x"}, {}, {"title": "x"}):
+    # Truthiness is not enough either (round-2 review MINOR-1): ``_source``
+    # strips and requires a scheme, so a blank url and a non-string url each
+    # produce zero sources while suppressing the wall.
+    for row in (
+        {"name": "x"},
+        {},
+        {"title": "x"},
+        {"url": "   "},
+        {"url": 5},
+        {"url": True},
+        {"url": {}},
+        {"url": None},
+    ):
         for key in ("sources_list", "search_results"):
             body = _sse(
                 {
