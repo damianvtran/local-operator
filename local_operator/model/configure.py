@@ -486,8 +486,12 @@ _OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
 #: the very 400 this capability exists to prevent.
 #:
 #: Anchored (unlike the boundary-marker table, which must absorb aggregator
-#: prefixes) because the capability is only ever set on the direct route.
-_DEEPSEEK_THINKING_MODELS = re.compile(r"^deepseek-(?:flash|v4)(?:-|$)")
+#: prefixes) because the capability is only ever set on the direct route. The
+#: separator accepts a dot as well as a dash: the vendor ships dotted ids
+#: (``deepseek-v4.1-flash``) beside hyphenated ones, and a family rule that
+#: silently dropped a dotted id would send it a key-less request -- the exact
+#: 400 this capability exists to prevent.
+_DEEPSEEK_THINKING_MODELS = re.compile(r"^deepseek-(?:flash|v4)(?:[.-]|$)")
 
 #: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
 #: model's provider emits at the head of the content channel, keyed on the MODEL

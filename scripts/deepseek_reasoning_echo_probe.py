@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 """Live check: DeepSeek's thinking-mode reasoning echo, through the harness.
 
-Run manually, from a checkout with the fix applied -- it spends real tokens on
-``api.deepseek.com`` and needs a working DeepSeek credential in the local auth
-store (which this reads at runtime and never prints).
+Not a unit test and not part of CI. Run manually, from a checkout with the fix
+applied -- the live half spends real tokens on ``api.deepseek.com`` and needs a
+working DeepSeek credential in the local auth store (which this reads at runtime
+and never prints).
 
-    .venv/bin/python docs/evidence/deepseek-reasoning-echo/reasoning_echo_probe.py
-    .venv/bin/python docs/evidence/deepseek-reasoning-echo/reasoning_echo_probe.py \
+    .venv/bin/python scripts/deepseek_reasoning_echo_probe.py --digest
+    .venv/bin/python scripts/deepseek_reasoning_echo_probe.py
+    .venv/bin/python scripts/deepseek_reasoning_echo_probe.py \
         --session ~/.local-operator/sessions/9daa47ece7ad
 
 Two shapes are checked, each TWICE, through ``OpenAICompatClient._build_body``
@@ -20,10 +22,22 @@ harness's own rather than a hand-written approximation:
   the ways users meet this 400.
 
 The pair is the echo capability turned OFF and ON, otherwise identical. OFF is
-what the builder produced before this change (pinned byte-for-byte by
-``tests/unit/providers/test_deepseek.py``); ON is this branch. Expected: 400
-then 200, with every assistant turn carrying a non-blank ``reasoning_content``
-in the second body.
+what the builder produced before this change; ON is this branch. Expected: the
+OFF body refused, the ON body accepted with nothing left blank.
+
+The shape that reproduces the refusal is a request built MID TOOL LOOP -- one
+that ends on a tool result, which is where the app builds the request that dies.
+Requests that omit the echo are accepted in other shapes (adding a trailing user
+turn, or tool-call ids copied from a reply the endpoint itself generated,
+answered 200 where the same body 400ed), so the server-side rule is not fully
+characterised and this probe does not claim to characterise it: it checks the
+shape that fails and that the fill is a measured-safe superset on both. See
+``ModelSpec.requires_reasoning_echo`` for the measurements in full.
+
+``--digest`` prints the two bodies' sha256 and blank-turn counts WITHOUT any
+network call, which is the reproducible half of the byte-identity claim: run it
+under ``PYTHONPATH`` against a clean ``origin/main`` worktree and against this
+branch and compare, to show the capability-off body is what ``main`` builds.
 
 Exit status is 0 when every expectation holds, 1 otherwise, so the run can be
 quoted as evidence rather than eyeballed.
@@ -34,14 +48,23 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 
-from local_operator.harness.types import ChatRequest, Message, TextContent, ToolCall
+from local_operator.harness.types import (
+    AgentTool,
+    ChatRequest,
+    Message,
+    MessageRole,
+    TextContent,
+    ToolCall,
+)
 from local_operator.model.configure import build_model_spec
 from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.replay import REASONING_ECHO_PLACEHOLDER
@@ -74,7 +97,7 @@ def text_of(content: object) -> str:
     return ""
 
 
-def harness_tools() -> list:
+def harness_tools() -> list[AgentTool]:
     """The runtime's own tool schemas, not a stand-in.
 
     They are load-bearing rather than decorative: the refusal is not reproduced
@@ -160,11 +183,14 @@ def session_history(session: Path) -> tuple[list[Message], list[str], str | None
                 )
             )
         else:
-            messages.append(Message(role=role, content=[TextContent(text=text)]))
+            # Any other role a transcript carries. Cast rather than coerced: the
+            # reconstruction must replay what the row says, not what this script
+            # would have written.
+            messages.append(Message(role=cast(MessageRole, role), content=[TextContent(text=text)]))
     return messages, system, scope
 
 
-def report(label: str, status: int, body: dict, detail: str) -> bool:
+def report(label: str, status: int, detail: str) -> bool:
     print(f"{status}  {label}  {detail}")
     return status < 400
 
@@ -175,7 +201,7 @@ async def check(
     system: list[str],
     scope: str | None,
     key: str,
-    tools: list,
+    tools: list[AgentTool],
 ) -> bool:
     spec = build_model_spec("deepseek", "deepseek-flash")
     client = OpenAICompatClient(DEEPSEEK_URL)
@@ -183,6 +209,10 @@ async def check(
     ok = True
 
     print(f"--- {name} ---")
+    # Both bodies are BUILT first and posted second, so the ON body's fill count
+    # can be compared against the OFF body's blank count -- the whole claim is
+    # that the second is exactly the first plus the echo.
+    built: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
     for label, model in (
         ("echo OFF (pre-fix body)", spec_without_echo),
         ("echo ON (this fix)", spec),
@@ -197,10 +227,12 @@ async def check(
             scope=scope,
         )
         entries = [m for m in body["messages"] if m.get("role") == "assistant"]
+        built.append((label, body, entries))
+    blanks_before = sum(1 for m in built[0][2] if not str(m.get("reasoning_content") or "").strip())
+
+    for label, body, entries in built:
         blank = [m for m in entries if not str(m.get("reasoning_content") or "").strip()]
         filled = [m for m in entries if m.get("reasoning_content") == REASONING_ECHO_PLACEHOLDER]
-        if label.startswith("echo OFF"):
-            blanks_before = len(blank)
         async with httpx.AsyncClient(timeout=300) as http:
             # Posted VERBATIM: the body carries ``stream: true`` and
             # ``stream_options.include_usage``, as the runtime sends it, and
@@ -213,12 +245,7 @@ async def check(
         detail = f"messages={len(body['messages'])} assistant={len(entries)} blank={len(blank)}"
         if "echo ON" in label:
             detail += f" placeholders={len(filled)}"
-        stopped = report(
-            label,
-            response.status_code,
-            body,
-            detail,
-        )
+        stopped = report(label, response.status_code, detail)
         if response.status_code >= 400:
             message = response.json().get("error", {}).get("message", "")
             print(f"       {message[:120]}")
@@ -232,10 +259,56 @@ async def check(
     return ok
 
 
+def digest(name: str, messages: list[Message], system: list[str], scope: str | None) -> None:
+    """The two bodies' identity and shape, with no network and no credential.
+
+    This is the reproducible half of the byte-identity claim: the OFF body is
+    what the pre-fix builder produces, so running this under ``PYTHONPATH``
+    against a clean ``origin/main`` worktree and against this branch must print
+    the same sha256 for the same session.
+    """
+    client = OpenAICompatClient(DEEPSEEK_URL)
+    spec = build_model_spec("deepseek", "deepseek-flash")
+    print(f"--- {name} ---")
+    for label, model in (
+        ("echo OFF", spec.model_copy(update={"requires_reasoning_echo": False})),
+        ("echo ON", spec),
+    ):
+        body = client._build_body(
+            ChatRequest(
+                model=model,
+                system_blocks=list(system),
+                messages=list(messages),
+                tools=harness_tools(),
+            ),
+            scope=scope,
+        )
+        entries = [m for m in body["messages"] if m.get("role") == "assistant"]
+        blank = sum(1 for m in entries if not str(m.get("reasoning_content") or "").strip())
+        blob = json.dumps(body, sort_keys=True).encode()
+        print(
+            f"{label}  sha256={hashlib.sha256(blob).hexdigest()}  "
+            f"messages={len(body['messages'])} assistant={len(entries)} blank={blank}"
+        )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", type=Path, default=None, help="a transcript directory")
+    parser.add_argument(
+        "--digest",
+        action="store_true",
+        help="print the two bodies' sha256 and stop, with no network call",
+    )
     args = parser.parse_args()
+
+    if args.digest:
+        digest("minimal synthetic tool loop", synthetic_history(), ["You are terse."], None)
+        if args.session is not None:
+            messages, system, scope = session_history(args.session)
+            digest(f"real session {args.session.name}", messages, system, scope)
+        return
+
     key = real_key()
 
     results = [
