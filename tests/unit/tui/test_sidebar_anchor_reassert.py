@@ -40,6 +40,18 @@ WHAT EACH CASE PINS, in the order the failure demands:
   switch spends 0, this fixture post-fix spends 8, and the pre-fix loop spends
   hundreds and never commits at all.
 
+WHAT THIS RIG DOES NOT PIN, MEASURED: it pins the CONVERGENCE PROPERTY, not the
+layer that produces the bad geometry. Neutering the commit's reveal-time restore
+(`self.call_after_refresh(restore_revealed_anchor)` -> `pass`, then restored)
+leaves this rig GREEN — 2 passed — because the synchronous re-assert alone lands
+the reader on the anchor. So do not read a pass here as covering that line: the
+reveal-time restore's necessity is guarded by the e2e `wrapped` case
+(`tests/e2e/test_sidebar_display_e2e.py`), which is the slower witness, and a
+case that pins the layer would have to make the re-assert unable to run. Both
+layers are wanted — the after-refresh restore keeps the healthy switch's frame
+count at 0 — but only one of them is pinned here, and saying so is cheaper than
+letting the next reader believe otherwise.
+
 Run it with ``env -u NO_COLOR TERM=xterm-256color`` like the rest of the TUI
 suite; the fixture below unsets every inherited ``CMUX_*`` variable, because an
 inherited ``CMUX_WORKSPACE_ID`` has previously let a headless run rename the

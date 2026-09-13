@@ -110,6 +110,18 @@ LANDING_S = 90.0
 #: the kill, so the failure message is built to say which.
 DEATH_S = 30.0
 
+#: One pass of the death loop: drain, poll, re-arm. A CADENCE rather than a sleep,
+#: because the drain is what makes the EOF witness reachable and is also what stops
+#: this loop from parking the painter in a full pty buffer — but a drain on a master
+#: this test already closed (the `pty-close` arm) returns instantly, so the deadline
+#: has to be paced by wall time as well. Without that the loop would spin `waitpid`
+#: (and the re-arm below) thousands of times a second for the whole backstop.
+_DEATH_POLL_S = 0.2
+
+#: Passes between SIGKILL re-arms, i.e. ~5 s at `_DEATH_POLL_S`. Only the arm whose
+#: death shape IS the kill re-arms; see `_await_interface_death`.
+_DEATH_REARM_EVERY = 25
+
 #: How long the ``ctrl-d`` arm keeps asking the interface to quit. MEASURED, and
 #: the reason this is a retry rather than a single keystroke: a Ctrl-D written
 #: the instant the runtime first reports ``busy`` did NOT quit the app, while the
@@ -241,15 +253,22 @@ class _Pty:
     def at_eof(self) -> bool:
         """Whether the master has read EOF — read as a fact about the interface.
 
-        This is only a witness to the interface's death because the interface is
-        the **only** holder of the slave side of this pty. That is a property of
-        the product, not an assumption: every helper the TUI starts is detached
-        with its stdio redirected (`proc.spawn_detached`: DEVNULL; the session
-        runtime: a log file, ``runtime.launch._spawn_runtime``), and the console
-        script this pty execs is a Python entry point, so it never leaves a
-        shell holding the descriptor. Nothing else can keep the slave open past
-        the interface's death, which is why an EOF here proves the interface is
-        gone.
+        AN EOF HERE MEANS THE INTERFACE (the pty's session leader) IS GONE, and
+        that implication is what makes it a witness. Measured on this repo's
+        macOS host with a probe that forks a HOLDER inside the pty child and lets
+        it outlive the child: the master reads EOF as soon as the session leader
+        exits, and the holder's stdio shows ``(revoked)`` in ``lsof`` — the kernel
+        takes the terminal away from everyone else rather than waiting for their
+        descriptors to close. On Linux the EOF waits for every slave descriptor,
+        which is a strictly stronger condition. Either way the implication the
+        arm needs holds, and it is one-sided: an EOF cannot appear while the
+        interface is still running and painting (it holds its own stdio).
+
+        Because it is one-sided it can never fake a death — the worst it can do
+        is fail to arrive, and the reap covers that. It is still checked in place
+        on the `sigkill-group` arm (`_await_pty_eof`), so a future spawn or a
+        platform whose master never EOFs fails loudly instead of silently losing
+        the second witness.
 
         The ``pty-close`` arm closes the master itself, so EOF is unavailable to
         it by construction and stays ``False``: that arm's witness is the reap
@@ -385,20 +404,37 @@ def _interface_state(pid: int) -> str:
 
     ``ps`` and not a ``/proc`` read: macOS has no ``/proc``, and macOS is the
     leg this exists for. The fields are chosen to decide between the two
-    readings a bare "it never died" cannot separate: `ppid`/`pgid`/`sid` say
-    whether the pid is still the leader of the group the kill was addressed to,
-    and `state`/`wchan` say whether it is merely un-reaped or parked in a wait
-    no signal can cut short. `etime` is included because "how long has this
+    readings a bare "it never died" cannot separate: the group and session say
+    whether the pid is still the leader of what the kill was addressed to, and
+    ``state``/``wchan`` say whether it is merely un-reaped or parked in a wait
+    no signal can cut short. ``etime`` is included because "how long has this
     process existed" is what turns a pid that is still our child into a pid that
     cannot be (a reused pid at the same address would show a young etime).
+
+    GROUP AND SESSION COME FROM PYTHON, NOT FROM ``ps``. Measured on macOS:
+    ``ps -o sid=`` is not a valid keyword there and ``ps`` fails the WHOLE
+    invocation when any keyword is unknown ("no valid keywords"), so asking for
+    the session id the obvious way left this diagnostic empty on the one
+    platform it exists for — and an empty diagnostic is indistinguishable from
+    one that ran and found nothing. ``os.getsid``/``os.getpgid`` answer the same
+    question portably, and the remaining ``ps`` keywords (``state``, ``wchan``,
+    ``etime``, ``command``) are valid on macOS and Linux alike.
     """
     exists = "yes" if _alive(pid) else "no"
+    try:
+        sid = str(os.getsid(pid))
+    except ProcessLookupError:
+        sid = "gone"
+    try:
+        pgid = str(os.getpgid(pid))
+    except ProcessLookupError:
+        pgid = "gone"
     try:
         result = subprocess.run(
             [
                 "ps",
                 "-o",
-                "pid=,ppid=,pgid=,sid=,state=,wchan=,etime=,command=",
+                "pid=,ppid=,state=,wchan=,etime=,command=",
                 "-p",
                 str(pid),
             ],
@@ -407,11 +443,11 @@ def _interface_state(pid: int) -> str:
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
-        return f"kill(pid, 0) => {exists}; ps unavailable ({exc})"
+        return f"kill(pid, 0) => {exists}; sid={sid}; pgid={pgid}; ps unavailable ({exc})"
     line = result.stdout.strip()
     if not line:
-        return f"kill(pid, 0) => {exists}; ps has no such process"
-    return f"kill(pid, 0) => {exists}; ps: {line}"
+        return f"kill(pid, 0) => {exists}; sid={sid}; pgid={pgid}; ps has no such process"
+    return f"kill(pid, 0) => {exists}; sid={sid}; pgid={pgid}; ps: {line}"
 
 
 def _kill_interface(pid: int) -> None:
@@ -431,7 +467,9 @@ def _kill_interface(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-def _await_interface_death(terminal: _Pty, pid: int, *, timeout: float) -> bool:
+def _await_interface_death(
+    terminal: _Pty, pid: int, *, timeout: float, rearm_kill: bool = False
+) -> bool:
     """Whether the pty child has actually died — the death shape's precondition.
 
     Without this, "the runtime survived" would be consistent with "nothing died
@@ -442,41 +480,67 @@ def _await_interface_death(terminal: _Pty, pid: int, *, timeout: float) -> bool:
     * the pty master reads **EOF** (``_Pty.at_eof``, which carries the argument
       for why only the interface's death can produce it).
 
-    WHY TWO, AND WHY THE KILL IS RE-ARMED. The macOS leg of this repo's CI
-    (``tui-e2e``) failed this arm in 7 of 8 recent failing runs across `main`
-    and two open branches, always as "the interface (sigkill-group) never died"
-    and always only on macOS (ubuntu passed the same commit). The single
-    witness and the single kill attempt were both defects a harness can own,
-    and neither could be ruled out from the log:
+    WHY TWO. The macOS leg of this repo's CI (``tui-e2e``) failed this arm in 7 of
+    8 recent failing runs across `main` and two open branches, always as "the
+    interface (sigkill-group) never died" and always only on macOS (ubuntu passed
+    the same commit). One witness was not enough to tell the thing under test from
+    a harness that could not see it, and the loop **did not drain the master** —
+    so the painter could sit parked in a full pty buffer while the loop waited,
+    and the old helper's own docstring claimed a drain that this path never did.
+    Draining is also what makes the second witness reachable at all, since only a
+    read can see an EOF.
 
-    * the loop **did not drain the master**, so the painter could be parked in a
-      full pty buffer while the loop waited — and the old helper's own docstring
-      claimed the drain happened on this path, which it did not. It also made
-      the EOF witness unobservable, since only a read can see it.
-    * a ``SIGKILL`` cannot be lost on a healthy kernel, but a single attempt
-      addressed only to the group is one delivery mechanism where two are free,
-      and every shape measured for ``DEATH_S`` on macOS reaps in well under a
-      second.
+    WHY THE KILL IS RE-ARMED, AND ONLY FOR ``rearm_kill``. A ``SIGKILL`` cannot be
+    lost on a healthy kernel, but a single attempt addressed only to the group is
+    one delivery mechanism where two are free, and every shape measured for
+    ``DEATH_S`` on macOS reaps in well under a second. That argument applies to
+    the arm whose death shape IS the kill. It must NOT apply to the other two:
+    ``ctrl-d`` claims the interface died of its own polite exit and ``pty-close``
+    claims it died of the kernel's hangup, so re-arming a SIGKILL under either
+    would let a harness kill satisfy the precondition and silently retire the
+    shape the arm exists to exercise — the same vacuity, moved. Hence the flag,
+    passed only by ``sigkill-group``.
 
-    So the kill is re-armed and re-addressed here rather than assumed, and a
-    timeout reports `_interface_state` — the child's own kernel state — instead
-    of leaving the next reader to re-derive whether an interface survived the
-    kill or the harness could not observe that it did.
+    A timeout reports `_interface_state` — the child's own kernel state — instead
+    of leaving the next reader to re-derive whether an interface survived the kill
+    or the harness could not observe that it did.
     """
     deadline = time.monotonic() + timeout
     attempts = 0
     while time.monotonic() < deadline:
-        # Drain first, every pass: the interface paints until it dies, and a
-        # master nobody reads fills its buffer and parks the painter in write().
-        # This loop must not manufacture the state it then reports, and this is
-        # also what makes the EOF witness above reachable at all.
-        terminal.drain(0.2)
+        # Drain first, every pass: the interface paints until it dies, and a master
+        # nobody reads fills its buffer and parks the painter in write(). This loop
+        # must not manufacture the state it then reports.
+        step = time.monotonic()
+        terminal.drain(_DEATH_POLL_S)
         if terminal.at_eof or _reaped(pid):
             return True
         attempts += 1
-        if attempts % 25 == 0:  # ~5 s at the 0.2 s drain above
+        if rearm_kill and attempts % _DEATH_REARM_EVERY == 0:
             _kill_interface(pid)
+        remaining = _DEATH_POLL_S - (time.monotonic() - step)
+        if remaining > 0:
+            time.sleep(remaining)
     return False
+
+
+def _await_pty_eof(terminal: _Pty, *, timeout: float) -> bool:
+    """Whether the master has read EOF — the interface is gone, by its own witness.
+
+    Required in place, not merely argued, on the arm whose death is a bare signal.
+    `_Pty.at_eof` carries the measurement behind the claim (on macOS the kernel
+    revokes the terminal from every other holder when the session leader exits;
+    on Linux the EOF waits for every slave descriptor). What this in-place check
+    buys is that the claim stays TRUE of the real process: a spawn shape that
+    inherited this pty, or a platform whose master does not EOF the way these two
+    do, fails the arm loudly instead of quietly reducing it to one witness.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if terminal.at_eof:
+            return True
+        terminal.drain(_DEATH_POLL_S)
+    return terminal.at_eof
 
 
 def _quit_via_key(terminal: _Pty, pid: int) -> None:
@@ -579,12 +643,26 @@ def test_a_closed_terminal_does_not_cancel_the_turn(headless_tui_env: Path, deat
                 terminal.close()
             else:
                 _kill_interface(interface_pid)
-            assert _await_interface_death(terminal, interface_pid, timeout=DEATH_S), (
+            assert _await_interface_death(
+                terminal,
+                interface_pid,
+                timeout=DEATH_S,
+                rearm_kill=death == "sigkill-group",
+            ), (
                 f"the interface ({death}) never died, so the runtime surviving proves "
                 f"nothing; {DEATH_S:.0f}s after the kill: "
                 f"{_interface_state(interface_pid)}; pty eof={terminal.at_eof}; "
                 f"pty tail:\n{terminal.tail()}"
             )
+            if death == "sigkill-group":
+                # The bare-signal arm is the one whose second witness rests on a
+                # product-level premise, so it is checked here rather than trusted.
+                assert _await_pty_eof(terminal, timeout=DEATH_S), (
+                    f"the interface ({death}) died but the pty master never read EOF, "
+                    f"so something else still holds the slave and this file's EOF "
+                    f"witness does not mean what it says; "
+                    f"{_interface_state(interface_pid)}"
+                )
 
             # (1) Still alive when the interface died...
             assert _alive(runtime_pid), (
