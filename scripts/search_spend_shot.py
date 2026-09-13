@@ -37,9 +37,24 @@ from tests.unit.tui.test_app_pilot import _factory  # noqa: E402
 from tests.unit.tui.test_slash_echo import _submit  # noqa: E402
 
 
-def seed_search_spend(session_id: str) -> None:
-    """Search spend in the four shapes the section must render differently."""
+def seed_search_spend(session_id: str, scenario: str = "mixed") -> None:
+    """Search spend in the shapes the section must render differently.
+
+    ``read-only`` is its own scenario because it is the case the section used to
+    vanish for: reads carry money and no search count, so a guard on searches
+    drew nothing while the status band kept the figure.
+    """
     SEARCH_SPEND.reset()
+    if scenario == "read-only":
+        SEARCH_SPEND.record(
+            session_id,
+            "deepseek:read",
+            SearchCost(
+                usd=0.002, basis="tokens at list price (estimate), off-peak", priced_from_usage=True
+            ),
+            kind="read",
+        )
+        return
     # Priced per search (a keyed paid engine).
     SEARCH_SPEND.record(
         session_id, "brave", SearchCost(usd=0.004, basis="published per-search rate")
@@ -81,12 +96,13 @@ async def main() -> None:
     cols, rows = size_arg.split("x")
     size = (int(cols), int(rows))
 
+    scenario = sys.argv[3] if len(sys.argv) > 3 else "mixed"
     session = DiagnosticSession()
     # A conversation-like name: a fixture titled after the surface under test
     # reads as a section heading in the frames it produces.
     session.set_conversation_name("Investigate retrieval costs")
     seed_populated(session.session_id)
-    seed_search_spend(session.session_id)
+    seed_search_spend(session.session_id, scenario)
 
     app = OperatorApp(lambda: _factory(session))
     widths = [(int(cols), int(rows)), (60, 24), (80, 24)]

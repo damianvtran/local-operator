@@ -463,3 +463,36 @@ def test_a_reads_known_price_is_rendered_not_hidden() -> None:
     partial = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
     assert partial.cost_is_partial is True
     SEARCH_SPEND.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_conversation_still_gets_its_section(tmp_path, monkeypatch) -> None:
+    """Read-only spend is spend: the section must not vanish while the band shows it.
+
+    The guard was ``snapshot.searches``, so a conversation whose only retrieval
+    money came from reads drew no Search spend heading at all on either panel --
+    while the band kept the figure, leaving the user with a number and nowhere to
+    read it.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record(
+        "sess",
+        "deepseek:read",
+        SearchCost(usd=0.0020, basis="token estimate", priced_from_usage=True),
+        kind="read",
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(110, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    assert "Search spend" in text
+    assert "1 read" in text
+    assert "0 searches" not in text
