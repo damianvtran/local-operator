@@ -121,8 +121,18 @@ say. The copy is `network: <what the exchange did>` (`cannot reach <host>`,
 `cannot resolve <host>`, `TLS handshake with <host> failed`, `no response from
 <host> (timed out)`, `the connection to <host> closed`), and when **every**
 failed server in a round is one of these the startup toast says
-`failed (network): a, b, c` once instead of naming the servers as unrelated
-faults. Why: the transport is the one layer a single local fault takes out for
+`network: a, b, c` once instead of naming the servers as unrelated faults — the
+same `network: ` spelling the durable notice and the `/mcp` row print, so one
+marker reads the same on all three surfaces. At a card width where the names
+cannot ride beside that marker the toast reports the count (`network: 3
+servers`) rather than a truncated name: the marker is the signal, and the names
+are carried whole by the notice and by `/mcp`. The single-failure card carries
+the phrase alone (`network: cannot reach <host>`), because the phrase already
+names the server by host and a `failed: <name> —` head would say it twice; a
+**hostless** stdio failure keeps that head, since nothing else in its line
+identifies the server. The durable notice's closing signpost is budgeted the
+same way: it is shed whole to `— /mcp` when the column cannot take
+`— /mcp for details`, never split across a fold. Why: the transport is the one layer a single local fault takes out for
 **every remote server at once**, and the operator's own boot screen — 10 of 11
 servers "failed" with `Request 'initialize' timed out` and nothing saying the
 machine's connection was the problem — was chased through MCP config and OAuth

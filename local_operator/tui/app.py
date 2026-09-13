@@ -46,6 +46,7 @@ from typing import (
 )
 from weakref import ReferenceType, ref
 
+from rich.cells import cell_len
 from rich.console import Group
 from rich.padding import Padding
 from rich.style import Style
@@ -2502,6 +2503,40 @@ MCP_STARTUP_TOAST_OWNER = object()
 #: truncate", spelled as a width so the existing `format_mcp_startup` path is
 #: reused rather than a second renderer that could drift from it.
 _MCP_ANNOUNCE_KEY_CELLS = 10**6
+
+#: The durable failure notice's signpost, in the order the budget tries them.
+#:
+#: WHY there are two: at boot the notice is not painted at the transcript's
+#: width — it is pinned to the boot CARD's column (``boot_card_width``, 75 cells
+#: at a 100-column terminal, minus the block's 2-cell spine and the 2-cell glyph
+#: field). The full form costs 18 cells on top of the sentence, so the longer
+#: ``network: …`` copy pushed it over the edge, the block wrapped, and the
+#: pointer SPLIT across the fold (``… — /mcp`` / ``for details``, and ``… — /mcp
+#: for`` / ``details`` for a longer name) — the D5 orphaned pointer, reintroduced
+#: by a longer sentence rather than by a second dash (design review D1-1). The
+#: short form is the shed one: it keeps the signpost whole and still fits.
+_MCP_NOTICE_POINTER_FULL = " — /mcp for details"
+_MCP_NOTICE_POINTER_SHORT = " — /mcp"
+
+
+def _drop_trailing_parenthetical(text: str) -> str:
+    """``no response from h (timed out)`` → ``no response from h``.
+
+    The ONLY droppable piece of a transport phrase, and it is droppable because
+    it is the classifier's own detail token rather than part of the claim: the
+    sentence already says no response arrived, and the parenthetical only names
+    which of the ways it did not. Used as the notice's third rung, where the
+    alternative is losing the signpost or wrapping the sentence (design review
+    D1-1). Deliberately narrow — a trailing group only, and nothing is removed
+    when the text does not end in one.
+    """
+    if not text.endswith(")"):
+        return text
+    opener = text.rfind("(")
+    if opener <= 0:
+        return text
+    return text[:opener].rstrip()
+
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
 #: :data:`COMPOSER_PASTE_NOTICE`.
@@ -15431,9 +15466,73 @@ class OperatorApp(App[None]):
             # is what orphaned "— /mcp for details" onto a row of its own (design
             # review D5). The pointer is for failures whose text is a diagnostic
             # rather than an instruction; when the text is already the command,
-            # the reader has the answer.
-            pointer = "" if "/mcp" in str(error) else " — /mcp for details"
-            self._system_notice(f"MCP {name} failed: {error}{pointer}", "error")
+            # the reader has the answer. WHICH form it takes is now a budget
+            # question as well — see :meth:`_mcp_notice_line`.
+            self._system_notice(self._mcp_notice_line(name, str(error)), "error")
+
+    def _mcp_notice_line(self, name: str, error: str) -> str:
+        """``MCP <name> failed: <error>`` plus its signpost, fitted to the column.
+
+        The pointer is the standing answer to "where do I read this properly?"
+        and the one part of the line that must never be SPLIT: a wrapped
+        ``— /mcp`` / ``for details`` still points at ``/mcp`` but reads as a
+        fragment, and the fold is what decides which half survives. So the line
+        is composed against the column it will be painted in and the whole of it
+        is chosen, in this order:
+
+        1. the full signpost, when the sentence leaves room for it;
+        2. the short one (``— /mcp``), shed whole rather than split;
+        3. the classifier's trailing parenthetical — ``(timed out)`` — dropped so
+           the short signpost fits: it is the DETAIL TOKEN, not the statement
+           (``no response from <host>`` is already the whole claim), and the
+           signpost is what the user needs next;
+        4. no signpost at all, when even that would not fit beside the sentence —
+           the sentence is what the user came for, and an orphaned half-pointer
+           is worse than none.
+
+        Past rung 4 the sentence WRAPS, which is what the notice has always done
+        at widths too narrow for it, and the hanging indent keeps the
+        continuation under the text rather than under the spine. It is
+        deliberately not clamped: a clamp at these widths cuts
+        ``cannot reach <host>`` down to ``cannot…``, losing the one thing the
+        sentence carries that ``/mcp`` does not repeat verbatim (measured at a
+        44-column terminal, which is why this rung does not exist).
+
+        The column is the BOOT CARD's (``boot_card_width``), not the live one,
+        and that is deliberate on both counts. While the card is up the notice is
+        pinned to that column, so it is the real budget — and the card standing
+        down only WIDENS the block (``1fr``), so a line composed to fit the
+        column CANNOT re-wrap when it does. Composing against the live width
+        instead would leave the boot case free to wrap whenever the boot class
+        has not landed yet, and the re-wrap at stand-down is the visible motion
+        design round 1 measured (``x=12`` → ``x=3`` with the row count changing).
+        Measured at a 100-column terminal: ``boot_card_width(98) = 75`` → a
+        69-cell body budget, which the ``cannot reach`` sentence fits with the
+        short signpost at 65 cells and the longest one (``no response from
+        <host> (timed out)``) fits at 65 only after the parenthetical is dropped.
+        """
+        from rich.cells import cell_len
+
+        head = f"MCP {name} failed: {error}"
+        if "/mcp" in error:
+            # The failure text is already the command (the auth family), so the
+            # signpost would double the dash and spend cells saying it twice.
+            return head
+        budget = self._mcp_notice_budget()
+        for pointer in (_MCP_NOTICE_POINTER_FULL, _MCP_NOTICE_POINTER_SHORT):
+            if cell_len(head + pointer) <= budget:
+                return head + pointer
+        trimmed_error = _drop_trailing_parenthetical(error)
+        if trimmed_error != error:
+            trimmed = f"MCP {name} failed: {trimmed_error}"
+            if cell_len(trimmed + _MCP_NOTICE_POINTER_SHORT) <= budget:
+                return trimmed + _MCP_NOTICE_POINTER_SHORT
+        return head
+
+    def _mcp_notice_budget(self) -> int:
+        """Cells a durable MCP notice's body is given in the boot column."""
+        box = max(0, self.size.width - SCREEN_INSET)
+        return NoticeBlock.body_budget(boot_card_width(box))
 
     def on_toast_evicted(self, message: Toast.Evicted) -> None:
         """Un-record the MCP announce when its card was thrown away unread.
@@ -39853,6 +39952,83 @@ def _partial_text(partial_result) -> str:
     return ""
 
 
+class _TreeRow(Text):
+    """One tree row — ``branch + name + detail`` — with a HANGING detail column.
+
+    WHY a row that paints itself rather than a plain ``Text``: a row whose detail
+    pushes it past the block's width folds at column ZERO, so the continuation
+    starts in the same column as the tree glyphs and reads as a SIBLING entry
+    rather than as the tail of the row above. Measured on ``/mcp``: at 66-71
+    columns the longer ``network: cannot reach <host>`` copy pushed the row over
+    the edge and ``linear.example.com`` painted as another server of the list,
+    where the base's shorter error text fitted the same row (design review
+    D1-4).
+
+    WHY a ``Text`` SUBCLASS rather than a standalone renderable: every existing
+    reader of these listings treats a row as text — the copy path and the
+    transcript's walkers read ``.plain``, and the app's own test helpers flatten
+    ``Text`` and ignore anything else. A bare renderable is invisible to all of
+    them (three listing tests went blank on the first cut of this), so the class
+    keeps ``.plain`` as the UNWRAPPED row and only the console render adds the
+    fold. That is also the house alignment convention: the ``/help`` key table
+    hangs its wrapped line under the first description, and a row that fits is
+    byte-for-byte what it was.
+    """
+
+    def __init__(
+        self,
+        branch: str,
+        name: str,
+        detail: str,
+        *,
+        dim: Style,
+        name_style: Style,
+        detail_style: Style,
+    ) -> None:
+        super().__init__()
+        self._branch = branch
+        self._name = name
+        self._detail = detail
+        self._dim = dim
+        self._name_style = name_style
+        self._detail_style = detail_style
+        self.append_text(self._head())
+        if detail:
+            self.append("  " + detail, style=detail_style)
+
+    def _head(self) -> Text:
+        """The row up to the detail column — the glyph branch and the name.
+
+        ONE composition for both the flat ``.plain`` the class inherits and the
+        console render below, so a change to the head cannot reach one and miss
+        the other.
+        """
+        head = Text()
+        head.append(self._branch, style=self._dim)
+        head.append(self._name, style=self._name_style)
+        return head
+
+    def __rich_console__(self, console: Any, options: Any) -> Any:
+        row = self._head()
+        if not self._detail:
+            yield row
+            return
+        # The detail's own column: the glyph branch, the name, and the two
+        # spaces that separate them from it. Continuations hang there.
+        column = cell_len(self._branch) + cell_len(self._name)
+        room = max(1, options.max_width - column - 2)
+        # ``Text.wrap`` keeps the spans and folds on words.
+        wrapped = Text(self._detail, style=self._detail_style).wrap(console, room)
+        for index, line in enumerate(wrapped):
+            if index:
+                row.append("\n")
+                row.append(" " * (column + 2), style=self._dim)
+            else:
+                row.append("  ", style=self._detail_style)
+            row.append_text(line)
+        yield row
+
+
 def _tree_listing(
     items: list[tuple[str, str]], caption: str, *, detail_token: str = "dim"
 ) -> Group:
@@ -39875,6 +40051,10 @@ def _tree_listing(
     receipt, and a listing that can silently omit its caption is not one. The
     same reasoning as ``SlashCommand.echo``'s pinned policy table — a new call
     site has to state its answer.
+
+    Rows come from :class:`_TreeRow` — a ``Text`` that hangs its own fold — so a
+    row that overflows keeps its tree legible: the detail wraps under its own
+    column instead of at column zero (design review D1-4).
     """
     if not items:
         return Group()
@@ -39885,12 +40065,16 @@ def _tree_listing(
     last_index = len(items) - 1
     for index, (name, detail) in enumerate(items):
         branch = "└─ " if index == last_index else "├─ "
-        line = Text()
-        line.append(branch, style=dim)
-        line.append(name, style=name_style)
-        if detail:
-            line.append("  " + detail, style=detail_style)
-        lines.append(line)
+        lines.append(
+            _TreeRow(
+                branch,
+                name,
+                detail,
+                dim=dim,
+                name_style=name_style,
+                detail_style=detail_style,
+            )
+        )
     return Group(*lines)
 
 

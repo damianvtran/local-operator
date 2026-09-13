@@ -956,14 +956,18 @@ async def test_the_announce_keeps_its_semantic_lamp() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("columns", [100, 80, 70, 60, 50, 44, 40])
-async def test_the_notice_pointer_wraps_rather_than_truncating(columns: int) -> None:
-    """The pointer is only worth adding if the user can actually read it.
+async def test_the_notice_pointer_is_never_split_at_any_width(columns: int) -> None:
+    """The pointer is only worth adding if the user can read it WHOLE.
 
     The toast was excluded from U4 precisely because it truncates; the notice
-    was chosen because it WRAPS. That distinction is the whole justification
-    for where the text went, so it is asserted against the painted cell grid
-    at the widths the band was driven at \u2014 the rendered frame, not the block's
-    source string, because only the frame shows what wrapping did to it.
+    was chosen not for wrapping but for being able to hold the signpost at all.
+    Design round 1 (D1-1) then measured what wrapping actually did to the longer
+    ``network: …`` sentence: the fold SPLIT the pointer (``— /mcp`` / ``for
+    details``) and the row count changed again when the boot card stood down. The
+    contract is therefore that the pointer is never the thing the fold decides
+    about — it is either whole, or shed whole to its short form — and this asserts
+    it against the painted cell grid, because only the frame shows what wrapping
+    did.
     """
     session = _session(_outcome(**_SLACK_DOWN), session_id="a")
     app = OperatorApp(lambda: _factory(session))
@@ -976,12 +980,28 @@ async def test_the_notice_pointer_wraps_rather_than_truncating(columns: int) -> 
             )
 
         assert await _until(pilot, lambda: "MCP slack" in _grid())
-        lines = [line.strip() for line in _grid().splitlines() if line.strip()]
-        start = next(index for index, line in enumerate(lines) if "MCP slack" in line)
-        # Three rows is the deepest this wraps at 40 columns, the narrowest
-        # width the status band itself was driven at.
-        painted = " ".join(lines[start : start + 3])
-        assert "/mcp for details" in painted, f"the pointer was clipped at {columns}"
+        lines = [line.rstrip() for line in _grid().splitlines() if line.strip()]
+        # The D1-1 shape, asserted on the frame: the pointer's tail orphaned onto
+        # a row of its own. Wherever the tail appears, the whole signpost is on
+        # that row with it.
+        for line in lines:
+            stripped = line.strip()
+            # A split pointer paints its tail on a row of its own, in the column
+            # where a continuation would start: either ``for details``, or the
+            # ``details`` half of ``— /mcp for`` / ``details``.
+            assert stripped != "details" and not stripped.startswith(
+                "for details"
+            ), f"the pointer was split at {columns}: {line!r}"
+            if "for details" in line:
+                assert line.endswith(
+                    "\u2014 /mcp for details"
+                ), f"the pointer was split at {columns}: {line!r}"
+        if columns >= 80:
+            # Where the boot column has room, the full form is what ships — a
+            # budget that shed it here would be shedding for nothing.
+            assert any(
+                line.endswith("\u2014 /mcp for details") for line in lines
+            ), f"the signpost was dropped where it fits, at {columns} columns"
 
 
 @pytest.mark.asyncio
