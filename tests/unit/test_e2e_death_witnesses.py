@@ -51,6 +51,14 @@ _SLEEPER = "import time; time.sleep(120)"
 #: A child that exits on its own, to close the slave side from the inside.
 _QUITTER = "pass"
 
+#: A child that closes its own stdio and keeps running: the terminal is released
+#: while the process is still alive. This is QA round 1's falsification of the
+#: stronger claim the witness used to carry.
+_CLOSES_STDIO_AND_LIVES = (
+    "import os, time\n" "os.close(0)\n" "os.close(1)\n" "os.close(2)\n" "time.sleep(120)\n"
+)
+
+
 #: A child that leaves a HOLDER behind: it forks a grandchild (which inherits the
 #: pty slave on its stdio), reports that grandchild's pid on the pty, and exits.
 #: The master must NOT read EOF while the grandchild lives — that is the whole
@@ -65,9 +73,12 @@ _QUITTER = "pass"
 #: product's own helpers are spawned detached.
 _LEAVES_A_HOLDER = (
     "import os, signal, sys, time\n"
+    # SIG_IGN is installed BEFORE the fork so the holder inherits it: installing
+    # it inside the grandchild would leave a window in which the pty child's exit
+    # delivers the kernel's SIGHUP to a holder that has not opted out yet.
+    "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
     "pid = os.fork()\n"
     "if pid == 0:\n"
-    "    signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
     "    time.sleep(120)\n"
     "    os._exit(0)\n"
     "sys.stdout.write('grandchild %d\\n' % pid)\n"
@@ -177,13 +188,12 @@ def test_a_killed_interface_is_detected_by_the_loop() -> None:
 def test_a_living_interface_is_not_reported_dead() -> None:
     """The precondition must not pass for an interface that is still alive.
 
-    The loop drains and polls; neither witness may fire while the child runs.
-    This is also the half that makes the EOF witness ONE-SIDED rather than merely
-    useful: an EOF cannot appear while the interface holds its own stdio, so the
-    witness can only ever fail to arrive, never invent a death — see
-    `test_the_eof_witness_is_one_sided_and_cannot_fake_a_death` for the other
-    side of that property, and why it does not rest on "nothing else held the
-    slave".
+    The loop drains and polls; neither witness may fire while the child runs —
+    which is the property the arms rely on, because a real interface paints into
+    its terminal and so holds its stdio until it dies. It is NOT the stronger
+    claim that the witness cannot fire for a live process at all: see
+    `test_eof_reports_a_closed_terminal_not_a_dead_process`, which pins QA round
+    1's counterexample, and why the reap is polled first.
 
     Bounded at 0.6 s because this asserts a *negative* — the point is that no
     witness fires, not how long the loop can spin.
@@ -192,6 +202,28 @@ def test_a_living_interface_is_not_reported_dead() -> None:
         assert _await_interface_death(terminal, pid, timeout=0.6) is False
         assert _reaped(pid) is False
         assert terminal.at_eof is False
+
+
+def test_eof_reports_a_closed_terminal_not_a_dead_process() -> None:
+    """QA round 1's falsification, pinned: EOF can fire for a LIVE process.
+
+    A child that closes its own stdio and keeps running still ends the master's
+    stream — the witness certifies that the interface's TERMINAL is gone, not
+    that its process exited (`_Pty.at_eof` says so and records why the two are
+    usually the same here). This is the residual the reap covers, and the reason
+    `_await_interface_death` polls `_reaped` first: where both are available the
+    stronger fact is the one that returns. No arm in the e2e closes its own
+    stdio — the interface paints until it dies — which is what keeps the premise
+    true in place, and `_await_pty_eof` is what makes a future violation of it
+    fail loudly.
+    """
+    with _pty_child(_CLOSES_STDIO_AND_LIVES) as (pid, terminal):
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not terminal.at_eof:
+            terminal.drain(0.1)
+        assert terminal.at_eof is True, "a closed stdio ends the master's stream"
+        assert _alive(pid) is True, "the process is alive; only its terminal is gone"
+        assert _reaped(pid) is False
 
 
 def test_a_child_reaped_by_someone_else_counts_as_a_death() -> None:
@@ -221,25 +253,17 @@ def _holder_pid(terminal: _Pty, *, timeout: float) -> int:
     raise AssertionError(f"the child never reported its holder; pty tail:\n{terminal.tail()}")
 
 
-def test_the_eof_witness_is_one_sided_and_cannot_fake_a_death() -> None:
-    """EOF arrives because the SESSION LEADER went away, not because nobody holds it.
+def test_eof_arrives_when_the_session_leader_exits() -> None:
+    """On macOS the leader's exit is what produces the EOF, holder or not.
 
-    Measured on the macOS host this was written on, using the holder-leaving child
-    below: the master reads EOF as soon as the pty child (the session leader)
-    exits, and the holder that outlives it shows ``(revoked)`` on its stdio in
-    ``lsof`` — the kernel takes the terminal away from the other holders instead
-    of waiting for their descriptors to close. On Linux the EOF waits for every
-    slave descriptor, a strictly stronger condition. Both give the arm the one
-    implication it needs:
-
-        EOF => the interface (the session leader) is gone.
-
-    The holder being alive across the leader's exit is the point: this pins that
-    the witness does not depend on "nothing else was holding the slave", which is
-    what an argument-from-audit would have claimed and what the kernel does not
-    actually require. `test_a_living_interface_is_not_reported_dead` pins the
-    other half — no EOF while the interface runs — which is what makes the
-    witness one-sided, and therefore unable to report a live interface dead.
+    Measured with the holder-leaving child below: the master reads EOF as soon as
+    the pty child (the session leader) exits, and the holder that outlives it
+    shows ``(revoked)`` on its stdio in ``lsof`` — the kernel takes the terminal
+    away from the other holders instead of waiting for their descriptors. On Linux
+    the EOF waits for every slave descriptor, a strictly stronger condition. Both
+    give the arm the implication it needs in practice: a painting interface holds
+    its stdio, so it cannot be in this state while it lives — the limit of that
+    implication is pinned by `test_eof_reports_a_closed_terminal_not_a_dead_process`.
     """
     with _pty_child(_LEAVES_A_HOLDER) as (pid, terminal):
         holder = _holder_pid(terminal, timeout=10.0)
