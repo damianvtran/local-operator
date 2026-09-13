@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping, get_args
+from typing import Any, Mapping, Sequence, get_args
 from urllib.parse import unquote
 
 from local_operator.evaluation.action_surface import ActionSurface
@@ -21,21 +21,65 @@ REPLY_VERSION = "1.0"
 MAX_PUBLIC_OBSERVATIONS_CHARS = 2_000
 _ENVELOPE_KEYS = {"reply_version", "action_batch", "public_observations"}
 
+#: The rule ``action_batch`` is held to, worded as it has always been worded.
+#: Kept as one literal because ``classify_rejection`` reads this sentence out of
+#: SEALED artifacts too, where it is the only surviving description of the
+#: defect -- a reworded opening would silently reclassify them.
+_BATCH_SHAPE_RULE = "model reply action_batch requires exactly an actions array"
+
+#: Present in the envelope diagnostic exactly when ``reply_version`` was found
+#: somewhere OTHER than the top level of the envelope: nested inside
+#: ``action_batch``, or duplicated at both levels. It is the discriminator
+#: ``classify_rejection`` keys the ``env-version-misplaced`` class on, so both
+#: branches that can report the defect carry this phrase verbatim -- a branch
+#: that named the key without it would report the defect without measuring it.
+_MISPLACED_REPLY_VERSION = (
+    "'reply_version' belongs at the top level of the envelope, beside "
+    "'action_batch' and 'public_observations', not inside 'action_batch'"
+)
+
+
 #: Bounds on how much of a rejected reply's OWN key names may appear in the
 #: diagnostic sent back to the model. The reserved keys are safe to name (they
 #: come from a fixed set), but any other key is model-supplied text: echoing it
 #: whole turns a malformed reply into an unbounded retry prompt and re-opens
 #: the replay channel the reserved-key suppression exists to close.
 #:
-#: A key is quoted WHOLE or not at all -- never truncated. Truncation was the
-#: first attempt and it failed closed in neither direction (review round 3):
-#: ``repr`` expands escapes after the cut, so the rendered length depended on
-#: the input's alphabet; and, far worse, cutting a secret that appeared as a
-#: key left a prefix that ``_assert_redacted``'s substring check no longer
-#: matched, converting a loud redaction failure into a silent leak. Quoting
-#: whole-or-nothing means nothing is ever reshaped on the way out.
+#: A key is quoted WHOLE or not at all -- :func:`_unexpected_key_summary`
+#: owns both the rendering and the guard that decides what may be quoted.
 _MAX_EXTRA_KEY_CHARS = 40
 _MAX_EXTRA_KEYS_SHOWN = 5
+
+
+def _unexpected_key_summary(keys: Sequence[str]) -> str:
+    """The bounded, quotation-guarded rendering of unexpected key names.
+
+    Truncation was the first attempt and it failed closed in neither direction
+    (review round 3): ``repr`` expands escapes after the cut, so the rendered
+    length depended on the input's alphabet; and, far worse, cutting a secret
+    that appeared as a key left a prefix that ``_assert_redacted``'s substring
+    check no longer matched, converting a loud redaction failure into a silent
+    leak. Quoting whole-or-nothing means nothing is ever reshaped on the way
+    out.
+
+    Shared by the two branches that name keys the model put in the wrong place
+    -- a top-level near-miss and a key nested inside ``action_batch`` -- because
+    the bound and the guard are the security property here, and a second copy
+    of them is a second place to get it wrong.
+    """
+
+    safe = [key for key in keys if is_quotable_key(key)]
+    shown = safe[:_MAX_EXTRA_KEYS_SHOWN]
+    summary = ", ".join(repr(key) for key in shown)
+    withheld = len(keys) - len(shown)
+    if withheld and summary:
+        summary += f" and {withheld} more"
+    elif withheld:
+        # Every key was unsafe or over the cap: report only how many to drop.
+        # The count alone is enough to act on, and is the part that carries no
+        # model-supplied text at all.
+        summary = f"{withheld} not shown"
+    return summary
 
 
 def is_quotable_key(key: str) -> bool:
@@ -53,6 +97,29 @@ def is_quotable_key(key: str) -> bool:
     return rendered[1:-1] == key
 
 
+def _misplaced_envelope_keys(value: Mapping[str, Any], missing: Sequence[str]) -> list[str]:
+    """Required envelope keys that were found inside ``action_batch`` instead.
+
+    The distinction this exists for: ``omitted 'reply_version'`` is literally
+    true whenever the key is absent from the TOP level, and it was the repair
+    turn for replies that had actually put the key somewhere -- the model is
+    then told to add a key it can see in its own reply, which is a rule it
+    cannot act on. A key that is present but nested was misplaced, not omitted,
+    and only the decoder can tell the two apart: the nesting is visible in the
+    parsed value and nowhere in the rendered rule.
+
+    Only keys the top level is missing are reported, and each must clear
+    :func:`is_quotable_key`, so the reported names are always a subset of the
+    reserved ones. ``action_batch`` itself takes exactly ``actions``, so no
+    reserved key can be inside it legitimately.
+    """
+
+    batch = value.get("action_batch")
+    if not isinstance(batch, Mapping):
+        return []
+    return [key for key in missing if key in batch and is_quotable_key(key)]
+
+
 REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)"
 
 #: Longest slice of a rejected reply that may be replayed into the model's
@@ -64,6 +131,16 @@ REJECTED_PUBLIC_REPLY = "(model reply rejected; no public observations accepted)
 #: One bound for both boundaries, declared here rather than beside the client
 #: because ``episode.py`` applies it while publishing the artifact and must not
 #: import the provider-backed client to reach it.
+#:
+#: Two exceptions, both deliberate. An ENVELOPE reply's history rendering is not
+#: a slice of the reply at all but :data:`REJECTED_PUBLIC_REPLY` (see
+#: ``provider_client.EpisodeModelClient``): unvalidated notes are not factual
+#: memory, so the model is corrected from the hint rather than from its own
+#: text, and this bound reaches that path only through the legacy batch. And the
+#: artifact's copy is bounded at its own boundary -- ``evidence_reply`` travels
+#: raw so that :func:`rejected_reply_evidence` can scan the WHOLE reply before
+#: cutting it, because a reply cut first and scanned afterwards returns clean
+#: over a canary the cut severed.
 MAX_REJECTED_REPLY_CHARS = 4_000
 
 #: Appended to a reply cut by :data:`MAX_REJECTED_REPLY_CHARS`.
@@ -178,6 +255,42 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _batch_shape_diagnostic(batch: Any) -> str:
+    """Why ``action_batch`` was refused, naming the keys that landed in it.
+
+    The bare rule is information-free for the defect it actually receives: the
+    rejected reply is withheld from the repair turn, so a model told only
+    "requires exactly an actions array" cannot see which key it put in the wrong
+    place. Measured on the DeepSeek canary arm this sentence was the whole
+    repair turn for 9 of 15 ``envelope-shape`` rejections -- 4 of those with
+    ``reply_version`` in the batch, the rest with an action's own fields there
+    -- and the two episodes that repeated it verbatim both sealed: the same
+    "name the defect vs repeat the rule" gap the envelope diagnostic was written
+    for (4/10 bare rule against 9/10 with the keys named).
+
+    ``reply_version`` inside ``action_batch`` is reported under its own marker
+    because it is the one case where the key belongs at the TOP level: that
+    placement is a rejection class of its own (see
+    :data:`_MISPLACED_REPLY_VERSION`), not a batch-shape defect.
+
+    Keys are rendered by :func:`_unexpected_key_summary`, so the same guard and
+    the same bound apply as on the envelope diagnostic's own unexpected keys.
+    """
+
+    if not isinstance(batch, Mapping):
+        return _BATCH_SHAPE_RULE
+    unexpected = sorted(set(batch) - {"actions"})
+    if not unexpected:
+        return _BATCH_SHAPE_RULE
+    diagnostic = (
+        f"{_BATCH_SHAPE_RULE}; it carried {len(unexpected)} unexpected key(s): "
+        f"{_unexpected_key_summary(unexpected)}"
+    )
+    if "reply_version" in unexpected:
+        return f"{diagnostic}; {_MISPLACED_REPLY_VERSION}"
+    return diagnostic
+
+
 def decode_public_reply(payload: str) -> dict[str, Any]:
     """Require one exact envelope; the legacy decoder keeps its own tolerance."""
     try:
@@ -220,37 +333,27 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
                 # prompt, which neither ``MAX_REJECTED_REPLY_CHARS`` nor
                 # ``_diagnostic``'s cap intercepts, and which re-opens the
                 # replay channel the reserved-key suppression below closes.
-                #
-                # A key is quoted only if it is ENTIRELY safe, and is otherwise
-                # counted but not named. Truncating instead was the first
-                # attempt and it failed closed in neither direction (review
-                # round 3):
-                #   - ``repr`` expands escapes AFTER a cut, so 40 characters of
-                #     ``\U000e0001`` still rendered ~700, making the bound
-                #     depend on the input's alphabet.
-                #   - worse, a cut CONVERTS A LOUD FAILURE INTO A SILENT ONE.
-                #     ``_assert_redacted`` is substring-based, so a secret
-                #     longer than the cut survived as a prefix that no longer
-                #     matched the canary: the leak stopped tripping the alarm
-                #     that exists to catch it.
-                # Quoting whole-or-nothing removes both: nothing is ever
-                # reshaped on the way out, so a redaction canary still matches
-                # and the rendered length is bounded by the charset itself.
-                safe = [key for key in extra if is_quotable_key(key)]
-                summary = ", ".join(repr(key) for key in safe[:_MAX_EXTRA_KEYS_SHOWN])
-                withheld = len(extra) - len(safe[:_MAX_EXTRA_KEYS_SHOWN])
-                if withheld and summary:
-                    summary += f" and {withheld} more"
-                elif withheld:
-                    # Every key was unsafe or over the cap: report only how many
-                    # to drop. The count alone is enough to act on, and is the
-                    # part that carries no model-supplied text at all.
-                    summary = f"{withheld} not shown"
-                parts.append(f"added {len(extra)} unexpected key(s): {summary}")
+                # :func:`_unexpected_key_summary` owns the guard that keeps a
+                # key whole-or-nothing; see it for why truncation is unsafe.
+                parts.append(
+                    f"added {len(extra)} unexpected key(s): {_unexpected_key_summary(extra)}"
+                )
+            sentence = "model reply used the reserved envelope but " + "; ".join(parts)
+            misplaced = _misplaced_envelope_keys(value, missing)
+            if misplaced:
+                # The key is not missing, it is in the wrong PLACE, and that is
+                # a different repair -- so it is a different class (see
+                # ``classify_rejection``) and a different sentence. The
+                # carried/omitted wording stays byte-verbatim as the prefix
+                # because it is the measured half (9/10 recovered on the model
+                # it was measured against, against 4/10 for the bare rule); what
+                # is dropped is the EITHER clause, which offers the
+                # version-less plain batch as an equal alternative -- advice
+                # that costs a model already inside the envelope its notes, to
+                # fix a defect that is one key's position.
+                raise ValueError(f"{sentence}. {_MISPLACED_REPLY_VERSION}")
             raise ValueError(
-                "model reply used the reserved envelope but "
-                + "; ".join(parts)
-                + '. Reply with EITHER the plain batch {"actions": [...]} and no other '
+                sentence + '. Reply with EITHER the plain batch {"actions": [...]} and no other '
                 "top-level keys, OR the full envelope with exactly reply_version, "
                 "action_batch, public_observations"
             )
@@ -271,7 +374,7 @@ def decode_public_reply(payload: str) -> dict[str, Any]:
         raise ValueError("public_observations must be valid Unicode text") from error
     batch = value["action_batch"]
     if not isinstance(batch, dict) or set(batch) != {"actions"}:
-        raise ValueError("model reply action_batch requires exactly an actions array")
+        raise ValueError(_batch_shape_diagnostic(batch))
     return value
 
 
