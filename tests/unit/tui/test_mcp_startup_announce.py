@@ -32,6 +32,7 @@ from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.toast import Toast
+from local_operator.tui.widgets.transcript import UserBlock
 from tests.unit.tui.test_app_pilot import (
     FakeMcpManager,
     McpSession,
@@ -55,6 +56,19 @@ def isolate_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
     monkeypatch.setenv("LOCAL_OPERATOR_NO_TERMINAL_TITLE", "1")
     monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+
+def _frame(app) -> str:  # type: ignore[no-untyped-def]
+    """The painted cell grid, rows right-stripped.
+
+    Only the compositor knows where a wrap lands, so a claim about a row is a
+    claim about this string and not about the block's own text (D1-1's whole
+    lesson: the fold, not the composer, decides what a reader sees).
+    """
+    return "\n".join(
+        "".join(segment.text for segment in strip).rstrip()
+        for strip in app.screen._compositor.render_strips()
+    )
 
 
 def _outcome(**overrides) -> McpStartupOutcome:
@@ -105,9 +119,12 @@ _SLACK_DOWN = dict(
 )
 
 #: Two errors whose FULL sentences differ but whose 50-column renders are
-#: byte-identical (both ellipsize to ``failed: slack — command not found:
-#: slack-…``). The pair review and UX both measured collapsing into one
+#: byte-identical (both ellipsize to ``✗ failed: slack — command not found:
+#: slac…``). The pair review and UX both measured collapsing into one
 #: announce on the round-2 head, swallowing the second failure (R2-2, U2-1).
+#: The shared prefix is 2 cells shorter than it was before the card's rows
+#: gained their own glyph (D2-2, which spends those cells on every card row);
+#: the pair still collides at 50 columns, which is what this fixture is for.
 _TRUNCATION_COLLISION_A = "command not found: slack-mcp-stdio-bridge"
 _TRUNCATION_COLLISION_B = "command not found: slack-mcp-oauth-refresh-expired"
 
@@ -783,7 +800,7 @@ async def test_two_failures_that_truncate_identically_both_announce() -> None:
     async with app.run_test(size=(50, 24)) as pilot:
         toast = app.query_one(Toast)
         assert await _until(pilot, lambda: toast.display)
-        assert "slack-" in toast.message  # truncated, but raised
+        assert toast.message.endswith("…") and "slack" in toast.message  # truncated, but raised
         rendered = toast.message
         toast.dismiss_toast()
         await pilot.pause()
@@ -989,10 +1006,7 @@ async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns
     async with app.run_test(size=(columns, 24)) as pilot:
 
         def _grid() -> str:
-            return "\n".join(
-                "".join(segment.text for segment in strip).rstrip()
-                for strip in app.screen._compositor.render_strips()
-            )
+            return _frame(app)
 
         assert await _until(pilot, lambda: "MCP slack" in _grid())
         lines = [line.rstrip() for line in _grid().splitlines() if line.strip()]
@@ -1204,3 +1218,149 @@ async def test_the_announce_record_is_bounded_by_sessions_not_outcomes() -> None
             app._adopt_session(again, replay_history=False)
         await _quiet(pilot)
         assert sorted(app._announced_mcp_startup) == ["a", "s0", "s1", "s2", "s3"]
+
+
+#: A network failure whose SENTENCE reaches the boundary the composition's width
+#: model got wrong (design round 2, D2-1): the phrase is 59 cells and the short
+#: signpost needs 7 more, so it needs a 66-cell body budget — inside the 60-84
+#: column band where the composer was handed 2 cells the painted block did not
+#: have and the fold therefore split ``— /mcp``.
+_NET_LINEAR = "network: cannot reach linear.example.com"
+
+
+def _network_fleet() -> McpStartupOutcome:
+    """Three network failures, one of them sitting on that boundary."""
+    return _outcome(
+        connected=(),
+        failures={
+            "linear": _NET_LINEAR,
+            "notion": "network: cannot reach notion.example.com",
+            "slack": "network: no response from slack.example.com (timed out)",
+        },
+        network_failures=frozenset({"linear", "notion", "slack"}),
+        tool_count=0,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [60, 64, 66, 68, 70, 72, 74, 76, 80, 84, 90, 100])
+async def test_the_notice_budget_is_the_column_the_block_is_painted_in(columns: int) -> None:
+    """D2-1: the ladder's input must be the column the notice is PAINTED in.
+
+    The composition modelled the boot CARD's clamp at every width, but that clamp
+    IS the painted column only while the card is up (85 columns and above). Below
+    it the block fills the lane, whose content box is two cells narrower than the
+    box the clamp is measured in — so the ladder accepted a line the fold then
+    broke, deterministically, at 68 and 74 columns on the boot frame.
+
+    The assertion is the invariant itself rather than a table of numbers: the
+    budget the composer used must be the budget of the box the block was given.
+    """
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    session = _session(_network_fleet(), session_id="a")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(columns, 24)) as pilot:
+        assert await _until(pilot, lambda: app.query(".notice-block")), "no notice painted"
+        widths = {block.size.width for block in app.query(".notice-block")}
+        budget = app._mcp_notice_budget()
+        for width in sorted(widths):
+            assert budget == NoticeBlock.body_budget(width), (
+                f"at {columns} columns the composer spent {budget} cells on a "
+                f"{width}-cell block"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_terminal_re_composes_the_notice_instead_of_splitting_it() -> None:
+    """D2-1 on the user's own path: boot wide, then narrow the terminal.
+
+    The notice's text is fitted ONCE and only re-wrapped afterwards, so a line
+    composed at 100 columns for 69 cells folded at 58 when the terminal was
+    narrowed to 68 — D1-1's split, reached without ever touching the boot width.
+    The column change now re-runs the ladder, so a narrowed frame carries
+    whatever rung the new column can hold and never a split pointer.
+    """
+    session = _session(_network_fleet(), session_id="a")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _until(pilot, lambda: "MCP linear" in _frame(app))
+        assert "— /mcp" in _frame(app), "the boot column holds the signpost whole"
+        for columns in (74, 68, 60):
+            await pilot.resize_terminal(columns, 30)
+            await _quiet(pilot)
+            grid = _frame(app)
+            # At every one of these widths the short form cannot ride beside the
+            # 59-cell sentence, so rung 4 is the contract: the sentence whole, no
+            # signpost at all. Absent is the point — an orphaned half-pointer is
+            # exactly what the old composition produced here.
+            assert "— /mcp" not in grid, (columns, grid)
+            assert "MCP linear failed: network: cannot reach" in grid, (columns, grid)
+            # And the block's recorded column followed (it is fitted to the column
+            # it is painted in, not to the one it was born with), so the NEXT
+            # narrowing is measured against the real box rather than the boot one.
+            from local_operator.tui.widgets.transcript import NoticeBlock
+
+            fitted = [
+                block.mcp_failure_fit
+                for block in app.query(".notice-block")
+                if isinstance(block, NoticeBlock)
+            ]
+            assert fitted and all(fit is not None for fit in fitted)
+            assert all(fit[2] <= app._mcp_notice_painted_column() for fit in fitted if fit)
+
+
+@pytest.mark.asyncio
+async def test_a_widening_does_not_change_the_words_the_user_just_read() -> None:
+    """D2-1's other half — a decision, not an omission.
+
+    The card standing down WIDENS the notice's column (the card's own width to
+    the lane). Re-fitting there would upgrade ``— /mcp`` to ``— /mcp for details``
+    under the reader — changing the words of a message they have just read, which
+    is the property D1-1 pinned for its row count. So only a NARROWED column
+    re-fits, and the widened line keeps the boot frame's words.
+    """
+    session = _session(_network_fleet(), session_id="a")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _until(pilot, lambda: "MCP linear" in _frame(app))
+        boot_rows = [
+            row.strip() for row in _frame(app).splitlines() if "MCP " in row and "failed" in row
+        ]
+        assert boot_rows, "no notice painted"
+        app._append_block(UserBlock("the conversation starts, so the card stands down"))
+        assert await _until(pilot, lambda: not app.screen.has_class("boot-layout"))
+        await _quiet(pilot)
+        after_rows = [
+            row.strip() for row in _frame(app).splitlines() if "MCP " in row and "failed" in row
+        ]
+        # The rows below the card compare whole. The FIRST row cannot be compared
+        # whole — the card floats over it, so the card's own row is what its tail
+        # reads as (asserted in the D2-2 test below) — and it is also where a
+        # widening re-fit would be invisible. Rows 2-3 are what show the decision:
+        # a re-fit would upgrade their ``— /mcp`` to ``— /mcp for details``.
+        assert after_rows[1:] == boot_rows[1:], (boot_rows, after_rows)
+
+
+@pytest.mark.asyncio
+async def test_the_card_row_cannot_read_as_the_notice_it_floats_over() -> None:
+    """D2-2 on the frame: the card's own row is glyph-marked at the boundary.
+
+    At stand-down the durable notices become the transcript's first rows while
+    the 10-second failure card is still up, so the card's detail row lands on the
+    first notice's row. The notice's own row ends with its signpost, so with the
+    card's text starting one cell later the two read as ONE sentence: measured,
+    ``…linear.example.com — network: linear, notion, slack``. Every row of the
+    card now opens on a glyph, which cannot be read as the continuation of the
+    row it abuts.
+    """
+    session = _session(_network_fleet(), session_id="a")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        assert await _until(pilot, lambda: "MCP slack" in _frame(app))
+        app._append_block(UserBlock("the conversation starts, so the card stands down"))
+        assert await _until(pilot, lambda: not app.screen.has_class("boot-layout"))
+        await _quiet(pilot)
+        grid = _frame(app)
+        assert "✗ network: linear, notion, slack" in grid, grid
+        assert "— network:" not in grid, grid

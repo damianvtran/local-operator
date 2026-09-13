@@ -1552,6 +1552,19 @@ class NoticeBlock(TranscriptBlock):
 
     SPACING_KIND = "notice"
 
+    #: Set by the app on an MCP failure notice: ``(server name, failure text,
+    #: column)``. The text is FITTED to a column when it is composed, so the
+    #: signpost ladder has to be re-run if the terminal later gives the block a
+    #: different one (``OperatorApp._refit_mcp_failure_notices``).
+    #:
+    #: It lives ON the block rather than in a side table keyed by the widget,
+    #: because a table loses rows: the app's boot sync runs BETWEEN two notices
+    #: being appended, and at that moment the first is created but not yet
+    #: MOUNTED, so an ``is_mounted`` sweep of that table pruned a live row and the
+    #: notice silently stopped tracking its column (measured at boot with two
+    #: failures; design round 2, D2-1). Every other notice leaves it ``None``.
+    mcp_failure_fit: tuple[str, str, int] | None = None
+
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
     #: and wrong for one that answers a question the user is actively asking
