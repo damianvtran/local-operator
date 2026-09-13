@@ -50,7 +50,10 @@ at paint leaves the notice's single text column and costs a second rebuild when
 the block's own ``Resize`` then hands it the card (R1, review round 2 / Q-R2-1,
 QA round 2). The two tests at the bottom of this file pin that the walk hands a
 pinned block its OWN box, that the box and the authored width agree through a
-lane change, and that the notice's rows all keep one text column.
+lane change, and that the notice's rows all keep one text column. A pin only
+exists while a card does: at a docked lane under the card's floor the notice is a
+spine block (see ``OperatorApp._boot_lane_width``), the class follows it, and
+those tests assert the box the block is actually painted in either way.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ from __future__ import annotations
 import pytest
 from rich.text import Text
 
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import BOOT_CARD_CLASS, OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
@@ -74,11 +77,14 @@ from tests.unit.tui.test_app_pilot import FakeSession, _factory
 #: that a 40-row ledger scrolls.
 FRAME = (130, 36)
 
-#: A frame the boot card is up at AND the sidebar is a real lane change in. The
-#: content box is 98 cells, so the card floors at 75 and the transcript's lane
-#: is 96 closed / 63 open: the boot-column notice's own box and the lane are 21
-#: cells apart, which is the window the notice defect needs.
-BOOT_FRAME = (100, 30)
+#: A frame the boot card is up at in BOTH sidebar states AND the sidebar is a
+#: real lane change in, with the card's box unchanged across it. At 200 columns
+#: the content box is 198, so the proportion runs past the 100-cell CAP: the card
+#: is 100 cells closed and 100 open (the drawer's 47 columns leave a 151-cell
+#: lane, still enough for the capped box plus its margin). The notice's own box
+#: and the transcript's lane are 98 cells apart at this frame — a wider window
+#: than the 21 this file first used, and the same defect.
+BOOT_FRAME = (200, 40)
 
 #: The boot notice's text. Every word is the marker, so EVERY authored row
 #: carries it and a stale (re-wrapped) build cannot hide one of its rows from
@@ -582,7 +588,6 @@ async def _assert_the_boot_notice_holds_its_own_box(
     """
     view = app.query_one(TranscriptView)
     notice = _boot_notice(app)
-    assert notice.has_class(BOOT_COLUMN_CLASS), "fixture: the notice is not boot-column clamped"
     lane_before = view.scrollable_content_region.width
 
     builds = 0
@@ -603,20 +608,35 @@ async def _assert_the_boot_notice_holds_its_own_box(
 
     lane = view.scrollable_content_region.width
     assert lane != lane_before, "the sidebar did not move the lane"
-    # The boot card the notice is pinned to, taken from the widget that IS the
-    # card rather than re-derived from the clamp: `_sync_boot_column_width`
-    # centres every boot notice on the composer's axis, and the composer's box
-    # follows the sidebar, the card floor and the cap. Measured equal to the
-    # notice's box in both states at both frames this file uses.
-    card = app.query_one("#input-shell").region.width
-    assert notice.outer_size.width == card, (
-        f"the boot notice's box is {notice.outer_size.width}, not the {card}-cell boot card "
+    # The box the notice is painted in, taken from the widget that IS the composer
+    # rather than re-derived from the clamp: `_sync_boot_column_width` centres
+    # every boot notice on the composer's axis, and the composer's box follows the
+    # sidebar, the card floor and the cap.
+    #
+    # WHEN THE LANE CANNOT HOLD A CARD the composer is the full width of its lane
+    # and the notice is a spine block, so the box to compare against is the
+    # transcript's own lane (see `OperatorApp._boot_lane_width`). At this frame's
+    # docked lane the card is withheld — 65 cells, under the 75-cell floor — and
+    # the notice is 63. Before the fix the card was resolved from the TERMINAL, so
+    # it kept its 75-cell floor inside the 63-cell lane the drawer left, the notice
+    # tracked it, and this helper asserted the two were equal: 12 cells of notice
+    # overhanging its container, pinned as correct.
+    carded = app.screen.has_class(BOOT_CARD_CLASS)
+    assert notice.has_class(BOOT_COLUMN_CLASS) == carded, (
+        "the notice's boot-column class must follow the card: clamped while a card is up, "
+        "a spine block while the lane is too narrow for one"
+    )
+    composer = app.query_one("#input-shell").region.width
+    box = composer if carded else lane
+    pin = "boot card" if carded else "transcript lane (no card at this width)"
+    assert notice.outer_size.width == box, (
+        f"the boot notice's box is {notice.outer_size.width}, not the {box}-cell {pin} "
         f"it is pinned to"
     )
-    assert notice._built_width == notice.outer_size.width == card, (
-        f"the boot notice is authored at {notice._built_width} in a {card}-cell box "
-        f"(the transcript lane is {lane}): a boot-column notice must be built at the card "
-        f"it is painted in, not at the container's lane"
+    assert notice._built_width == notice.outer_size.width == box, (
+        f"the boot notice is authored at {notice._built_width} in a {box}-cell box "
+        f"(the composer is {composer}, the transcript lane {lane}): a boot-column notice "
+        f"must be built at the box it is painted in, not at another width"
     )
     assert builds == expected_builds, (
         f"one lane change built the pinned notice {builds} times, expected {expected_builds}: "
@@ -631,7 +651,7 @@ async def _assert_the_boot_notice_holds_its_own_box(
     applied = _applied_notice_rows(notice)
     assert applied == fresh, (
         f"the boot notice holds the rows of a build at another width, not the ones it authors "
-        f"at its own {card}-cell box:\napplied={applied}\nauthored={fresh}"
+        f"at its own {box}-cell box:\napplied={applied}\nauthored={fresh}"
     )
     # And the invariant the re-wrap breaks, stated on its own: every row of one
     # notice sits on one text column — the glyph row indented by SPINE_INDENT,
@@ -650,14 +670,18 @@ async def _assert_the_boot_notice_holds_its_own_box(
 async def test_a_boot_column_notice_authors_at_its_own_box_through_a_lane_change() -> None:
     """The walk must not publish the LANE to a block the app pinned to the card.
 
-    At 100x30 the card floors at 75 while the transcript's lane is 96 closed and
-    63 open, and the card does not move with the sidebar — so the notice's box is
-    the same one throughout and a lane change has nothing to re-fit. Published
-    the lane, the walk re-authored it 21 cells wider than its box and its own
-    ``Resize`` then re-authored it back, TWICE a lane change, with the width the
-    settled frame held decided by trigger order (measured on the pre-fix head:
-    two builds per toggle, and ``built=96 outer=75`` after a close).
-    """
+    At 200x40 the card is capped at 100 cells while the transcript's lane is 198
+    closed and 151 open, and the box does NOT move with the sidebar — so the
+    notice's box is the same one throughout and a lane change has nothing to
+    re-fit. Published the lane, the walk re-authored it 98 cells wider than its
+    box and its own ``Resize`` then re-authored it back, TWICE a lane change,
+    with the width the settled frame held decided by trigger order (measured on
+    the pre-fix head: two builds per toggle, and ``built=96 outer=75`` after a
+    close at the 100-column frame this test first ran at).
+
+    That earlier frame no longer shows the case: at 100x30 the docked lane is 65
+    cells, under the 75-cell floor the card needs, so the card is withheld there
+    and the box DOES move (that is the test below)."""
     app = _app()
     async with app.run_test(size=BOOT_FRAME) as pilot:
         await pilot.pause()
@@ -676,13 +700,16 @@ async def test_a_boot_column_notice_authors_at_its_own_box_through_a_lane_change
 
 @pytest.mark.asyncio
 async def test_a_boot_column_notice_is_rebuilt_once_when_its_own_card_moves() -> None:
-    """The other half: when the card DOES move, one rebuild — not two.
+    """The other half: when the box DOES move, one rebuild — not two.
 
-    At 130x36 the boot card is 89 cells closed and 75 with the sidebar docked, so
-    a lane change really does change the width this notice authors at. One
-    rebuild is the answer (the walk hands the new card; the block's own
-    ``Resize`` then finds the width it already holds and is free), where the
-    pre-fix head paid two — one at the lane the walk published, one at the card.
+    At 130x36 the boot card is 89 cells closed while the docked lane is 81 — under
+    the 75-cell floor plus its 8-cell margin, so the drawer withholds the card
+    there and the notice becomes a spine block at the transcript's lane, 79 cells.
+    Its box really does change (89 -> 79), so one rebuild is the answer (the walk
+    hands the new box; the block's own ``Resize`` then finds the width it already
+    holds and is free), where the pre-fix head paid two — one at the lane the walk
+    published, one at the box. The class follows the box as well, and the helper
+    asserts that rather than assuming the notice stays carded.
     """
     app = _app()
     async with app.run_test(size=FRAME) as pilot:
