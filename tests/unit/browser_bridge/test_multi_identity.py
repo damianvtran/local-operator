@@ -1127,9 +1127,9 @@ def _assert_invariant(service: BridgeService, root: Path, where: str) -> None:
     assert named in listed, f"{where}: the trio names {named!r}, which is not authorised"
     driver = service.link
     if driver.websocket is not None and driver.paired:
-        assert named == driver.extension_id, (
-            f"{where}: the file names {named!r} while {driver.extension_id!r} drives"
-        )
+        assert (
+            named == driver.extension_id
+        ), f"{where}: the file names {named!r} while {driver.extension_id!r} drives"
 
 
 @pytest.mark.asyncio
@@ -1227,9 +1227,9 @@ def test_u28b_drive_pins_the_driver_and_the_record_follows(tmp_path: Path) -> No
                     "/driver", headers={"X-Bridge-Key": key}, json={"target": UNPACKED_ID[:12]}
                 )
                 assert pinned.status_code == 200, pinned.text
-                assert _record(tmp_path) == UNPACKED_ID, (
-                    "POST /driver moved the wheel without moving the record"
-                )
+                assert (
+                    _record(tmp_path) == UNPACKED_ID
+                ), "POST /driver moved the wheel without moving the record"
                 _assert_invariant(app.state.bridge, tmp_path, "after POST /driver")
 
 
@@ -1256,9 +1256,9 @@ async def test_u29_shutdown_does_not_move_the_durable_record(tmp_path: Path) -> 
         service.begin_shutdown()  # what `shutdown()` and uvicorn's should_exit do
         store.push(None)  # the driver's socket ends during teardown
         assert await _settles(lambda: service.link.websocket is None)
-        assert _record(root) == STORE_ID, (
-            f"attempt {attempt}: teardown promoted the standby into the durable record"
-        )
+        assert (
+            _record(root) == STORE_ID
+        ), f"attempt {attempt}: teardown promoted the standby into the durable record"
         # And the old daemon's own rule still authorises the store build's token.
         assert _valid_saved_token_for(root, STORE_ID, STORE_TOKEN) is True
         assert _valid_saved_token_for(root, UNPACKED_ID, UNPACKED_TOKEN) is False
