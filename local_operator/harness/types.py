@@ -169,12 +169,26 @@ class RenderedStreamError(Exception):
     #: laptop moved between wifi networks" — or "the gateway's upstream host
     #: died mid-body" — apart from "the provider 500ed" to decide whether an
     #: interrupted turn may be continued, and this attribute is the only channel
-    #: that does not invert the layering. ``providers.failover.ProviderError``
-    #: stamps it from the two classifiers that own the decision
-    #: (``is_connectivity_loss`` and ``is_aggregator_upstream_stream_failure`` —
-    #: carriers, never a second definition); every other stream error keeps the
-    #: ``False`` default, so a client that knows nothing about it behaves exactly
-    #: as before.
+    #: that does not invert the layering.
+    #:
+    #: The flag has TWO halves and they are stamped in different places, so a
+    #: reader looking for both at construction will not find them:
+    #:
+    #: * The connectivity half is stamped by ``ProviderError.__init__`` itself
+    #:   (``self.connectivity_loss = transport and is_connectivity_loss(self)``)
+    #:   — available at construction, and only when OUR client observed the
+    #:   transport die (see :func:`~local_operator.providers.failover.is_connectivity_loss`).
+    #: * The aggregator half is stamped LATER, by the failover driver's
+    #:   ``_mark_mid_stream_connectivity`` upgrade, which consults
+    #:   ``is_aggregator_upstream_stream_failure`` — and only on the raise site
+    #:   where bytes had already been forwarded, because "the caller has read
+    #:   part of the answer" is the fact that inference turns on. A PRE-delta
+    #:   aggregator 5xx is therefore marked nowhere, here or there, and stays the
+    #:   terminal failure it has always been.
+    #:
+    #: Both classifiers carry one decision rather than defining a second one;
+    #: every other stream error keeps the ``False`` default, so a client that
+    #: knows nothing about it behaves exactly as before.
     connectivity_loss: bool = False
 
 

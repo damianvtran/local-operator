@@ -528,6 +528,68 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     assert _page_rows([Message.user(p) for p in prompts]) == []
 
 
+def test_every_connectivity_instruction_shape_is_chrome() -> None:
+    """Round-1 M1: the shared list only held the PROSE continuation prompt.
+
+    ``_continuation_instruction`` composes the persisted instruction per cut, so
+    the incident's own shape — partial prose with a call still being dictated —
+    is prose + a space + the tool-call half, and a prose-less cut gets the
+    tool-call half alone. Neither was an exact member of
+    ``harness_chrome_prompts()``, so a resumed session painted harness words as
+    the operator's own on both surfaces. Built from the producer, not typed out,
+    so the shapes cannot drift from the strings the loop actually persists.
+    """
+    from local_operator.harness.loop import _continuation_instruction
+
+    call = ToolCall(name="write", raw_arguments='{"path": "/tmp/notes", "content": "hel')
+    shapes = {
+        "prose only": _continuation_instruction(resumable_text=True, interrupted=[]),
+        "tool-call only": _continuation_instruction(resumable_text=False, interrupted=[call]),
+        "composed": _continuation_instruction(resumable_text=True, interrupted=[call]),
+    }
+    multi = [
+        ToolCall(name="write", raw_arguments="{"),
+        ToolCall(name="shell", raw_arguments="{"),
+    ]
+    shapes["composed, two tools"] = _continuation_instruction(
+        resumable_text=True, interrupted=multi
+    )
+
+    for label, text in shapes.items():
+        assert is_harness_chrome(text), f"{label} must not be painted as the user's words"
+        assert _page_rows([Message.user(text)]) == [], label
+
+
+@pytest.mark.parametrize(
+    "resembling",
+    [
+        # An operator QUOTING the instruction — asking about a log line is a
+        # realistic thing to do — must keep their own row, so the recogniser
+        # matches whole shapes and not a distinctive prefix.
+        "why does the transcript say: " + harness_chrome_prompts()[2],
+        "[system] A tool call (write) was aborted by the network interruption "
+        "before it finished, so it never ran. If you still need that action, "
+        "issue the call again from scratch. ok?",
+    ],
+)
+def test_an_operator_message_resembling_the_instruction_is_not_swallowed(
+    resembling: str,
+) -> None:
+    """Negative control for the recogniser above.
+
+    The pre-fix rule was exact membership of harness-minted constants, and the
+    extension must not turn "the operator typed something similar" into
+    "the harness said it": a swallowed operator turn is invisible and
+    unrecoverable, which is worse than the leak it fixes.
+    """
+    assert not is_harness_chrome(resembling)
+
+    rows = _page_rows([Message.user(resembling)])
+
+    assert [row.kind for row in rows] == ["user"]
+    assert rows[0].text == resembling
+
+
 def test_a_human_quoting_the_envelope_keeps_their_own_words() -> None:
     """Negative control for D1/D9 suppression: asking about the wrapper is a
     realistic thing to do, and must not be rewritten as a parent steer."""

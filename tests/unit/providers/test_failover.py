@@ -5298,6 +5298,75 @@ def test_the_recorded_openrouter_error_chunk_classifies_as_resumable() -> None:
     assert not is_aggregator_upstream_stream_failure(error, "openai")
 
 
+def test_a_relayed_5xx_with_an_OPAQUE_upstream_body_is_resumable() -> None:
+    """Round-1 m1: the envelope is PROVENANCE, so an opaque body cannot hide it.
+
+    Every fixture above starts from the marker-bearing body, which made the
+    classifier depend on the upstream HOST's wording. This is the same recorded
+    chunk with a body that says nothing at all — the reviewer's exact shape —
+    pushed through the real ``_compat_stream_error``, which renders it
+    ``Provider returned error: "ERROR"``: no marker matches, while the envelope
+    says plainly that the gateway is relaying an upstream death.
+
+    The status gate, not the wording, is what keeps refusals terminal, so
+    admitting the envelope stays bounded: 4xx never reaches the classifier, and
+    a non-aggregator never reaches it at all.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    opaque = {"code": 502, "message": "Provider returned error", "metadata": {"raw": '"ERROR"'}}
+    error = _compat_stream_error({"error": opaque})
+
+    assert error.status == 502
+    assert error.message == 'Provider returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    assert is_aggregator_upstream_stream_failure(error, "radient")
+    assert not is_aggregator_upstream_stream_failure(
+        error, "openai"
+    ), "a direct provider has no sibling host to re-route to"
+
+    # The attributed variant is the same envelope: the composer swaps the
+    # gateway's generic subject for the upstream host's name when the envelope
+    # carries one, so a recogniser keyed on the full generic sentence would miss
+    # half the envelopes on the wire.
+    attributed = _compat_stream_error(
+        {
+            "error": {
+                "code": 502,
+                "message": "Provider returned error",
+                "metadata": {"provider_name": "Together", "raw": '"ERROR"'},
+            }
+        }
+    )
+    assert attributed.message == 'Together returned error: "ERROR"'
+    assert is_aggregator_upstream_stream_failure(attributed, "openrouter")
+
+    # The STATUS gate is what keeps a refusal terminal, not the envelope's
+    # absence: the identical body under a 400 stays a request defect.
+    refusal = _compat_stream_error({"error": {**opaque, "code": 400}})
+    assert not is_aggregator_upstream_stream_failure(refusal, "openrouter")
+
+
+async def test_an_opaquely_worded_relay_5xx_continues_through_the_driver() -> None:
+    """The classifier's new arm has to be reached by the DRIVER's marking helper.
+
+    The classification is inert unless ``_mark_mid_stream_connectivity`` runs on
+    the forwarded-any raise, which is the half an error object cannot carry.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(502, 'Provider returned error: "ERROR"', retryable=True),
+        deltas=2,
+        request=_request("openrouter", "deepseek/deepseek-v4.1-flash"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "the gateway's relay envelope says an upstream host died, however opaque "
+        "that host's own body was"
+    )
+
+
 def test_connectivity_config_keys_parse_camel_and_snake() -> None:
     """Both key spellings parse; defaults survive a reconnect out of the box."""
     camel = RetrySettings.from_settings(
