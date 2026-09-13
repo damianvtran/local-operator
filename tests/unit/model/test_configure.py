@@ -4877,18 +4877,66 @@ class TestTheConfiguredEffortClamp:
         ("deepseek", "deepseek-chat", False),
         ("deepseek", "deepseek-v3.2-chat", False),
         ("deepseek", "deepseek-reasoner", False),
-        # The same weights behind an aggregator keep it off: measured, an
-        # OpenRouter request without the echo answers 200, so the requirement is
-        # the route's, not the model's.
-        ("openrouter", "deepseek/deepseek-v4-flash", False),
-        ("openrouter", "deepseek/deepseek-v4-flash-0731", False),
-        # And no other family gains a DeepSeek-only field.
+        # The SAME weights behind an aggregator keep it ON, on every route that
+        # can serve them. The requirement belongs to the weights, not to the
+        # hosting: an aggregator load-balances one model across many endpoints
+        # and DeepSeek's own is among them, so a 200 from another endpoint is
+        # evidence about THAT endpoint and not about the route. Measured
+        # 2026-09-13: OpenRouter lists thirteen endpoints for
+        # ``deepseek/deepseek-v4.1-flash`` including DeepSeek's, and the request
+        # our own probe sent was served by ``Together``.
+        ("openrouter", "deepseek/deepseek-v4-flash", True),
+        ("openrouter", "deepseek/deepseek-v4-flash-0731", True),
+        ("openrouter", "deepseek/deepseek-v4.1-flash", True),
+        ("radient", "deepseek/deepseek-v4-flash", True),
+        # ...including a HuggingFace-style owner prefix, which is the same
+        # namespace shape under a different name.
+        ("openrouter", "deepseek-ai/DeepSeek-V4-Flash", True),
+        # An aggregator's route to a NON-thinking DeepSeek row still gets
+        # nothing, and no other family gains a DeepSeek-only field.
+        ("openrouter", "deepseek/deepseek-chat", False),
+        ("openrouter", "deepseek/deepseek-reasoner", False),
+        ("openrouter", "deepseek/deepseek-v3.2-chat", False),
         ("openai", "gpt-5.2", False),
         ("anthropic", "claude-opus-5", False),
     ],
 )
 def test_reasoning_echo_capability_is_derived_per_route(hosting, model_name, expected):
     assert build_model_spec(hosting, model_name).requires_reasoning_echo is expected
+
+
+def test_reasoning_echo_capability_ignores_the_route_namespace_only():
+    """The family rule reads the LAST path segment, and nothing else.
+
+    Pinned separately from the table above because the failure it prevents is
+    silent in both directions: an anchored rule matched against a namespaced id
+    (``deepseek/deepseek-v4.1-flash``) drops the family entirely, and one that
+    stripped every ``deepseek``-looking segment would match unrelated ids.
+    """
+    from local_operator.model.configure import _served_model_family
+
+    assert _served_model_family("deepseek/deepseek-v4.1-flash") == "deepseek-v4.1-flash"
+    assert _served_model_family("deepseek-flash") == "deepseek-flash"
+    assert _served_model_family("vendor/deepseek/DeepSeek-V4-Flash") == "DeepSeek-V4-Flash"
+    # The KNOWN limit, pinned so the docstring's claim is executable: only a
+    # ``/`` namespace is stripped, so the harness's own normalised
+    # ``provider_smodel`` spelling passes through untouched and matches no family
+    # rule. No live caller passes one; this row is here to fail the day one does
+    # (review round 1, NIT 2).
+    assert _served_model_family("minimax_sminimax-m3") == "minimax_sminimax-m3"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "vllm", "llamacpp", "lmstudio"])
+def test_a_local_server_serving_the_weights_is_left_alone(provider):
+    """A user-operated server keeps today's body.
+
+    The local route builds its spec through ``local_model_spec`` rather than
+    this derivation, and a server the user runs themselves is not the vendor's
+    endpoint: the echo belongs on the routes that reach it, and injecting a
+    sentence into a local server's request on a hunch about its chat template
+    is not a change this capability should make.
+    """
+    assert build_model_spec(provider, "deepseek-v4-flash").requires_reasoning_echo is False
 
 
 def test_reasoning_echo_defaults_off_for_a_hand_built_spec():

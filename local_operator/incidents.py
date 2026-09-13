@@ -138,10 +138,52 @@ CONTEXT_LENGTH_MARKERS: tuple[str, ...] = (
     "input is too long",
 )
 
-#: Ordered (category, patterns) rules. First category whose pattern matches
-#: (case-insensitive) wins; order is specificity, not severity.
-_RULES: list[tuple[str, tuple[str, ...]]] = [
+#: The provider wording that means "this DeepSeek thinking-mode request never
+#: carried the reasoning back": the message this pins is, verbatim, "The
+#: `reasoning_content` in the thinking mode must be passed back to the API."
+#:
+#: BOTH halves are required, and this tuple is the ONE definition of them: the
+#: loop's recovery gate (``harness/loop.py``, which imports this) and the
+#: classifier below must agree about what the refusal is. They once carried
+#: private copies and combined them differently -- the loop requiring both, the
+#: rule only one -- so a 429 body quoting ``requested.reasoning_content``, a
+#: relayed 502 naming the field, and the legacy rows' "unsupported field
+#: 'reasoning_content'" 400 all rendered as this category with the "switch
+#: model" hint. That last one is the error
+#: :data:`model.configure._DEEPSEEK_THINKING_MODELS` exists to AVOID, so
+#: reporting it as our own recovery having failed inverted its meaning.
+REASONING_ECHO_MARKERS: tuple[str, ...] = ("reasoning_content", "must be passed back")
+
+#: One marker in a rule below: a plain string matches on its own, and a TUPLE is
+#: a CONJUNCTION whose every element must be present. Any-of is the right default
+#: for vendor wording; the conjunction form exists for the one refusal whose two
+#: halves are each individually common (see :data:`REASONING_ECHO_MARKERS`).
+Marker = str | tuple[str, ...]
+
+#: Ordered (category, markers) rules. First category with a matching marker wins
+#: (case-insensitive); order is specificity, not severity.
+_RULES: list[tuple[str, tuple[Marker, ...]]] = [
     ("context-length", CONTEXT_LENGTH_MARKERS),
+    # The DeepSeek thinking-mode validator's own wording, named before the
+    # generic rules because the refusal arrives RELAYED through an aggregator
+    # ("upstream ...") as often as directly, and a relayed body must not be read
+    # as a provider fault. The harness answers it with a retry that turns
+    # thinking off (``harness/loop.py``), so a user seeing this category means
+    # that recovery did not apply or was refused too -- their model cannot
+    # continue this conversation with thinking on, which only they can resolve.
+    #
+    # The markers are a CONJUNCTION, not a choice: each half alone is ordinary,
+    # and order alone cannot separate them. A 429 quoting the field name now
+    # falls through to rate-limit and a relayed 502 to provider, which is what
+    # they are; and the legacy rows' "unsupported field 'reasoning_content'" 400
+    # matches no other rule at all, so under the ORed form it landed HERE --
+    # reporting the error the capability exists to AVOID as our own recovery
+    # having failed. Sharing :data:`REASONING_ECHO_MARKERS` with the loop's gate
+    # is what keeps the two answers from drifting apart again.
+    (
+        "reasoning-echo",
+        (REASONING_ECHO_MARKERS,),
+    ),
     (
         "rate-limit",
         (
@@ -226,6 +268,16 @@ _HINTS: dict[str, str] = {
     "ask the user to /compact or send fewer and smaller images.",
     "rate-limit": "Back off and retry later; if it persists, tell the user which "
     "provider hit the limit — they may need to switch model or top up quota.",
+    # Two honest readings of the same category, because the hint is a static
+    # string and the RETRY's existence is per-model: on a model with no
+    # thinking-off rung -- which includes the live aggregator routes to these
+    # weights -- the loop never re-asks, so a hint claiming a retry "did not
+    # clear" it describes a call that was never made.
+    "reasoning-echo": "The provider refused the request because the conversation's "
+    "reasoning was not carried back, and the harness could not clear it by "
+    "retrying with thinking disabled (or this model has no such rung to retry "
+    "at). Do not resend the same request unchanged: tell the user the model's "
+    "thinking mode cannot continue this conversation and suggest switching model.",
     "auth": "Credentials were rejected: tell the user which provider and suggest "
     "`local-operator login <provider>`. Do not retry the identical request.",
     "billing": "The provider account cannot pay for this request: report it and "
@@ -425,13 +477,19 @@ class Incident:
         return "\n".join(lines)
 
 
+def _matches(text: str, marker: Marker) -> bool:
+    """Does ``text`` carry this marker? A tuple is a conjunction of all of it."""
+    if isinstance(marker, tuple):
+        return all(re.search(re.escape(part), text) for part in marker)
+    return bool(re.search(re.escape(marker), text))
+
+
 def classify_incident(raw: str, provider: str = "", model: str = "") -> Incident:
     """Classify an error string; never raises, never returns None."""
     text = (raw or "").lower()
     for category, patterns in _RULES:
-        for pattern in patterns:
-            if re.search(re.escape(pattern), text):
-                return Incident(category, raw, provider, model)
+        if any(_matches(text, marker) for marker in patterns):
+            return Incident(category, raw, provider, model)
     return Incident("unknown", raw, provider, model)
 
 

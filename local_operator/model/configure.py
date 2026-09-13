@@ -485,13 +485,42 @@ _OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
 #: an input ``reasoning_content`` outright, so a placeholder sent there would be
 #: the very 400 this capability exists to prevent.
 #:
-#: Anchored (unlike the boundary-marker table, which must absorb aggregator
-#: prefixes) because the capability is only ever set on the direct route. The
-#: separator accepts a dot as well as a dash: the vendor ships dotted ids
+#: The separator accepts a dot as well as a dash: the vendor ships dotted ids
 #: (``deepseek-v4.1-flash``) beside hyphenated ones, and a family rule that
 #: silently dropped a dotted id would send it a key-less request -- the exact
-#: 400 this capability exists to prevent.
+#: 400 this capability exists to prevent. Anchored, so it must be matched
+#: against the FAMILY (see :func:`_served_model_family`) rather than against a
+#: route-namespaced id: ``deepseek/deepseek-v4.1-flash`` is the same weights,
+#: and an anchored rule applied to the namespaced spelling silently matches
+#: nothing at all.
 _DEEPSEEK_THINKING_MODELS = re.compile(r"^deepseek-(?:flash|v4)(?:[.-]|$)")
+
+
+def _served_model_family(model_id: str) -> str:
+    """The model's own family name, with any route NAMESPACE removed.
+
+    Aggregators namespace what they route -- OpenRouter lists this family as
+    ``deepseek/deepseek-v4.1-flash`` and Radient carries the same
+    ``vendor/model`` shape -- and a HuggingFace-style id carries an owner
+    prefix too. The validator this capability answers to belongs to the
+    weights, not to the namespace, so every family rule here is matched against
+    the LAST path segment. Exactly one namespace is dropped (whatever precedes
+    the final ``/``): deeper prefixes are all the same idea, and a rule that
+    stripped only a known vendor list would stop matching the day a new
+    aggregator shipped.
+
+    Only a ``/`` namespace is stripped, and that is a KNOWN limit rather than
+    an oversight: ``build_model_spec`` receives the caller's model NAME, not a
+    route id, so the harness's own normalised ``provider_smodel`` spelling the
+    marker table above documents (``minimax_sminimax-m3``) is not a shape that
+    reaches here -- no live caller passes one, and one that did would match
+    nothing and silently lose the family rule. Splitting on ``:`` or ``_s`` too
+    would be dead code claiming coverage it does not have; if a caller ever
+    starts passing a route id, widen this and add its row to the derivation
+    table at the same time (review round 1, NIT 2).
+    """
+    return model_id.rpartition("/")[2]
+
 
 #: The per-family REASONING-BOUNDARY MARKER table: the chat-template token a
 #: model's provider emits at the head of the content channel, keyed on the MODEL
@@ -632,15 +661,13 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     fallback_levels = (
         ("none", "low", "high", "max") if direct_deepseek else supported_efforts(model_name)
     )
-    # Whether this route's requests must echo reasoning back on every assistant
-    # turn. Keyed on the canonical provider AND the model family, and NOT on
-    # ``direct_deepseek``, which happens to cover almost the same ids: that flag
-    # also decides the effort ladder, and the pinned 0731 snapshot runs the same
-    # thinking-mode validator while shipping no ladder at all. See
-    # ``ModelSpec.requires_reasoning_echo`` for the measurements.
-    requires_reasoning_echo = canonical == "deepseek" and bool(
-        _DEEPSEEK_THINKING_MODELS.match(lowered)
-    )
+    # Whether requests to this model must echo reasoning back on every
+    # assistant turn. Keyed on the MODEL FAMILY, on every route, and NOT on
+    # ``direct_deepseek`` -- that flag also decides the effort ladder, and the
+    # pinned 0731 snapshot runs the same thinking-mode validator while shipping
+    # no ladder at all. See ``ModelSpec.requires_reasoning_echo`` for the
+    # measurements, including why the earlier route-keyed form was wrong.
+    requires_reasoning_echo = bool(_DEEPSEEK_THINKING_MODELS.match(_served_model_family(lowered)))
     effort_levels = listing_levels if listing_levels is not None else fallback_levels
     # THE LADDER and THE SEED are two separate questions with two different
     # answers, and conflating them is what made two earlier revisions wrong.
