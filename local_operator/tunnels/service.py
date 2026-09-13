@@ -158,7 +158,8 @@ def _could_not_reach_control_plane(failure: BaseException) -> bool:
         # Both links, deliberately, including a context Python would otherwise
         # suppress: this asks whether anything in the failure was a transport
         # error, and the cost of missing one is an operator sent to /login for a
-        # network fault.
+        # network fault. The walk is depth-first — the stack is popped LIFO — and
+        # the order does not matter, because the answer is a boolean.
         pending.extend(link for link in (current.__cause__, current.__context__) if link)
     return False
 

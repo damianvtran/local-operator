@@ -871,11 +871,13 @@ def _synthetic_port() -> int:
 
 
 def _refusal_from_an_unreachable_control_plane() -> ValueError:
-    """The failure the tunnel client raises when its refresh cannot connect.
+    """The shape the tunnel client refuses with when its refresh cannot connect.
 
-    Built as the client actually produces it — the transport error on
-    `__cause__` of a ValueError — because that chain is the whole reason a
-    surface can tell this apart from an expired login.
+    A ValueError with the transport error reachable on its chain: the client's
+    own chain has an `AuthStoreError` in between (AuthStore wraps the transport
+    failure, `request` chains that), and the test that uses this only needs the
+    shape, because the chain is the whole reason a surface can tell this apart
+    from an expired login.
     """
     try:
         try:

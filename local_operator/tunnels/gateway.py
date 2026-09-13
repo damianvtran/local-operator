@@ -80,8 +80,9 @@ RELAY_DETAIL = {
 }
 
 # What `lop tunnel status` prints for the same cause. It differs where a terminal
-# can run the command a phone cannot, and never says "run lop tunnel status" —
-# that command is what is printing this line.
+# can run the command a phone cannot. The lease-pending advice points forward —
+# retry in a moment — rather than repeating the command that is printing the line,
+# which is the circularity this split exists to avoid.
 TERMINAL_DETAIL = {
     UNREACHABLE: (
         "This computer could not reach Radient to renew the relay authorization (its "
