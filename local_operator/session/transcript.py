@@ -1246,10 +1246,27 @@ class Transcript:
             details = (entry.payload.get("provider_payload") or {}).get("details")
             if not isinstance(details, dict):
                 continue
-            cost = details.get("search_cost")
-            if not isinstance(cost, dict):
-                continue
-            rows.append({**cost, "provider": str(details.get("provider") or "")})
+            # BOTH money rows: ``web_search`` records its per-search price under
+            # ``search_cost`` and ``web_read`` records its own under
+            # ``read_cost``. Reading only the first restored a read-heavy
+            # conversation's searches while silently dropping its reads, so the
+            # recovered figure sat below what the live ledger had shown for the
+            # same conversation.
+            for key, kind in (("search_cost", "search"), ("read_cost", "read")):
+                cost = details.get(key)
+                if not isinstance(cost, dict):
+                    continue
+                rows.append(
+                    {
+                        **cost,
+                        "provider": (
+                            str(details.get("provider") or "")
+                            if kind == "search"
+                            else f"{str(details.get('provider') or '')}:read"
+                        ),
+                        "kind": kind,
+                    }
+                )
         return rows
 
     def pending_prunes(self) -> dict[str, str]:

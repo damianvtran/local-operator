@@ -66,7 +66,11 @@ class PageContext:
         return [str(source.get("url") or "") for source in self.sources if source.get("url")]
 
     def ages_out(self, ttl_seconds: float, now: float | None = None) -> bool:
-        return (now or time.monotonic()) - self.created_at > ttl_seconds
+        # ``now is not None`` rather than ``now or``: an explicit ``now=0.0`` is a
+        # value a caller can legitimately pass (a test clock starting at zero),
+        # and ``or`` would silently replace it with the real monotonic clock.
+        observed = now if now is not None else time.monotonic()
+        return observed - self.created_at > ttl_seconds
 
 
 class PageContextStore:

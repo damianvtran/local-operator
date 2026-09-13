@@ -40,9 +40,9 @@ def test_deepseek_cost_is_token_priced_and_halves_off_peak() -> None:
     peak = estimate_search_cost("deepseek", usage, moment=_at(2026, 9, 16, 2))
     off_peak = estimate_search_cost("deepseek", usage, moment=_at(2026, 9, 16, 12))
 
-    # 5,000 cache-miss input at $0.30/1M, 10,000 cache reads at $0.006/1M,
-    # 800 output at $1.20/1M.
-    expected_peak = 5_000 * 0.30e-6 + 10_000 * 0.006e-6 + 800 * 1.20e-6
+    # The Anthropic wire EXCLUDES cache reads from input_tokens, so all 15,000
+    # inputs bill at the miss rate and the 10,000 reads bill at the hit rate.
+    expected_peak = 15_000 * 0.30e-6 + 10_000 * 0.006e-6 + 800 * 1.20e-6
     assert peak.usd == pytest.approx(expected_peak, abs=1e-9)
     assert off_peak.usd == pytest.approx(expected_peak / 2, abs=1e-9)
     assert "estimate" in peak.basis and "peak" in peak.basis
@@ -50,16 +50,20 @@ def test_deepseek_cost_is_token_priced_and_halves_off_peak() -> None:
     assert peak.priced_from_usage is True
 
 
-def test_cache_reads_are_not_charged_twice() -> None:
-    """A cache read is cheaper input, not extra input.
+def test_anthropic_wire_cache_reads_are_added_not_subtracted() -> None:
+    """The search route is Anthropic-wire: reads are OUTSIDE ``input_tokens``.
 
-    Charging 10k cache reads at both the miss rate and the hit rate is the easy
-    arithmetic slip here, and it inflates every enriched DeepSeek search.
+    The OpenAI-shaped reading (subtract the reads from the input count) charged
+    nothing for fresh input on a cache-dominated turn -- and the enriched path is
+    exactly that shape, since the replayed pages arrive as cache reads. This pins
+    the convention so the subtraction cannot come back.
     """
-    usage = SearchUsage(input_tokens=10_000, cache_read_tokens=10_000, output_tokens=0)
+    usage = SearchUsage(input_tokens=200, cache_read_tokens=10_000, output_tokens=0)
     cost = estimate_search_cost("deepseek", usage, moment=_at(2026, 9, 16, 2))
 
-    assert cost.usd == pytest.approx(10_000 * 0.006e-6, abs=1e-9)
+    assert cost.usd == pytest.approx(200 * 0.30e-6 + 10_000 * 0.006e-6, abs=1e-9)
+    # Both buckets are charged: a subtraction would bill only the reads.
+    assert cost.usd > 10_000 * 0.006e-6
 
 
 def test_free_tiers_are_zero_and_paid_paths_use_published_rates() -> None:

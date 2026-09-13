@@ -203,13 +203,26 @@ class SearchSpendRow:
     provider: str
     searches: int = 0
     usd: float = 0.0
+    #: ``search`` or ``read``. ``web_read`` records its money under
+    #: ``<provider>:read`` so the totals stay clean, and this is what lets the
+    #: row SAY read: a row whose whole purpose is separating reads from searches
+    #: must not be labelled as one of them.
+    kind: str = "search"
+    reads: int = 0
     #: Searches whose provider publishes no rate. Counted, never rendered as
     #: $0: unknown and free are different facts (see ``format_cost``).
     unpriced_searches: int = 0
 
     @property
     def priced_searches(self) -> int:
-        return self.searches - self.unpriced_searches
+        """Everything with a known price: searches AND reads.
+
+        The name follows the common case, but a READ has a price too. Counting
+        only ``searches`` here made a read-only row report ``cost_is_known``
+        False, so a read that cost $0.002 rendered ``$—``: the ledger knew the
+        money and the panel claimed it did not.
+        """
+        return self.count - self.unpriced_searches
 
     @property
     def cost_usd(self) -> float:
@@ -225,6 +238,11 @@ class SearchSpendRow:
     def cost_is_partial(self) -> bool:
         # A lower bound: some of this provider's searches are unpriced.
         return self.unpriced_searches > 0
+
+    @property
+    def count(self) -> int:
+        """Everything this row covers: searches plus reads."""
+        return self.searches + self.reads
 
 
 @dataclass(frozen=True)
@@ -255,6 +273,8 @@ class SearchSpendSnapshot:
     searches: int = 0
     usd: float = 0.0
     unpriced_searches: int = 0
+    #: Page reads, counted apart from searches (see ``SearchSpendRow.kind``).
+    reads: int = 0
     rows: tuple[SearchSpendRow, ...] = ()
 
     @classmethod
@@ -275,6 +295,8 @@ class SearchSpendSnapshot:
             SearchSpendRow(
                 provider=str(getattr(entry, "provider", key) or key),
                 searches=int(getattr(entry, "searches", 0) or 0),
+                kind=str(getattr(entry, "kind", "search") or "search"),
+                reads=int(getattr(entry, "reads", 0) or 0),
                 usd=float(getattr(entry, "usd", 0.0) or 0.0),
                 unpriced_searches=int(getattr(entry, "unpriced_searches", 0) or 0),
             )
@@ -284,12 +306,25 @@ class SearchSpendSnapshot:
             searches=int(getattr(totals, "searches", 0) or 0),
             usd=float(getattr(totals, "usd", 0.0) or 0.0),
             unpriced_searches=int(getattr(totals, "unpriced_searches", 0) or 0),
-            rows=tuple(sorted(rows, key=lambda row: (-row.usd, -row.searches, row.provider))),
+            reads=int(getattr(totals, "reads", 0) or 0),
+            rows=tuple(sorted(rows, key=lambda row: (-row.usd, -row.count, row.provider))),
         )
 
     @property
+    def count(self) -> int:
+        """Searches plus reads: everything that could carry a price."""
+        return self.searches + self.reads
+
+    @property
     def priced_searches(self) -> int:
-        return self.searches - self.unpriced_searches
+        """Known-price operations, reads included.
+
+        The name follows the common case, but a READ has a price too: counting
+        only ``searches`` made a read-only row or session report
+        ``cost_is_known`` False, so a read that cost $0.002 rendered ``$—`` --
+        the ledger knew the money and the panel claimed it did not.
+        """
+        return self.count - self.unpriced_searches
 
     @property
     def cost_usd(self) -> float:

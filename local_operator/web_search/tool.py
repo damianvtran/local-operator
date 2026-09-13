@@ -130,11 +130,8 @@ def _render_response(response: SearchResponse) -> tuple[str, int]:
 
     # One footer for the whole response: a mixed set of sources would otherwise
     # suggest some snippets are page text and others are not.
-    footer = (
-        _EVIDENCE_FOOTER
-        if any(source.relevance is not None for source in response.sources)
-        else _SOURCE_FOOTER
-    )
+    # Follows the SNIPPET, not the score: see ``SearchResponse.evidence_applied``.
+    footer = _EVIDENCE_FOOTER if response.evidence_applied else _SOURCE_FOOTER
 
     failures = ""
     if response.failures:

@@ -8538,7 +8538,11 @@ class OperatorApp(App[None]):
                 self._spend_text((cost or 0.0) + search_usd)
                 if cost is not None
                 else (
-                    self._spend_text(search_usd)
+                    # Model money unpriceable, search money real: the cell can
+                    # only show the half it knows, so it says `+`. Showing a
+                    # partial figure as if it were the total is the lie
+                    # ``_spend_text``'s docstring calls the more expensive one.
+                    self._spend_text(search_usd, floor=True)
                     if search_usd
                     else ("$—" if billed_unknown else None)
                 )
@@ -9259,7 +9263,10 @@ class OperatorApp(App[None]):
             from local_operator.web_search.models import SearchCost
 
             session_id = str(getattr(session, "session_id", "") or "")
-            if SEARCH_SPEND.session(session_id).searches:
+            # ``operations``, not ``searches``: a conversation whose only recorded
+            # spend is reads has entries too, and the guard exists to stop a
+            # reload double-recording them, not to let reads through.
+            if SEARCH_SPEND.session(session_id).operations:
                 return
             for row in restore() or ():
                 if not isinstance(row, dict):
@@ -9275,6 +9282,7 @@ class OperatorApp(App[None]):
                         basis=str(row.get("basis") or ""),
                         priced_from_usage=bool(row.get("priced_from_usage")),
                     ),
+                    kind=str(row.get("kind") or "search"),
                 )
         except Exception:  # noqa: BLE001 -- a recovered total is never worth a boot failure
             logger.debug("search spend recovery failed", exc_info=True)
@@ -37243,7 +37251,23 @@ class OperatorApp(App[None]):
                 total += self._live_manager_cost(nested, default_label, seen)
         return total
 
-    def _spend_text(self, total: float | None = None) -> str:
+    def _search_spend_is_floor(self) -> bool:
+        """Whether the search half makes the band's figure a lower bound.
+
+        Two shapes, both about the CELL rather than about any one search: the
+        session has an unpriced search (so the total covers part of the work),
+        or its search money is priced while its model money is not (so the cell
+        is showing half a session). Folded in here because the mark is a
+        property of the figure -- the same argument :meth:`_spend_text` makes
+        for centralizing it -- and because leaving it to the callers is how the
+        band came to print a combined total that was a floor, unmarked, while
+        `/session` for the same session printed `$0.0040+` beside an explicitly
+        unpriced row.
+        """
+        snapshot = self._session_search_spend()
+        return snapshot.cost_is_partial or (snapshot.usd > 0 and not snapshot.cost_is_known)
+
+    def _spend_text(self, total: float | None = None, *, floor: bool | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.
 
         Every writer of the cost cell goes through here, because the mark is a
@@ -37281,7 +37305,8 @@ class OperatorApp(App[None]):
         spend = self._spend_total() if total is None else total
         if not spend:
             return ""
-        return f"{RESTORED_COST_PREFIX if self._spend_is_floor else ''}{format_cost(spend)}"
+        is_floor = self._spend_is_floor or self._search_spend_is_floor() if floor is None else floor
+        return f"{RESTORED_COST_PREFIX if is_floor else ''}{format_cost(spend)}"
 
     @staticmethod
     def _frontend_child_costs(state: Any) -> dict[str, float]:
