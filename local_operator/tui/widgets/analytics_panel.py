@@ -293,6 +293,27 @@ def search_block_needs_legend(snapshot: "SearchSpendSnapshot | None") -> bool:
     return any(scope_needs_cost_legend(scope) for scope in (snapshot, *snapshot.rows))
 
 
+def _counted_kinds(snapshot: SearchSpendSnapshot) -> str:
+    """``5 searches · 3 reads``, or just the kind this scope actually has.
+
+    The noun follows the KIND (a read-only conversation says ``1 read``, not
+    ``0 searches · 1 read``) and a mixed scope names both counts, because the
+    share it is printed beside covers both kinds' money -- ``5 searches`` next to
+    a share that includes a read's dollars reads as if the read were not part of
+    it. Extracted from the row that needed it so the bar policy can MEASURE the
+    same ladder it renders (round-3 MAJOR-2).
+    """
+    if snapshot.searches:
+        word = "search" if snapshot.searches == 1 else "searches"
+        counted = f"{snapshot.searches} {word}"
+        if snapshot.reads:
+            read_word = "read" if snapshot.reads == 1 else "reads"
+            counted = f"{counted} · {snapshot.reads} {read_word}"
+        return counted
+    word = "read" if snapshot.reads == 1 else "reads"
+    return f"{snapshot.reads} {word}"
+
+
 def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
     """How a headline names its search half: money when there is any, else volume.
 
@@ -312,16 +333,28 @@ def search_component_text(snapshot: SearchSpendSnapshot | None) -> str:
     reads_only = bool(snapshot.reads) and not snapshot.searches
     noun, plural = ("read", "reads") if reads_only else ("search", "searches")
     if snapshot.usd > 0:
-        return f"incl. {format_cost(MoneyFigure(cost_usd=snapshot.usd))} {noun}"
+        # ``format_cost(snapshot)``, not a bare ``MoneyFigure``: the snapshot
+        # carries the search money's own honesty marks, so a session with any
+        # unpriced operation renders ``$0.0069+`` here as well as in the block
+        # below -- passing a plain figure dropped the ``+`` and let the headline
+        # state a total the block two rows down contradicts (round-3 MAJOR-3).
+        return f"incl. {format_cost(snapshot)} {noun}"
     # Branch on the COUNTERS, never on the money (round-2 review R2-MAJOR-1):
     # ``usd`` is zero for an unpriced operation too, so a money test called
     # unpriced searches "free" -- the same render-time inference the ledger's
     # free/paid/unpriced counters exist to prevent.
     if snapshot.unpriced_searches:
-        word = "read" if reads_only and snapshot.unpriced_searches == 1 else (
-            "reads" if reads_only else ("search" if snapshot.unpriced_searches == 1 else "searches")
-        )
-        return f"incl. {snapshot.unpriced_searches} unpriced {word}"
+        # The unpriced tally spans both kinds, so it is split before it is named:
+        # a session with searches plus an unpriced READ said "1 unpriced search"
+        # while the block below said "1 read · no published price" (round-3
+        # MINOR-1).
+        unpriced_reads = max(0, snapshot.unpriced_reads)
+        unpriced_searches = max(0, snapshot.unpriced_searches - unpriced_reads)
+        if unpriced_searches:
+            n, word = unpriced_searches, ("search" if unpriced_searches == 1 else "searches")
+        else:
+            n, word = unpriced_reads, ("read" if unpriced_reads == 1 else "reads")
+        return f"incl. {n} unpriced {word}"
     count = snapshot.reads if reads_only else snapshot.searches
     word = noun if count == 1 else plural
     return f"incl. {count} free {word}"
@@ -406,18 +439,27 @@ def search_spend_section(
         line = Text()
         line.append(f"  {name:<{_SEARCH_NAME_COL}}", style=semantic_style("dim"))
         line.append_text(_money_run(scope, _SEARCH_VALUE_CELL))
-        if share is None and bar_cells:
+        row_bar = bar_cells
+        if share is not None and bar_cells and notes:
+            # Belt-and-braces on the section threshold (round-3 MAJOR-2): no row
+            # may spend the bar's cells and then push its own count onto a
+            # continuation line. Measured with the WIDEST rung, because a note
+            # that has to wrap is the thing this guards against.
+            with_bar = width - (line.cell_len + 2 + bar_cells + 2)
+            if len(notes[0]) > with_bar:
+                row_bar = 0
+        if share is None and row_bar:
             # The reference rows have no share to draw, but they still SPEND the
             # bar's cells so the block keeps one count column (round-2 design
             # D11): without this the reference counts sat 10 cells left of the
             # providers' and the grid split in exactly the frames with bars.
-            line.append(" " * (bar_cells + 2))
-        if share is not None and bar_cells:
+            line.append(" " * (row_bar + 2))
+        if share is not None and row_bar:
             # The USAGE half of the row: how much of this scope's work went to
             # this provider. Money alone cannot answer it -- six free searches
             # and no searches both total $0.0000 -- which is why the count and
             # the bar are here beside the dollars rather than in prose.
-            line.append(f"  {proportion_bar(share, bar_cells)}", style=semantic_style("accent"))
+            line.append(f"  {proportion_bar(share, row_bar)}", style=semantic_style("accent"))
         # Same ladder semantics as ``session_panel._Body.kv``: the first rung
         # that fits uncropped wins, and none fitting means the qualifier sheds
         # rather than being cut mid-word. Every rung here still carries the
@@ -474,16 +516,6 @@ def search_spend_section(
             f"{n} {word} · unpriced",
         )
 
-    _base_cells = 2 + _SEARCH_NAME_COL + _SEARCH_VALUE_CELL
-    _widest_note = max(
-        (
-            len(search_notes(row.count, row.unpriced_searches, kind=row.kind)[0])
-            for row in snapshot.rows
-        ),
-        default=0,
-    )
-    bar_cells = 8 if width >= _base_cells + 2 + 8 + 2 + _widest_note else 0
-
     def total_notes() -> tuple[str, ...]:
         """The total's own counts, in the kinds it actually has.
 
@@ -502,6 +534,43 @@ def search_spend_section(
         # has one, next to a row below saying the opposite about the read.
         read_note = search_notes(snapshot.reads, snapshot.unpriced_reads, kind="read")[0]
         return tuple(f"{note} · {read_note}" for note in base)
+
+    def session_notes() -> tuple[str, ...]:
+        """This session's own counts and its share of the process total.
+
+        Built here rather than inline at the row so the bar policy can measure
+        it: the threshold has to cover every row the block DRAWS, and the
+        reference rows' notes -- the total's and this one -- are longer than any
+        provider's, which is how the bar came to be drawn where the Total row
+        still orphaned its count (round-3 MAJOR-2).
+        """
+        share = (
+            format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
+        )
+        counted = _counted_kinds(session)
+        return (
+            f"{counted} · {share} of search spend",
+            # The compact rung keeps a referent: a bare ``· 100%`` says a
+            # proportion of nothing, which is the failure the denominator
+            # rule above already calls out. ``of search`` is shorter than
+            # ``of search spend`` and still names what the share is OF.
+            f"{counted} · {share} of search",
+            f"{counted} · {share} share",
+            counted,
+        )
+
+    _base_cells = 2 + _SEARCH_NAME_COL + _SEARCH_VALUE_CELL
+    # Every note-ladder the block will render, not just the providers':
+    # ``default=0`` keeps an empty ledger (which returns before this point) out of
+    # the arithmetic, and ``session`` is measured only when its row is drawn.
+    _notes_to_fit = [
+        len(search_notes(row.count, row.unpriced_searches, kind=row.kind)[0])
+        for row in snapshot.rows
+    ]
+    _notes_to_fit.append(len(total_notes()[0]))
+    if session is not None and session.count:
+        _notes_to_fit.append(len(session_notes()[0]))
+    bar_cells = 8 if width >= _base_cells + 2 + 8 + 2 + max(_notes_to_fit, default=0) else 0
 
     lines.append(
         section_header(
@@ -522,42 +591,7 @@ def search_spend_section(
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # reads has a share worth showing, and the guard dropped the row for it.
     if session is not None and session.count:
-        # The share is of the PRICED total, and says ``—`` when there is no
-        # priced total to take a share of: a process whose searches are all
-        # unpriced has no denominator, and "0%" would read as "this session
-        # spent nothing" -- the empty-context lie in a different currency.
-        share = (
-            format_percent(session.usd / snapshot.usd) if snapshot.usd > 0 else format_percent(None)
-        )
-        # The noun follows the KIND this session actually has: a read-only
-        # conversation guards its way into this row now, and `0 searches · 100%`
-        # would be both wrong-sounding and less informative than `1 read`.
-        if session.searches:
-            word = "search" if session.searches == 1 else "searches"
-            counted = f"{session.searches} {word}"
-            if session.reads:
-                # The share covers BOTH kinds' money, so a mixed session names
-                # both counts: `5 searches` beside a share that includes a
-                # read's dollars reads as if the read were not part of it.
-                read_word = "read" if session.reads == 1 else "reads"
-                counted = f"{counted} · {session.reads} {read_word}"
-        else:
-            word = "read" if session.reads == 1 else "reads"
-            counted = f"{session.reads} {word}"
-        row(
-            "This session",
-            session,
-            (
-                f"{counted} · {share} of search spend",
-                # The compact rung keeps a referent: a bare ``· 100%`` says a
-                # proportion of nothing, which is the failure the denominator
-                # rule above already calls out. ``of search`` is shorter than
-                # ``of search spend`` and still names what the share is OF.
-                f"{counted} · {share} of search",
-                f"{counted} · {share} share",
-                counted,
-            ),
-        )
+        row("This session", session, session_notes())
     # A dim sub-label rather than a section header: the rows under it PARTITION
     # the total above, which is the same relationship the Totals block's tree
     # rows (`` ├ Fresh (uncached)``) already express with one level less chrome.

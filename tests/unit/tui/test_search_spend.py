@@ -954,3 +954,54 @@ async def test_analytics_never_paints_a_cropped_money_fragment(tmp_path, monkeyp
     # padding after it, so no half-token can be mistaken for money.
     assert "incl" not in row
     assert row.split()[-1].startswith("$"), f"something follows the figure: {row!r}"
+
+
+def test_the_bar_threshold_measures_the_reference_rows_too() -> None:
+    """R3-MAJOR-2: the threshold only measured provider notes.
+
+    The Total row's note is the longest in the block (it names both kinds), so a
+    threshold that ignored it drew the bar where that row then orphaned its count
+    -- at the canonical 80-column frame.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_spend_section
+
+    snapshot = _ledger(
+        [("duckduckgo", SearchCost(usd=0.0, basis="free"))] * 5
+        + [("deepseek:read", SearchCost(usd=0.0, basis="free"), "read")] * 3
+    )
+
+    def render(width: int):
+        return [
+            line.plain if hasattr(line, "plain") else str(line)
+            for line in search_spend_section(snapshot, width, meta="this session · live")
+        ]
+
+    for width in (57, 60, 64, 66):
+        lines = render(width)
+        assert not any("█" in line for line in lines), "bar drawn where the total row cannot fit"
+        assert any("5 searches · 3 reads" in line for line in lines)
+        # No continuation line at all: every count is on its row.
+        assert not any(line.startswith("    ") and line.strip() for line in lines)
+
+    wide = render(68)
+    assert any("█" in line for line in wide), "the bar returns where everything fits"
+
+
+def test_the_headline_component_carries_the_search_floors_mark() -> None:
+    """R3-MAJOR-3: a bare money figure dropped the ``+``.
+
+    With a paid AND an unpriced search the headline said ``incl. $0.0069 search``
+    while the block below rendered ``$0.0069+`` and ``2 searches · 1 unpriced``.
+    """
+    from local_operator.tui.widgets.analytics_panel import search_component_text
+
+    mixed = _ledger(
+        [
+            ("brave", SearchCost(usd=0.0069, basis="per-search rate")),
+            ("future-engine", None),
+        ]
+    )
+    assert search_component_text(mixed) == "incl. $0.0069+ search"
+    # A fully priced ledger carries no mark.
+    priced = _ledger([("brave", SearchCost(usd=0.0069, basis="per-search rate"))])
+    assert search_component_text(priced) == "incl. $0.0069 search"
