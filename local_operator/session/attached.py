@@ -1821,6 +1821,31 @@ class AttachedSession:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
 
+    @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this facade could EVER succeed.
+
+        The negation of ``_ensure_bound``'s first guard, plus the one state that
+        looks like it and is not: a facade with a recovery loop RUNNING is on
+        its way back, so it answers True even on the legacy contract where the
+        flag that guard reads is still unset. Every exit of that loop either
+        attaches this facade or releases it rebindable (``_give_up_recovery``
+        sets ``_can_go_cold`` before it goes cold), so no arm of it ends more
+        closed than it started.
+
+        THE REACHABLE False IS A DELIBERATE STOP ON THE LEGACY CONTRACT, and it
+        is worth stating here because nothing else in this file says it plainly:
+        ``connect`` without ``viewer=True`` builds ``_can_go_cold = False``, and
+        ``_on_disconnected``'s deliberate-stop branch returns BEFORE setting
+        ``_recovering`` or starting ``_recover_runtime`` — so there is no loop,
+        nothing sets the flag, and the facade is cold and closed to dialling for
+        the rest of the process's life. ``lop --resume`` leaves exactly that
+        facade behind, and the TUI registers it as a sidebar source. The
+        disposed arm is latent by comparison: every ``dispose()`` reachable from
+        a sidebar source retires the source first or is app shutdown.
+        """
+        return not self._disposed and (self._can_go_cold or self._recovering)
+
     async def attach_existing(self) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 

@@ -658,6 +658,46 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     @property
+    def can_ever_bind(self) -> bool:
+        """Whether a bind attempt on this viewer could EVER succeed.
+
+        Its own question, and not a refinement of :attr:`is_cold`. A facade is
+        cold for many reasons that all clear on their own — a socket blip, an
+        owner loss the recovery loop is already chasing, a never-bound row that
+        has not been asked to dial yet — and every one of those binds. This
+        asks the one thing a caller cannot wait out: whether the facade is
+        closed to dialling BY CONSTRUCTION.
+
+        False is the two halves of the guard at the top of
+        ``AttachedSession._ensure_bound``, which returns without dialling:
+
+        * the LEGACY attach contract (``_can_go_cold`` false, what ``connect``
+          builds unless a caller asks for the viewer contract) once its owner is
+          gone. That facade never dials, and what normally releases it is its
+          own recovery loop (``_give_up_recovery`` sets the flag before going
+          cold). A DELIBERATE stop is the arm where no loop ever runs —
+          ``_on_disconnected`` returns before starting one — so nothing sets the
+          flag and the state is permanent;
+        * a DISPOSED facade, which refuses every path.
+
+        ``_recovering`` must answer True, and the distinction is load-bearing:
+        the flag means "a recovery loop is running", and every exit of that loop
+        either attaches this facade or releases it rebindable, so the state is
+        transient by construction. A caller that treated it as final would tell
+        the user that a session on its way back is gone.
+
+        **Why this is DECLARED rather than probed.** The caller that needs it
+        uses the answer to choose a sentence the user reads, which is exactly
+        where a ``getattr(session, "_can_go_cold", None)`` duck-probe belongs:
+        that is how the original sidebar defect shipped — a private read nothing
+        type-checks, and a rename on the facade could not break it loudly. The
+        name answers the question the caller has, not the flag it reads, so a
+        future second reason to be un-bindable does not put a second name in
+        every host.
+        """
+        ...
+
+    @property
     def runtime_pid(self) -> int | None:
         """Pid of the runtime this viewer is attached to.
 
