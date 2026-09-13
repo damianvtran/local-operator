@@ -1599,6 +1599,22 @@ class StatusLine:
 
     # -- rendering ----------------------------------------------------------
     def _render(self, width: int) -> Text:
+        if width <= 0:
+            # Nothing to compose into, and ``Text.truncate`` cannot express that:
+            # at a non-positive width it does NOT empty the text — ``truncate(0)``
+            # keeps the cell count and swaps the tail for an ellipsis, and
+            # ``truncate(-n)`` gives back only ``n`` cells — so every row builder
+            # below would paint nearly all of itself past a box it was told was
+            # empty. Guarded once here rather than at each of the three sites
+            # that pass a non-positive cap down to ``truncate`` (the connection
+            # row's left group, and the irreducible tail's two), because the
+            # bound is a property of the row and not of any one of its segments.
+            # Unreachable today: ``refresh`` clamps to
+            # ``max(self._dock.size.width, 10)`` and Textual does not paint a
+            # zero-width widget. The row should not depend on a caller's
+            # arithmetic for its own bound, and that clamp is one line away from
+            # moving (review MINOR-1 on #1048).
+            return Text()
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         # Separators must sit BELOW the things they separate or they read as
@@ -1639,7 +1655,7 @@ class StatusLine:
                 connection,
                 style=muted if connecting else Style(color=theme_mod.semantic_color("danger")),
             )
-            left.truncate(max(0, width), overflow="ellipsis")
+            left.truncate(width, overflow="ellipsis")
             # The gap this row reserves for the name must be the one ``_compose``
             # will actually insert. It pads with ``max(_MIN_GROUP_GAP, …)``, so a
             # literal 3 — the width of the ` · ` separator used INSIDE a group,
@@ -1654,13 +1670,21 @@ class StatusLine:
             spare = width - left.cell_len - _MIN_GROUP_GAP
             if spare <= 0:
                 # No room for even the seam, so the name is not part of this
-                # row. ``Text.truncate(0)`` is a NO-OP in Rich rather than an
-                # empty string, so this branch has to be explicit: without it
-                # a band narrower than its own connection text would compose
-                # the whole name past its edge.
+                # row. The branch is load-bearing rather than defensive: on
+                # pinned rich 15.0.0 ``Text.truncate`` at a non-positive width
+                # keeps the text's cell count (or gives back only the magnitude),
+                # so it does not empty the name — it would compose nearly the
+                # whole thing past the box's edge. It fires at every reachable
+                # width where this row's connection text plus the seam does not
+                # fit, which for the longest of those texts is 10..47 cells.
                 return self._compose(left, Text(), width, dim)
-            right = Text(self._conversation_name, style=dim)
-            right.truncate(spare, overflow="ellipsis")
+            # ``truncate_name``, not an ellipsis-truncate of the ``Text``: the
+            # latter does not rstrip, so a cut landing after the last space left
+            # a DETACHED ellipsis — `Fix sidebar reconnect …` at 80x24 — which
+            # reads as a rendering fault rather than as "this was cut". It is
+            # also what the ladder's own title cut uses one method below, so the
+            # band cuts its conversation name one way and not two.
+            right = Text(truncate_name(self._conversation_name, spare), style=dim)
             return self._compose(left, right, width, dim)
         fitted = self._fit(width, dim, muted, seam, accent)
         if fitted is not None:
