@@ -214,6 +214,14 @@ class SearchSpendRow:
     #: Searches whose provider publishes no rate. Counted, never rendered as
     #: $0: unknown and free are different facts (see ``format_cost``).
     unpriced_searches: int = 0
+    #: Operations served free and paid for, counted exactly by the ledger (see
+    #: :class:`~local_operator.web_search.cost.ProviderSearchSpend`), and the
+    #: money each half came to. The pair the dollars alone cannot carry: six free
+    #: searches and no searches at all both total $0.0000.
+    free_operations: int = 0
+    paid_operations: int = 0
+    free_usd: float = 0.0
+    paid_usd: float = 0.0
 
     @property
     def priced_searches(self) -> int:
@@ -279,6 +287,12 @@ class SearchSpendSnapshot:
     reads: int = 0
     #: Unpriced reads (see ``SearchSpendRow.unpriced_reads``).
     unpriced_reads: int = 0
+    #: Free and paid operations across every provider (see
+    #: ``SearchSpendRow.free_operations``).
+    free_operations: int = 0
+    paid_operations: int = 0
+    free_usd: float = 0.0
+    paid_usd: float = 0.0
     rows: tuple[SearchSpendRow, ...] = ()
 
     @classmethod
@@ -302,6 +316,10 @@ class SearchSpendSnapshot:
                 kind=str(getattr(entry, "kind", "search") or "search"),
                 reads=int(getattr(entry, "reads", 0) or 0),
                 unpriced_reads=int(getattr(entry, "unpriced_reads", 0) or 0),
+                free_operations=int(getattr(entry, "free_operations", 0) or 0),
+                paid_operations=int(getattr(entry, "paid_operations", 0) or 0),
+                free_usd=float(getattr(entry, "free_usd", 0.0) or 0.0),
+                paid_usd=float(getattr(entry, "paid_usd", 0.0) or 0.0),
                 usd=float(getattr(entry, "usd", 0.0) or 0.0),
                 unpriced_searches=int(getattr(entry, "unpriced_searches", 0) or 0),
             )
@@ -313,6 +331,10 @@ class SearchSpendSnapshot:
             unpriced_searches=int(getattr(totals, "unpriced_searches", 0) or 0),
             reads=int(getattr(totals, "reads", 0) or 0),
             unpriced_reads=int(getattr(totals, "unpriced_reads", 0) or 0),
+            free_operations=int(getattr(totals, "free_operations", 0) or 0),
+            paid_operations=int(getattr(totals, "paid_operations", 0) or 0),
+            free_usd=float(getattr(totals, "free_usd", 0.0) or 0.0),
+            paid_usd=float(getattr(totals, "paid_usd", 0.0) or 0.0),
             rows=tuple(sorted(rows, key=lambda row: (-row.usd, -row.count, row.provider))),
         )
 
@@ -343,6 +365,97 @@ class SearchSpendSnapshot:
     @property
     def cost_is_partial(self) -> bool:
         return self.unpriced_searches > 0
+
+
+@dataclass(frozen=True)
+class SpendSummary:
+    """One screen's money: the model half, the search half, and their total.
+
+    THE place the two kinds of spend are combined, because they reached three
+    surfaces (the status band, ``/session``, ``/analytics``) and each one had to
+    answer the same three questions: what is the total, is any of it unknown
+    rather than zero, and is the total a LOWER BOUND. Written out per surface,
+    those answers drifted -- the band folded search in while both panels'
+    headline said model-only, so one session showed two different costs, and
+    the version that omitted retrieval was the one a person reads first.
+
+    Deliberately not a money FORMATTER: the values here go to ``format_cost``,
+    which owns the honesty vocabulary (``$—`` unknown, ``+`` lower bound).
+    """
+
+    model_usd: float | None
+    search_usd: float
+    #: True when NOTHING could be priced (an unpriced model with no search
+    #: spend), so the figure must render ``$—`` rather than a confident zero.
+    is_unknown: bool
+    #: True when the figure covers only part of the work: an unpriceable model
+    #: beside real search spend, or any unpriced search.
+    is_floor: bool
+
+    @property
+    def total_usd(self) -> float:
+        return (self.model_usd or 0.0) + self.search_usd
+
+
+@dataclass(frozen=True)
+class MoneyFigure:
+    """One money figure with its honesty flags, for ``format_cost``.
+
+    ``format_cost`` takes a SCOPE rather than a float because the marks it
+    renders (``+`` lower bound, ``$—`` unknown) are properties of the scope's
+    knowledge. A figure this module has already combined and classified still has
+    to be spelled as a scope to go through the same formatter -- the alternative
+    is a second money formatter on the same screen, which is the defect the
+    panels' single-formatter rule exists to prevent.
+    """
+
+    cost_usd: float
+    cost_is_known: bool = True
+    cost_is_partial: bool = False
+
+    @classmethod
+    def of(cls, summary: "SpendSummary") -> "MoneyFigure":
+        return cls(
+            cost_usd=summary.total_usd,
+            cost_is_known=not summary.is_unknown,
+            cost_is_partial=summary.is_floor,
+        )
+
+
+def combined_spend(
+    model_usd: float | None,
+    search: "SearchSpendSnapshot | None",
+    *,
+    model_is_partial: bool = False,
+) -> SpendSummary:
+    """Combine model cost with search spend for one screen.
+
+    ``model_usd`` is ``None`` when the model half is unpriceable; the search half
+    is never ``None`` (an absent snapshot is an empty one), because a retrieval
+    ledger that is missing means no searches were recorded HERE, which is a
+    zero and not an unknown.
+
+    ``model_is_partial`` carries the model figure's OWN floor (some calls priced,
+    some not) into the combined one: the marks are per-figure, and dropping it
+    here printed a bare total for a tree whose child had used an unpriced model
+    -- the very mark the panel had, before this function existed, gone at the
+    moment the two halves were added together.
+    """
+    if search is None:
+        search = SearchSpendSnapshot()
+    search_usd = float(search.usd or 0.0)
+    if model_usd is None and search_usd <= 0.0:
+        # Neither half is priceable: the honest figure is "unknown", and it is
+        # not a floor because there is no known part for it to be a floor OF.
+        return SpendSummary(None, search_usd, True, False)
+    if model_usd is None:
+        # Real search money beside an unpriceable model: a floor, and the one
+        # case where a bare figure would understate the session by the whole
+        # model half.
+        return SpendSummary(None, search_usd, False, True)
+    return SpendSummary(
+        model_usd, search_usd, False, bool(model_is_partial or search.cost_is_partial)
+    )
 
 
 def job_cost(job: Any, *, default_model_label: str | None = None) -> float | None:
