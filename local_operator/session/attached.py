@@ -1040,7 +1040,14 @@ class AttachedSession:
         False, the default, is the legacy attach contract: owner loss is
         recovered by TAKING OVER the conversation, and a facade built this way
         returns from ``_ensure_bound`` without dialling (``_can_go_cold`` is
-        False on it) unless recovery is releasing it.
+        False on it) unless recovery is releasing it. False does not BY ITSELF
+        imply the flag is unset, though: this keyword adds the capability, and
+        ``__init__`` sets it independently for ``surface="desktop"``. No caller
+        passes both today (no ``connect`` caller passes ``surface`` at all), so
+        the two are disjoint — but they are separate switches, and a future
+        ``connect(..., surface="desktop", viewer=False)`` would still be a
+        viewer, which is the asymmetry to keep in mind rather than a
+        contradiction to resolve here.
 
         True builds the VIEWER contract instead — the same one ``cold`` and
         ``saved_preview`` set, and the only one this keyword asks for: owner
@@ -4758,9 +4765,12 @@ class AttachedSession:
                         self._go_cold()
                         return
                     # The LEGACY attach surface does not go cold at the FIRST
-                    # branch above (``_can_go_cold`` is desktop-only) because its
-                    # contract is to keep chasing a successor — but it reaches a
-                    # cold state HERE, through ``_give_up_recovery``, at the same
+                    # branch above because the flag is not set for it — it is set
+                    # only where the caller asks for the viewer contract (the
+                    # desktop surface and ``connect(viewer=True)``, which is what
+                    # the sidebar's speculative lease builds) — and the legacy
+                    # contract is to keep chasing a successor. It reaches a cold
+                    # state HERE, through ``_give_up_recovery``, at the same
                     # bound. That comment used to say this surface had "no cold
                     # state to fall into" at all, which is how the forever-latch
                     # survived review.
@@ -4781,13 +4791,16 @@ class AttachedSession:
                     #
                     # THIS IS THE ARM THE OPERATOR'S REPORT LANDS ON, which is why
                     # it needs the verdict as much as ``_go_cold`` does. The
-                    # owner-death branch there carries it, but it is reachable only
-                    # when ``_can_go_cold`` holds — and that is False for every
-                    # viewer built through ``connect()``, which is what the TUI
-                    # builds. Measured on this head: a SIGKILLed runtime painted
-                    # ``interrupted ⊘`` with no notice, no reason and durable state
-                    # still ``kind=None`` at t≈98 s, byte-identical to the user's
-                    # own cancel (QA round 1, Q-1; UX U1).
+                    # owner-death branch there carries it, and it is reachable
+                    # only when the flag holds — set by the desktop surface and by
+                    # ``connect(viewer=True)``, the sidebar's speculative lease,
+                    # while every OTHER ``connect()`` caller (``/resume``, the
+                    # startup attach, ``session_factory``) leaves it unset and
+                    # therefore arrives here instead. Measured on this head: a
+                    # SIGKILLed runtime painted ``interrupted ⊘`` with no notice,
+                    # no reason and durable state still ``kind=None`` at t≈98 s,
+                    # byte-identical to the user's own cancel (QA round 1, Q-1; UX
+                    # U1).
                     if self._suspect_generation is not None:
                         logger.info(
                             "no runtime for %s after %.0fs; ending the in-flight turn",
