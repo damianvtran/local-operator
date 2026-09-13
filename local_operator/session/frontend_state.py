@@ -42,6 +42,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
+from local_operator.harness.intent import ACTIVITY_RESPONDING, ACTIVITY_THINKING
 from local_operator.harness.subagent import TRAJECTORY_CAP as _TRAJECTORY_CAP
 from local_operator.harness.types import (
     AgentEndEvent,
@@ -49,7 +50,13 @@ from local_operator.harness.types import (
     AgentStartEvent,
     CompactionEndEvent,
     MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
+    ToolCallComposeEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
+    TurnEndEvent,
     Usage,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
@@ -60,6 +67,20 @@ from local_operator.tui.costs import cost_summary, job_cost, turn_cost
 FRONTEND_STATE_VERSION = 1
 FRONTEND_CAPABILITY = "tui_state_v1"
 FRONTEND_CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
+
+#: The phase names ``FrontendSessionState.activity_phase`` folds to.
+#:
+#: The reader matches a folded phase against the phase it DERIVED by string
+#: equality, so these have to be the same words the working line's own
+#: vocabulary uses rather than a private enum: `thinking` and `responding` are
+#: imported from ``harness/intent.py`` (the module that owns the label words)
+#: rather than restated here, and `composing`/`running` name the two states the
+#: tool ledger itself uses. A rename in either place must move together or the
+#: reader silently stops matching and every clock goes blank.
+ACTIVITY_PHASE_THINKING = ACTIVITY_THINKING
+ACTIVITY_PHASE_RESPONDING = ACTIVITY_RESPONDING
+ACTIVITY_PHASE_COMPOSING = "composing"
+ACTIVITY_PHASE_RUNNING = "running"
 
 #: How many per-call billing receipts ``usage_components`` retains.
 #:
@@ -141,7 +162,35 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: 25. Per-row text is the right place to take it from — it is already shared,
 #: already floored at a legible preview, and 128 chars spread across a roster
 #: is invisible, whereas an over-limit frame cannot be sent at all.
-JOB_TEXT_FRAME_BUDGET_CHARS = 119_872
+#:
+#: Reduced again, 119,872 → 119,360, by the UNION of the two per-frame consumers
+#: that arrived either side of a rebase: this branch's attention payload
+#: (``reason`` at :data:`local_operator.session.attention.REASON_WIRE_CHARS`
+#: plus ``cause``, 714 B on every frame) and upstream's ``live_tool_started_at``
+#: (8 concurrently executing calls × 52 B = 416 B). Each fits alone on its own
+#: base — upstream's tree had 147 B of headroom, this branch's 83 B — and the
+#: pair does not, which is what put the ``ran all year`` worst case 416 bytes
+#: over the line. The same shelf pays, for the same reasons: the budget is
+#: elastic, shared, and floored at a legible preview, so 512 chars spread across
+#: a 200-row roster is 3 characters off each row's 599 — invisible — where an
+#: over-limit frame cannot be sent at all.
+#:
+#: Mind the GRANULARITY, because it is why this is a round 512 rather than the
+#: 416 the union overshot by: a row's share is ``BUDGET // len(jobs)``, so a
+#: reduction lands on whole characters per row and no value buys exactly 416.
+#: At the guard's 200 rows, 512 chars moves the share 599 → 596, and three
+#: fields × 3 chars × 200 rows is 1,800 bytes off the frame's FIXED content —
+#: past the overshoot by a margin rather than flush against it, which is the
+#: distinction the 13-byte precedent above did not make. Measure the guard, not
+#: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
+#: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
+#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: the catalogue grown from its 50-row floor to 54). The number that matters is
+#: the one the overshoot was about — whether the FLOOR fits: with the catalogue
+#: held at its floor the frame now has 1,384 B of line where it had 416 B too
+#: little. It is not slack: it bought two fields, and the next per-frame field is
+#: paid for out of here too.
+JOB_TEXT_FRAME_BUDGET_CHARS = 119_360
 JOB_TEXT_FLOOR_CHARS = 200
 
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
@@ -223,6 +272,13 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "context_window",
         "context_is_estimate",
         "cumulative_parent_cost",
+        # The working line's phase and its zero are read PER EVENT that moves the
+        # turn (`OperatorApp._current_activity`), which is far too hot for the
+        # whole-state clone. Both are admitted on the set's own two tests: a
+        # `str` and a `float | None`, so nothing of the store's can be reached
+        # through them.
+        "activity_phase",
+        "activity_phase_started_at",
     }
 )
 #: Wire budget for the in-flight seed's retained tool results.
@@ -874,6 +930,25 @@ class PendingGateState(BaseModel):
     secret: bool = False
     question_index: int = 0
     question_total: int = 1
+    #: The conversation's name, for a surface that renders this card as a
+    #: NOTIFICATION rather than in the session it belongs to. A desktop banner
+    #: saying only "Waiting for approval" cannot be triaged: with several
+    #: sessions open the user cannot tell which run is being held hostage
+    #: without opening each one (design round 1, D3).
+    #:
+    #: EMPTY when ``display.notification_session_name`` is off, and the
+    #: emptiness is decided in the BACKEND for the same reason every other
+    #: notification fact is: only the backend can read that setting, and a
+    #: renderer re-deriving the privacy rule is a renderer that can get it
+    #: wrong in a signed binary the user updates on their own schedule.
+    #:
+    #: ADDITIVE AND DEFAULTED, in both skew directions. An old viewer reading a
+    #: new payload ignores a key it does not know; a new viewer reading an old
+    #: payload gets ``""`` and falls back to the anonymous card it already
+    #: renders. Gates deliberately keep travelling on THIS path rather than
+    #: gaining a ``notification`` frame of their own — a second channel for a
+    #: card the app already receives is how one question becomes two banners.
+    session_name: str = ""
 
 
 class _FrozenSequence(tuple[Any, ...]):
@@ -1228,8 +1303,8 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
-    """Omit the launch-reconciliation keys from a row that has no launch.
+def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Omit the per-row keys that are EMPTY from a row that has neither fact.
 
     An absent fact must not buy wire bytes. These two keys are empty on every
     bash job and on every child that was never resumed, and at roster scale the
@@ -1243,6 +1318,13 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
     reading neither key takes the same degrade path as one attached to a runtime
     that predates the fields. So this is a pure byte saving, not a semantic one.
 
+    ``cut_off_cause`` joins them for the same reason, measured the same way:
+    it is empty on every row that was not restored from a roster record, and one
+    key's worth of JSON on each of 200 rows was enough to push the same class
+    guard 4 KB over the line on its own. Its non-empty value is a single token
+    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
+    tens of bytes on the handful of rows that carry it.
+
     Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
@@ -1251,6 +1333,8 @@ def _drop_absent_launch_fields_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_message_id", None)
     if not job.get("launch_prompts"):
         job.pop("launch_prompts", None)
+    if not job.get("cut_off_cause"):
+        job.pop("cut_off_cause", None)
 
 
 def _jobs_equal(current: Sequence["JobState"], candidate: Sequence["JobState"]) -> bool:
@@ -1296,6 +1380,12 @@ class JobState(BaseModel):
     latest_details: dict[str, Any] | str | None = None
     error_text: str = ""
     result_text: str = ""
+    #: Why a restored row reads ``interrupted`` — added with the cut-off
+    #: taxonomy (design §4, D3) so the subagent panel can say what stopped the
+    #: child rather than only that it stopped. Additive with a ``""`` default,
+    #: so an older runtime's row validates and the panel's existing spellings
+    #: stay valid; the value is a token from ``incidents.CUT_OFF_CAUSES``.
+    cut_off_cause: str = ""
     model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
@@ -1472,6 +1562,15 @@ class JobState(BaseModel):
             output_tail=str(getattr(job, "output_tail", "") or ""),
             output_seq=int(getattr(job, "output_seq", 0) or 0),
             restored=bool(getattr(job, "restored", False)),
+            # Carried, not re-derived here: the resolver that sets it
+            # (``session/restored_rows.py``) is the one place that knows whether
+            # a restored row's outcome came from a record, from the child's own
+            # journal, or from nothing at all. Dropping it on the way to the
+            # wire is what left the dock unable to say WHY a restored child
+            # stopped — and, for a child whose record reads ``completed``, was
+            # how the whole resolved row disappeared within a second of the
+            # session opening (UX review round 1, U2).
+            cut_off_cause=str(getattr(job, "cut_off_cause", "") or ""),
         )
 
 
@@ -1584,7 +1683,49 @@ class FrontendSessionState(BaseModel):
     #: value — treat as aborted. Additive; extra="allow" keeps older readers
     #: tolerant. One value per user prompt, not per compaction continuation.
     last_turn_outcome: Literal["completed", "aborted", "error", ""] = ""
+    #: The rendered reason for a cut-off last turn, mirrored beside
+    #: ``last_turn_outcome`` for the same reason that field exists: a viewer
+    #: that dropped mid-turn rebinds after the real end is gone from
+    #: ``live_events``, and without this it can only synthesise the CLASS
+    #: placeholder ``"turn failed"`` (or blame the user for a cancel they never
+    #: made). Additive; ``""`` is the old-runtime value and means "no reason
+    #: was recorded", which is exactly what it is.
+    last_turn_cut_off: str = ""
     activity_started_at: float | None = None
+    #: Which kind of work the working line is naming, and when that kind began.
+    #:
+    #: The terminal's band and the phone's working line both key their elapsed
+    #: number to the PHASE (`thinking`/`responding`/`composing`/`running`) rather
+    #: than to the label, because a batch shedding a call or a tool name arriving
+    #: in fragments must not restart a clock that answers "has this been stuck".
+    #: That phase zero lived only in whoever built the widget, so a frontend that
+    #: joined mid-turn counted from its own arrival — the operator's report
+    #: names the thinking indicator as well as the tool row, which a per-call
+    #: stamp alone cannot fix. `running` is folded here too, but its clock is
+    #: still taken from the live cards themselves (the oldest of their starts),
+    #: which is a finer anchor than any phase edge.
+    #:
+    #: ``""`` is "no phase": the turn has not started, or has ended, and a
+    #: frontend must not match it against anything it derives.
+    activity_phase: str = ""
+    activity_phase_started_at: float | None = None
+    #: ``tool_call_id -> started_at_epoch`` for the calls executing RIGHT NOW.
+    #:
+    #: Folded from ``ToolExecutionStartEvent.started_at_epoch`` so a frontend
+    #: that attaches mid-turn can seed a live row's clock from the call's true
+    #: age instead of its own arrival. Keyed by call rather than as one scalar
+    #: because a batch has several: the row and the band must agree on ONE
+    #: anchor, and only the per-call map can tell them what the oldest live
+    #: call's age actually is.
+    #:
+    #: TRANSIENT by construction and bounded by the live batch: an entry is
+    #: popped by the call's own end and the whole map is cleared at
+    #: ``agent_start``/``agent_end``, so it neither grows with the conversation
+    #: nor outlives the turn. A call whose producer sent no epoch is
+    #: deliberately ABSENT rather than stamped with the fold instant — see
+    #: ``_fold_live_tool_starts``. It is stripped from the durable checkpoint
+    #: for the same reason ``live_events`` is: there is nothing to restore.
+    live_tool_started_at: dict[str, float] = Field(default_factory=dict)
     active_duration_s: float = 0.0
     current_turn_accrued_cost: float = 0.0
     queued_steering: list[dict[str, Any]] = Field(default_factory=list)
@@ -1887,7 +2028,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_launch_fields_in_place(job)
+                    _drop_absent_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -2321,12 +2462,19 @@ class SnapshotJobs:
         # deep-copy tuple-backed Mapping/Sequence wrappers: the wrappers must
         # stay immutable while consumers retain their abstract container API.
         self._values = [_public_job(value) for value in values]
+        # Roster rendering asks get() once per row. A linear lookup made one
+        # paint quadratic in the number of children; retain the first duplicate
+        # ID to preserve the old next(...) behaviour for malformed extensions.
+        self._by_id: dict[str, JobState] = {}
+        for value in self._values:
+            self._by_id.setdefault(value.id, value)
 
     def list(self) -> list[JobState]:
         return [_public_job(value) for value in self._values]
 
     def get(self, job_id: str) -> JobState | None:
-        return next((_public_job(value) for value in self._values if value.id == job_id), None)
+        value = self._by_id.get(job_id)
+        return _public_job(value) if value is not None else None
 
 
 class SnapshotWakeScheduler:
@@ -2777,6 +2925,34 @@ class FrontendStateStore:
             )
         return getattr(self._state, name)
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """A COPY of the live-call start map, without cloning the whole state.
+
+        The sibling of :meth:`read_field`, which cannot serve this one: that
+        allow-list is restricted to deeply immutable scalars precisely because
+        it hands out the store's OWN object, and this is a mutable mapping.
+
+        Copying is what the per-call caller can afford, and asking for ``state``
+        instead is what it cannot: ``state`` deep-copies every job, usage
+        component and trajectory row, which profiling one sidebar navigation
+        measured at ~30 ms of a 135 ms frame. This is read once per tool start
+        and once per switch, so the copy is a handful of floats.
+        """
+        return dict(self._state.live_tool_started_at)
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The working line's folded phase and when it began, read cheaply.
+
+        One call rather than two :meth:`read_field` reads because the pair is
+        only ever consumed together — the reader compares the phase and uses
+        the instant in the same expression — and a caller that could read them
+        apart could pair a phase with the previous phase's zero.
+        """
+        return (
+            self.read_field("activity_phase"),
+            self.read_field("activity_phase_started_at"),
+        )
+
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.
 
@@ -2891,6 +3067,9 @@ class FrontendStateStore:
                 subscriber(update.model_copy(deep=True))
             return self.state
         changes = copy.deepcopy(update.changes)
+        # A malformed field later in a jobs delta must not advance a plan's
+        # watermark: validation either installs the entire update or nothing.
+        todo_sequences = dict(self._todo_sequences)
         if "jobs" in changes:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
@@ -2909,23 +3088,42 @@ class FrontendStateStore:
                     del trajectory[: len(trajectory) - _TRAJECTORY_CAP]
                 raw["trajectory"] = trajectory
                 raw["todos"] = _wire_value(prior.todos) if prior is not None else None
-                if (
-                    job_id in update.job_todo_updates
-                    and update.sequence > self._todo_sequences.get(job_id, -1)
+                if job_id in update.job_todo_updates and update.sequence > todo_sequences.get(
+                    job_id, -1
                 ):
                     raw["todos"] = update.job_todo_updates[job_id]
-                    self._todo_sequences[job_id] = update.sequence
+                    todo_sequences[job_id] = update.sequence
                 rebuilt.append(raw)
             changes["jobs"] = rebuilt
             retained = {str(row["id"]) for row in rebuilt}
-            self._todo_sequences = {
-                key: seq for key, seq in self._todo_sequences.items() if key in retained
+            todo_sequences = {key: seq for key, seq in todo_sequences.items() if key in retained}
+        # Validate only the supplied fields, through the MODEL rather than a
+        # bare TypeAdapter: its before-validators normalize Usage/ModelSpec,
+        # and extra='allow' preserves fields introduced by a newer runtime.
+        # Defaults fill this ephemeral model but are never installed. Dumping
+        # the previous state here serialized every child's retained trajectory
+        # for each scalar streaming edge, blocking the viewer's keyboard loop.
+        patch = FrontendSessionState.model_validate(
+            {
+                "session_id": self._state.session_id,
+                **changes,
+                "epoch": update.epoch,
+                "sequence": update.sequence,
             }
-        payload = self._state.model_dump()
-        payload.update(changes)
-        payload["epoch"] = update.epoch
-        payload["sequence"] = update.sequence
-        self._state = _freeze_state_jobs(FrontendSessionState.model_validate(payload))
+        )
+        # Unknown wire names may collide with our properties or BaseModel
+        # methods (e.g. model_dump). Attribute lookup would substitute the
+        # property/method for the accepted JSON value and poison later exports.
+        # Read validated storage instead; extras have their own owning mapping.
+        normalized = {
+            name: patch.__dict__[name]
+            for name in patch.model_fields_set
+            if name in FrontendSessionState.model_fields
+        }
+        normalized.update(patch.model_extra or {})
+        candidate = self._state.model_copy(update=normalized)
+        self._state = _freeze_state_jobs(candidate, jobs_are_canonical="jobs" not in changes)
+        self._todo_sequences = todo_sequences
         for subscriber in list(self._subscribers):
             subscriber(update.model_copy(deep=True))
         return self.state
@@ -3056,7 +3254,7 @@ class FrontendStateStore:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_launch_fields_in_place(summary)
+                _drop_absent_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -3293,8 +3491,30 @@ class FrontendStateStore:
             streaming=bool(getattr(session, "is_streaming", False)),
             generation=int(getattr(session, "_generation", current.generation) or 0),
             last_turn_outcome=_last_turn_outcome_from(session, current.last_turn_outcome),
+            last_turn_cut_off=_last_turn_cut_off_from(session, current.last_turn_cut_off),
             activity_started_at=(
                 current.activity_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else None
+            ),
+            # The live-batch anchor is carried on the same gate as the turn's
+            # own start instant, and for the same reason: both answer "how long
+            # has the work in flight been going", and neither means anything
+            # once the turn is over. See ``_fold_live_tool_starts``.
+            live_tool_started_at=(
+                current.live_tool_started_at
+                if bool(getattr(session, "is_streaming", False))
+                else {}
+            ),
+            # The working line's phase and its zero ride the same gate. A
+            # non-streaming session has no phase, and leaving a stale one in
+            # place would let a frontend that has just settled match it and
+            # count from a zero belonging to a turn that is over.
+            activity_phase=(
+                current.activity_phase if bool(getattr(session, "is_streaming", False)) else ""
+            ),
+            activity_phase_started_at=(
+                current.activity_phase_started_at
                 if bool(getattr(session, "is_streaming", False))
                 else None
             ),
@@ -3419,11 +3639,148 @@ class FrontendStateStore:
             )
         return self.mutate(model_catalogue=rows)
 
+    def _fold_live_tool_starts(self, event: AgentEvent[Any]) -> dict[str, Any]:
+        """Track the start epoch of every call executing RIGHT NOW.
+
+        The map a mid-turn joiner seeds a live row's clock from. The producer
+        stamped the instant on its own ``tool_execution_start`` (see
+        ``ToolExecutionStartEvent.started_at_epoch``); this keeps those stamps
+        keyed by call so the row and the band can share one anchor, and drops
+        them the moment the call ends so nothing about a finished call is
+        offered as a start.
+
+        Two deliberate omissions, both of which keep this from becoming an
+        invention:
+
+        * a ``tool_execution_start`` carrying NO epoch contributes no entry.
+          The tempting default — the fold's own ``now`` — is precisely the
+          fabricated zero this whole path exists to refuse: for an attached
+          viewer it is its arrival instant dressed as the call's start, and it
+          would print a plausible wrong age where the widget's blank column
+          currently tells the truth.
+        * the map is cleared at BOTH ends of the turn (``agent_start`` and
+          ``agent_end``) rather than left to the individual ends. A turn that
+          dies without emitting every ``tool_execution_end`` is exactly the
+          case that leaves a stale entry, and a stale entry is worse than none:
+          a later turn's row would seed from it.
+        """
+        state = self._state
+        if isinstance(event, (AgentStartEvent, AgentEndEvent)):
+            return {"live_tool_started_at": {}} if state.live_tool_started_at else {}
+        if isinstance(event, ToolExecutionStartEvent):
+            epoch = getattr(event, "started_at_epoch", None)
+            if not isinstance(epoch, (int, float)):
+                return {}
+            live = dict(state.live_tool_started_at)
+            live[event.tool_call_id] = float(epoch)
+            return {"live_tool_started_at": live}
+        if isinstance(event, ToolExecutionEndEvent):
+            if event.tool_call_id not in state.live_tool_started_at:
+                return {}
+            live = dict(state.live_tool_started_at)
+            del live[event.tool_call_id]
+            return {"live_tool_started_at": live}
+        return {}
+
+    def _fold_activity_phase(self, event: AgentEvent[Any], now: float) -> dict[str, Any]:
+        """Fold the PHASE the working line is in, and when that phase began.
+
+        The band's clock is keyed to the phase, not to the label — a batch
+        shedding a call, a tool name arriving in fragments and an intent being
+        revised all change the label without the agent having changed what it
+        is doing — and the phase's zero used to exist only inside whichever
+        widget happened to be constructed. A frontend that joins mid-turn was
+        therefore always at zero: the operator's report names the thinking
+        indicator restarting alongside the tool row, and a per-call stamp
+        cannot answer that one because there is no call behind it.
+
+        The rule is the phone projection's (``mobile/projection.py``
+        ``_derive_activity``) for the PHASES it names, because both surfaces
+        draw the same row and a second rule would be a second answer. It is
+        deliberately narrow: a phase RESTARTS the zero only when it begins a
+        kind of work, never when it merely relabels one — the composed batch
+        is the case that shows the difference, since it announces a call per
+        fragment and all of them belong to one dictation.
+
+        It is one rule in two PLACES, not one shared implementation, and the
+        ``tool_execution_end`` arm below is where they part: the fold restarts
+        only when the batch has no siblings left (D9 — a narrowed label must
+        not report a shed sibling's age), while the phone projection restarts
+        unconditionally. The divergence is deliberate and is the TUI's D9
+        reading; it is recorded here rather than left for someone to find by
+        diffing the two files, and a change to either side has to be checked
+        against the other.
+
+        The ``running`` phase is folded so the end rule can tell a batch that
+        still has siblings from one that has just lost its last call. Its
+        clock does NOT come from here: a running batch is measured from the
+        OLDEST live card's own start, which is finer than any phase edge and is
+        what keeps a narrowed label from reporting a shed sibling's age.
+
+        Any mismatch between this phase and the one the app derives is handled
+        at the reader (``OperatorApp._current_activity``), which withholds the
+        clock rather than passing a zero that does not belong: a facade with no
+        fold, a legacy producer and a compaction fallback all stay blank
+        instead of inventing an age.
+        """
+        state = self._state
+        phase = state.activity_phase
+
+        def into(new_phase: str) -> dict[str, Any]:
+            return {"activity_phase": new_phase, "activity_phase_started_at": now}
+
+        if isinstance(event, (AgentStartEvent, TurnEndEvent)):
+            # A turn boundary and a per-model-turn boundary are both the start
+            # of waiting on a model call: between two tool batches, and before
+            # the first, that IS what the turn is doing.
+            return into(ACTIVITY_PHASE_THINKING)
+        if isinstance(event, AgentEndEvent):
+            return {"activity_phase": "", "activity_phase_started_at": None}
+        if isinstance(event, ToolCallComposeEvent):
+            # One batch, one zero: a three-call batch announces three calls in
+            # one dictation, and restarting per announcement would show the
+            # same "still composing" state counting from zero three times.
+            return {} if phase == ACTIVITY_PHASE_COMPOSING else into(ACTIVITY_PHASE_COMPOSING)
+        if isinstance(event, ToolExecutionStartEvent):
+            return into(ACTIVITY_PHASE_RUNNING)
+        if isinstance(event, ToolExecutionEndEvent):
+            # Waiting on the model again — but only once the batch is done. A
+            # batch that still has a sibling executing is still `running`, and
+            # restarting there would reset the number the surviving row's
+            # label still claims.
+            remaining = set(state.live_tool_started_at) - {event.tool_call_id}
+            return into(ACTIVITY_PHASE_THINKING) if not remaining else {}
+        if isinstance(event, MessageStartEvent):
+            # A model call in flight with nothing streamed yet. The loop yields
+            # this from a placeholder at the top of EVERY provider call, so
+            # keying prose here would claim text for a tool-only turn; the
+            # first non-empty delta below is the transition to `responding`.
+            if str(getattr(event.message, "role", "") or "") == "assistant":
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        if isinstance(event, MessageUpdateEvent):
+            if event.delta and phase == ACTIVITY_PHASE_THINKING:
+                return into(ACTIVITY_PHASE_RESPONDING)
+            return {}
+        if isinstance(event, MessageEndEvent):
+            # Ends the PROSE phase only. For a tool-calling turn this arrives
+            # after the compose events, and the composed call is still what
+            # the turn is doing, so anything but `responding` is left alone.
+            if (
+                str(getattr(event.message, "role", "") or "") == "assistant"
+                and phase == ACTIVITY_PHASE_RESPONDING
+            ):
+                return into(ACTIVITY_PHASE_THINKING)
+            return {}
+        return {}
+
     def observe_event(self, session: Any, event: AgentEvent[Any]) -> FrontendUpdate | None:
         now = time.time()
         state = self._state
         changes: dict[str, Any] = {}
         self._fold_live_event(event)
+        changes.update(self._fold_live_tool_starts(event))
+        changes.update(self._fold_activity_phase(event, now))
         if isinstance(event, AgentStartEvent):
             changes.update(
                 streaming=True,
@@ -3445,6 +3802,9 @@ class FrontendStateStore:
                 activity_started_at=None,
                 active_duration_s=duration,
                 last_turn_outcome=outcome,
+                # Empty for every non-cut-off end, which is what clears a
+                # previous turn's reason as the new outcome lands.
+                last_turn_cut_off=str(getattr(event, "cut_off", "") or ""),
             )
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
@@ -3632,6 +3992,16 @@ class FrontendStateStore:
         durable = state.model_copy(
             update={
                 "live_events": [],
+                # The live-batch anchor is transient by construction, exactly
+                # like the seed above: it describes calls executing RIGHT NOW
+                # in this process, and there is nothing for a later reader to
+                # restore from it — a resumed conversation's in-flight call is
+                # re-stamped by the producer that is still running it. Its
+                # scalar neighbours (`activity_started_at`, `activity_phase`)
+                # are deliberately NOT stripped: they are O(1) values the
+                # turn-end fold and the non-streaming gate already clear, so
+                # there is nothing here to make durable or to withhold.
+                "live_tool_started_at": {},
                 "jobs": [
                     job.model_copy(
                         update={
@@ -3914,6 +4284,20 @@ def _last_turn_outcome_from(session: Any, current: str) -> str:
         return current if current in ("completed", "aborted", "error") else ""
     raw = str(getattr(session, "_last_turn_outcome", "") or "")
     return raw if raw in ("completed", "aborted", "error") else ""
+
+
+def _last_turn_cut_off_from(session: Any, current: str) -> str:
+    """The session's published cut-off reason, or the store's, or ``""``.
+
+    The twin of :func:`_last_turn_outcome_from`, and needed for the same reason:
+    ``refresh_from_session`` copies the session's fields over the store, and a
+    reduced test double (or an older runtime) without the attribute would
+    otherwise wipe a reason ``observe_event`` had just written — leaving a
+    rebinding viewer to synthesise a cause it could have named.
+    """
+    if not hasattr(session, "_last_turn_cut_off"):
+        return current
+    return str(getattr(session, "_last_turn_cut_off", "") or "")
 
 
 def _label(spec: Any) -> str:

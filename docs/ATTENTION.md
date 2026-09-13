@@ -15,8 +15,31 @@ through their authenticated runtime connection, not through their own PID.
 The logical run journals its token before execution. A settled eligible outcome
 is journaled after durable message persistence and imported idempotently into
 SQLite. Error and interrupted outcomes can have an explicit outcome marker even
-when no assistant message exists. Resuming an unfinished journaled run records an
-interruption rather than treating its output as unknown pre-upgrade history.
+when no assistant message exists; an outcome marker carries an additive `cause`
+(a machine token, from the harness's own cut-off vocabulary) and `reason` (one
+operator-facing sentence) whenever it knows why the turn ended.
+
+**The default flipped for an unfinished run.** Resuming an unfinished journaled
+run records an **error** naming the cause, not an interruption: a cut-off the
+harness cannot explain is not a stop. Only POSITIVE evidence of a deliberate act
+— a recorded stop marker, or a deliberate rung's own `user-stop` cause — records
+an `interrupted`. "Deliberate rung" means every route a person's stop takes:
+the `stop` control op (`/stop`, `lop stop`), the in-process dispose a bare
+`/stop` performs on a TUI-owned session, the phone's `abort` button and a
+supervisor's `cancel`. An INVOLUNTARY teardown (a reload, an unmount, a session
+swap) is a cut-off and keeps saying so.
+
+`cause` is empty when the harness has no evidence at all — the reason then says
+the cause could not be determined, and nothing names a mechanism nobody
+observed. A cause is set only where one was established.
+
+The one exception is a run that published its own outcome before the process
+went away: that marker is replayed verbatim, so a deliberate stop that settled is
+still an interruption. A marker that reports a CUT-OFF is also journaled at that
+boot (`session_incident`), once per token, because the process that published it
+could not journal it itself — `journal_incident` refuses once the session is
+disposed, and the dispose rung sets that flag before the turn's `finally`
+publishes.
 Copied fork journals cannot reuse another conversation's token.
 
 A receipt advances through the supplied token's sequence using a monotonic
@@ -36,6 +59,9 @@ contains:
 
 - `conversation_id`
 - `completion_token`, `anchor_id`, `kind` (`complete`, `error`, `interrupted`)
+- `cause`, `reason` — the machine token and the operator-facing sentence for a
+  non-`complete` outcome, both `""` when there is nothing to say (every
+  completion, and every row written before this vocabulary existed)
 - `unseen`
 - `revision: [completion_sequence, acknowledged_sequence]`
 
@@ -50,6 +76,27 @@ The relay maintains its existing projection ordering while alive. A new,
 authenticated and source-fenced SSE connection starts with an authoritative
 snapshot; its first projection may have a lower counter after daemon restart.
 Retired sources cannot publish callbacks or close the current connection.
+
+The desktop app is a `claim_delivery` claimant like any other, with
+`backend="desktop"`. It reaches the primitive through `POST
+/v1/desktop/sessions/{id}/notified` (`{completion_token}` →`{claimed}`), which
+is cold: no bridge is acquired and no runtime is started, because a completion
+worth announcing usually has no owner alive. With the desktop window unfocused
+a session's `live_state` is `idle`, so a TUI observer and the desktop are both
+eligible for one completion and the watermark picks exactly one — a losing claim
+is the arbitration working, not a fault. The `backend` column is diagnostics
+only; no decision reads it, since a claim consulting anything beyond the
+monotonic sequence would stop being clock-free.
+
+**The claim never advances the read watermark.** `claim_delivery` writes
+`deliveries` alone, so `unseen` and the sidebar's mark survive a banner
+untouched and a conversation can be delivered-and-unread indefinitely. The
+desktop route therefore does not reuse `/seen` and must not be routed through
+any foreground-receipt guard: that guard demands a focused window, which is the
+exact opposite of when a notification fires. Claim-then-deliver also means the
+claimant must BE the deliverer — the app claims immediately before constructing
+the OS notification and after its focus gate, because a claim taken for a banner
+it then suppresses would mark the completion delivered to nobody, for good.
 
 ## What a frontend can acknowledge
 

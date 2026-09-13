@@ -43,6 +43,7 @@ from local_operator.harness.rows import (
     compaction_refused_notice,
     gate_timeout_notice,
     is_harness_chrome,
+    is_harness_notice_row,
     user_row_text,
     wake_receipt_headline,
 )
@@ -760,6 +761,17 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # prompt while rendering the goal-loop and auto-continuation
                 # prompts as the user's own words.
                 continue
+            if is_harness_notice_row(message):
+                # A row the harness wrote — a stamped render of a
+                # ``CustomMessage`` (model-switch notice, incident, wake
+                # delivery) or a notice a compaction block carried forward from
+                # before the stamp existed — and the operator never typed it.
+                # The live fold has its own receipt for the moments these
+                # announce, so dropping the rendered copy is live/replay
+                # parity, and it also hides the rows an older build left in
+                # existing transcripts. One decision, in ``harness/rows.py``,
+                # for the same reason the chrome list lives there.
+                continue
             # A `$skill` invocation persists as its EXPANDED payload, because
             # that is what the model was sent. Rendering it verbatim showed the
             # whole SKILL.md body as the user's bubble and titled the session
@@ -1001,7 +1013,27 @@ class ProjectionFold:
             p.streaming = False
             self._streaming_ended = True
             p.queued_count = 0
-            p.stop_reason = "aborted" if event.aborted else "completed"
+            # A CUT-OFF TURN IS AN ABORT, not a completion. The taxonomy flips an
+            # involuntary end to `aborted=False, error=<notice>` so every
+            # existing surface paints it as a failure, and this fold naively read
+            # that as "the turn finished" — which silently removed the phone's
+            # only recovery affordance for exactly the sessions the operator
+            # reports losing (`composer.tsx` gates `interrupted — tap to resume`
+            # on `stop_reason === "aborted"`, review round 1 MAJOR-1). The field
+            # means "why streaming last stopped", and a turn that was cut off
+            # stopped without finishing; `cut_off`/`cut_off_cause` is how the
+            # session states that, so it is read here rather than inferred from
+            # `aborted` alone.
+            cut_off = bool(event.cut_off or event.cut_off_cause)
+            p.stop_reason = "aborted" if (event.aborted or cut_off) else "completed"
+            # ...and the phone's BUTTON needs to know which of the two it was:
+            # "aborted" is both a deliberate stop and a cut-off, and pairing a
+            # `Stopped with an error — ...` notice with a button reading
+            # `interrupted — tap to resume` names one act two ways (design round
+            # 2, D7). Deliberately a separate flag rather than a third
+            # `stop_reason` value: the affordance is gated on `=== "aborted"`,
+            # so a new token would strip it from every bundle not yet updated.
+            p.cut_off = cut_off
             self._close_open_message()
             if event.error:
                 self._append(

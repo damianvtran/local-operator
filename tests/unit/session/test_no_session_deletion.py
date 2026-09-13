@@ -120,6 +120,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.remove",
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
+    (
+        "local_operator/tui/app.py::OperatorApp._on_steer_undeliverable",
+        "<path>.remove",
+        "THREE list removals on the app's own bookkeeping — `_held_steer_blocks`, "
+        "`_queued_steer_notices` and `_deferred_steer_notices` hold widgets and "
+        "Message objects, and none of the three is a path (QA round 2, Q-1)",
+        3,
+    ),
     # The browser resource sidecar. Both paths are the FILE
     # `<session_dir>/.browser-resource.json` and a `mkstemp` sibling of it, so
     # neither call can name the directory itself: `os.replace` over a regular

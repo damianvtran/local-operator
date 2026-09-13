@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 import zlib
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -19,8 +20,16 @@ import requests
 from pydantic import SecretStr
 
 from local_operator.credentials import CredentialManager
-from local_operator.harness.types import ChatRequest, Message, ModelSpec
+from local_operator.harness.types import (
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamEvent,
+    Usage,
+)
 from local_operator.model.configure import (
+    SessionStreamFn,
     build_model_spec,
     calculate_cost,
     configure_model,
@@ -3780,6 +3789,677 @@ def test_openrouter_preferences_reach_the_client_through_client_for() -> None:
     assert other._openrouter_provider_preferences is None
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter cache affinity: the session-held pin
+# ---------------------------------------------------------------------------
+
+
+def _affinity_stream(settings: dict[str, Any] | None = None):
+    """A SessionStreamFn over a mocked auth store, for gate/pin state only."""
+    from unittest.mock import MagicMock
+
+    from local_operator.model.configure import SessionStreamFn
+
+    return SessionStreamFn(MagicMock(), settings if settings is not None else {}, "s-affinity")
+
+
+def _affinity_request(**overrides: Any) -> ChatRequest:
+    spec = ModelSpec(
+        provider=overrides.pop("provider", "openrouter"),
+        model_id=overrides.pop("model_id", "deepseek/deepseek-v4.1-flash"),
+        supports_prompt_cache=overrides.pop("supports_prompt_cache", True),
+    )
+    return ChatRequest(model=spec, messages=[Message.user("hi")], **overrides)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "settings", "enabled", "why"),
+    [
+        ({}, {}, True, "the shipped default: openrouter + cacheable + shared"),
+        ({"provider": "kimi"}, {}, False, "a direct provider has no host to pin"),
+        (
+            {"provider": "radient"},
+            {},
+            False,
+            "radient aggregates too, but its routing was never measured here",
+        ),
+        (
+            {"supports_prompt_cache": False},
+            {},
+            False,
+            "no server-side cache means the pin buys nothing and costs hosts",
+        ),
+        ({"isolated": True}, {}, False, "an errand has no warm prefix of its own"),
+        (
+            {"model_id": "deepseek/deepseek-v4.1-flash:nitro"},
+            {},
+            False,
+            ":nitro sorts by throughput by definition; a pin would defeat it",
+        ),
+        (
+            {"model_id": "deepseek/deepseek-v4.1-flash:floor"},
+            {},
+            False,
+            ":floor sorts by price by definition",
+        ),
+        (
+            {},
+            {"providers": {"openrouter": {"provider_affinity": False}}},
+            False,
+            "the user turned it off",
+        ),
+        (
+            {},
+            {"providers": {"openrouter": {"provider_affinity": True}}},
+            True,
+            "explicitly on reads the same as the default",
+        ),
+        (
+            {},
+            {"providers": {"openrouter": {"order": ["Novita"]}}},
+            False,
+            "a typed host order is the user's own routing opinion",
+        ),
+        ({}, {"providers": {"openrouter": {"only": ["Novita"]}}}, False, "same for only"),
+        ({}, {"providers": {"openrouter": {"ignore": ["Novita"]}}}, False, "same for ignore"),
+        ({}, {"providers": {"openrouter": {"sort": "price"}}}, False, "a sort policy outranks it"),
+        (
+            {},
+            {"providers": {"openrouter": {"zdr": "true"}}},
+            True,
+            "a privacy preference is not a host opinion, so the pin survives",
+        ),
+    ],
+)
+def test_affinity_gate_matrix(
+    kwargs: dict[str, Any], settings: dict[str, Any], enabled: bool, why: str
+) -> None:
+    """Every condition under which the harness may or may not pin a host."""
+    assert _affinity_stream(settings)._affinity_enabled(_affinity_request(**kwargs)) is enabled, why
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_host_decorates_the_next_request() -> None:
+    """The read half: a recorded host rides out on `ChatRequest`, which is what
+    failover clones for retries, so the pin follows a retry for free."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+    request = _affinity_request()
+
+    pin = stream._provider_affinity.get(request.model.model_id)
+    assert pin and stream._affinity_enabled(request)
+    assert request.model_copy(update={"provider_affinity": pin}).provider_affinity == "AtlasCloud"
+
+
+@pytest.mark.asyncio
+async def test_the_setting_off_never_decorates_even_with_a_pin_held() -> None:
+    """A pin acquired before the user turned the feature off must stop being
+    applied immediately — the switch is LIVE, not next-session."""
+    stream = _affinity_stream({"providers": {"openrouter": {"provider_affinity": False}}})
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+    assert stream._affinity_enabled(_affinity_request()) is False
+
+
+@pytest.mark.asyncio
+async def test_a_successful_end_records_the_served_host() -> None:
+    """The write half, through the real `_record_stream` wrapper."""
+    stream = _affinity_stream()
+    request = _affinity_request()
+
+    async def served() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason="stop", served_provider="AtlasCloud")
+
+    assert [event async for event in stream._record_stream(request, served())]
+    assert stream._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["error", "aborted"])
+async def test_a_failed_end_does_not_move_the_pin(stop_reason: str) -> None:
+    """A host that errored or was aborted mid-stream did not necessarily ingest
+    the prefix, so it is not evidence of a warm cache."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+
+    async def failed() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason=stop_reason, served_provider="Novita")
+
+    assert [event async for event in stream._record_stream(_affinity_request(), failed())]
+    assert stream._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+
+
+@pytest.mark.asyncio
+async def test_being_served_elsewhere_repins_immediately() -> None:
+    """No hysteresis, deliberately: the host that just served now holds this
+    conversation's prefix, while the previous host's entry is already decaying
+    (OpenRouter documents a ~10-minute sticky expiry). Keeping the older pin
+    would aim the next turn at the colder of the two caches."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+
+    async def served_by_b() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason="stop", served_provider="Novita")
+
+    assert [event async for event in stream._record_stream(_affinity_request(), served_by_b())]
+    assert stream._provider_affinity["deepseek/deepseek-v4.1-flash"] == "Novita"
+
+
+@pytest.mark.asyncio
+async def test_the_pin_is_held_per_model() -> None:
+    """A detour to another model must not hand its host to the first model:
+    two models are two prefixes on two different hosts. (And the pin outlives
+    that detour, which is why it is not folded into `_route_state` — that
+    state is cleared on a model switch.)"""
+    stream = _affinity_stream()
+
+    async def served(name: str) -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason="stop", served_provider=name)
+
+    async for _ in stream._record_stream(_affinity_request(), served("AtlasCloud")):
+        pass
+    async for _ in stream._record_stream(
+        _affinity_request(model_id="moonshotai/kimi-k2"), served("Novita")
+    ):
+        pass
+    assert stream._provider_affinity == {
+        "deepseek/deepseek-v4.1-flash": "AtlasCloud",
+        "moonshotai/kimi-k2": "Novita",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_isolated_request_neither_reads_nor_writes_the_pin() -> None:
+    """Both directions, which is the point: an errand gains nothing from a pin
+    it has no warm prefix for, and letting one MOVE the pin would drag the real
+    conversation onto whatever host answered an unrelated question."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+    isolated = _affinity_request(isolated=True)
+
+    # Does not read: the gate refuses, so `__call__` never decorates.
+    assert stream._affinity_enabled(isolated) is False
+
+    # Does not write: a successful isolated end leaves the pin where it was.
+    async def served() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason="stop", served_provider="Novita")
+
+    assert [event async for event in stream._record_stream(isolated, served())]
+    assert stream._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+
+
+@pytest.mark.asyncio
+async def test_a_wire_that_names_no_host_leaves_the_pin_untouched() -> None:
+    """Direct providers send no `provider` field; None must not clear a pin."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+
+    async def silent() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(stop_reason="stop")
+
+    assert [event async for event in stream._record_stream(_affinity_request(), silent())]
+    assert stream._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+
+
+def test_a_transcript_fork_inherits_the_pin_as_a_copy() -> None:
+    """A true fork replays a byte-identical prefix, so the parent's host really
+    is warm for it — the same reasoning that makes it inherit the cache lineage.
+    A COPY, so the child's own re-pins cannot move the parent onto a host chosen
+    for a conversation the parent is not having."""
+    parent = _affinity_stream()
+    parent._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+
+    child = parent.fork("s-child", cache_lineage_id="s-affinity")
+    try:
+        assert child._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+        child._provider_affinity["deepseek/deepseek-v4.1-flash"] = "Novita"
+        assert parent._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+    finally:
+        child._transport.owners -= 1
+
+
+def test_a_fresh_delegated_fork_does_not_inherit_the_pin() -> None:
+    """No shared lineage means no shared prefix, so inheriting a pin would only
+    narrow the child's host pool for a cache it cannot hit."""
+    parent = _affinity_stream()
+    parent._provider_affinity["deepseek/deepseek-v4.1-flash"] = "AtlasCloud"
+
+    child = parent.fork("s-child")
+    try:
+        assert child._provider_affinity == {}
+    finally:
+        child._transport.owners -= 1
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter cache affinity: retiring a host whose cache is dead
+# ---------------------------------------------------------------------------
+
+
+def _warm_usage(cached: int = 0, prompt: int = 30_000) -> Usage:
+    """A prefix big enough for "no reuse" to carry information."""
+    return Usage(input_tokens=prompt, cache_read_tokens=cached)
+
+
+async def _score(
+    stream: Any,
+    *,
+    asked: str | None,
+    served: str,
+    usage: Usage,
+    gap_s: float = 5.0,
+    model_id: str = "deepseek/deepseek-v4.1-flash",
+) -> None:
+    """One scored turn: ``asked`` is the pin we SENT, ``served`` who answered."""
+    request = _affinity_request(model_id=model_id)
+    if asked:
+        request = request.model_copy(update={"provider_affinity": asked})
+    previous = stream._provider_last_turn_at.get(model_id)
+    if previous is None:
+        # Prime the clock: the FIRST turn on a model has no predecessor, so
+        # the real code cannot know the gap and never strikes. Tests that want
+        # to exercise striking must start from an established conversation.
+        previous = 1000.0
+        stream._provider_last_turn_at[model_id] = previous
+    stream._score_cache_affinity(request, served, usage, now=previous + gap_s)
+
+
+@pytest.mark.asyncio
+async def test_two_warm_turns_without_reuse_retire_the_host() -> None:
+    """The guard's whole purpose: a pin is only worth holding if the host
+    actually caches. One measured upstream served 38% of same-host turns from
+    cache while its peers managed 99%, and its misses billed at FULL input
+    price — holding a conversation there is worse than the churn the pin
+    replaced."""
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "SiliconFlow"
+
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_strikes["deepseek/deepseek-v4.1-flash"]["SiliconFlow"] == 1
+    assert not stream._provider_retired.get("deepseek/deepseek-v4.1-flash")
+
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_retired["deepseek/deepseek-v4.1-flash"] == {"SiliconFlow"}
+    # The pin it was holding goes with it, or the next turn asks for the host
+    # we just retired.
+    assert "deepseek/deepseek-v4.1-flash" not in stream._provider_affinity
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_to_another_host_never_strikes() -> None:
+    """A host we did NOT ask for was never given this prefix, so its cold turn
+    is expected and says nothing about the host we wanted. Charging it would
+    retire innocent hosts during exactly the load that caused the fallback."""
+    stream = _affinity_stream()
+    for _ in range(4):
+        await _score(stream, asked="Wafer", served="SiliconFlow", usage=_warm_usage())
+    assert not stream._provider_strikes.get("deepseek/deepseek-v4.1-flash")
+    assert not stream._provider_retired.get("deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_an_idle_gap_is_charged_to_the_clock_not_the_host() -> None:
+    """Host-side entries expire on a ~10-minute timer, so a miss after a long
+    pause is an expiry — not evidence that the host does not cache."""
+    stream = _affinity_stream()
+    for _ in range(4):
+        await _score(
+            stream,
+            asked="SiliconFlow",
+            served="SiliconFlow",
+            usage=_warm_usage(),
+            gap_s=SessionStreamFn.PROVIDER_STRIKE_MAX_GAP_S + 1,
+        )
+    assert not stream._provider_strikes.get("deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_a_short_prompt_never_strikes() -> None:
+    """Below the floor a prefix may simply sit under the host's minimum
+    cacheable block, so "no reuse" carries no information."""
+    stream = _affinity_stream()
+    for _ in range(4):
+        await _score(
+            stream,
+            asked="SiliconFlow",
+            served="SiliconFlow",
+            usage=_warm_usage(prompt=SessionStreamFn.PROVIDER_STRIKE_MIN_PROMPT_TOKENS - 1),
+        )
+    assert not stream._provider_strikes.get("deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_real_reuse_clears_the_strike_counter() -> None:
+    """Strikes must be CONSECUTIVE: a single miss is ordinary (an eviction
+    under load), and letting isolated misses accumulate would eventually retire
+    a host that caches perfectly well."""
+    stream = _affinity_stream()
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_strikes["deepseek/deepseek-v4.1-flash"]["SiliconFlow"] == 1
+
+    await _score(
+        stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage(cached=29_000)
+    )
+    assert not stream._provider_strikes["deepseek/deepseek-v4.1-flash"].get("SiliconFlow")
+
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_strikes["deepseek/deepseek-v4.1-flash"]["SiliconFlow"] == 1
+    assert not stream._provider_retired.get("deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_reuse_just_over_the_floor_counts_as_a_hit() -> None:
+    """The floor is max(1024, 2% of the prefix); at or above it is reuse."""
+    stream = _affinity_stream()
+    floor = int(30_000 * SessionStreamFn.PROVIDER_STRIKE_MIN_CACHED_FRACTION)
+    await _score(
+        stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage(cached=floor - 1)
+    )
+    assert stream._provider_strikes["deepseek/deepseek-v4.1-flash"]["SiliconFlow"] == 1
+    await _score(
+        stream,
+        asked="SiliconFlow",
+        served="SiliconFlow",
+        usage=_warm_usage(cached=max(floor, SessionStreamFn.PROVIDER_STRIKE_MIN_CACHED_TOKENS)),
+    )
+    assert not stream._provider_strikes["deepseek/deepseek-v4.1-flash"].get("SiliconFlow")
+
+
+@pytest.mark.asyncio
+async def test_a_retired_host_is_never_pinned_again() -> None:
+    """Retirement has to survive the host serving again — OpenRouter may still
+    route there, and re-pinning on that would undo the retirement instantly."""
+    stream = _affinity_stream()
+    for _ in range(2):
+        await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_retired["deepseek/deepseek-v4.1-flash"] == {"SiliconFlow"}
+
+    async def served_by_retired() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(
+            stop_reason="stop", served_provider="SiliconFlow", usage=_warm_usage(cached=29_000)
+        )
+
+    request = _affinity_request()
+    assert [event async for event in stream._record_stream(request, served_by_retired())]
+    assert "deepseek/deepseek-v4.1-flash" not in stream._provider_affinity
+
+
+@pytest.mark.asyncio
+async def test_retirement_is_capped() -> None:
+    """``ignore`` is a HARD filter, so an unbounded set walks a conversation
+    toward "no eligible endpoints". A routing optimisation must never be able
+    to make a model unreachable."""
+    stream = _affinity_stream()
+    hosts = ["HostA", "HostB", "HostC", "HostD", "HostE"]
+    for host in hosts:
+        for _ in range(2):
+            await _score(stream, asked=host, served=host, usage=_warm_usage())
+    retired = stream._provider_retired["deepseek/deepseek-v4.1-flash"]
+    assert len(retired) == SessionStreamFn.MAX_RETIRED_PROVIDERS
+    assert set(hosts[: SessionStreamFn.MAX_RETIRED_PROVIDERS]) == retired
+
+
+@pytest.mark.asyncio
+async def test_retirements_are_held_per_model_and_inherited_by_a_transcript_fork() -> None:
+    """Cache deadness is observed per PREFIX, so it is scoped to the
+    conversation and model that observed it — and a true fork replays that same
+    prefix, so it inherits the finding rather than re-paying for it."""
+    stream = _affinity_stream()
+    for _ in range(2):
+        await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    for _ in range(2):
+        await _score(
+            stream,
+            asked="Novita",
+            served="Novita",
+            usage=_warm_usage(),
+            model_id="moonshotai/kimi-k2",
+        )
+    assert stream._provider_retired == {
+        "deepseek/deepseek-v4.1-flash": {"SiliconFlow"},
+        "moonshotai/kimi-k2": {"Novita"},
+    }
+
+    child = stream.fork("s-child", cache_lineage_id="s-affinity")
+    try:
+        assert child._provider_retired["deepseek/deepseek-v4.1-flash"] == {"SiliconFlow"}
+        # A deep copy: the child's later findings are its own.
+        child._provider_retired["deepseek/deepseek-v4.1-flash"].add("Wafer")
+        assert stream._provider_retired["deepseek/deepseek-v4.1-flash"] == {"SiliconFlow"}
+    finally:
+        child._transport.owners -= 1
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter cache affinity: the guard must not retire a GOOD host
+# (review round 1, blocker-2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["compaction", "compaction_advisor"])
+async def test_a_non_turn_request_never_strikes_the_host(purpose: str) -> None:
+    """Only a real turn's cache result says anything about the host's cache.
+
+    A `compaction` request is a fresh write-once system+transcript prefix by
+    construction — its own `context_tokens_hint=0` documents that — and a
+    `compaction_advisor` call is an aside. Both MISS by design: the host was
+    never given the prefix they send. Charging them a strike means the
+    conversation's host is penalised for being cold on a prompt it could not
+    have cached, which is the mechanism that retired a host measured at 99.6%
+    cache share.
+    """
+    stream = _affinity_stream()
+    stream._provider_affinity["deepseek/deepseek-v4.1-flash"] = "Wafer"
+    request = _affinity_request(purpose=purpose).model_copy(update={"provider_affinity": "Wafer"})
+    stream._provider_last_turn_at["deepseek/deepseek-v4.1-flash"] = 1000.0
+
+    for step in range(4):
+        stream._score_cache_affinity(request, "Wafer", _warm_usage(), now=1005.0 + step * 5)
+
+    assert not stream._provider_strikes.get("deepseek/deepseek-v4.1-flash")
+    assert not stream._provider_retired.get("deepseek/deepseek-v4.1-flash")
+    assert stream._provider_affinity["deepseek/deepseek-v4.1-flash"] == "Wafer"
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_beside_a_cold_turn_does_not_retire_the_host() -> None:
+    """The reviewer's reproduction, as a test: `Wafer` cached 99.6% of its
+    same-host turns in the live run, and the guard retired it anyway.
+
+    Compaction fires exactly when the conversation is largest, so the cold
+    compaction call and the first turn on the REBUILT prefix (also cold — the
+    summary replaced the tokens the host had cached) landed seconds apart. Two
+    strikes, cap of two, host retired for the rest of the conversation with no
+    removal path, and every fork inheriting the bar. Both halves of the fix
+    show up here: the compaction does not score, and it clears the slate the
+    post-compaction cold turn would otherwise be the second strike on.
+    """
+    stream = _affinity_stream()
+    model_id = "deepseek/deepseek-v4.1-flash"
+    stream._provider_affinity[model_id] = "Wafer"
+
+    # A genuine first miss on the pre-compaction prefix — ordinary, an eviction
+    # under load. This is the strike the compaction must void.
+    await _score(stream, asked="Wafer", served="Wafer", usage=_warm_usage())
+    assert stream._provider_strikes[model_id]["Wafer"] == 1
+
+    # The compaction request itself, through the real request-side path.
+    compacting = _affinity_request(purpose="compaction", context_tokens_hint=0)
+    stamped = stream._apply_cache_affinity(compacting)
+    # It still rides on the pinned host: the summary is sent to the host
+    # holding this conversation, which is the feature working as intended.
+    assert stamped.provider_affinity == "Wafer"
+    assert not stream._provider_strikes.get(model_id), "the old prefix's evidence is void"
+
+    # The compaction's own (cold by design) result must not score either.
+    stream._score_cache_affinity(stamped, "Wafer", _warm_usage(), now=1005.0)
+    assert not stream._provider_strikes.get(model_id)
+
+    # First turn on the rebuilt prefix, seconds later, and cold for the honest
+    # reason that the prefix is new. One strike, not a retirement.
+    await _score(stream, asked="Wafer", served="Wafer", usage=_warm_usage())
+    assert stream._provider_strikes[model_id]["Wafer"] == 1
+    assert not stream._provider_retired.get(model_id)
+    assert stream._provider_affinity[model_id] == "Wafer"
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_lifts_an_existing_retirement() -> None:
+    """A retirement is a claim about one prefix: "this host was given these
+    tokens and returned no reuse". Compaction replaces those tokens, so the
+    host has never been asked about the new prefix and the bar has to lift —
+    `provider.ignore` is a hard filter with no removal path of its own, so a
+    retirement that outlives its evidence is permanent."""
+    stream = _affinity_stream()
+    model_id = "deepseek/deepseek-v4.1-flash"
+    for _ in range(2):
+        await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_retired[model_id] == {"SiliconFlow"}
+
+    # It is on the wire as `ignore` before the boundary...
+    stream._provider_affinity[model_id] = "Wafer"
+    assert stream._apply_cache_affinity(_affinity_request()).provider_avoid == ["SiliconFlow"]
+
+    stream._apply_cache_affinity(_affinity_request(purpose="compaction"))
+
+    assert not stream._provider_retired.get(model_id)
+    # ...and gone from it afterwards, which is the half a bare dict-clear would
+    # miss if the request-side read were cached anywhere.
+    assert stream._apply_cache_affinity(_affinity_request()).provider_avoid == []
+
+
+@pytest.mark.asyncio
+async def test_two_strikes_too_far_apart_never_pair() -> None:
+    """Strike bookkeeping had no clock: a cold turn in the morning and another
+    in the afternoon retired the host as though they were consecutive evidence
+    about one warm prefix. Two isolated single misses are exactly what the
+    "one miss is ordinary" reasoning behind the two-strike bar forgives."""
+    stream = _affinity_stream()
+    model_id = "deepseek/deepseek-v4.1-flash"
+
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_strikes[model_id]["SiliconFlow"] == 1
+
+    # Hours later the conversation resumes and misses again. The per-turn gap
+    # guard cannot catch this: the SECOND strike's own predecessor gap is
+    # short (the conversation has been active again for a while), so only the
+    # gap between the two STRIKES distinguishes it.
+    stream._provider_last_turn_at[model_id] = 40_000.0
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+
+    assert stream._provider_strikes[model_id]["SiliconFlow"] == 1, "a first strike, again"
+    assert not stream._provider_retired.get(model_id)
+
+    # And a genuinely adjacent third still retires: the age-out must not have
+    # disarmed the guard.
+    await _score(stream, asked="SiliconFlow", served="SiliconFlow", usage=_warm_usage())
+    assert stream._provider_retired[model_id] == {"SiliconFlow"}
+
+
+@pytest.mark.asyncio
+async def test_the_retirement_cap_still_holds_after_a_compaction() -> None:
+    """The cap is the invariant that keeps a routing optimisation from making a
+    model unreachable (`ignore` is a hard filter). Clearing on compaction must
+    reset the count rather than leave a stale one that lets the set grow past
+    the cap on the next pass."""
+    stream = _affinity_stream()
+    model_id = "deepseek/deepseek-v4.1-flash"
+    for host in ["HostA", "HostB", "HostC", "HostD", "HostE"]:
+        for _ in range(2):
+            await _score(stream, asked=host, served=host, usage=_warm_usage())
+    assert len(stream._provider_retired[model_id]) == SessionStreamFn.MAX_RETIRED_PROVIDERS
+
+    stream._apply_cache_affinity(_affinity_request(purpose="compaction"))
+    assert not stream._provider_retired.get(model_id)
+
+    for host in ["HostF", "HostG", "HostH", "HostI"]:
+        for _ in range(2):
+            await _score(stream, asked=host, served=host, usage=_warm_usage())
+    assert len(stream._provider_retired[model_id]) == SessionStreamFn.MAX_RETIRED_PROVIDERS
+
+
+@pytest.mark.asyncio
+async def test_a_failover_stamped_usage_attributes_the_pin_to_the_served_model() -> None:
+    """Review round 1, major-1.
+
+    `stream_with_failover` rewrites the request to a fallback and stamps the
+    spec that actually served onto `Usage.provider`/`Usage.model_id` — that
+    field exists because an earlier bug priced every Grok call at Opus rates by
+    reading `request.model` off the original request. The pin had the same bug
+    in a different currency: filed under the PRIMARY, it later asked the
+    primary for a host that never served it, while the fallback's own cache
+    evidence was thrown away.
+    """
+    stream = _affinity_stream()
+
+    async def served_by_fallback() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(
+            stop_reason="stop",
+            served_provider="AtlasCloud",
+            usage=Usage(
+                input_tokens=30_000,
+                cache_read_tokens=29_000,
+                provider="openrouter",
+                model_id="moonshotai/kimi-k2",
+            ),
+        )
+
+    request = _affinity_request(model_id="deepseek/deepseek-v4.1-flash")
+    assert [event async for event in stream._record_stream(request, served_by_fallback())]
+
+    assert stream._provider_affinity == {"moonshotai/kimi-k2": "AtlasCloud"}
+    assert "deepseek/deepseek-v4.1-flash" not in stream._provider_affinity
+
+
+@pytest.mark.asyncio
+async def test_strikes_follow_the_served_model_too() -> None:
+    """The other half of major-1: bookkeeping keyed by the request while the
+    pin is keyed by the served model would put the two in different buckets,
+    so a host could never accumulate the second strike that retires it."""
+    stream = _affinity_stream()
+    served_id = "moonshotai/kimi-k2"
+
+    async def cold_fallback() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(
+            stop_reason="stop",
+            served_provider="SiliconFlow",
+            usage=Usage(
+                input_tokens=30_000,
+                cache_read_tokens=0,
+                provider="openrouter",
+                model_id=served_id,
+            ),
+        )
+
+    # An established conversation on the SERVED model, pinned to the host that
+    # is about to answer — the only shape that can strike.
+    stream._provider_affinity[served_id] = "SiliconFlow"
+    stream._provider_last_turn_at[served_id] = time.monotonic()
+    request = _affinity_request().model_copy(update={"provider_affinity": "SiliconFlow"})
+
+    assert [event async for event in stream._record_stream(request, cold_fallback())]
+    assert stream._provider_strikes[served_id]["SiliconFlow"] == 1
+    assert not stream._provider_strikes.get("deepseek/deepseek-v4.1-flash")
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_usage_still_attributes_to_the_request_model() -> None:
+    """`Usage.model_id` is `None` for a primary success and for a direct
+    non-failover call, and then the request is the honest answer. This is the
+    fallback path major-1's fix must not break."""
+    stream = _affinity_stream()
+
+    async def served() -> AsyncIterator[StreamEvent]:
+        yield StreamEndEvent(
+            stop_reason="stop",
+            served_provider="AtlasCloud",
+            usage=Usage(input_tokens=30_000, cache_read_tokens=29_000),
+        )
+
+    assert [event async for event in stream._record_stream(_affinity_request(), served())]
+    assert stream._provider_affinity == {"deepseek/deepseek-v4.1-flash": "AtlasCloud"}
+
+
 def _anthropic_sse(context_tokens: int, *, tool_call: bool = False) -> bytes:
     """One mocked Anthropic stream whose usage adds up to ``context_tokens``
     (the client derives ``Usage.context_tokens`` as input + cache read +
@@ -4075,3 +4755,93 @@ async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session
 
     stream.forget_fast_refusal()
     assert not state.fast_refused_for("anthropic/claude-opus-5")
+
+
+class TestTheConfiguredEffortClamp:
+    """``configure_model(reasoning_effort=…)`` — the config default, clamped.
+
+    The clamp belongs on the spec builder because that is the one place a
+    session spec is BORN: the status band, the wire client's membership
+    re-check and the failover driver then all read a single value rather than
+    re-deriving one. It clamps against the SPEC's own ladder rather than the
+    effort table's, because an aggregator listing can narrow the ladder below
+    the table's — the split brain ``resolve_effort_in``'s docstring documents.
+    """
+
+    def test_a_supported_level_is_applied(self, mock_credential_manager) -> None:
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="low"
+        )
+        assert config.spec.reasoning_effort == "low"
+
+    def test_an_unsupported_level_lands_on_the_nearest_rung(self, mock_credential_manager) -> None:
+        """`claude-opus-4-6` offers low/medium/high/max, so `xhigh` is one rung
+        from `high` and one from `max`; a tie goes DOWN (``resolve_effort_in``).
+        Reaching the wire unclamped would be a silent drop beneath a band that
+        still named the level."""
+        config = configure_model(
+            "anthropic", "claude-opus-4-6", mock_credential_manager, reasoning_effort="xhigh"
+        )
+        assert config.spec.reasoning_effort == "high"
+
+    def test_the_clamp_can_move_upward_too(self, mock_credential_manager) -> None:
+        """`gpt-6-astra`'s ladder starts at `low`, so the vocabulary's `none`
+        has only one rung to land on and it is ABOVE the request."""
+        config = configure_model(
+            "openai", "gpt-6-astra", mock_credential_manager, reasoning_effort="none"
+        )
+        assert config.spec.reasoning_effort == "low"
+
+    def test_a_model_with_no_ladder_ignores_the_level(self, mock_credential_manager) -> None:
+        """A non-reasoning model must not acquire a level it would silently
+        drop — and no warning either, since a standing config value the model
+        simply cannot express is not an error, only a level out of reach."""
+        config = configure_model(
+            "deepseek", "deepseek-chat", mock_credential_manager, reasoning_effort="high"
+        )
+        assert config.spec.reasoning_efforts == ()
+        assert config.spec.reasoning_effort is None
+
+    def test_the_models_own_default_is_never_overwritten(self, mock_credential_manager) -> None:
+        """``/effort auto`` RESTORES ``reasoning_default_effort``, so it has to
+        stay the MODEL's documented default and not the configured one (D4).
+        Overwriting it would make "auto" mean the configured level, the exact
+        opposite of the withdrawal the command performs."""
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="low"
+        )
+        assert config.spec.reasoning_default_effort == "high"
+
+    def test_a_level_already_in_force_is_left_alone(self, mock_credential_manager) -> None:
+        """Anthropic seeds `high` directly, so asking for `high` must resolve to
+        what the spec already carries. The observable guard is the value; the
+        point of the ``!=`` in the implementation is to skip the copy."""
+        config = configure_model(
+            "anthropic", "claude-opus-5", mock_credential_manager, reasoning_effort="high"
+        )
+        assert config.spec.reasoning_effort == "high"
+
+    def test_no_argument_leaves_the_builders_seed(self, mock_credential_manager) -> None:
+        """``None`` is "no opinion": an absent key must not disturb the spec
+        builder's own seeding, which for a direct Anthropic route is `high`."""
+        config = configure_model("anthropic", "claude-opus-5", mock_credential_manager)
+        assert config.spec.reasoning_effort == "high"
+
+    def test_a_listing_narrowed_ladder_is_the_clamp_target(self, mock_credential_manager) -> None:
+        """The split-brain case made concrete: a listing can offer
+        medium/high/xhigh while the table for the same id offers
+        none/low/medium/high/xhigh. Clamping against the TABLE would keep a
+        ``low`` the route rejects; the clamp must read the SPEC's ladder, which
+        ``build_model_spec`` installed from the listing."""
+        widened = build_model_spec("openai", "gpt-5.4")
+        narrowed = widened.model_copy(
+            update={
+                "reasoning_efforts": ("medium", "high", "xhigh"),
+                "reasoning_default_effort": "medium",
+            }
+        )
+        with patch("local_operator.model.configure.build_model_spec", return_value=narrowed):
+            config = configure_model(
+                "openai", "gpt-5.4", mock_credential_manager, reasoning_effort="low"
+            )
+        assert config.spec.reasoning_effort == "medium"
