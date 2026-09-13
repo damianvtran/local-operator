@@ -204,6 +204,19 @@ class ProviderSearchSpend:
     #: Unpriced READ operations, so a note can attach the tally to the kind it
     #: belongs to instead of pairing a search count with a read's missing price.
     unpriced_reads: int = 0
+    #: Operations this provider served at a KNOWN price of exactly zero (a free
+    #: tier), and those it served for a known non-zero price. Counted at the
+    #: WRITE, where the price of each individual call is still in hand: the
+    #: stored ``usd`` is a sum, so a provider that mixed a free and a paid call
+    #: could not be split correctly at render time.
+    free_operations: int = 0
+    paid_operations: int = 0
+    #: The same split in MONEY, accumulated at the write for the reason the
+    #: counts are: a summed ``usd`` cannot be divided back into its free and
+    #: paid parts at render time, and "how much of this was free?" is the
+    #: question the counts alone only half answer.
+    free_usd: float = 0.0
+    paid_usd: float = 0.0
     bases: set[str] = field(default_factory=set)
     #: ``search`` or ``read``. A page read is not a search -- it runs no query
     #: and bills no provider search -- and it is recorded under its own provider
@@ -224,6 +237,12 @@ class ProviderSearchSpend:
                 self.unpriced_reads += 1
         else:
             self.usd += usd
+            if usd > 0:
+                self.paid_operations += 1
+                self.paid_usd += usd
+            else:
+                self.free_operations += 1
+                self.free_usd += usd
         if basis:
             self.bases.add(basis)
 
@@ -242,6 +261,10 @@ class ProviderSearchSpend:
             "usd": round(self.usd, 6),
             "unpriced_searches": self.unpriced_searches,
             "unpriced_reads": self.unpriced_reads,
+            "free_operations": self.free_operations,
+            "paid_operations": self.paid_operations,
+            "free_usd": round(self.free_usd, 6),
+            "paid_usd": round(self.paid_usd, 6),
             "basis": "; ".join(sorted(self.bases)),
         }
 
@@ -260,6 +283,18 @@ class SearchSpendTotals:
     #: Unpriced reads, so the total's note can name the kind the missing price
     #: belongs to (see ``ProviderSearchSpend.unpriced_searches``).
     unpriced_reads: int = 0
+    #: Free and paid operations, counted exactly (see
+    #: ``ProviderSearchSpend.free_operations``). This is the pair that answers
+    #: "how much of this was free?", which the money alone cannot: $0.0000 of
+    #: spend and no search at all look identical in dollars.
+    free_operations: int = 0
+    paid_operations: int = 0
+    #: The same split in MONEY, accumulated at the write for the reason the
+    #: counts are: a summed ``usd`` cannot be divided back into its free and
+    #: paid parts at render time, and "how much of this was free?" is the
+    #: question the counts alone only half answer.
+    free_usd: float = 0.0
+    paid_usd: float = 0.0
     by_provider: dict[str, ProviderSearchSpend] = field(default_factory=dict)
 
     @property
@@ -276,6 +311,10 @@ class SearchSpendTotals:
             "searches": self.searches,
             "reads": self.reads,
             "operations": self.operations,
+            "free_operations": self.free_operations,
+            "paid_operations": self.paid_operations,
+            "free_usd": round(self.free_usd, 6),
+            "paid_usd": round(self.paid_usd, 6),
             "usd": round(self.usd, 6),
             "unpriced_searches": self.unpriced_searches,
             "by_provider": [entry.as_dict() for entry in self.by_provider.values()],
@@ -329,6 +368,12 @@ class SearchSpendLedger:
                         totals.unpriced_reads += 1
                 else:
                     totals.usd += usd
+                    if usd > 0:
+                        totals.paid_operations += 1
+                        totals.paid_usd += usd
+                    else:
+                        totals.free_operations += 1
+                        totals.free_usd += usd
                 entry.add(usd, basis, kind=kind)
             return entry
 
@@ -345,6 +390,10 @@ class SearchSpendLedger:
                 merged.usd += totals.usd
                 merged.unpriced_searches += totals.unpriced_searches
                 merged.unpriced_reads += totals.unpriced_reads
+                merged.free_operations += totals.free_operations
+                merged.paid_operations += totals.paid_operations
+                merged.free_usd += totals.free_usd
+                merged.paid_usd += totals.paid_usd
                 for provider, entry in totals.by_provider.items():
                     target = merged.by_provider.setdefault(
                         provider, ProviderSearchSpend(provider=provider, kind=entry.kind)
@@ -354,6 +403,10 @@ class SearchSpendLedger:
                     target.usd += entry.usd
                     target.unpriced_searches += entry.unpriced_searches
                     target.unpriced_reads += entry.unpriced_reads
+                    target.free_operations += entry.free_operations
+                    target.paid_operations += entry.paid_operations
+                    target.free_usd += entry.free_usd
+                    target.paid_usd += entry.paid_usd
                     target.bases |= entry.bases
             return merged
 

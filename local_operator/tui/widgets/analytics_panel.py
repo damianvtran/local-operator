@@ -68,7 +68,7 @@ from local_operator.analytics.model import (
     session_table_labels,
 )
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.costs import SearchSpendSnapshot
+from local_operator.tui.costs import MoneyFigure, SearchSpendSnapshot, combined_spend
 from local_operator.tui.widgets.report_view import ReportView
 from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -331,10 +331,30 @@ def search_spend_section(
     if not snapshot.count:
         return lines
 
-    def row(name: str, scope: "_CostLike", notes: Sequence[str] = ()) -> None:
+    #: Cells in the per-provider usage bar. Fixed rather than derived from the
+    #: frame, unlike the ledger tables that size theirs from the content box:
+    #: this block shares its line with a money gutter and a count, both of which
+    #: must survive a 60-column terminal, and a bar that grew with the frame
+    #: would push them off it. Eight cells reads as a proportion at every width
+    #: the panels are tested at.
+    bar_cells = 8
+
+    def row(
+        name: str,
+        scope: "_CostLike",
+        notes: Sequence[str] = (),
+        *,
+        share: float | None = None,
+    ) -> None:
         line = Text()
         line.append(f"  {name:<{_SEARCH_NAME_COL}}", style=semantic_style("dim"))
         line.append_text(_money_run(scope, _SEARCH_VALUE_CELL))
+        if share is not None:
+            # The USAGE half of the row: how much of this scope's work went to
+            # this provider. Money alone cannot answer it -- six free searches
+            # and no searches both total $0.0000 -- which is why the count and
+            # the bar are here beside the dollars rather than in prose.
+            line.append(f"  {proportion_bar(share, bar_cells)}", style=semantic_style("accent"))
         # Same ladder semantics as ``session_panel._Body.kv``: the first rung
         # that fits uncropped wins, and none fitting means the qualifier sheds
         # rather than being cut mid-word. Every rung here still carries the
@@ -411,7 +431,8 @@ def search_spend_section(
         return tuple(f"{note} · {read_note}" for note in base)
 
     lines.append(section_header("Search spend", meta))
-    row("Total spend", snapshot, total_notes())
+    total_operations = max(snapshot.count, 1)
+    row("Total spend", snapshot, total_notes(), share=1.0 if snapshot.count else None)
     # ``count``, not ``searches``: a conversation whose only retrieval spend is
     # reads has a share worth showing, and the guard dropped the row for it.
     if session is not None and session.count:
@@ -465,7 +486,28 @@ def search_spend_section(
                 glyph + entry.provider,
                 entry,
                 search_notes(entry.count, entry.unpriced_searches, kind=entry.kind),
+                share=entry.count / total_operations,
             )
+    # Free versus paid, in counts AND money: the pair the dollars cannot carry,
+    # since six free searches and no searches at all both total $0.0000. A
+    # ladder, widest first, and every rung keeps both counts -- dropping one
+    # would make the line answer a different question than the row above it.
+    free_word = "free"
+    if snapshot.free_operations or snapshot.paid_operations:
+        summary = (
+            f"{snapshot.free_operations} {free_word} "
+            f"({format_cost(MoneyFigure(cost_usd=snapshot.free_usd))}) · "
+            f"{snapshot.paid_operations} paid "
+            f"({format_cost(MoneyFigure(cost_usd=snapshot.paid_usd))})",
+            f"{snapshot.free_operations} {free_word} · {snapshot.paid_operations} paid",
+        )
+        budget = width - 2
+        chosen = next((candidate for candidate in summary if len(candidate) <= budget), summary[-1])
+        line = Text(no_wrap=True, overflow="crop")
+        line.append(f"  {chosen}", style=semantic_style("dim"))
+        line.truncate(width, overflow="crop")
+        lines.append(line)
+
     # The money footnote for THIS block, drawn here rather than with the model
     # figures: these are the marks it explains (`+` lower bound, `$—` unknown),
     # and the screens that draw the block are not always the screens that draw
@@ -963,22 +1005,40 @@ def build_report(
     # discount, or free tier), so its note says so — the same measured-vs-modelled
     # honesty the WHERE-INPUT-WENT caveat carries. ``$—`` for a run with no
     # priceable model; a trailing ``+`` when some calls used an unpriced one.
-    if aggregate.cost_is_known:
+    # The figure is the session's WHOLE money: the model half from this ledger
+    # plus the search half from its own, combined in ONE place
+    # (``costs.combined_spend``) so the band, this screen and ``/session``
+    # cannot disagree about what a session cost. The note names the search
+    # component, which is what the header comment above asks for: a mixed figure
+    # is only a problem if it cannot say which half is which.
+    spend = combined_spend(
+        aggregate.cost_usd if aggregate.cost_is_known else None,
+        search_spend,
+        model_is_partial=aggregate.cost_is_partial,
+    )
+    search_component = (
+        f"incl. {format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
+        if spend.search_usd > 0 or (search_spend is not None and search_spend.count)
+        else ""
+    )
+    if spend.is_unknown:
+        cost_note = "no published price"
+    elif search_component:
+        cost_note = f"≈ list price × tokens · {search_component}"
+    else:
         # The trailing ``+`` on the figure already flags a partial (lower-bound)
         # sum, so the note stays short enough to fit a narrow frame; the caveat
         # it must always carry is that this is list price, not a billed invoice.
         cost_note = "≈ list price × tokens"
-    else:
-        cost_note = "no published price"
     # Built directly (not via ``kv``) so the lower-bound ``+`` is dimmed like the
     # table cells (review D1) — the figure reads as a number, the ``+`` as a flag.
     # ``append_cost`` right-aligns (table cells); here we pass the figure's own
     # width so it left-aligns with the token values, then pad out to
     # ``_VALUE_CELL`` so the cost note shares the gutter (D2).
-    cost_text = format_cost(aggregate)
+    cost_text = format_cost(MoneyFigure.of(spend))
     cost_row = Text()
     cost_row.append(f"  {'Est. cost':<22}", style=dim)
-    append_cost(cost_row, aggregate, len(cost_text), fg, dim)
+    append_cost(cost_row, MoneyFigure.of(spend), len(cost_text), fg, dim)
     cost_row.append(" " * max(0, _VALUE_CELL - len(cost_text)))
     cost_row.append(f"  {cost_note}", style=dim)
     lines.append(cost_row)

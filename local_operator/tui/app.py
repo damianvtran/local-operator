@@ -150,7 +150,12 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import ArgumentChoice
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
-from local_operator.tui.costs import SearchSpendSnapshot, job_cost, turn_cost
+from local_operator.tui.costs import (
+    SearchSpendSnapshot,
+    combined_spend,
+    job_cost,
+    turn_cost,
+)
 from local_operator.tui.error_text import error_text
 from local_operator.tui.events import (
     AssistantDelta,
@@ -37613,13 +37618,11 @@ class OperatorApp(App[None]):
         unpriced row.
         """
         snapshot = self._session_search_spend()
-        # ``cost_is_partial`` alone. The model-money-unknown case this used to
-        # spell out here is unreachable -- ``usd`` only accrues for priced
-        # operations, which are exactly the ones that do not raise the unpriced
-        # count -- and the real case (a search-only figure against an
-        # unpriceable model) is marked at the call site that knows it is showing
-        # half a session.
-        return snapshot.cost_is_partial
+        # Asked of the ONE combiner rather than re-derived here: the panels ask
+        # the same question of the same function, and a band that spelled the
+        # rule out again is how the two surfaces came to disagree about whether a
+        # figure was a floor.
+        return combined_spend(0.0, snapshot).is_floor
 
     def _spend_text(self, total: float | None = None, *, floor: bool | None = None) -> str:
         """The session's spend as the band should SPELL it, mark included.

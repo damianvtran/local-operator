@@ -55,7 +55,7 @@ from local_operator.analytics.model import (
     UsageAggregate,
 )
 from local_operator.session.protocol import SessionProtocol
-from local_operator.tui.costs import SearchSpendSnapshot
+from local_operator.tui.costs import MoneyFigure, SearchSpendSnapshot, combined_spend
 from local_operator.tui.widgets.analytics_panel import (
     COST_LEGEND,
     METRIC_COST,
@@ -849,6 +849,17 @@ def build_session_report(
     return body.to_text()
 
 
+def _search_activity(runtime: SessionDiagnostics) -> bool:
+    """Whether this session has any search spend to name at all.
+
+    The Est. cost row asks this before mentioning the search half: a session that
+    never searched must not read ``incl. $0.0000 search``, which is a claim about
+    retrieval rather than a report of none.
+    """
+    snapshot = runtime.search_spend
+    return snapshot is not None and bool(snapshot.count)
+
+
 def _draw_search_spend(body: _Body, runtime: SessionDiagnostics) -> None:
     """This session's search spend, as its own attributed block.
 
@@ -1023,15 +1034,30 @@ def _draw_recorded_usage(
         # tree figure that looks like the own figure it replaced. Every rung
         # still says the scope; the narrow ones trade the breakdown for it,
         # which is the right thing to lose last.
-        body.kv(
-            "Est. cost",
-            format_cost(subtree),
-            notes=(
-                f"{own} own · {subs} subagents",
-                f"{own} + {subs} subagents",
-                "incl. subagents",
-            ),
+        # The figure is the session's WHOLE money: model plus retrieval, combined
+        # in ONE place (``costs.combined_spend``) so this screen, ``/analytics``
+        # and the band cannot report three different totals for one session. The
+        # ladder keeps a rung that names the search half at every width, because
+        # the reader must be able to tell a combined figure from a model-only one
+        # -- the failure this row had (the band folded search in, this row did
+        # not, and this is the row a person reads first).
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
         )
+        ladder = (
+            f"{own} own · {subs} subagents",
+            f"{own} + {subs} subagents",
+            "incl. subagents",
+        )
+        if _search_activity(runtime):
+            # Appended rather than always present: a session that never searched
+            # must not carry "incl. $0.0000 search", which reads as a claim about
+            # retrieval that did not happen.
+            search_note = f"incl. {format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
+            ladder = tuple(f"{rung} · {search_note}" for rung in ladder) + (search_note,)
+        body.kv("Est. cost", format_cost(MoneyFigure.of(spend)), notes=ladder)
         # Kept under ~70 characters so it does not wrap at the common widths.
         # The 103-character version wrapped at every width from 70 to ~128 and
         # — because a folded continuation loses the body indent — dropped an
@@ -1044,8 +1070,21 @@ def _draw_recorded_usage(
             "other sections are this session only."
         )
     else:
-        note = "≈ list price × tokens" if subtree.cost_is_known else "no published price"
-        body.kv("Est. cost", format_cost(subtree), note)
+        spend = combined_spend(
+            subtree.cost_usd if subtree.cost_is_known else None,
+            runtime.search_spend,
+            model_is_partial=subtree.cost_is_partial,
+        )
+        if spend.is_unknown:
+            note = "no published price"
+        elif _search_activity(runtime):
+            note = (
+                f"≈ list price × tokens · incl. "
+                f"{format_cost(MoneyFigure(cost_usd=spend.search_usd))} search"
+            )
+        else:
+            note = "≈ list price × tokens"
+        body.kv("Est. cost", format_cost(MoneyFigure.of(spend)), note)
     # Suppressed when both are zero: on the healthy path "0 requests; 0 unknown"
     # is a row whose only content is the absence of a problem.
     if report.missing_usage_calls or report.unknown_usage_calls:

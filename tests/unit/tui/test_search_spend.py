@@ -621,3 +621,119 @@ async def test_a_mixed_sessions_share_row_names_both_kinds(tmp_path, monkeypatch
 
     assert "This session" in text
     assert "1 search · 1 read" in text
+
+
+# -- usage metrics: free vs paid, and search money in the headline ----------
+
+
+def test_the_ledger_counts_free_and_paid_operations_exactly() -> None:
+    """Counts and money per half, at the WRITE.
+
+    The stored ``usd`` is a sum, so a provider that served one free and one paid
+    call could not be split correctly at render time; the split has to be taken
+    where each call's own price is still in hand. Six free searches and no
+    searches at all both total $0.0000, which is why the counts exist.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot
+    from local_operator.web_search.cost import SEARCH_SPEND
+    from local_operator.web_search.models import SearchCost
+
+    SEARCH_SPEND.reset()
+    SEARCH_SPEND.record("sess", "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    SEARCH_SPEND.record("sess", "duckduckgo", SearchCost(usd=0.0, basis="free"))
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+    snapshot = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+
+    assert snapshot.free_operations == 2
+    assert snapshot.paid_operations == 1
+    assert snapshot.free_usd == pytest.approx(0.0)
+    assert snapshot.paid_usd == pytest.approx(0.004)
+    SEARCH_SPEND.reset()
+
+
+def test_combined_spend_is_one_rule_for_every_surface() -> None:
+    """Model plus search, with the flags each surface has to render.
+
+    The band folded search in while both panels' headline said model-only, so one
+    session reported two different costs. This function is the single answer, and
+    these are the four shapes it has to get right.
+    """
+    from local_operator.tui.costs import SearchSpendSnapshot, combined_spend
+    from local_operator.web_search.cost import SEARCH_SPEND
+    from local_operator.web_search.models import SearchCost
+
+    SEARCH_SPEND.reset()
+    empty = SearchSpendSnapshot()
+    # A priced model with no searches: the combined figure IS the model figure.
+    plain = combined_spend(1.20, empty)
+    assert plain.total_usd == pytest.approx(1.20)
+    assert (plain.is_unknown, plain.is_floor) == (False, False)
+
+    # A model figure that is itself a floor stays a floor once search is added.
+    floored = combined_spend(1.20, empty, model_is_partial=True)
+    assert floored.is_floor is True
+
+    # Real search money beside an UNPRICEABLE model: a floor, never "unknown".
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="rate"))
+    search = SearchSpendSnapshot.of(SEARCH_SPEND.session("sess"))
+    mixed = combined_spend(None, search)
+    assert mixed.total_usd == pytest.approx(0.004)
+    assert (mixed.is_unknown, mixed.is_floor) == (False, True)
+
+    # Nothing priceable at all: unknown, and not a floor (there is no known part
+    # for it to be a floor of).
+    nothing = combined_spend(None, empty)
+    assert (nothing.is_unknown, nothing.is_floor) == (True, False)
+    SEARCH_SPEND.reset()
+
+
+@pytest.mark.asyncio
+async def test_the_session_headline_includes_search_and_names_it(tmp_path, monkeypatch) -> None:
+    """``Est. cost`` is the session's WHOLE money, with the search half named.
+
+    The band already folded search in; this row did not, so the figure a person
+    reads first was the one that omitted retrieval.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    SEARCH_SPEND.record("sess", "brave", SearchCost(usd=0.004, basis="per-search rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    assert "Est. cost" in text
+    assert "incl. $0.0040 search" in text
+    # The usage half: free vs paid, in counts and money.
+    assert "1 paid" in text
+    assert "free ($0.0000)" in text or "0 free" in text
+
+
+@pytest.mark.asyncio
+async def test_a_session_that_never_searched_claims_no_search_spend(tmp_path, monkeypatch) -> None:
+    """No searches must not read as ``incl. $0.0000 search``.
+
+    A zero there is a claim about retrieval rather than a report of none, and it
+    would also imply the combined figure had a search component to name.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/session")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = app.screen._report_text().plain
+
+    assert "Est. cost" in text
+    assert "search" not in text.split("Est. cost")[1].split("\n")[0]
