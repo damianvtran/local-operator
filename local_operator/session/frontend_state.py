@@ -2465,17 +2465,23 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     )
 
 
-#: The three delta fields this filter decides about, excluded when measuring how
-#: much of the frame the REST of the payload already costs.
-_TRAJECTORY_DELTA_KEYS = frozenset(
-    {"job_trajectory_appends", "job_trajectory_replacements", "job_todo_updates"}
-)
+#: The delta fields this filter REPLACES outright, excluded when measuring how much
+#: of the frame the rest of the payload already costs.
+#:
+#: ``job_todo_updates`` is deliberately not in here: it rides the same frame and
+#: nothing in this module bounds it, so excluding it would overstate the room the
+#: appends may spend by exactly the todo payload — the failure mode this file is
+#: about, a bound that does not count what actually ships.
+_TRAJECTORY_APPEND_KEYS = frozenset({"job_trajectory_appends", "job_trajectory_replacements"})
 
-#: Room reserved for the frame's own envelope — the ``{"op": …, "data": …}``
-#: wrapper, its JSON separators, and the relay's per-frame bookkeeping — when the
-#: ceiling is derived from the socket's line limit. The appends must not spend the
-#: line's last bytes and leave the wrapper nowhere to go.
-TRAJECTORY_FRAME_ENVELOPE_BYTES = 65_536
+#: Room reserved for the frame's own envelope — the ``{"op": "frontend_update",
+#: "data": …}`` wrapper and its separators — when the ceiling is derived from the
+#: socket's line limit. Measured at 37 B for that wrapper, so this is slack rather
+#: than an estimate: the row costs that spend the room are themselves measured with
+#: ``json.dumps`` at its default separators, which runs ~3.5% above the compact wire
+#: form, so the room is already conservative before this is subtracted. Kept small
+#: on purpose — a needlessly large reservation drops rows that would have fitted.
+TRAJECTORY_FRAME_ENVELOPE_BYTES = 4_096
 
 
 def _bound_trajectory_appends_in_place(
@@ -2508,12 +2514,18 @@ def _bound_trajectory_appends_in_place(
     Two limits, and the second one is why the first can be conservative. The
     budget is the SHARE the frame hands this connection's deltas, deliberately
     well under the line limit so the roster, todos and usage still fit beside it.
-    ``ceiling_bytes`` is the measured room left under the real limit once the rest
-    of this frame is counted, and a job's NEWEST row is admitted past its share up
-    to it: one 342 KB tool result fits a 1 MiB line, so shipping that job an empty
-    window would hide an event the socket could have carried (measured — the first
-    cut of this bound did exactly that). A row larger than the whole ceiling has
-    nowhere to ride; that job gets an empty window and the fetch path.
+    ``ceiling_bytes`` is the measured room left under the real line limit once the
+    rest of this frame is counted, and it is the HARD one in both directions: when
+    it is smaller than the budget it caps the spend outright (a frame carrying a
+    near-limit roster leaves little room, and dropping rows entirely still beats
+    the degraded placeholder an overflow produces — measured: 800,014 B of
+    non-trajectory payload plus one 250 KB row shipped a 1,050,435-byte frame
+    under a 1,048,576-byte limit), and when it is larger it is what admits a job's
+    NEWEST row past its share (one 342 KB tool result fits a 1 MiB line, so
+    shipping that job an empty window would hide an event the socket could have
+    carried — the first cut of this bound did exactly that). A row larger than the
+    whole room has nowhere to ride; that job gets an empty window and the fetch
+    path.
 
     The budget is spent newest-first per job, and unspent budget is offered back
     to jobs that were cut short, so a child with a small delta cannot starve a
@@ -2522,10 +2534,10 @@ def _bound_trajectory_appends_in_place(
     job_ids = [job_id for job_id, rows in appends.items() if rows]
     if not job_ids:
         return False
-    ceiling = budget_bytes if ceiling_bytes is None else max(budget_bytes, ceiling_bytes)
+    room = budget_bytes if ceiling_bytes is None else max(0, ceiling_bytes)
     costs = {job_id: [_live_row_cost(row) for row in appends[job_id]] for job_id in job_ids}
     counts = {job_id: 0 for job_id in job_ids}
-    budget_left = max(0, budget_bytes)
+    budget_left = min(budget_bytes, room)
     spent = 0
     jobs_left = len(job_ids)
     for job_id in job_ids:
@@ -2535,7 +2547,7 @@ def _bound_trajectory_appends_in_place(
         for cost in newest_first:
             if used + cost <= allowance:
                 pass
-            elif used == 0 and spent + cost <= ceiling:
+            elif used == 0 and spent + cost <= room:
                 # The newest row, past its slice but inside the frame's room.
                 allowance = cost
             else:
@@ -2553,7 +2565,6 @@ def _bound_trajectory_appends_in_place(
                 if cost > budget_left:
                     break
                 budget_left -= cost
-                spent += cost
                 counts[job_id] += 1
     dropped = False
     for job_id in job_ids:
@@ -2629,7 +2640,7 @@ def filter_update_trajectories(
     ceiling: int | None = None
     if line_limit_bytes is not None:
         others = _live_row_cost(
-            {key: value for key, value in payload.items() if key not in _TRAJECTORY_DELTA_KEYS}
+            {key: value for key, value in payload.items() if key not in _TRAJECTORY_APPEND_KEYS}
         )
         ceiling = line_limit_bytes - others - TRAJECTORY_FRAME_ENVELOPE_BYTES
     dropped = _bound_trajectory_appends_in_place(
