@@ -949,14 +949,14 @@ def test_the_connection_row_survives_a_non_positive_budget() -> None:
     ``left.truncate(max(0, width))`` looks defensive but is the opposite: on
     pinned rich 15.0.0 ``Text.truncate`` at a non-positive width does NOT empty
     the text — ``truncate(0)`` keeps the cell count and swaps the tail for an
-    ellipsis, and ``truncate(-n)`` gives back only ``n`` cells — so a zero-width
-    row would paint nearly 40 cells past a box it was told was 0 wide. The
-    connection row's left group and the irreducible tail's two ``tail.truncate``
-    calls all had the same hole, so the guard sits once at the top of ``_render``
-    rather than at each site. Unreachable today only because ``refresh`` clamps
-    to ``max(self._dock.size.width, 10)``; the row should not depend on a
-    caller's arithmetic for its own bound, and that clamp is one line away from
-    moving.
+    ellipsis, and ``truncate(-n)`` keeps ``cell_len - n`` cells (39 in, 38 out at
+    -1 and 34 at -5) — so a zero-width row would paint nearly 40 cells past a box
+    it was told was 0 wide. The connection row's left group and the irreducible
+    tail's two ``tail.truncate`` calls all had the same hole, so the guard sits
+    once at the top of ``_render`` rather than at each site. Unreachable today
+    only because ``refresh`` clamps to ``max(self._dock.size.width, 10)``; the row
+    should not depend on a caller's arithmetic for its own bound, and that clamp
+    is one line away from moving.
     """
     # A connection row and a plain one, because the two reach different
     # builders below the guard: the connection branch, and the ladder-then-tail
