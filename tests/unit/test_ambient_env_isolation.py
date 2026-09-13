@@ -60,10 +60,11 @@ _HARMLESS: dict[str, str] = {
     "TERM_PROGRAM": "terminal identity for tab-title / notification routing",
     "NO_COLOR": "colour probe; tests pin it themselves",
     # Textual reads this once as a ``Final`` at ``textual.constants`` import;
-    # ``guard_pixel_mouse_latch`` sets it to 0 and DEFERS to an inherited value
-    # as a deliberate user override. Selects a parser gate, names nothing on
-    # the machine, and the parser-side tests pin the constant by attribute
-    # rather than reading the environment.
+    # ``guard_pixel_mouse_latch`` sets it to 0 and DEFERS only to an inherited
+    # value Textual itself honours (one that parses as an int), treating an
+    # unparseable one as absent. Selects a parser gate, names nothing on the
+    # machine, and the parser-side tests pin the constant by attribute rather
+    # than reading the environment.
     "TEXTUAL_SMOOTH_SCROLL": "in-band resize negotiation gate; a switch, not a resource",
     "TMUX": "presence probe for terminal-title routing; never used to address a pane",
     "KITTY_WINDOW_ID": "presence probe for terminal-title routing",

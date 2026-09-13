@@ -44,6 +44,14 @@ makes ``constants.SMOOTH_SCROLL`` False, and the mode-report branch at
 ``_xterm_parser.py:321`` then refuses to emit an ``InBandWindowResize`` token at
 all, so Textual never concludes the mode is available.
 
+AN INHERITED VALUE COUNTS ONLY IF TEXTUAL READS IT. ``constants.SMOOTH_SCROLL``
+is ``_get_environ_int("TEXTUAL_SMOOTH_SCROLL", 1) == 1`` (``constants.py:30-52``
+and ``:168``), and that helper returns its DEFAULT for anything ``int()``
+rejects. An unparseable inherited value — empty, or ``true`` — therefore means
+"smooth scrolling ON" to Textual, so deferring merely because the name is set
+would hand the latch back to a value Textual never acted on. The guard parses
+the value the same way Textual does and treats what Textual ignores as absent.
+
 THE RE-ENABLE BRANCH. That gate is why the mode reset alone is not enough
 either. Textual's driver answers a ``;2`` reply — supported but reset, exactly
 what a bare ``CSI ?2048l`` produces — by turning the mode back on: the
@@ -82,7 +90,11 @@ nothing from ``textual``: the same leaf discipline as ``terminals.py``, and here
 it is also a correctness requirement, since importing this module must not be
 what pulls ``textual.constants`` in ahead of the guard.
 
-All references pinned to textual 8.2.8.
+All references pinned to textual 8.2.8. Every bare ``linux_driver.py`` means
+``textual/drivers/linux_driver.py`` — there is no top-level file of that name,
+so the prefix is what makes a reference greppable — and ``_xterm_parser.py``,
+``constants.py``, ``app.py``, ``scrollbar.py`` and ``messages.py`` are the
+files of those names in the ``textual`` package root.
 """
 
 from __future__ import annotations
@@ -113,20 +125,46 @@ _ENV_DISABLE = "LOCAL_OPERATOR_NO_MODE_RESET"
 _SMOOTH_SCROLL_ENV = "TEXTUAL_SMOOTH_SCROLL"
 
 
+def _textual_honours(value: str) -> bool:
+    """True when Textual's own parse gives ``value`` meaning.
+
+    ``constants._get_environ_int`` returns its DEFAULT for a value ``int()``
+    rejects, and its caller compares that default to 1, so an unparseable
+    value reads to Textual as "smooth scrolling ON". Presence alone is
+    therefore not a statement of intent, and this predicate is deliberately
+    the same ``int()``: the guard and Textual must agree on which values are
+    meaningful, or the guard defers to a value Textual discards.
+    """
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def guard_pixel_mouse_latch(env: MutableMapping[str, str] | None = None) -> bool:
     """Ask Textual not to negotiate in-band resize; True when we set it.
 
-    Returns False when the variable is already present, which is a deliberate
-    user override we leave alone — someone who set ``TEXTUAL_SMOOTH_SCROLL``
-    by hand has said what they want on their terminal.
+    Returns False when the variable is already present AND holds a value
+    Textual honours — a deliberate user override we leave alone, because
+    someone who set ``TEXTUAL_SMOOTH_SCROLL`` to an integer has said what they
+    want on their terminal (``1`` keeps smooth scrolling and pixel
+    coordinates; any other integer turns the negotiation off).
+
+    A present but unparseable value is NOT an override and is treated as
+    absent: Textual ignores it and falls back to its default of 1, i.e. to
+    smooth scrolling ON, so deferring to it would silently disable this fix.
 
     Must be called before ``textual.constants`` is imported to have any effect.
     """
     if env is None:
         env = os.environ
-    if _SMOOTH_SCROLL_ENV in env:
+    inherited = env.get(_SMOOTH_SCROLL_ENV)
+    if inherited is not None and _textual_honours(inherited):
         return False
-    env.setdefault(_SMOOTH_SCROLL_ENV, "0")
+    # Assignment, not setdefault: the deferral above is the only path that
+    # leaves an inherited value alone, so a default here would be unreachable.
+    env[_SMOOTH_SCROLL_ENV] = "0"
     return True
 
 

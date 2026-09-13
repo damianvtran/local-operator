@@ -35,7 +35,10 @@ the divisor is correct and this fix trades it away for a cell-accurate pointer;
 that trade is a product decision recorded in ``terminal_modes``, not a property
 this file tests.
 
-All references pinned to textual 8.2.8.
+All references pinned to textual 8.2.8; ``_xterm_parser.py`` is
+``textual/_xterm_parser.py``, and ``drivers/linux_driver.py`` is
+textual 8.2.8's ``textual/drivers/linux_driver.py`` (a bare ``linux_driver.py``
+resolves to nothing, so the prefix is what makes it greppable).
 """
 
 from __future__ import annotations
@@ -181,7 +184,7 @@ def test_guard_sets_the_textual_switch() -> None:
 
 
 def test_guard_respects_an_explicit_user_setting() -> None:
-    """A user who set the variable by hand keeps their value."""
+    """A user who set the variable to a value Textual honours keeps their value."""
     env = {"TEXTUAL_SMOOTH_SCROLL": "1"}
     assert guard_pixel_mouse_latch(env) is False
     assert env == {"TEXTUAL_SMOOTH_SCROLL": "1"}
@@ -246,6 +249,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 #: What ``run_tui`` does, reduced to the part this test is about: the two calls,
 #: in wire order, and then a Textual app that boots far enough for the driver to
 #: run its startup negotiation before exiting itself.
+#:
+#: Deliberately the CALLS and not ``run_tui`` (review round 3, MINOR 1): the
+#: wiring is asserted separately, by
+#: ``test_run_tui_calls_the_guard_before_importing_textual`` below, which calls
+#: the real ``run_tui`` and goes red if either call is removed from it. Keeping
+#: this child hermetic — its own calls, no session, no app — is what makes it a
+#: wire-ordering test rather than a boot test.
 _BOOT_CHILD = """
 import sys
 sys.path.insert(0, {repo!r})
@@ -344,9 +354,16 @@ def _capture_boot_bytes(child_source: str, timeout: float = 30.0) -> bytes:
 def test_startup_writes_the_reset_before_the_in_band_query() -> None:
     """On a real pty the reset precedes the query, and 1016 is never enabled.
 
-    This is the only test that can fail for an ORDERING mistake. The two calls
-    could both be present and still be useless if they landed after
-    ``linux_driver.py:299`` had already asked the terminal about mode 2048.
+    This is the only test that can fail for an ORDERING mistake on the wire.
+    The two calls could both be present and still be useless if they landed
+    after ``drivers/linux_driver.py:299`` had already asked the terminal about
+    mode 2048.
+
+    Scope, stated because it was overstated once (review round 3, MINOR 1):
+    the child above re-implements the two calls, so this test pins the calls
+    and their wire order — NOT the wiring. Deleting both calls from ``run_tui``
+    leaves this file green; ``test_run_tui_calls_the_guard_before_importing
+    _textual`` below is what fails.
     """
     data = _capture_boot_bytes(_BOOT_CHILD.format(repo=str(_REPO_ROOT)))
 
@@ -400,3 +417,185 @@ def test_importing_the_tui_package_does_not_pull_textual() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, cwd=_REPO_ROOT
     )
     assert out.stdout.strip() == "CLEAN", out.stdout
+
+
+#: The env→constant hop, in the only place it can be asked: ``SMOOTH_SCROLL`` is
+#: a ``Final`` frozen when ``textual.constants`` is imported. Production order
+#: is mirrored exactly — guard first, Textual's import second. ``inherited``
+#: arrives as JSON so ``None`` (absent) and ``""`` (present-but-empty) stay
+#: distinguishable, the distinction the whole finding is about.
+_HOP_CHILD = """
+import json, os, sys
+
+from local_operator.tui.terminal_modes import guard_pixel_mouse_latch
+
+inherited = json.loads(sys.argv[1])
+if inherited is not None:
+    os.environ["TEXTUAL_SMOOTH_SCROLL"] = inherited
+
+wrote = guard_pixel_mouse_latch()
+
+import textual.constants as constants
+
+print(json.dumps({"wrote": wrote, "smooth_scroll": constants.SMOOTH_SCROLL}))
+"""
+
+#: The five states an inherited ``TEXTUAL_SMOOTH_SCROLL`` can be in, and what
+#: each must leave behind: ``(inherited value or None, the guard wrote?,
+#: Textual's SMOOTH_SCROLL)``.
+#:
+#: The last two are the shapes a user writes when they believe this is a
+#: boolean switch, and they are the ones that used to silently disarm the fix
+#: (review round 3, MINOR 2): Textual's ``_get_environ_int`` returns its
+#: default of 1 for both, i.e. smooth scrolling ON, so a guard that deferred on
+#: mere presence handed the latch straight back.
+_SMOOTH_SCROLL_SHAPES = [
+    pytest.param(None, True, False, id="unset"),
+    pytest.param("0", False, False, id="zero-int"),
+    pytest.param("1", False, True, id="one-int"),
+    pytest.param("", True, False, id="empty-string"),
+    pytest.param("true", True, False, id="non-integer-word"),
+]
+
+
+@pytest.mark.parametrize(("inherited", "guard_wrote", "smooth_scroll"), _SMOOTH_SCROLL_SHAPES)
+def test_guard_defers_only_to_a_value_textual_honours(
+    inherited: str | None, guard_wrote: bool, smooth_scroll: bool
+) -> None:
+    """The guard's own contract over all five shapes.
+
+    ``guard_wrote`` is the return value and ``smooth_scroll`` the value the
+    environment must be left holding (``"1"`` only where the user's integer was
+    honoured and asked for it). A presence check fails the last two rows, which
+    is the point: this test bites if the guard ever goes back to
+    ``if _SMOOTH_SCROLL_ENV in env``.
+    """
+    env: dict[str, str] = {} if inherited is None else {"TEXTUAL_SMOOTH_SCROLL": inherited}
+
+    assert guard_pixel_mouse_latch(env) is guard_wrote
+
+    expected_value = "1" if smooth_scroll else "0"
+    assert env["TEXTUAL_SMOOTH_SCROLL"] == expected_value
+
+
+@pytest.mark.parametrize(("inherited", "guard_wrote", "smooth_scroll"), _SMOOTH_SCROLL_SHAPES)
+def test_the_guard_leaves_a_value_textual_actually_reads(
+    inherited: str | None, guard_wrote: bool, smooth_scroll: bool, tmp_path: Path
+) -> None:
+    """The same five shapes through Textual's parse — the env-to-constant hop.
+
+    Nothing checked this hop before: the guard's unit test asserts the string it
+    writes, while ``constants.SMOOTH_SCROLL`` is a ``Final`` frozen at import,
+    so this suite — which imported Textual long ago — cannot observe what
+    Textual makes of it. A child per shape, guard first and ``textual.constants``
+    second exactly as production orders them, is the only honest way to ask.
+    """
+    import json
+    import subprocess
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".local-operator"),
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", _HOP_CHILD, json.dumps(inherited)],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        env=env,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+
+    assert json.loads(out.stdout) == {"wrote": guard_wrote, "smooth_scroll": smooth_scroll}
+
+
+#: The wiring itself, which the pty child above cannot see: it re-implements the
+#: two calls, so deleting them from ``run_tui`` leaves this file green (review
+#: round 3, MINOR 1). This child calls the REAL ``run_tui`` and stubs the lazy
+#: ``local_operator.tui.app`` import to raise, so its failure lands immediately
+#: after the two calls and nothing has to boot.
+#:
+#: The recorders replace the module attributes ``run_tui`` resolves at call
+#: time, which is what makes this a test of the production path rather than of
+#: the child: remove a call from ``run_tui`` and no recorder fires.
+_WIRING_CHILD = """
+import asyncio, json, sys, types
+
+import local_operator.tui as tui
+
+calls = []
+textual_loaded_at_call = None
+
+
+def _recorder(name):
+    def _call(*_args, **_kwargs):
+        global textual_loaded_at_call
+        calls.append(name)
+        if textual_loaded_at_call is None:
+            textual_loaded_at_call = any(
+                module == "textual" or module.startswith("textual.")
+                for module in sys.modules
+            )
+        return True
+
+    return _call
+
+
+tui.reset_in_band_resize = _recorder("reset")
+tui.guard_pixel_mouse_latch = _recorder("guard")
+
+
+class _NoApp(types.ModuleType):
+    def __getattr__(self, name):
+        raise ImportError("stubbed by the wiring test: " + name)
+
+
+sys.modules["local_operator.tui.app"] = _NoApp("local_operator.tui.app")
+
+try:
+    asyncio.run(tui.run_tui(lambda: None))
+except ImportError:
+    pass
+
+print(json.dumps({"calls": calls, "textual_loaded_at_call": textual_loaded_at_call}))
+"""
+
+
+def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> None:
+    """The wiring, which the pty ordering test cannot see (review round 3, MINOR 1).
+
+    ``_capture_boot_bytes``'s child re-implements the two calls, so both could be
+    deleted from ``run_tui`` with the whole file green — a plausible refactor
+    (moving them below the lazy import) would silently restore the reported bug.
+    This calls the REAL ``run_tui`` and stubs only the ``local_operator.tui.app``
+    import to raise, so the failure lands immediately after the two calls: with
+    either call missing, or with the calls moved below the import, ``calls``
+    comes back short and this goes red.
+
+    ``textual_loaded_at_call`` is the guard's precondition, asserted at the
+    moment the first call ran rather than inferred afterwards: the guard is
+    inert if ``textual.constants`` is already in ``sys.modules``.
+    """
+    import json
+    import subprocess
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / ".local-operator"),
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", _WIRING_CHILD],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        env=env,
+        timeout=120,
+    )
+    assert out.returncode == 0, out.stderr
+
+    result = json.loads(out.stdout)
+    assert result["calls"] == ["reset", "guard"], result
+    assert result["textual_loaded_at_call"] is False, result
