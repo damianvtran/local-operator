@@ -22,6 +22,7 @@ from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.status_line import ICON_MCP
 from local_operator.tui.widgets.toast import (
+    _HOST_LEADS,
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
     TOAST_MAX_WIDTH,
@@ -29,6 +30,7 @@ from local_operator.tui.widgets.toast import (
     TOAST_MIN_WIDTH,
     TOAST_PADDING_CELLS,
     Toast,
+    _phrase_host,
     format_mcp_startup,
     toast_max_width,
 )
@@ -301,6 +303,31 @@ def test_a_short_name_that_is_only_in_the_layer_wording_keeps_its_head() -> None
     linear_payload = format_mcp_startup(linear)
     assert linear_payload is not None
     assert _detail_row(linear_payload[0]) == "network: cannot reach linear.example.com"
+
+
+def test_the_transport_phrases_and_the_host_mirror_agree() -> None:
+    """R5-1: ``_HOST_LEADS`` mirrors the manager's phrase table, so pin the pair.
+
+    Same class of mirror as the app's `` (timed out)`` and this widget's network
+    marker, both of which the repo already compares against the manager; this one
+    had nothing. A divergence is not only a lost dedup: :func:`_phrase_host`
+    returns the FIRST token after a matching lead-in, so a phrase reworded to put
+    something else there (``no response from the server at {host}``) would drop
+    the head for a server named ``the``, ``server`` or ``at`` — the R4-4 harm
+    restored, silently, in copy that lives on the card for the session.
+    """
+    from local_operator.mcp import manager as manager_module
+
+    for token, phrase in manager_module._TRANSPORT_DETAIL_TEXT.items():
+        composed = f"{manager_module.NETWORK_FAILURE_MARKER}{phrase.format(host='h.example.com')}"
+        assert _phrase_host(composed) == "h.example.com", (token, composed)
+    # Every lead-in must be exercised by a phrase above: a stale one is a live
+    # trap, because it would keep matching copy the manager no longer composes
+    # and answer a host for it.
+    phrases = tuple(manager_module._TRANSPORT_DETAIL_TEXT.values())
+    assert {lead for lead in _HOST_LEADS if any(lead in p for p in phrases)} == set(
+        _HOST_LEADS
+    ), _HOST_LEADS
 
 
 def test_a_hostless_transport_line_keeps_its_head() -> None:

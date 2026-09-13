@@ -4216,30 +4216,43 @@ class TestRefreshRefusalCopy:
     painted rows rather than as source strings.
 
     The 44-column case is the tight one and the reason the wording is this
-    short: ``failed: notion — `` spends 17 of the 36 available cells, leaving 19
-    for the reason, so each reason must be DISTINGUISHABLE inside its first 19
-    cells.
+    short: ``✗ failed: notion — `` spends 19 of the 36 available cells, leaving
+    17 for the reason, so each reason must be DISTINGUISHABLE inside its first
+    17 cells.
+
+    Every pinned row below carries the row's own glyph (design review round 2,
+    D2-2). It is 2 of the card's 58 content cells, and that is the whole reason
+    these strings moved: the row a user reads is ``✗ `` + the copy, so the
+    boundaries are re-derived at the PAINTED width (58 → 56 for the copy, 36 →
+    34) rather than the pre-glyph 58/36 (review round 4, R4-3; round 5, R5-3).
+    Two consequences are pinned deliberately rather than absorbed: the auth
+    family's 57-cell whole row no longer fits the 58-cell card and sheds its
+    reason, and at 44 columns the reauth command's name argument is truncated
+    one cell from the end (the D9 constraint at that width, priced below).
     """
 
     URL = "https://mcp.example.com/v1/mcp"
 
-    #: Rendered at 100 columns (58 content cells) and at 44 (36).
+    #: Rendered at 100 columns (58 content cells) and at 44 (36). The row the
+    #: composer returns INCLUDES the card row's own ``✗ `` glyph (D2-2), which is
+    #: why the truncation boundaries sit two cells earlier than they did before
+    #: the glyph was added — measured on the painted row, not shaved to fit.
     EXPECTED = {
         REFRESH_REFUSAL_LOCK: (
-            "failed: notion — another session is refreshing",
-            "failed: notion — another session is…",
+            "✗ failed: notion — another session is refreshing",
+            "✗ failed: notion — another session…",
         ),
         REFRESH_REFUSAL_INFLIGHT: (
-            "failed: notion — refresh still in progress",
-            "failed: notion — refresh still in p…",
+            "✗ failed: notion — refresh still in progress",
+            "✗ failed: notion — refresh still in…",
         ),
         REFRESH_REFUSAL_ENDPOINT: (
-            "failed: notion — the server returned no token",
-            "failed: notion — the server returne…",
+            "✗ failed: notion — the server returned no token",
+            "✗ failed: notion — the server retur…",
         ),
         REFRESH_REFUSAL_UNREACHABLE: (
-            "failed: notion — cannot reach the server",
-            "failed: notion — cannot reach the s…",
+            "✗ failed: notion — cannot reach the server",
+            "✗ failed: notion — cannot reach the…",
         ),
     }
 
@@ -4284,7 +4297,8 @@ class TestRefreshRefusalCopy:
 
         A green unit test on ``str(exc)`` is what let this defect through round
         1: the strings differed, and the CARD did not. So this pins the exact
-        rendered row at 58 cells (a 100-column terminal) and 36 (44 columns).
+        rendered row at 58 cells (a 100-column terminal) and 36 (44 columns) —
+        the row the widget paints, glyph included.
         """
         from local_operator.mcp.auth import McpRefreshContendedError
 
@@ -4314,7 +4328,7 @@ class TestRefreshRefusalCopy:
         assert text == "the refresh did not complete"
         assert "http" not in text
         line = self._toast_failure_line(text, 36)
-        assert line == "failed: notion — the refresh did no…"
+        assert line == "✗ failed: notion — the refresh did…"
 
     #: The three auth lines design review round 2 (D9) pinned CHARACTER FOR
     #: CHARACTER, with the composed toast row each produces at the two widths
@@ -4323,21 +4337,24 @@ class TestRefreshRefusalCopy:
     #: shortfall that pushed the reason past the card's clamp at 100 columns and
     #: cut the server name mid-word at 44 — and the bare slash command is the
     #: app's own habit for a runnable command (the splash, the usage panel).
+    #: The rows below are the POST-glyph measurements: `unconfirmed` (57 cells
+    #: whole, now 59 with the glyph) sheds its reason at 100 columns, the other
+    #: two keep it, and at 44 the name argument loses its last cell.
     AUTH_LINE_EXPECTED = {
         "unconfirmed": (
             "/mcp reauth notion — refresh unconfirmed",
-            "failed: notion — /mcp reauth notion — refresh unconfirmed",
-            "failed: notion — /mcp reauth notion…",
+            "✗ failed: notion — /mcp reauth notion…",
+            "✗ failed: notion — /mcp reauth noti…",
         ),
         "default": (
             "/mcp reauth notion — sign-in expired",
-            "failed: notion — /mcp reauth notion — sign-in expired",
-            "failed: notion — /mcp reauth notion…",
+            "✗ failed: notion — /mcp reauth notion — sign-in expired",
+            "✗ failed: notion — /mcp reauth noti…",
         ),
         "no-grant": (
             "/mcp login notion to authorize",
-            "failed: notion — /mcp login notion to authorize",
-            "failed: notion — /mcp login notion…",
+            "✗ failed: notion — /mcp login notion to authorize",
+            "✗ failed: notion — /mcp login notio…",
         ),
     }
 
@@ -4345,12 +4362,12 @@ class TestRefreshRefusalCopy:
     #: request that never went out, so neither may borrow the endpoint wording.
     LOCAL_REFUSAL_EXPECTED = {
         REFRESH_REFUSAL_UNSENT: (
-            "failed: notion — no stored token to send",
-            "failed: notion — no stored token to…",
+            "✗ failed: notion — no stored token to send",
+            "✗ failed: notion — no stored token…",
         ),
         REFRESH_REFUSAL_UNATTRIBUTED: (
-            "failed: notion — the refresh did not complete",
-            "failed: notion — the refresh did no…",
+            "✗ failed: notion — the refresh did not complete",
+            "✗ failed: notion — the refresh did…",
         ),
     }
 
@@ -4393,24 +4410,32 @@ class TestRefreshRefusalCopy:
             assert len(wide) <= 58, (key, wide)
             assert self._toast_failure_line(text, 36) == narrow, (key, narrow)
             if key != "no-grant":
-                # The D9 constraint at 44 columns: what is shed is the REASON,
-                # never the server name the command has to hand over.
-                assert "/mcp reauth notion" in narrow, (key, narrow)
+                # The D9 constraint at 44 columns, priced for the glyph: the row
+                # spends 2 of its 36 content cells on ``✗ ``, so what survives
+                # whole is the COMMAND VERB (``/mcp reauth`` — typeable with the
+                # name this same row's head carries) while the name's last cell
+                # truncates. The alternative the ladder rejects — dropping to
+                # the bare command to keep the name whole — would cost the row
+                # its server, the D2-3 harm, and is a copy decision for the
+                # design round rather than a pin to shave (review rounds 4/5).
+                assert "/mcp reauth" in narrow, (key, narrow)
+                assert "failed: notion" in narrow, (key, narrow)
 
     #: The D11 rows, measured on the head that fixes them. Both names are this
     #: project's own server names: ``minerva-qa`` (10 cells) is the one
     #: ``test_turn_abandoned.py`` uses, and ``launchdarkly`` (12) the one this
     #: file already copies. The wide row keeps the whole command and sheds the
     #: reason; the narrow one is asserted VERBATIM as the base renders it, which
-    #: is the recorded deferral (see the test's docstring).
+    #: is the recorded deferral (see the test's docstring). Both were re-measured
+    #: with the row's ``✗ `` glyph in the budget (review rounds 4/5).
     LONG_NAME_EXPECTED = {
         "minerva-qa": (
-            "failed: minerva-qa — /mcp reauth minerva-qa…",
-            "failed: minerva-qa — /mcp reauth mi…",
+            "✗ failed: minerva-qa — /mcp reauth minerva-qa…",
+            "✗ failed: minerva-qa — /mcp reauth…",
         ),
         "launchdarkly": (
-            "failed: launchdarkly — /mcp reauth launchdarkly…",
-            "failed: launchdarkly — /mcp reauth…",
+            "✗ failed: launchdarkly — /mcp reauth launchdarkly…",
+            "✗ failed: launchdarkly — /mcp reaut…",
         ),
     }
 
@@ -4448,27 +4473,31 @@ class TestRefreshRefusalCopy:
             assert "refresh" not in rendered and "unconfirmed" not in rendered, rendered
             assert rendered.count("—") == 1, rendered  # D4: not a chain of dashes
             assert len(rendered) <= 58, (name, rendered)
-            # At 44 columns the command ALONE is ``23 + 2n`` cells against 36, so
-            # no composition of this line fits for names >= 7 without a second
-            # row or a different card shape — both layout decisions this change
-            # does not make (D11 resolution 2). The base row is pinned verbatim
-            # instead, so a future regression is visible rather than silent.
+            # At 44 columns the row's head plus the command is ``25 + 2n`` cells
+            # against 36 (the glyph's 2 included), so no composition of this
+            # line fits for names >= 6 without a second row or a different card
+            # shape — both layout decisions this change does not make (D11
+            # resolution 2). The base row is pinned verbatim instead, so a future
+            # regression is visible rather than silent.
             assert self._toast_failure_line(text, 36, name) == narrow, (name, narrow)
 
-    def test_the_shed_boundary_is_the_seventh_cell_of_the_name(self) -> None:
+    def test_the_shed_boundary_is_the_sixth_cell_of_the_name(self) -> None:
         """The boundary the shed starts at, pinned from BOTH sides.
 
-        ``45 + 2n`` against 58 makes ``n <= 6`` the range where
-        ``name + command-with-name + reason`` fits: ``github``'s unconfirmed row
-        is 57 cells and keeps its reason, while ``datadog`` (7) is 59 and sheds
-        it. Both names are real servers in this repo's own config vocabulary, so
-        the boundary is asserted on the two names a user would actually read.
+        The rung-1 row is ``47 + 2n`` cells against the card's 58 — 45 for
+        ``failed: <name> — <command-with-name> — <reason>`` plus the row's own
+        ``✗ `` glyph — so ``n <= 5`` is the range where the whole row fits.
+        ``slack`` (5) keeps its reason and is 57 cells; ``notion`` (6) is 59 and
+        sheds it. Both names are real servers in this repo's own config
+        vocabulary, so the boundary is asserted on two names a user would
+        actually read. The glyph moved this boundary one cell left: before it,
+        a 6-cell name still fitted (review rounds 4/5).
         """
-        kept = self._toast_failure_line("/mcp reauth github — refresh unconfirmed", 58, "github")
-        assert kept == "failed: github — /mcp reauth github — refresh unconfirmed"
+        kept = self._toast_failure_line("/mcp reauth slack — refresh unconfirmed", 58, "slack")
+        assert kept == "✗ failed: slack — /mcp reauth slack — refresh unconfirmed"
         assert len(kept) == 57, kept
-        shed = self._toast_failure_line("/mcp reauth datadog — refresh unconfirmed", 58, "datadog")
-        assert shed == "failed: datadog — /mcp reauth datadog…"
+        shed = self._toast_failure_line("/mcp reauth notion — refresh unconfirmed", 58, "notion")
+        assert shed == "✗ failed: notion — /mcp reauth notion…"
         assert len(shed) == 38, shed
 
     def test_the_local_refusals_never_blame_a_server(self) -> None:
@@ -4479,7 +4508,8 @@ class TestRefreshRefusalCopy:
         mapped that to the endpoint code — "the server returned no token" —
         which is untrue about the WIRE (nothing was sent) and about the SERVER
         (it was never asked). Each local shape now carries its own code, and
-        both still fit the 44-column card's 19-cell reason budget.
+        both still fit the 44-column card's 17-cell reason budget (36 content
+        cells minus the row's 19-cell ``✗ failed: notion — `` head).
         """
         from local_operator.mcp.auth import McpRefreshContendedError
 

@@ -1262,7 +1262,12 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
     for a 75-cell block — 25 cells over budget — and a line fitted to it orphaned
     ``for details`` on the next row through the ordinary sidebar-click adoption
     path (review round 4, R4-1). Both states run at every width, and the sweep
-    covers widths either side of the card threshold.
+    covers widths either side of the card threshold — but how much of it
+    DISCRIMINATES is worth stating honestly: a sidebar docks only from 95
+    columns, so the narrow "sidebar open" cases are the overlay regime rather
+    than the docked one, and at 100 columns both resolutions land on the card
+    floor of 75. The cases that exercise the debit are 150 and 190 (review round
+    5, R5-4).
 
     The assertion is the invariant itself rather than a table of numbers: the
     column the composer used must be the column the layout pass ASSIGNED. Where
@@ -1270,7 +1275,11 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
     block fills the lane, the engine's own reconciled width is the check — a
     reconciled ``size`` can still hold the previous card in the frame a walk runs
     in, which is why the pin is preferred where there is one (review round 4,
-    R4-6).
+    R4-6). The pinned branch also compares against the **input shell's own
+    painted width**, which does not come from the shared resolver at all: that is
+    the assertion a ``_boot_notice_box`` wrong in BOTH of its call sites cannot
+    satisfy, and it discriminates at every carded width including 100 (review
+    round 5, R5-4).
     """
     from local_operator.tui.widgets.transcript import NoticeBlock
 
@@ -1290,6 +1299,17 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
             # when the block was left at ``1fr`` (the fraction the lane resolves).
             cells = getattr(block.styles.width, "cells", None)
             if isinstance(cells, int):
+                # The boot card clamps the notice to the same column the input
+                # shell resolves to, and the shell's width comes from the sheet's
+                # clamp rather than from the resolver the composer and the layout
+                # pass share — so this is the check that sees a resolution wrong
+                # in both call sites (review round 5, R5-4).
+                shell = app.query_one("#input-shell")
+                shell_column = shell.size.width + shell.styles.gutter.width
+                assert cells == shell_column, (
+                    f"at {columns} columns (sidebar={sidebar}) the layout pinned "
+                    f"{cells} but the input shell is painted {shell_column}"
+                )
                 assert cells == column, (
                     f"at {columns} columns (sidebar={sidebar}) the layout pinned "
                     f"{cells} but the composer measured {column}"
