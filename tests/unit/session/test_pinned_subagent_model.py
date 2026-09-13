@@ -419,3 +419,206 @@ def test_pinned_child_transient_failure_is_left_alone():
 def test_unpinned_child_failure_is_left_alone():
     rendered = "authentication failed (HTTP 401): bad key"
     assert _describe_child_failure(rendered, None) == rendered
+
+
+# ---------------------------------------------------------------------------
+# the operator's choice vs. the harness honouring a tier it was GIVEN
+# ---------------------------------------------------------------------------
+
+
+def test_a_role_pin_is_honoured_under_the_operator_default(tmp_path, monkeypatch):
+    """``subagents.model_choice`` gates CHOOSING a tier, never honouring one.
+
+    The sequence here is the one that matters: the shipped default is in force
+    (the key is absent, so it reads ``operator``), and the session still launches
+    a ``reviewer`` on the model the OPERATOR pinned it to. A gate in the shared
+    resolver would break this — and would break it for callers that are not the
+    model at all (session naming's ``lo`` preference, ``hub op='resume'``'s
+    re-resolution of a recorded tier) — which is why the refusal lives at the
+    tool-argument boundary instead.
+
+    The pin is written through the real writer with NO validation context, which
+    is what an operator's own surface (and ``/v1/desktop/profiles``) does. That
+    absence is the contract: a call that cannot be shown to come from a model is
+    the operator's, so it may name a tier.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.subagent import read_model_choice
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+    assert read_model_choice() == "operator", "this test is about the shipped default"
+
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        ),
+        creating=True,
+    )
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+
+    spec = session._resolve_subagent_model("reviewer", None, strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5")
+    # And an explicit launch argument still outranks the pin, as before.
+    override = session._resolve_subagent_model("task", "hi", strict=True)
+    assert override is not None and override.model_id == "claude-opus-5"
+
+
+def test_a_recorded_tier_still_re_resolves_strictly_under_the_operator_default(
+    tmp_path, monkeypatch
+):
+    """A resumed child's recorded tier is honoured — and still strictly checked.
+
+    ``SubagentComms.resume`` calls ``_resolve_subagent_model(agent, effort,
+    strict=True)`` with the tier RECORDED on the job, which is a tier the
+    operator's own launch created. Refusing it under the default would make
+    ``model_choice=operator`` silently convert every resumed child onto the
+    parent's model while its panel still displayed ``hi`` — the substitution the
+    strict path exists to prevent. The unconfigured case is asserted beside it
+    so "honoured" cannot quietly mean "no longer checked".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None and spec.model_id == "claude-opus-5"
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._resolve_subagent_model("task", "med", strict=True)
+    assert caught.value.tier == "med"
+
+
+# ---------------------------------------------------------------------------
+# the launch result line names the model the child will run on
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_task_result_names_the_model_each_child_will_run_on(tmp_path, monkeypatch):
+    """The line the delegating model reads back states the model, both ways.
+
+    This is the half of the incident that no gate closes: the operator's own
+    tier pin is legitimate, and what made it expensive was that nothing in the
+    loop said a child had moved onto that model until the bill. The result of
+    the call that MADE the delegation is the one place the delegating model is
+    guaranteed to read.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.tools.builtin import execute_task
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents", {"model_choice": "model", "models": {"hi": "anthropic/claude-opus-5"}}
+    )
+    session = make_session(tmp_path)
+    session.jobs.set_max_running(1)  # the second child parks behind capacity
+
+    context = session._build_tool_context()
+    assert context.session_model_label == f"{MODEL.provider}/{MODEL.model_id}"
+    result = await execute_task(
+        "call-1",
+        {
+            "context": "goal",
+            "tasks": [
+                {"label": "inherit", "prompt": "go"},
+                {"label": "pinned", "prompt": "go", "effort": "hi"},
+            ],
+        },
+        None,
+        None,
+        context,
+    )
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+
+    inherited = f"on this session's model ({MODEL.provider}/{MODEL.model_id})"
+    assert f"- inherit (task) {inherited}: job " in text
+    assert "- pinned (task) on anthropic/claude-opus-5: job " in text
+    # The PARKED row is truthful too: it has no runner yet, so its label can
+    # only come from registration.
+    details = result.details or {}
+    parked = session.jobs.get(details["jobs"][1]["job_id"])
+    assert parked is not None and parked.queued
+    assert parked.model_label == "anthropic/claude-opus-5"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_in_operator_mode_restamps_the_recorded_tier_on_the_new_row(
+    tmp_path, monkeypatch
+):
+    """The LAST place a recorded tier is honoured, driven end to end.
+
+    Pinning the resolver directly (above) proves the resolution; it does not
+    prove the ROW. A resume is the one path that re-launches a child from a
+    RECORDED tier under a policy that refuses new pins, so a refactor that
+    re-resolved on another line, or dropped the tier from the record, would
+    leave the resolver's unit test green while the resumed child ran on the
+    session's model under a row that said otherwise. Asserted on the row's
+    ``model_label`` because that is what the panel, the cost accounting and the
+    parent's launch line read.
+    """
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value(
+        "subagents",
+        {"model_choice": "operator", "models": {"hi": "anthropic/claude-opus-5"}},
+    )
+    session = make_session(tmp_path)
+    job_id = session._launch_subagent(label="rev", prompt="review it", effort="hi")
+
+    def settled() -> bool:
+        row = session.jobs.get(job_id)
+        return row is not None and row.status == "completed"
+
+    await wait_for(settled)
+
+    first = session.jobs.get(job_id)
+    assert first is not None
+    assert first.model_label == "anthropic/claude-opus-5"
+    assert first.owns_model is True
+
+    new_id, error = session.subagent_comms.resume(job_id, "carry on")
+
+    assert error is None and new_id is not None
+    resumed = session.jobs.get(new_id)
+    assert resumed is not None
+    # Honoured, not re-chosen by the model: the recorded tier still decides, and
+    # the new row says so rather than defaulting to the session's model.
+    assert resumed.model_label == "anthropic/claude-opus-5"
+    assert resumed.owns_model is True
+    assert resumed.effort == "hi"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp_path, monkeypatch):
+    """A host that keeps no job rows must not get an invented model.
+
+    The reduced hosts (and this file's own ``ToolContext``) hand ``task`` a
+    launcher and nothing else, so the label is unknown rather than inherited —
+    and the line falls back to exactly the shape it had before this field
+    existed, which is what keeps those hosts' assertions honest.
+    """
+    from local_operator.tools.builtin import execute_task
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    def launcher(label, prompt, *, agent="task", effort=None):
+        return f"job-{label}"
+
+    context = ToolContext(subagent_launcher=launcher, session_model_label="test/m")
+    result = await execute_task("call-1", {"label": "x", "prompt": "go"}, None, None, context)
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+    assert "- x (task): job job-x" in text
+    assert "on " not in text

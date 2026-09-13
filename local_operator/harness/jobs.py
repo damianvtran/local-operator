@@ -386,11 +386,32 @@ class AsyncJob(BaseModel):
     # its relay (``harness/subagent.py``), read by the TUI's subagent panel and
     # by parent-side cost aggregation.
     #
-    # The CHILD session's ``provider/model_id``, captured once when the child
-    # is built. Read off the child, never off the parent: ``run_subagent``
-    # takes a ``model_spec`` override, and a child running on a different
-    # model is exactly the fact this records.
+    # The CHILD session's ``provider/model_id``. Written in TWO phases, and the
+    # split is what lets a row that has not started yet still be truthful:
+    # ``run_subagent`` stamps it at REGISTRATION from the spec the launch
+    # resolved (a tier or a role pin), or from the PARENT's label when the
+    # child owns no model and inherits — an absent label there would be
+    # ambiguous between "inherits" and "nobody knows", and the ``task`` result
+    # line the parent model reads has to say which. The runner then OVERWRITES
+    # it from the built child (``effective_model_label``), and that write wins:
+    # a restored provider fallback is the model actually being called, and
+    # ``_accumulate_usage`` prices usage off this field.
     model_label: str | None = None
+    # Whether a TIER or ROLE PIN chose that model, as opposed to the child
+    # inheriting the session's own. Written once, at REGISTRATION, from the spec
+    # the launch resolved (``model_spec is not None``), and never overwritten:
+    # it is an ATTRIBUTION, not a model, so the runner's later label write (a
+    # restored provider fallback, above) does not change whose choice it was.
+    #
+    # It cannot be inferred downstream, and the ``task`` result line is why it
+    # exists: that line used to decide between "on <model>" and "on this
+    # session's model (<model>)" by comparing labels, which reads a tier that
+    # happens to resolve to the session's OWN model as an inherit. That is not
+    # hypothetical — every tier in the operator's config resolved to their
+    # session's model for a while, and the line then told the delegating model
+    # the child had inherited when a pin had in fact been accepted. ``None`` is
+    # "not recorded" and the reader falls back to comparing labels.
+    owns_model: bool | None = None
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same

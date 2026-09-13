@@ -58,7 +58,7 @@ import time
 import traceback
 import unicodedata
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +82,7 @@ from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
+    model_may_choose_tier,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -9792,6 +9793,18 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 #: through ``ValidationInfo.context``.
 ADVERTISED_EFFORT_KEY = "advertised_effort"
 
+#: Key carrying whether the BUILD that produced the tool let a delegating model
+#: choose a tier at all (``values.subagents.model_choice``). See
+#: ``_ADVERTISED_MODEL_CHOICE`` for why the policy needs a second record beside
+#: the members it advertises.
+ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
+
+#: The one spelling that means "no tier" on both surfaces: on ``task`` it is a
+#: synonym for omitting the field, and on ``agent`` create/update it is the
+#: sentinel that CLEARS a role's pin. Named once because it is now shared policy
+#: between the two tools rather than a private value of the ``agent`` schema.
+INHERIT_EFFORT = "inherit"
+
 #: The advertised set for the tool currently executing, published by the
 #: builder's wrapper (:func:`_with_advertised_effort`) and read at the
 #: ``model_validate`` call.
@@ -9816,13 +9829,47 @@ _ADVERTISED_EFFORT: ContextVar[frozenset[str] | None] = ContextVar(
     "advertised_effort", default=None
 )
 
+#: Whether the BUILD that produced the tool let a delegating model choose a
+#: tier, published beside :data:`_ADVERTISED_EFFORT` by the same wrapper and for
+#: the same reason: only the build side knows what the model was shown.
+#:
+#: It is a SEPARATE record from the advertised members, not something derivable
+#: from them, because the two answer different questions about the same refusal.
+#: The gate itself is decided by the LIVE config at call time (an operator who
+#: flipped the key mid-session must not be able to have their choice spent
+#: before the tool rebuild lands — see :func:`_advertise_effort_tiers`), while
+#: the fault CLASS needs the build-time policy: a value the model was offered a
+#: menu for is the operator's change, and a value it invented is the model's
+#: mistake. Without this record a mid-session ``model`` → ``operator`` flip
+#: would bill an operator edit to the model's accuracy figure — the same
+#: misattribution :func:`_validate_effort_tier` was written to stop for a
+#: vanished tier.
+#:
+#: ``None`` means no build published a snapshot (a direct call to the
+#: module-level executor, or a route that builds an ``AgentParams`` itself).
+#: Both the gate and its fault class read that as "unknown provenance": a call
+#: outside the advertised surface is an OPERATOR-side caller, so it is allowed,
+#: exactly as an unknown tier's provenance is not billed to the model.
+_ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
+    "advertised_model_choice", default=None
+)
 
-def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) -> ToolExecutor:
+
+def _with_advertised_effort(
+    executor: ToolExecutor, parameters: dict[str, Any], *, model_choice: bool
+) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
     Wraps the builder's executor so the validator can tell an operator's
-    vanished tier from a value the model invented. Reset in a ``finally`` so a
-    raising tool cannot leak one tool's snapshot into the next call.
+    vanished tier from a value the model invented, and can tell a policy the
+    operator flipped mid-session from a value the model invented for a field it
+    was never offered. Reset in a ``finally`` so a raising tool cannot leak one
+    tool's snapshot into the next call.
+
+    ``model_choice`` is passed in rather than re-read here: it is the SAME value
+    the accompanying schema was rendered from, and reading the config a second
+    time inside the wrapper would let the two disagree if an edit landed between
+    the build and the call.
     """
     advertised = advertised_effort_members(parameters)
 
@@ -9834,10 +9881,12 @@ def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) 
         context: ToolContext | None = None,
     ) -> ToolResult:
         token = _ADVERTISED_EFFORT.set(advertised)
+        choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
+            _ADVERTISED_MODEL_CHOICE.reset(choice_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
@@ -9845,8 +9894,11 @@ def _with_advertised_effort(executor: ToolExecutor, parameters: dict[str, Any]) 
 
 
 def effort_validation_context() -> dict[str, Any]:
-    """Validation context carrying the advertised ``effort`` members."""
-    return {ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get()}
+    """Validation context carrying the advertised ``effort`` members and policy."""
+    return {
+        ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
+        ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
+    }
 
 
 def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
@@ -9858,7 +9910,126 @@ def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
     return frozenset(members) if isinstance(members, (set, frozenset, list, tuple)) else None
 
 
-def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None:
+def _advertised_model_choice(info: ValidationInfo) -> bool | None:
+    """Whether the build let a model choose a tier, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    choice = context.get(ADVERTISED_MODEL_CHOICE_KEY)
+    return choice if isinstance(choice, bool) else None
+
+
+def _operator_choice_task_rejection(tier: str) -> str:
+    """The ``task`` refusal for a tier the model may not choose.
+
+    Names the tier's MODEL when it resolves, because the whole point of the
+    refusal is that ``effort`` buys a different model and not a reasoning
+    level — an operator reading ``'hi'`` as "think harder" is the misreading
+    that produced this change. Omitted when the tier is unconfigured (nothing
+    resolves, and inventing the selector would be a lie).
+
+    ORDER matters here and is not stylistic: the tool-result card truncates PER
+    LINE at the pane's width and never wraps, so on the surface a person reads
+    the refusal on, only the first line survives — and that line spends ~23
+    cells on ``- effort: Value error, `` before this text begins. Measured on a
+    rendered frame at 100 columns, the visible window inside the message is ~69
+    cells, and three facts compete for it: the remedy, who owns the field, and
+    the key that names it. The wording below puts the remedy and the ownership
+    inside the window; the KEY clause comes last, after the sentence that
+    explains the swap, so whatever the cut falls on is prose rather than half a
+    key — a partly-drawn `(subagents.` is the one rendering a reader can
+    mis-transcribe, and it was what the previous order painted at 100 columns.
+    The key is still the fact that gives way first, which is affordable: the
+    operator can read it off the `/settings` row's own detail line, and the
+    delegating model — this message's first reader — receives it whole either
+    way. Two earlier orders were measured and rejected: fact first put the
+    remedy at cell 73 (one word past the cut), and remedy-first with the key
+    inline cut the key mid-token.
+    """
+    selector = configured_effort_tiers().get(tier)
+    where = (
+        f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
+    )
+    return (
+        "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+        f"child's MODEL, not its reasoning level{where}. That switch is "
+        "subagents.model_choice."
+    )
+
+
+def _operator_choice_pin_rejection(tier: str) -> str:
+    """The ``agent`` create/update refusal for a tier the model may not pin.
+
+    This one carries the OPERATOR's remedy as well as the model's, because
+    refusing a model-side pin would otherwise leave the person who wants one
+    strong reviewer with no route at all.
+
+    The ORDER is load-bearing for the same reason as the ``task`` refusal, and
+    measured on the same frame: the card spends 23 cells on
+    ``- effort: Value error, `` and then truncates the message at cell 68, so the
+    copy leads with the ownership AND the operator's next step — the two things
+    the person reading the card can act on — and puts the model's own
+    instruction (omit the field, or pass ``inherit``) after them. Two routes
+    ride here, deliberately: the setting, which is in the TUI, and the role's own
+    profile, which the desktop editor writes today. Before this order the route
+    sentence began at cell ~260 of a ~356-cell message and was invisible even
+    expanded.
+
+    The lead ends at cell 64 of the 68-cell window with the key COMPLETE, so the
+    cut falls in the prose that follows rather than inside
+    ``subagents.model_choice`` — a half-drawn key is the one rendering a reader
+    can mis-transcribe (R-9), and ``=model``, which reads better, measured 70 and
+    would have put the ellipsis inside it.
+    """
+    selector = configured_effort_tiers().get(tier)
+    where = f" ('{tier}' → {selector})" if selector else ""
+    return (
+        "effort is the operator's; pin a role via subagents.model_choice. "
+        f"Setting it to 'model' hands the choice over, and a role's own profile can "
+        f"carry the pin instead. A pin runs that role on a different MODEL{where}, "
+        "not at a different reasoning level. Omit 'effort', or pass 'inherit' to "
+        "clear a pin."
+    )
+
+
+def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exception | None:
+    """Refuse an ``effort`` the operator has not delegated to the model, or ``None``.
+
+    The gate is evaluated against the LIVE config — an operator who has just
+    flipped ``model_choice`` back to ``operator`` must be obeyed by the very
+    next call, not after the tool rebuild reaches the inventory — while the
+    fault CLASS comes from the build-time record, exactly as
+    :func:`_validate_effort_tier` splits a vanished tier from an invented one:
+
+    - The build let the model choose AND the value was in the enum it published:
+      the model picked from a menu it was given, and the operator has since
+      taken that menu away. Environmental, not billed to the model.
+    - Anything else: the build never offered this model the field (the shipped
+      default deletes it outright), so the value was invented — the same kind of
+      mistake as a stray ``extra="forbid"`` key, and a model fault.
+
+    ``None`` from the build-time record means no advertised tool made this call
+    (a direct executor call, or ``server/routes/desktop_profiles.py`` building
+    ``AgentParams`` for an operator's own edit). That is an operator-side
+    caller, so it is ALLOWED: the key gates a model's choice, never the
+    operator's, and an absent context cannot be evidence of a model at all.
+    """
+    if model_may_choose_tier():
+        return None
+    advertised_choice = _advertised_model_choice(info)
+    if advertised_choice is None:
+        return None
+    message = (
+        _operator_choice_pin_rejection(value) if pin else _operator_choice_task_rejection(value)
+    )
+    if advertised_choice and value in (_advertised_effort(info) or frozenset()):
+        return EnvironmentDependentRejectionError(message)
+    return ValueError(message)
+
+
+def _validate_effort_tier(
+    value: str | None, info: ValidationInfo, *, pin: bool = False
+) -> str | None:
     """Refuse an ``effort`` the live config cannot honour, naming what can be.
 
     Shared by both ``task`` forms and the ``agent`` tool so the three fields
@@ -9867,6 +10038,19 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
     agree except across a mid-session edit, and this is the side that must be
     right — an accepted-but-stale tier would reach the strict launch path and
     fail there with less context than the message here carries.
+
+    Three refusals now live here, and they are ordered by how much the model
+    could have known:
+
+    - ``inherit`` is not a refusal at all. It is the value the ``agent`` schema
+      advertises as "clear the pin", so a model copying that token onto
+      ``task`` means exactly "no tier" and gets omission (review of the
+      asymmetry: the two tools sit in one inventory, and a token that is valid
+      on one of them reads as valid on both).
+    - ``model_choice=operator``: the operator owns the choice, so no tier is
+      the model's to make — see :func:`_model_choice_refusal` for the fault
+      split.
+    - a tier the live config cannot honour: :func:`effort_tier_rejection`.
 
     **The refusal splits into two fault classes, and only the build-time
     record can tell them apart.** ``effort_tier_rejection`` says only "not
@@ -9891,6 +10075,11 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
     """
     if value is None:
         return None
+    if value == INHERIT_EFFORT:
+        return None
+    refusal = _model_choice_refusal(value, info, pin=pin)
+    if refusal is not None:
+        raise refusal
     rejection = effort_tier_rejection(value)
     if rejection is None:
         return value
@@ -9908,9 +10097,13 @@ def _validate_effort_tier(value: str | None, info: ValidationInfo) -> str | None
 
 
 def _advertise_effort_tiers(
-    schema: dict[str, Any], *, description: str, extra: tuple[str, ...] = ()
+    schema: dict[str, Any],
+    *,
+    description: str,
+    extra: tuple[str, ...] = (),
+    model_choice: bool,
 ) -> dict[str, Any]:
-    """Rewrite every ``effort`` property in ``schema`` to the CONFIGURED tiers.
+    """Rewrite every ``effort`` property in ``schema`` to what the model may pick.
 
     The params models declare ``effort`` as a free string so validation can
     consult the live config; the schema the model reads is patched here at
@@ -9922,24 +10115,37 @@ def _advertise_effort_tiers(
     guaranteed failure, and the schema never said that omitting the field was
     the one choice that worked.
 
-    With tiers configured, the enum lists exactly those and the description
-    names the ``provider/model`` each resolves to, so the model chooses on
-    information rather than a label. With none configured the property is
-    REMOVED rather than advertised as empty: Gemini function declarations
-    reject ``enum: []``, an always-invalid field is pure schema cost on every
-    turn, and a model that cannot see the field cannot pick it. Validation
-    still refuses a stray ``effort`` with the same guidance (see
-    :func:`_validate_effort_tier`). ``extra`` members (the ``agent`` tool's
-    ``inherit`` sentinel) follow the configured tiers and keep the property
-    alive on their own.
+    **A second way to advertise nothing: ``model_choice``.** With
+    ``values.subagents.model_choice=operator`` (the default) no tier is the
+    delegating model's to pick, so none is advertised on either tool — the
+    members come out empty and the property is DELETED, which is exactly the
+    zero-tier path below and therefore needs no second code path to get right.
+    The field's name is the reason that default exists: ``effort`` is this
+    harness's REASONING-effort vocabulary, so a model that reads it as "pick
+    how hard this child thinks" is reading it correctly and gets a different
+    provider/model instead. Handing it a menu made that misreading a menu item.
+    ``extra`` (the ``agent`` tool's ``inherit`` sentinel) survives either way,
+    so that tool keeps the property alive to say "clear the pin" while
+    refusing to offer a tier.
+
+    With model choice ON and tiers configured, the enum lists exactly those and
+    the description names the ``provider/model`` each resolves to, so the model
+    chooses on information rather than a label. With none configured the
+    property is REMOVED rather than advertised as empty: Gemini function
+    declarations reject ``enum: []``, an always-invalid field is pure schema
+    cost on every turn, and a model that cannot see the field cannot pick it.
+    Validation still refuses a stray ``effort`` with the same guidance (see
+    :func:`_validate_effort_tier`).
 
     Patches both the top-level property and every ``$defs`` entry, so the
     batch form's ``TaskItem`` mirror gets the same treatment as the single
     form. Tools are built once at session construction; a config edit is
     picked up by ``Session._apply_config_change``, which rebuilds the two
-    tools that carry this field.
+    tools that carry this field — for BOTH keys that decide what they render,
+    ``subagents.models.*`` and ``subagents.model_choice``, since an
+    unregistered key is invisible to the watcher's registry-key diff.
     """
-    tiers = configured_effort_tiers()
+    tiers = configured_effort_tiers() if model_choice else {}
     members = [*tiers, *extra]
 
     def patch(properties: Any) -> None:
@@ -10004,39 +10210,61 @@ def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[st
 
 
 def _effort_tier_field_description() -> str:
-    """The ``task`` ``effort`` description, built from the configured tiers.
+    """The ``task`` ``effort`` description for the MODEL-CHOICE arm.
 
-    Only ever rendered when at least one tier exists (with none the property
-    is dropped), so it can lead with the tier list. Short on purpose: it is
-    billed on every turn of every session that can delegate.
+    Only rendered when the model is allowed to choose and at least one tier
+    exists (elsewhere the property is dropped), so it can lead with the tier
+    list. It says MODEL in capitals on purpose: the whole incident is that the
+    field's name is this harness's reasoning-effort vocabulary while its value
+    is a provider/model swap, and one word of the model's own prompt is the
+    cheapest place to say so. Short on purpose: it is billed on every turn of
+    every session that can delegate.
     """
     tiers = configured_effort_tiers()
     return (
-        f"Model tier for this subagent ({describe_effort_tiers(tiers)}). "
+        f"Swaps this child's MODEL (not its reasoning level): {describe_effort_tiers(tiers)}. "
         "Omit to inherit this session's model and reasoning effort."
     )
 
 
-def _task_tool_description() -> str:
+#: The ``task`` tool's effort sentence in the SHIPPED default, where the field
+#: is not in the schema at all. It has to carry the whole contract that the
+#: absent field would otherwise imply, and it names the key so an operator (or
+#: a model asked to explain the refusal) can find the switch that changes it.
+_OPERATOR_CHOICE_EFFORT_SENTENCE = (
+    "No effort tiers are yours to choose (subagents.model_choice=operator): "
+    "children inherit this session's model — do not pass 'effort'."
+)
+
+
+def _task_tool_description(model_choice: bool) -> str:
     """The ``task`` tool description, with the effort sentence matching the schema.
 
     A model told "effort picks a configured model tier" while no tier is
     configured infers that some tier must be pickable; the sentence has to
     say which state it is in. One sentence either way — prompt text is paid on
-    every turn.
+    every turn. ``model_choice`` is the flag the accompanying schema was
+    rendered from, passed in rather than re-read so the description and the
+    schema cannot disagree about which arm they are in.
     """
-    tiers = configured_effort_tiers()
-    if tiers:
-        effort = (
-            "Omit 'effort' to inherit this session's model and reasoning effort, "
-            "or set it to one of the configured tiers the schema lists."
-        )
+    if not model_choice:
+        # The whole field is gone from this schema, so the description is the
+        # only place left to say so — and it must, or a model that remembers
+        # `effort` from another session's prompt has nothing telling it no.
+        effort = _OPERATOR_CHOICE_EFFORT_SENTENCE
     else:
-        effort = (
-            "No effort tiers are configured (values.subagents.models), so every "
-            "child inherits this session's model and reasoning effort; do not pass "
-            "'effort'."
-        )
+        tiers = configured_effort_tiers()
+        if tiers:
+            effort = (
+                "Omit 'effort' to inherit this session's model and reasoning effort, "
+                "or set it to one of the configured tiers the schema lists."
+            )
+        else:
+            effort = (
+                "No effort tiers are configured (subagents.models), so every child "
+                "inherits this session's model and reasoning effort; do not pass "
+                "'effort'."
+            )
     return (
         "Launch background subagents — one, or a whole concurrent batch "
         "('tasks' + shared 'context') in a single call. 'agent' names a "
@@ -10049,8 +10277,21 @@ class TaskItem(BaseModel):
     """One slice of a task batch. ``agent`` names the ROLE the child runs as —
     a registered profile or a packaged starter (reviewer, coder, architect,
     manager, designer, scout); the role supplies standing guidance and may
-    restrict the child's tools. ``effort`` routes to a configured model tier
-    (a key of values.subagents.models)."""
+    restrict the child's tools."""
+
+    # What ``effort`` does is deliberately NOT stated in the docstring above,
+    # and the sentence that used to state it ("``effort`` routes to a
+    # configured model tier") is gone rather than reworded. That docstring
+    # becomes the ``$defs.TaskItem`` description on EVERY build — including the
+    # builds where the property is deleted because the operator owns the
+    # choice — so any sentence here is a claim about a field that may not be
+    # present. The field's own description and the tool's description are the
+    # two places that know which mode they render for.
+    #
+    # It lives here, as a comment, because the docstring above is prompt text:
+    # it rides every request and is charged to the context-budget ratchet
+    # (``scripts/bench_context_budget.py``), which is why the explanation of a
+    # missing field must not itself cost tokens.
 
     model_config = ConfigDict(extra="forbid")
 
@@ -10071,14 +10312,21 @@ class TaskItem(BaseModel):
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
-    # configured under ``values.subagents.models`` at CALL time, and a Literal
-    # would freeze one guess at import. The schema the model sees is rewritten
-    # to the configured tiers by ``_advertise_effort_tiers``; validation below
-    # is what refuses anything else.
-    effort: str | None = Field(
-        default=None,
-        description="Model tier for this subagent (a configured values.subagents.models key).",
-    )
+    # configured under ``subagents.models`` at CALL time, and a Literal would
+    # freeze one guess at import. The schema the model sees is rewritten to the
+    # configured tiers by ``_advertise_effort_tiers`` — and REMOVED entirely
+    # when the operator owns the choice (``subagents.model_choice``), which is
+    # the shipped default — while validation below is what refuses anything
+    # else.
+    #
+    # NO field description, deliberately. There is no path that renders this
+    # field without the patch: the patcher either replaces the description or
+    # deletes the property, in the top-level form and in ``$defs`` alike, so a
+    # fallback string here was text nobody could read — and it carried a second
+    # spelling of the key (`values.`-prefixed) that the `/settings` page never
+    # shows and `lop config edit` does not take. Two spellings for one key in
+    # one file is how the next reader learns the wrong one.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10107,10 +10355,10 @@ class TaskParams(BaseModel):
         default=None,
         description="Single-task form: role for the subagent (see 'tasks[].agent').",
     )
-    effort: str | None = Field(
-        default=None,
-        description="Single-task form: model tier for the subagent.",
-    )
+    # Same reason as ``TaskItem.effort`` above, including the missing
+    # description: the rendered one replaces it on every build path, and the
+    # fallback it used to carry spelled the key a second way.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10528,9 +10776,10 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     """Return a context-bounded handoff while keeping the full report readable.
 
     A task job's header names the model the child ran on, as recorded by the
-    harness (``job.model_label``, set from the child's own model-change event),
-    so the parent can STATE which model produced a delegated result rather
-    than assume it. This is the parent-visible half of the pinned-tier work:
+    harness (``job.model_label``, stamped by the launch at registration and
+    OVERWRITTEN from the built child — see :attr:`AsyncJob.model_label`), so the
+    parent can STATE which model produced a delegated result rather than assume
+    it. This is the parent-visible half of the pinned-tier work:
     ``subagent_start.model`` tells a stream consumer, this tells the model
     that launched the child. It is deliberately the harness's record and not
     anything the child said about itself, which is what makes it evidence
@@ -10545,6 +10794,96 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     if job.status == "failed" and job.error_text:
         text += f"\n{job.error_text}"
     return spill_truncate(text, "wait", context)
+
+
+def _job_model_label(context: ToolContext | None, job_id: str) -> str:
+    """The model the registered job says its child runs on, or ``""``.
+
+    Read off the JOB rather than off the arguments, because the job row knows
+    two things the arguments cannot: a ROLE PIN resolved inside the session, and
+    the model a child parked behind the capacity gate was stamped with before it
+    ever started. Empty when the host keeps no job manager (a reduced host or a
+    test double) or the row is unknown, and the caller then says nothing about
+    models rather than inventing one.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return ""
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — a label is decoration, never a launch
+        return ""
+    return str(getattr(job, "model_label", None) or "")
+
+
+def _job_owns_model(context: ToolContext | None, job_id: str) -> bool | None:
+    """Whether a TIER or ROLE PIN chose the registered job's model, or ``None``.
+
+    Read off the JOB, exactly as the label beside it is, because the job row is
+    stamped at registration and therefore knows this before the child exists. A
+    label comparison cannot answer it: a tier that resolves to the session's own
+    model produces the same string as an inherit, which is how a child that a
+    pin had moved was reported as inheriting while every tier in the operator's
+    config pointed at their session's model.
+
+    ``None`` — not ``False`` — when the host keeps no job manager, the row is
+    unknown, or the row predates the stamp (a resumed legacy row): the caller
+    then falls back to comparing labels rather than asserting an inherit it
+    cannot know.
+    """
+    jobs = getattr(context, "jobs", None)
+    if jobs is None:
+        return None
+    try:
+        job = jobs.get(job_id)
+    except Exception:  # noqa: BLE001 — an attribution is decoration, never a launch
+        return None
+    owns = getattr(job, "owns_model", None)
+    return owns if isinstance(owns, bool) else None
+
+
+def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str:
+    """One launched child, NAMING the model it will run on.
+
+    Why this is on the launch line: the failure it answers is a delegated child
+    that moved to a different — and costlier — model without the operator
+    learning it before the bill. ``effort`` is this harness's reasoning-effort
+    vocabulary while its value is a provider/model swap, so the swap has to be
+    stated in the one place the delegating model reads immediately: the result
+    of the call that made it.
+
+    Two wordings, because they are two different facts. ``on <model>`` is a
+    child that owns a model (a tier, or a role's own pin). ``on this session's
+    model (<model>)`` is a child that owns none — saying so is what stops the
+    other wording from reading as "someone chose the model you already had".
+    Which one applies comes from the job row's ``owns_model`` stamp, NOT from
+    comparing the two labels: those are equal whenever a pin resolves to the
+    session's own model, and the inherit wording then reports the one fact the
+    line exists to carry. Only when the stamp is absent (no job manager, an
+    unknown row, a legacy row) does this fall back to the comparison. The
+    session's own label comes from the context (see
+    ``ToolContext.session_model_label``); when the host supplies none the line
+    falls back to today's shape rather than claiming a model it cannot name.
+    """
+    label = entry["label"]
+    agent = entry["agent"]
+    job_id = entry["job_id"]
+    model = str(entry.get("model") or "")
+    session_model = str(getattr(context, "session_model_label", "") or "")
+    if not model:
+        return f"- {label} ({agent}): job {job_id}"
+    # `owns is not True` rather than `owns is False`: the inherited wording needs
+    # the label comparison BESIDE it, never instead of it. A `False` stamp means a
+    # tier or pin chose this child but its label has since moved away from the
+    # session's (a restored fallback rewrites ``model_label`` and never
+    # ``owns_model``), and asserting "on this session's model (<a model it is not
+    # on>)" there would be the same class of lie this stamp was added to fix
+    # (R-1). Today's only call site renders at launch, where the two agree — this
+    # keeps the next one honest.
+    owns = _job_owns_model(context, job_id)
+    if owns is not True and model == session_model:
+        return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
+    return f"- {label} ({agent}) on {model}: job {job_id}"
 
 
 @_guard("task")
@@ -10620,11 +10959,24 @@ async def execute_task(
             else:
                 failures.append(f"{item.label}: {exc}")
             continue
-        launched.append({"job_id": job_id, "label": item.label, "agent": item.agent})
+        launched.append(
+            {
+                "job_id": job_id,
+                "label": item.label,
+                "agent": item.agent,
+                # The model this child WILL run on, read off the job row rather
+                # than guessed from the arguments: the row is stamped at
+                # registration from the spec the launch resolved, so it is
+                # already true for a child parked behind the capacity gate (see
+                # ``run_subagent``), and it covers a ROLE PIN the arguments do
+                # not mention at all.
+                "model": _job_model_label(context, job_id),
+            }
+        )
     if not launched:
         detail = failures[0] if failures else "no tasks to launch"
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
-    lines = [f"- {entry['label']} ({entry['agent']}): job {entry['job_id']}" for entry in launched]
+    lines = [_launched_line(entry, context) for entry in launched]
     body = (
         f"launched {len(launched)} subagent(s) as concurrent background jobs:\n"
         + "\n".join(lines)
@@ -10643,22 +10995,27 @@ async def execute_task(
 def build_task_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_launcher is None:
         return None
+    # ONE read of the policy per build, handed to the schema renderer, the
+    # description and the validator's wrapper, so the three cannot disagree
+    # about which arm this tool instance is in.
+    model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
         description=_effort_tier_field_description(),
+        model_choice=model_choice,
     )
     return AgentTool(
         name="task",
         label="Subagent task",
         describe_approval=_describe_task_approval,
-        description=_task_tool_description(),
+        description=_task_tool_description(model_choice),
         parameters=parameters,
         # Spawns autonomous child work, so it rides the write gate just like
         # scheduling a wake: the user approves starting the child.
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_task, parameters),
+        execute=_with_advertised_effort(execute_task, parameters, model_choice=model_choice),
     )
 
 

@@ -1074,13 +1074,22 @@ def three_effort_tiers(tmp_path, monkeypatch) -> None:
     enum on the wire. The ``agent``/``task`` schemas advertise only CONFIGURED
     tiers (an unconfigured one is a guaranteed launch failure), so with the
     suite's isolated HOME the enum would otherwise be ``["inherit"]`` alone and
-    these tests would no longer prove that every tier survives the client."""
+    these tests would no longer prove that every tier survives the client.
+
+    ``model_choice: "model"`` for the same reason, one level up: an enum on the
+    wire exists only in the arm where a delegating model may pick a tier, and
+    the shipped default (``operator``) removes the field entirely. This fixture
+    is about what a CLIENT does with the members, so it opts into the arm that
+    has any."""
     from local_operator.config import ConfigManager
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     ConfigManager(tmp_path / "config").set_config_value(
         "subagents",
-        {"models": {"lo": "openai/gpt-5-mini", "med": "openai/gpt-5", "hi": "anthropic/opus"}},
+        {
+            "model_choice": "model",
+            "models": {"lo": "openai/gpt-5-mini", "med": "openai/gpt-5", "hi": "anthropic/opus"},
+        },
     )
 
 

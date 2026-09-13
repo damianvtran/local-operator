@@ -122,7 +122,12 @@ class RebindableStream:
 def make_session(tmp_path, stream, **kwargs) -> Session:
     # Both web tools OFFERED at build, the way the factory builds a session on
     # default config, so the ``web_*.enabled`` probes can observe a disable as
-    # the tool leaving the inventory at the next turn boundary.
+    # the tool leaving the inventory at the next turn boundary. The two
+    # effort-carrying tools are offered for the same reason: a rebuild can only
+    # replace a tool that is already in the inventory, so the
+    # ``subagents.model_choice`` probe (which reads the task tool's BUILT
+    # description) needs one there to read.
+    from local_operator.agents import AgentRegistry
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import create_tools
 
@@ -133,8 +138,10 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
                 cwd=str(tmp_path),
                 web_search_settings={"enabled": True},
                 web_fetch_settings={"enabled": True},
+                subagent_launcher=lambda label, prompt, **_: f"job:{label}",
+                agent_registry=AgentRegistry(tmp_path / "agents"),
             ),
-            enabled=("web_search", "web_fetch"),
+            enabled=("web_search", "web_fetch", "task", "agent"),
         ),
     )
     # ``model`` is overridable so a probe can seat a spec that SEEDS an effort
@@ -145,6 +152,13 @@ def make_session(tmp_path, stream, **kwargs) -> Session:
         model=kwargs.pop("model", MODEL),
         stream_fn=stream,
         tools=tools,
+        # A registry, so the ``agent`` tool is advertised at all: without one
+        # ``build_agent_tool`` returns None, and
+        # ``Session._rebuild_effort_tier_tools`` then leaves the stale ``agent``
+        # tool in place while it replaces ``task`` — the half-rebuild the
+        # ``subagents.model_choice`` probe exists to catch, which this fixture
+        # would otherwise manufacture for itself.
+        agent_registry=kwargs.pop("agent_registry", AgentRegistry(tmp_path / "agents")),
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
         **kwargs,
@@ -201,6 +215,44 @@ def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = No
 
 def subscribe(session: Session, watcher: ConfigWatcher) -> None:
     session.add_dispose_hook(watcher.subscribe(session._apply_config_change))
+
+
+def _task_effort_arm(session: Session, watcher: ConfigWatcher) -> str:
+    """The arm the session's ``task`` tool was last BUILT in.
+
+    A TOOL-BUILD product on purpose. ``read_model_choice()`` re-reads the file
+    on every call, so a probe that asked the reader would pass with
+    ``Session._apply_config_change``'s rebuild entirely unwired — and the
+    rebuild is the only part of this key that can be wrong once a session is
+    running, which is the whole reason the key is registered LIVE.
+
+    No tier is configured in this table's file, so the model arm and the
+    operator arm render the same field-less ``task`` schema and the description
+    is the witness that tells them apart here; the structural assertions (the
+    field present/absent with tiers configured) live in
+    ``tests/unit/tools/test_effort_tier_schema.py``. Both effort-carrying tools
+    are read, because one rebuild renders both and a rebuild that patched only
+    one of them is exactly the half-wiring this probe should catch.
+    """
+    from local_operator.harness.subagent import (
+        MODEL_CHOICE_MODEL,
+        MODEL_CHOICE_OPERATOR,
+    )
+
+    task = next(tool for tool in session._tools if tool.name == "task")
+    agent = next(tool for tool in session._tools if tool.name == "agent")
+    pin = ((agent.parameters.get("properties") or {}).get("effort") or {}).get("description", "")
+    operator_mode = "model_choice=operator" in task.description
+    assert (
+        "no effort tiers are yours to choose" in pin
+    ) == operator_mode, "task and agent were rebuilt into different arms"
+    if operator_mode:
+        # The operator arm drops the field whatever the tier map says. The model
+        # arm keeps it only when a tier exists to offer, and this file
+        # configures none — which is why the description, not the field, is the
+        # witness that can tell the two arms apart here.
+        assert "effort" not in (task.parameters.get("properties") or {})
+    return MODEL_CHOICE_OPERATOR if operator_mode else MODEL_CHOICE_MODEL
 
 
 def compaction_of(session: Session) -> CompactionSettings:
@@ -421,6 +473,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # -- subagents ---------------------------------------------------------------
     "subagents.max_running": (3, lambda s, w: s.jobs.max_running),
+    # The policy key beside them, and the ONLY probe in this table that reads a
+    # TOOL-BUILD product: ``subagents.models.*`` are launched-through (read per
+    # spawn), while this one is baked into the ``task``/``agent`` schemas at
+    # build time and reaches a running session only through the rebuild.
+    "subagents.model_choice": ("model", _task_effort_arm),
     "subagents.models.lo": ("openai/lo-model", lambda s, w: _spawn_model(s, "lo")),
     "subagents.models.med": ("openai/med-model", lambda s, w: _spawn_model(s, "med")),
     "subagents.models.hi": ("openai/hi-model", lambda s, w: _spawn_model(s, "hi")),
