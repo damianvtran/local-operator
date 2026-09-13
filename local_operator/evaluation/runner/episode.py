@@ -260,9 +260,11 @@ class EpisodeConfig:
     :func:`default_guards`; an empty tuple disables them.
     ``max_cycle_cost_micros`` feeds the default cost-rate guard's absolute cap.
     ``max_steps`` is snapshotted for the guards (``GuardInput.max_steps``):
-    an episode that states BOTH this step budget and an explicit provider-cost
-    cap is judged by the caps rather than by the cost-rate ratio, which cannot
-    tell a legitimate expensive cycle from a runaway one.
+    a guard that would truncate on PRICE is told the episode's length is an
+    authority the operator set, so it judges no cost ratio at all and only the
+    operator's own ``max_cycle_cost_micros`` can stop a bounded episode on
+    cost (see :class:`CostRateGuard` for the measured reason a prorated
+    per-step pace is not an acceptable substitute).
     ``max_decision_retries`` is how many corrective re-prompts one observation
     may take after a billed reply fails strict parsing (a ``frame_id`` the
     observation does not carry, malformed JSON) before the episode ends as a
@@ -330,6 +332,19 @@ class EpisodeOutcome:
     rescue_required: bool = False
     rescue_complete: bool | None = None
     diagnostic: str | None = None
+    # The scored run's truncation, mirrored out of the sealed step payload so a
+    # caller's own result record carries it without re-reading ``events.jsonl``
+    # by hand (the campaign harness writes this outcome as its outcome.json).
+    # ``truncation_reason`` is the same stable identifier the bundle records
+    # (``max-steps``, a guard code); ``truncation_detail`` is the guard
+    # verdict's human-readable why, which has no other home: ``GuardVerdict``
+    # keeps the two apart because consumers compare runs on the code and a
+    # diagnosis is not an identifier. Both are ``None`` unless the run reached
+    # its last step truncated and the bundle was sealed -- an abandoned run
+    # reports its abandonment in ``diagnostic`` instead, because it has no
+    # sealed step to mirror.
+    truncation_reason: str | None = None
+    truncation_detail: str | None = None
 
 
 class _Cancelled(Exception):
@@ -412,6 +427,7 @@ class EpisodeRunner:
         )
         self._recent_costs: list[int] = []
         self._truncation_reason: str | None = None
+        self._truncation_detail: str | None = None
         self._last_request_id: str | None = None
         self._usage_totals: dict[str, int] = {}
         self._provider_cost_micros = 0
@@ -1113,6 +1129,7 @@ class EpisodeRunner:
         reason = self._truncation_reason
         if truncated and reason is None:
             reason = "max-steps"
+        detail = self._truncation_detail
         if not truncated:
             # Guards are evaluated HERE, on the post-step snapshot and before
             # the step event is written, for the same reason ``max_steps`` is
@@ -1125,6 +1142,13 @@ class EpisodeRunner:
             if verdict is not None:
                 truncated = True
                 reason = verdict.code
+                # Keep the why as well as the code. ``reason`` is a
+                # ``StrictIdentifier`` that consumers compare runs on, so it
+                # cannot carry the diagnosis; dropping the detail here is what
+                # forced every truncation analysis to be re-derived from
+                # ``events.jsonl`` by hand. A step-cap truncation has no guard
+                # verdict and so no detail -- ``max-steps`` is its own why.
+                detail = verdict.detail
         # The step event MUST precede its output observation: the verifier
         # expects the observation it just declared, and reversing the two makes
         # the observation unbound.
@@ -1149,6 +1173,7 @@ class EpisodeRunner:
         )
         self._truncated = truncated
         self._truncation_reason = reason if truncated else None
+        self._truncation_detail = detail if truncated else None
         self._last_step_terminated = truncated
         self._record_observation(result.observation)
 
@@ -1696,6 +1721,8 @@ class EpisodeRunner:
             rescue_required=cleanup_result.rescue_required or self._rescue_required,
             rescue_complete=rescue_complete,
             diagnostic=diagnostic,
+            truncation_reason=self._truncation_reason,
+            truncation_detail=self._truncation_detail,
         )
 
     # ------------------------------------------------------------------

@@ -875,10 +875,10 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | Parameter | Default | Notes |
 | --- | --- | --- |
 | `--route` | required | `<provider>/<model>`; the paid episode used `openrouter/deepseek/deepseek-v4-flash-vision-exp` |
-| `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50. With an explicit `--max-usd` this also makes the cost guard prorate a per-cycle ceiling from the remaining budget and remaining steps instead of judging the recent-vs-previous cost ratio |
-| `--max-usd` | 0.50 | hard provider spend cap; states the explicit cost cap the cost guard prorates against |
+| `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50. Stating it also takes the cost-rate ratio out of the picture for that episode: the step budget is the authority about how long the run lasts, so cycle prices are not judged as a rate (see `--max-cycle-usd`) |
+| `--max-usd` | 0.50 | hard provider spend cap; reaching it is a scored truncation (`budget-cap`), and it is the only COST authority a step-budgeted episode has |
 | `--max-wall-s` | 18000 | runaway guard only; the 500-step budget binds first. The TTL lease is derived from it (`_ensure_lease_outlasts_wall`), see BUDGETS_AND_LATENCY.md |
-| `--max-cycle-usd` | none | ADDS an absolute per-cycle cap; it is not what stops a runaway on a doubly-capped episode, the prorated ceiling is |
+| `--max-cycle-usd` | none | ADDS an absolute per-cycle cap, the operator's own number: it truncates (`cost-spike`) whatever the step budget says, and a series crossing it is worth reading. Unlike the prorated per-cycle ceiling this used to be paired with, it does not mistake context growth for waste |
 | `--keep-recent-frames` | 3 | frame retention |
 | `--benchmark-release` | `osworld-v2-2026.08.08` | |
 | `--run-root` | required | must be durable; `/tmp` and `$TMPDIR` are refused |
