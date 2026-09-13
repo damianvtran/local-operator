@@ -162,18 +162,27 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # imperative, `/title refresh` is the request, and a bare `/title` reports.
     #
     # OPTIONAL rather than NONE now that an argument has a value list: the space
-    # offers `refresh` to a user who does not know the word exists, and Enter on
-    # the bare command still reports the current name — the exact distinction
-    # `/approvals` and `/effort` draw against `/login`'s REQUIRED. Free typing
-    # is unaffected, so an arbitrary title still submits.
+    # offers `--refresh` to a user who does not know the capability exists, and
+    # Enter on the bare command still reports the current name — the exact
+    # distinction `/approvals` and `/effort` draw against `/login`'s REQUIRED.
+    # Free typing is unaffected, so an arbitrary title still submits.
     SlashCommand(
         "rename",
         # 43 cells, inside the ~55 at which the description column wraps and
-        # renders a phantom command name in `/help` (see `/model`, `/theme`).
-        # The `refresh` word has to be HERE because the help table is where a
+        # renders a phantom command name in `/help` (see `/model`, `/theme`);
+        # composed with the 20-cell name column that is a 63-cell row, one line
+        # at 80 columns.
+        # The `--refresh` flag has to be HERE because the help table is where a
         # user learns the command exists at all, and the capability it names is
-        # the reason this entry changed.
-        "Name this conversation, or refresh the name",
+        # the reason this entry changed. The INVOCATION is spelled out rather
+        # than the bare flag alone because this is the only surface that teaches
+        # the words to TYPE: "or --refresh the name" reads as though the flag
+        # takes "the name" as a value — and `parse_title_arg("--refresh the
+        # name")` really does store that literal as the conversation's title,
+        # so the misreading is reachable, not pedantic. The picker needs no
+        # such help: it supplies the argument itself, so its row teaches the
+        # flag alone.
+        "Name this conversation, or /title --refresh",
         aliases=("title",),
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.rename",
