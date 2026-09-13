@@ -65,7 +65,12 @@ ENGAGE_START_BUDGET_S = 20.0
 #: the half that names the FAILURE rather than the half that names the next
 #: step, so the copy can be reworded without silently un-pinning the
 #: behaviour — but not so loosely that any notice would satisfy it.
-FAILURE_NOTICE_FRAGMENT = "no runtime came up for this session"
+#: The stable half of the notice's sentence — the part that names the FACT rather
+#: than the advice. Deliberately not the whole line: this test is about the app
+#: admitting a failure at all, and the six unit cases in
+#: `tests/unit/session/runtime/test_eager_runtime.py` are what discriminate the
+#: gates. A copy reword must not be able to turn this green or red on its own.
+FAILURE_NOTICE_FRAGMENT = "no runtime yet"
 
 #: The candidate the engage spawns, in place of the runtime entry point.
 #:
