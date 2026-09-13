@@ -6169,13 +6169,13 @@ class Session:
             # prices it already counted. A correction it cannot see there is
             # billed a second time by the remainder, so tell it how much of this
             # accumulator arrived as a re-price (review R1-1). The index is
-            # passed so a correction whose turn has already closed is not charged
-            # to the NEXT turn's reconciliation (the aggregate of the closed turn
-            # was paint-grade over the same calls, so the delta on top of it is
-            # the right total, not a double bill).
+            # passed so a correction whose turn has already closed is clamped
+            # against that turn's floor rather than charged to the NEXT turn's
+            # reconciliation (R2-2), which is why the store needs the session
+            # back: the clamp is a money adjustment on the accumulator.
             store = self._frontend_state_store
             if store is not None:
-                store.note_spend_correction(index, delta)
+                store.note_spend_correction(self, index, delta)
             self.schedule_spend_persist()
             # Republish so the band converges on the authoritative figure
             # instead of keeping the optimistic one it painted this tick.

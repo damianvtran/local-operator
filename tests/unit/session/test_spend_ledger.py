@@ -1064,6 +1064,73 @@ def test_a_mid_turn_correction_is_not_billed_twice_by_the_remainder(
     asyncio.run(main())
 
 
+def test_a_late_correction_is_clamped_exactly_like_a_mid_turn_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the persisted total must not depend on WHEN the re-price lands.
+
+    The turn-end remainder makes the aggregate a FLOOR for the turn
+    (``accrued + max(0, aggregate - accrued) == max(accrued, aggregate)``):
+    mid-turn, ``accrued_this_turn`` moves with the correction and the remainder
+    hands the money back, so a re-price can only change the total as far as it
+    lifts the turn above that floor. A correction whose turn had already closed
+    took the other path -- the full delta straight onto the accumulator -- so the
+    SAME fixtures disagreed: paint $2.00, re-priced $1.00, aggregate $2.00
+    persisted $2.00 mid-turn and $1.00 late, and the record inherited whichever
+    ordering the scheduler happened to produce. Both orderings now run the same
+    formula against the closed turn's snapshot, and a re-price that raises the
+    true cost above the aggregate still counts in full.
+    """
+    from local_operator.harness.types import MessageEndEvent
+
+    usage = Usage(provider="deepseek", model_id="deepseek-chat", input_tokens=1_000)
+
+    def run(*, resolved: int, late: bool) -> int:
+        session = make_session(tmp_path / f"sess-{resolved}-{int(late)}")
+        store = session._frontend_state_store
+        message = Message.assistant("a", usage=usage)
+        # The call's paint price AND the turn's aggregate are both $2.00; the
+        # fake cannot tell them apart by object here because both come off the
+        # same resolver, which is the honest fixture for this question -- the
+        # ordering is the only variable.
+        monkeypatch.setattr(frontend_state_module, "turn_cost", lambda label, value: 2.0)
+        # In the LATE ordering the scheduled price resolves to nothing, so the
+        # call stays at paint grade until the test drives the correction itself
+        # after the turn has closed.
+        monkeypatch.setattr(
+            session_module,
+            "price_call",
+            (lambda *a: (None, False)) if late else (lambda *a: (resolved, True)),
+        )
+
+        async def main() -> None:
+            store.observe_event(session, MessageEndEvent(message=message))
+            if late:
+                store.observe_event(session, AgentEndEvent(messages=[message]))
+                async with asyncio.timeout(30):
+                    while session._spend_tasks:
+                        await asyncio.sleep(0.01)
+                monkeypatch.setattr(session_module, "price_call", lambda *a: (resolved, True))
+                # index 0: the only call of a fresh session (``SessionSpend.accrue``
+                # numbers from zero), which is what the store registered above.
+                await session._price_spend_call(0, usage, "deepseek", "deepseek-chat")
+            else:
+                async with asyncio.timeout(30):
+                    while session._spend_tasks:
+                        await asyncio.sleep(0.01)
+                store.observe_event(session, AgentEndEvent(messages=[message]))
+
+        asyncio.run(main())
+        return session.spend.micro
+
+    # A DOWNWARD re-price below the aggregate: the turn's floor holds, same both ways.
+    assert run(resolved=1_000_000, late=False) == 2_000_000
+    assert run(resolved=1_000_000, late=True) == 2_000_000
+    # An UPWARD one above it: the authoritative per-call sum wins, same both ways.
+    assert run(resolved=3_000_000, late=False) == 3_000_000
+    assert run(resolved=3_000_000, late=True) == 3_000_000
+
+
 def test_a_cheaper_re_price_does_not_log_a_backwards_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1159,3 +1226,6 @@ def test_the_session_screen_shows_both_money_rows_from_a_real_session(tmp_path: 
     assert "3,500,750 μ$" in text
     assert "$3.00" in text
     assert "+0.500750" in text
+    # R2-4: the sign alone left "vs the record" reading either way, so the word
+    # that names the minuend is part of the contract now.
+    assert "record +0.500750" in text, text

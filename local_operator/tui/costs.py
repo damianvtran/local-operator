@@ -61,6 +61,13 @@ __all__ = [
 #: 50 µ$ is $0.00005, the rounding boundary of ``{"$%.4f"}``.
 _SUB_CENT_VISIBLE_MICRO = 50
 
+#: THE lower-bound mark, shared by every surface that has to say "this figure
+#: cannot be whole". It lives here rather than on the band because the band and
+#: ``/session`` both draw it, and two spellings of the same honesty vocabulary is
+#: exactly the defect the panels' single-formatter rule exists to prevent (review
+#: R2-1: ``/session`` printed an unmarked figure for a state the band marked).
+LOWER_BOUND_MARK = "\u2265"
+
 
 def format_usd(micro: int) -> str:
     """The ONE dollar ladder, from an EXACT integer micro-USD amount.

@@ -511,6 +511,13 @@ classify the store as: **exact 1,367 · floor (shrunk) 475 · partial (unpriced)
 151 · empty 8** — i.e. the `≥` would survive on 626 of ~2,000 sessions where it is
 genuinely earned, and vanish from the ~1,367 where it was noise.
 
+*(Superseded as a prediction by §12.1 note 10: review R1-4 removed the
+marker-based loss predicate on the grounds that rewriting a row keeps its money,
+and nothing in the tree writes the remaining `LOST_USAGE_KEY`, so a rebuild
+cannot earn `FLOOR` at all — the `floor (shrunk) 475` bucket is **0 by
+construction**, and the `≥` a rebuild could produce is `PARTIAL` only. The 1,367
+`exact` figure is unaffected.)*
+
 ## 6. Decision 3 — the recall path
 
 ### 6.1 Recall on resume / attach / `/reload` / paint
@@ -843,6 +850,12 @@ demonstrably does (35.1% of transcript bytes, §2.3).
 sessions — for a reason that is now real. The rollout note should say so
 explicitly so it is not re-diagnosed as the bug returning.
 
+*(Superseded in the same way as §5.4 above, and for the same reason: after R1-4
+the rebuild's `FLOOR` branch is a hook — the predicate is `lost_money_rows`, the
+key it reads has no writer, so the count is 0 by construction. What remains on
+old sessions is what the pre-ledger SEED puts there, which is the state this
+change redesigns rather than removes.)*
+
 **R11 — a second pricing path.** §5.2 adds an off-loop pricer. It must call the
 SAME `resolve_model_info` + `cost_for_usage` pair `price_snapshot` calls
 (`analytics/model.py:249-273`), and a test must price a fixture call both ways
@@ -1086,9 +1099,14 @@ the accumulator mid-turn left the remainder to re-bill the whole delta: paint
 $1.00 → corrected $2.00 → aggregate $2.00 persisted **$3.00** as `EXACT`. The two
 numbers stay separate — one is money, the other is "what this turn's aggregate
 has already been charged" — and are moved together. The mirror is scoped by call
-index to the turn that accrued the call, so a correction outliving its turn does
-NOT suppress the next turn's remainder: that turn's aggregate was paint-grade
-over the same calls, so the delta on top of it is the corrected total.
+index to the turn that accrued the call. A correction outliving its turn is
+**clamped against that turn's snapshot** (review R2-2), because the remainder had
+already made the turn's aggregate a floor: the delta moves the total only as far
+as it lifts the turn above `max(accrued, aggregate)`, and a re-price below the
+floor is absorbed rather than pushing the total under it. Without the clamp the
+SAME fixtures persisted $2.00 mid-turn and $1.00 late — the recorded total
+depended on when the scheduler ran. A re-price that raises the true cost above
+the aggregate still counts in full.
 9. **The suffix reader separates REQUIRED from OPPORTUNISTIC types** (review
 R1-2). Requiring the spend record meant a pre-ledger journal — which by
 definition has none — could never satisfy the stop condition, so a cold open read
@@ -1097,6 +1115,18 @@ on `28a800c6a783`, and 18,192,882 on `560f212a892c`. Opportunistic types are
 collected when the backward scan passes them and never gate the stop; the
 compaction boundary still does, so a row inside the replayed window is still
 found.
+
+**The condition that costs this correctness, stated rather than implied:** the
+record is found only when it lies above the newest compaction's
+`first_kept_entry_id` **or** inside the same 1 MiB tail chunk as the boundary
+drawn above it. A record below BOTH yields no record on a cold open and the
+viewer falls back to the one-receipt `FLOOR` — i.e. `≥` on a session that had an
+exact record, which is the safe direction of error but not free. Review R2 tried
+to build that ordering from a synthetic journal and could not make it happen for
+a record anywhere near the tail: it needs more than 1 MiB of rows between the
+record and a boundary drawn above it, which is not a shape this store produces
+(records are written per call, in the tail). It is recorded here as the price of
+`O(suffix)` on cold open rather than claimed as covered.
 10. **`floor` is never earned by a marker** (review R1-4). Every writer that
 rewrites a row keeps its money: `_pruned_entry` replaces only
 `payload["content"]` (a pruned row's `usage` survives, and a pruned tool result's
@@ -1107,7 +1137,12 @@ which is why §2.2's rule exists at all. A marker is evidence of rewriting, not 
 loss, so the 494 sessions the census classified `rebuild_would_be_floor` are
 exact or partial in fact, and `≥` now means only what it can: a call the pricing
 could not size (`PARTIAL`). The predicate that remains
-(`transcript.lost_money_rows`) reads a positive report that a usage row is gone.
+(`transcript.lost_money_rows`) reads a positive report that a usage row is gone —
+and **nothing in the tree writes that key** (`LOST_USAGE_KEY`, declared with that
+statement beside it), so a rebuild produces no `FLOOR` at all today: the state is
+reachable only from a pre-ledger SEED, which is what the `≥` on old sessions now
+means. The rebuild's `FLOOR` branch is a hook for a future writer, not a live
+path, and the census's `rebuild_would_be_floor` bucket is 0 by construction.
 11. **A downward re-price is not a broken attach invariant** (review R1-6). The
 record's backwards-total WARNING fired for every legitimate cheaper re-price; it
 is now debug-level when a correction caused the drop (one-shot token, cleared on
