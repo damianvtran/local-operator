@@ -813,6 +813,12 @@ async def warm(session_id: str, body: Warm, request: Request):
     once engaged). The renderer calls this on the first keystroke, so the spawn
     overlaps the time the user spends finishing their sentence.
 
+    NOT THE ONLY WARM ANY MORE. The bridge also warms on a live VISIBLE watch
+    lease, without going through this route, so a session the user is merely
+    looking at is already warm when the first click arrives; see
+    ``DesktopSessionBridge.refresh_watch``. This route remains the renderer's
+    explicit speculation and needs no change to keep working.
+
     PRECONDITION, AND IT BINDS THE CALLER: a warm issued while nothing else
     holds the bridge is cancelled when its own request returns; the desktop UI
     satisfies this by firing the warm from the mounted, subscribed session

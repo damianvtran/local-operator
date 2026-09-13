@@ -122,6 +122,18 @@ residency. The runtime's existing heartbeat re-evaluates expired leases and
 restores parked-gate OS fallback. A valid desktop notification lease suppresses
 that fallback, so one gate does not produce both an Electron and runtime toast.
 
+A lease is also the one signal that CREATES residency rather than only
+preserving it. While a live lease says `visible`, the HTTP bridge starts the
+session's runtime in the background (`refresh_watch`), because that is term 3 of
+the residency predicate's own premise: a user looking at the conversation is
+about to type, and paying the child spawn inside their first click is the stall
+this removes. The bounds are the ones already in place rather than new ones —
+one runtime per session (the engage path is shared), `WATCH_TTL` as the
+lifetime, and the runtime's own idle drain to reap it once the lease expires or
+stops being renewed. A lease that says only `can_notify` creates nothing: it is
+delivery reachability, not attention, and it never did more than keep an
+already-running runtime warm.
+
 `AttachedSession(surface="desktop")` carries this metadata through its existing
 runtime binding/recovery path. It goes cold rather than becoming the runtime
 in the HTTP process; reconnect does not resurrect an expired desktop lease. Its

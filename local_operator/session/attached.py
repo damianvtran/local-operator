@@ -1917,7 +1917,16 @@ class AttachedSession:
         await self._ensure_bound()
 
     async def update_desktop_watch(self, *, visible: bool, can_notify: bool) -> None:
-        """Update the existing attach lease; a proxy socket alone is not a human."""
+        """Update the existing attach lease; a proxy socket alone is not a human.
+
+        The ``{visible, can_notify}`` pair is also the DESIRED presence for the
+        NEXT dial, which is why ``_dial`` re-asserts it from the last recorded
+        values (TTL-bounded, so a stale lease is never resurrected). Recording
+        it while cold is therefore meaningful rather than a no-op with a
+        comment: ``DesktopSessionBridge.refresh_watch`` records a live VISIBLE
+        lease before it warms, so the runtime it is about to start counts the
+        viewer from its first tick instead of idling out under it.
+        """
         if self._surface != "desktop":
             raise ValueError("only a desktop viewer can renew a desktop lease")
         self._desktop_visible = visible
