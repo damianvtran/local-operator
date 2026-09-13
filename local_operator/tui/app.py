@@ -5849,7 +5849,7 @@ class OperatorApp(App[None]):
             and bool(getattr(source.session, "is_cold", False))
         )
 
-    def _reassert_sidebar_anchor(self, source: SessionInteraction) -> bool:
+    def _reassert_sidebar_anchor(self, source: SessionInteraction) -> None:
         """Re-place a refused frame's reader on the saved anchor it asked for.
 
         A RELAYOUT ALONE DOES NOT CONVERGE WHEN THE ANCHOR IS THE REFUSAL, and
@@ -5875,8 +5875,13 @@ class OperatorApp(App[None]):
         queued after-refresh callback run: the healing has to be synchronous,
         inside the hook that already decided the frame was refused.
 
-        Harmless when the anchor is already placed: `restore_navigation_anchor`
-        computes the same `scroll_y` and scrolls nowhere. It scrolls
+        SAFE FOR A HEALTHY SWITCH, BUT BECAUSE OF THE GUARD RATHER THAN ANY
+        IDENTITY OF THE TWO OPERATIONS. `restore_navigation_anchor`
+        re-establishes the saved offset; that equals the current scroll only when
+        the anchor already sits at it, so it is NOT idempotent in general (do not
+        reach for it as a no-op elsewhere on that reading). What keeps it free
+        here is that the guard below refuses to call it unless the anchor is
+        mounted, displayed and genuinely off screen. It scrolls
         PROGRAMMATICALLY, so it is never mistaken for reader input, and it only
         runs while a frame is armed — i.e. before the switch re-enables input.
 
@@ -5886,12 +5891,26 @@ class OperatorApp(App[None]):
         the transient that needs no help: a frame painted before the anchor row
         is mounted has `mounted=False`/zero region, and no scroll can place a
         block that has no geometry yet, so that frame keeps the plain relayout
-        the recovery branch has always bought. Returning ``False`` there is how
-        a healthy switch keeps its single recovery instead of paying a scroll
-        per frame.
+        the recovery branch has always bought. Returning there is how a healthy
+        switch keeps its single recovery instead of paying a scroll per frame.
+
+        ``display`` IS FILTERED FOR THE SAME REASON THE REST OF THIS FILE FILTERS
+        ON IT (`_capture_sidebar_scroll`): a mounted block with `display: none`
+        is absent from the compositor's layout, so `Widget.region` is
+        `NULL_REGION` and `NULL_REGION.overlaps(...)` is False — i.e. "no
+        geometry" would read as "off screen" and the restore would be called
+        with a zero-height target, drifting the reader on a block that is not
+        painted at all.
+
+        The id+part match here is STRICTER than the id-only fallback
+        `restore_navigation_anchor` documents internally, and that asymmetry is
+        deliberate rather than an inconsistency: this guard decides whether to
+        act, so it must not act on a block that is not the anchor it was asked
+        for, while the delegate may still resolve the anchor it is handed. A
+        strict match here therefore cannot make the delegate miss.
         """
         if source.draft.following_tail or not source.draft.scroll_anchor_id:
-            return False
+            return
         view = self._transcript_view()
         anchor = next(
             (
@@ -5902,14 +5921,18 @@ class OperatorApp(App[None]):
             ),
             None,
         )
-        if anchor is None or not anchor.is_mounted or anchor.region.overlaps(view.content_region):
-            return False
+        if (
+            anchor is None
+            or not anchor.is_mounted
+            or not anchor.display
+            or anchor.region.overlaps(view.content_region)
+        ):
+            return
         view.restore_navigation_anchor(
             source.draft.scroll_anchor_id,
             source.draft.scroll_anchor_part,
             source.draft.scroll_offset,
         )
-        return True
 
     def _await_sidebar_frame(
         self, source: SessionInteraction, generation: int
