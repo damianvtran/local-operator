@@ -628,11 +628,19 @@ def test_serve_command_preserves_the_address_it_was_given() -> None:
             "host": "localhost",
             "port": resolved_port,
         }, "uvicorn is told the bound port"
-        # And the same number is what the app publishes its record with.
-        assert serve_registry.advertised_address() == ("localhost", resolved_port)
+        # And the same number is what the app publishes its record with — read
+        # off the app OBJECT, which is the channel this path announces on (no
+        # environment: nothing this daemon spawns may inherit its address).
+        assert serve_registry.advertised_address(asgi_app) == ("localhost", resolved_port)
     finally:
         for listener in sockets:
             listener.close()
+        # No lifespan runs in this test to consume the announcement, and `app`
+        # is a module-level singleton: clear it so a later test in the worker
+        # does not boot an app still announced on a dead ephemeral port.
+        state = asgi_app.state
+        if serve_registry.ANNOUNCED_STATE_ATTR in state:
+            del state[serve_registry.ANNOUNCED_STATE_ATTR]
 
 
 def test_serve_command_still_routes_reload_through_uvicorn_run() -> None:

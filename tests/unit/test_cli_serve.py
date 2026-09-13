@@ -6,16 +6,53 @@ fact: the daemon's rendezvous record must carry the port ACTUALLY BOUND, and
 bound the socket can know it. So the CLI binds, announces the resolved
 address, and hands the open socket to uvicorn — and these tests pin all three,
 without starting a real server.
+
+The announce has TWO shapes and the split is the point: the address goes on the
+app OBJECT for the daemon served in-process (no environment, so nothing this
+daemon spawns can inherit it), and through the environment only for the
+``--reload`` child, which cannot be reached any other way and where the value
+names the process that wrote it.
 """
 
 from __future__ import annotations
 
+import os
 import socket
+from collections.abc import Iterator
+from unittest.mock import patch
 
 import pytest
 
+from local_operator import cli
 from local_operator.cli import _bind_serve_socket, serve_command
 from local_operator.server import registry as serve_registry
+from local_operator.server.app import app as asgi_app
+
+
+@pytest.fixture(autouse=True)
+def clean_app_announcement() -> Iterator[None]:
+    """Give the module-level app the state it had before the test.
+
+    ``serve_command`` announces on the app OBJECT (the environment is the
+    ``--reload`` channel only, and ``tests/conftest.py`` scrubs that), and these
+    tests never run the lifespan that would publish from it — so without this,
+    the next test in the worker would see an app still announced on a dead
+    ephemeral port.
+
+    Snapshotting through Starlette's mapping interface (``__iter__`` +
+    ``__getitem__``) deliberately: ``vars(app.state)`` returns ``{'_state': …}``,
+    whose value is the SAME dict the app keeps using, so a snapshot taken that
+    way restores nothing.
+    """
+    saved = {key: asgi_app.state[key] for key in asgi_app.state}
+    state = asgi_app.state
+    try:
+        yield
+    finally:
+        for key in list(state):
+            del state[key]
+        for key, value in saved.items():
+            state[key] = value
 
 
 @pytest.fixture
@@ -46,9 +83,13 @@ def test_port_zero_announces_the_port_it_actually_bound(
     """The whole point of ``--port 0``: the record gets the RESOLVED port.
 
     Asserted at every hop the value travels — the socket the kernel gave us,
-    the ``Config`` uvicorn is handed, the environment the app reads at startup,
-    and the record built from it — because a break at any one of them is a
-    record that names a port nobody is listening on.
+    the ``Config`` uvicorn is handed, the app object the lifespan reads at
+    startup, and the record built from it — because a break at any one of them
+    is a record that names a port nobody is listening on.
+
+    The environment is asserted to be UNTOUCHED on this path, which is the
+    other half of the contract: a daemon that wrote its address into its own
+    environment would hand it to every process it spawns.
     """
     assert serve_command("127.0.0.1", 0, False) == 0
 
@@ -59,8 +100,13 @@ def test_port_zero_announces_the_port_it_actually_bound(
         bound = listener.getsockname()[1]
         assert bound > 0, "an ephemeral port was requested and one was granted"
         assert captured_server["port"] == bound, "uvicorn is told the bound port"
-        assert serve_registry.advertised_address() == ("127.0.0.1", bound)
-        record = serve_registry.build_record(instance_id="instance")
+        assert serve_registry.SERVE_ANNOUNCE_ENV not in os.environ, (
+            "the served-in-process path announces on the app object, never in "
+            "the environment: nothing this daemon spawns may inherit its address"
+        )
+        announced = serve_registry.advertised_address(asgi_app)
+        assert announced == ("127.0.0.1", bound), "the app carries the address it serves"
+        record = serve_registry.build_record(instance_id="instance", announced=announced)
         assert (record.host, record.port) == ("127.0.0.1", bound)
     finally:
         listener.close()
@@ -85,7 +131,7 @@ def test_a_fixed_port_is_bound_and_announced_unchanged(
     assert isinstance(sockets, list)
     try:
         assert sockets[0].getsockname()[1] == port
-        assert serve_registry.advertised_address() == ("127.0.0.1", port)
+        assert serve_registry.advertised_address(asgi_app) == ("127.0.0.1", port)
     finally:
         sockets[0].close()
     assert f"Starting server at http://127.0.0.1:{port}" in capsys.readouterr().out
@@ -96,19 +142,20 @@ def test_an_occupied_port_is_refused_with_the_address_named(
 ) -> None:
     """The common failure on this host is a daemon already on 1111.
 
-    uvicorn's own path logs ``[Errno 48] Address already in use`` and exits
-    non-zero; the address is what makes it actionable, and the exit code is the
-    same so a supervisor sees no difference.
+    The refusal names the address, which is what makes it actionable. The exit
+    code is this path's own (1), NOT uvicorn's ``STARTUP_FAILURE`` (3) — the
+    message is printed by us and nothing branches on the number.
 
     The holder is a LISTENER, on a plain socket with no ``SO_REUSEADDR``, and it
-    stays open across the whole call. That is not incidental — it is the only
-    shape that is portable. On BSD/macOS ``SO_REUSEADDR`` lets a second socket
-    bind an address a first NON-LISTENING socket holds, so a holder that merely
-    bound would have let this test pass on a developer's Mac while proving
-    nothing; on Linux it is the same quirk in the other direction. A live
-    listener is refused by a second bind on both, whatever ``SO_REUSEADDR``
-    says (only ``SO_REUSEPORT`` would defeat it), which is also how a real
-    daemon holds its port — so this exercises the actual collision.
+    stays open across the whole call. That is not incidental — it is what is
+    PORTABLE, measured on both platforms this runs on. On the Linux CI runner
+    ``SO_REUSEADDR`` lets a second socket bind an address a NON-listening holder
+    only bound (that is the shape that failed shard 3 when this test used a bare
+    bound socket); on this macOS host (Darwin 25.6.0, arm64) every permutation of
+    that holder was refused. A live listener is refused by a second bind on
+    BOTH, whatever ``SO_REUSEADDR`` says (only ``SO_REUSEPORT`` would defeat
+    it), which is also how a real daemon holds its port — so this exercises the
+    actual collision rather than a platform quirk.
     """
     holder = socket.socket()
     holder.bind(("127.0.0.1", 0))
@@ -147,5 +194,31 @@ def test_reload_resolves_an_ephemeral_port_without_keeping_a_listener(
     port = captured["port"]
     assert isinstance(port, int) and port > 0
     assert captured["app"] == "local_operator.server.app:app"
-    assert serve_registry.advertised_address() == ("127.0.0.1", port)
+    announced = os.environ[serve_registry.SERVE_ANNOUNCE_ENV].split(" ")
+    assert announced == [str(os.getpid()), "127.0.0.1", str(port)], (
+        "the reload child is told the resolved port through the environment, and "
+        "the announcement names THIS process so only a child of ours honours it"
+    )
     assert f"Starting server at http://127.0.0.1:{port}" in capsys.readouterr().out
+
+
+def test_a_reload_probe_that_cannot_bind_is_refused_like_the_listener(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The ``--reload`` probe reports a bind failure the way the listener does.
+
+    An unbindable host (``--host 10.1.2.3``: not an address on this machine, and
+    the reachable input the reviewer named) used to escape ``serve_command`` as
+    an uncaught traceback on this branch while the non-reload branch printed a
+    named refusal — the same operator mistake, two different reports. uvicorn
+    must never be reached in that case.
+    """
+
+    def refuse(host: str, port: int) -> socket.socket:
+        raise OSError(49, "Can't assign requested address")
+
+    with patch.object(cli, "_bind_serve_socket", refuse), patch("uvicorn.run") as mock_run:
+        assert serve_command("10.1.2.3", 0, True) == 1
+
+    mock_run.assert_not_called()
+    assert "cannot bind http://10.1.2.3:0" in capsys.readouterr().err
