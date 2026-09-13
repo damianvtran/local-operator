@@ -304,11 +304,15 @@ class ViewerServer:
                 except ValueError:
                     # An over-limit line: `start_server(..., limit=...)` makes
                     # `readline` raise `LimitOverrunError` (a `ValueError`)
-                    # WITHOUT consuming the buffer, so the same read would raise
-                    # forever. Uncaught it escaped `client_connected_cb`, skipped
+                    # instead of RETURNING the line, so this request can never be
+                    # read — and a lost request on a req/reply protocol is a
+                    # reply the peer waits for forever. (`readline` does drain
+                    # the offending bytes, so the NEXT line would have read
+                    # cleanly: the loss is the frame, not the connection.)
+                    # Uncaught it escaped `client_connected_cb`, skipped
                     # the reply and logged an asyncio traceback while the client
                     # waited out its ack timeout. `viewer_client._read_reply`
-                    # hand-rolls its framing to dodge this exact defect on its
+                    # hand-rolls its framing to READ such lines on its
                     # side; closing the conversation is the server's equivalent —
                     # the peer is authenticated, so this is a bug in a peer
                     # rather than an attack, and it falls back correctly.
