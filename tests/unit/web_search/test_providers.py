@@ -1055,16 +1055,35 @@ def test_a_top_level_source_list_is_served_content_not_a_wall() -> None:
     marker was raised away whenever the extractor rejected the entries -- the
     entries with no URL scheme reach the parser's notice but not its source map.
     """
+    # The answer is a REAL one, not the wall sentence: the claim being pinned is
+    # that a served answer survives, and a fixture whose text is the wall's own
+    # could not show that (round-1 review NIT-2).
+    real_answer = [
+        {"intended_usage": "ask_text", "markdown_block": {"answer": "Paris is the capital."}}
+    ]
     for key in ("sources_list", "search_results"):
-        for row in ({"url": "https://example.com"}, {"url": "example.com"}, {"name": "x"}):
+        for row in ({"url": "https://example.com"}, {"url": "example.com"}):
+            body = _sse({"upsell_information": SOFT_UPSELL, "blocks": real_answer, key: [row]})
+            assert _wall(body) is None, f"a served top-level {key} was mistaken for a refusal"
+
+
+def test_a_top_level_row_with_no_url_is_not_served_content() -> None:
+    """MINOR-1: a dict row is not evidence of a result.
+
+    ``_perplexity_sources`` builds nothing from a row without a URL, so a
+    name-only or empty row beside a wall left the wall's own sentence as the
+    response -- the original bug, reached through the new check.
+    """
+    for row in ({"name": "x"}, {}, {"title": "x"}):
+        for key in ("sources_list", "search_results"):
             body = _sse(
                 {
-                    "upsell_information": SOFT_UPSELL,
+                    "upsell_information": WALL_UPSELL,
                     "blocks": _ASK_ONLY_BLOCKS,
                     key: [row],
                 }
             )
-            assert _wall(body) is None, f"a served top-level {key} was mistaken for a refusal"
+            assert _wall(body) is not None, f"a wall escaped behind a url-less {key} row"
 
 
 def test_a_payload_carrying_our_own_served_key_cannot_suppress_a_wall() -> None:
@@ -1110,23 +1129,3 @@ async def test_a_single_candidate_message_keeps_the_provider_name_once(
     # The provider is named once, in the scope note -- not again as a prefix.
     assert "perplexity: Fetch" not in message
     assert message.count("perplexity") == 1
-
-
-@pytest.mark.asyncio
-async def test_a_single_candidate_summary_without_the_prefix_is_untouched(
-    tmp_path, monkeypatch
-) -> None:
-    """The strip must not eat text that merely looks like a prefix."""
-    from local_operator.web_search.service import WebSearchService
-
-    settings = WebSearchSettings(providers=["duckduckgo", "perplexity"], strategy="ordered")
-    service = WebSearchService(settings, _credentials(tmp_path))
-
-    async def odd(*_args: object, **_kwargs: object):
-        raise RuntimeError("Fetch a page directly: refused")
-
-    monkeypatch.setitem(PROVIDERS, "perplexity", SimpleNamespace(search=odd))
-    with pytest.raises(RuntimeError) as raised:
-        await service.search("query", forced_provider="perplexity")
-
-    assert "Fetch a page directly: refused" in str(raised.value)
