@@ -22,6 +22,11 @@ export type EntryKind =
 
 export type ToolState =
 	| "composing"
+	/* Announced and finished being written, waiting for its turn to execute. The
+	   producer's terminal dictation frame sets it; `composing` would claim the
+	   model is still writing a call it finished minutes ago, and `running` would
+	   claim execution nothing has started. */
+	| "queued"
 	| "running"
 	| "done"
 	| "failed"
