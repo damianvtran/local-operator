@@ -42,6 +42,14 @@ and the speculative (prewarm) branch now asks `connect` for that contract with
 `viewer=True`. The tests under "the viewer contract" below pin the flag at the
 call site, its effect through the real `connect`, and what it is for — the cold
 prewarm row that heals on the click instead of latching.
+
+The two levers are complementary and neither replaces the other: the LEASE now
+builds a facade that can bind, and a facade that cannot bind AT ALL (a
+deliberate stop on the legacy attach contract, which no lease in this file can
+reach) gets one honest report instead of a budget spent on rounds that dial
+nothing. That second half is what the tests appended to "the viewer contract"
+below pin, including the arm that must still be retried — a facade
+mid-recovery.
 """
 
 from __future__ import annotations
@@ -108,7 +116,19 @@ class RecoveringRemote(AttachedSession):
 
     Deliberately does NOT call ``AttachedSession.__init__``: constructing a real
     one dials a runtime. Only the surface the connect path reads is provided.
+
+    THE THREE FLAGS ARE PART OF THAT SURFACE, and they are the real ones the
+    inherited ``can_ever_bind`` reads: this double is a VIEWER that HEALS, so it
+    carries the capability (``_can_go_cold`` True) and no loop of its own
+    (``_recovering`` False, because the SILENT RETURN is what this double models
+    and the budget is what the tests below spend against it). The mid-recovery
+    answer is pinned separately, on the arm that has to answer True for a facade
+    that does NOT heal — see ``MidRecoveryRemote``.
     """
+
+    _can_go_cold = True
+    _recovering = False
+    _disposed = False
 
     def __init__(self, session_id: str, *, heals_after: int | None = None) -> None:
         self._session_id = session_id
@@ -1505,53 +1525,159 @@ async def test_a_cold_prewarm_facade_heals_instead_of_latching(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_a_cold_prewarm_facade_without_the_contract_spends_the_budget_on_no_ops(
+async def test_a_facade_that_can_never_bind_reports_once_and_spends_no_budget(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The mechanism, pinned so the case above cannot pass vacuously.
+    """THE POLICY: a viewer closed to dialling gets one report, not a budget.
 
-    The same cold state WITHOUT the capability returns from ``_ensure_bound``'s
-    first guard on every round, so the budget expires over rounds that could
-    never dial — the operator's latch, and the reason the contract has to be
-    built by the lease rather than assumed by the caller. Reselecting hands back
-    this same source, so the latch repeats; nothing here is a wall-clock claim,
-    only a count of rounds that did nothing.
+    Cold is NOT one state. A facade mid-recovery is cold and WILL bind (its loop
+    releases it rebindable, which is what the budget exists to wait out); a
+    facade that cannot bind at all is cold and will NOT, so every further round
+    is pure backoff over a round that dials nothing — the operator's latch, whose
+    signature was ``elapsed=0.00s`` over eight attempts.
+
+    The reachable shape is a DELIBERATE STOP on the legacy attach contract: the
+    session `lop --resume` boots is built by ``connect`` without ``viewer=True``,
+    ``_adopt_session`` registers it as a sidebar source, and ``/stop`` ends it -
+    and ``_on_disconnected`` returns BEFORE any recovery loop starts, so nothing
+    ever sets the capability ``_ensure_bound``'s first guard reads. The session
+    is stopped, so the honest sentence is the app's own for that state and the
+    reselect promise is withdrawn: a reselection reuses this very facade, and a
+    message is REFUSED rather than served (``_no_session_notice`` says so).
+
+    Retrying stays right one arm over; ``MidRecoveryRemote`` pins that.
     """
-    session = PrewarmRemote("prewarm", can_go_cold=False)
+    session = PrewarmRemote("stopped", can_go_cold=False)
     app = OperatorApp(lambda: _factory(FakeSession()))
-    # Explicit rather than relying on the root level happening to be WARNING:
-    # the latch line is the artefact under test below.
     caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
     async with app.run_test(size=(100, 30)) as pilot:
         source = await _current_source(app, pilot, session)
-        prepared: Any = (source, object())
-        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
-        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
-        _instant_backoff(monkeypatch, attempts=3)
+        # A budget of four, so "one round" cannot be confused with "the budget".
+        _instant_backoff(monkeypatch, attempts=4)
 
         app._start_sidebar_connection(source)
         await _drain_retries(app, source)
 
-        assert session.dials == 0, "a facade without the capability dialled anyway"
-        assert (
-            session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
-        ), "every round must reach the guard that returns without dialling"
+        # THE STRUCTURAL CLAIM: one bind attempt, out of a budget of four, and
+        # not one dial — asserted as counts, never as a span.
+        assert session.bind_calls == 1, "the un-bindable arm spent the budget anyway"
+        assert session.dials == 0, "a facade without the capability dialled"
         assert source.display_only is True
+        assert source.connect_attempts == 0
         assert app._status is not None
         status = app._status.render_text(160).plain
-        assert "Reconnect failed" in status
-        assert "Select again to retry" in status
+        assert app_module.STOPPED_SESSION_CONNECT_NOTICE in status
+        assert "Select again to retry" not in status
+        # The composer's own row answers with the same verdict rather than the
+        # reselect it cannot honour; one string, so the two cannot drift.
+        assert app._unavailable_hint() == f" {app_module.STOPPED_SESSION_CONNECT_NOTICE}."
 
-        # AND THE LATCH LINE NAMES THE GUARD. `can_go_cold` is the field this
-        # whole investigation did not have: without it a latch logged the
-        # symptom (`attempts=8 elapsed=0.00s`) and left the guard that ran to be
-        # found by a reproduction. Both arms log through the same helper, so
-        # this is the assertion that the one missing field stays there.
+        # AND THE LATCH LINE NAMES THE ARM, so the arm is diagnosable from the
+        # log the way the budget arm already is. `attempts=1` is the count of
+        # rounds spent, and it is the field that separates this arm from the
+        # eight-round no-op sequence that used to print the same shape.
         latch_lines = [
             record.getMessage()
             for record in caplog.records
             if "sidebar connect latched" in record.getMessage()
         ]
         assert latch_lines, "the latch was not logged at all"
+        assert "can never bind this session" in latch_lines[0]
         assert "can_go_cold=False" in latch_lines[0]
-        assert "disposed=False" in latch_lines[0]
+        assert "attempts=1" in latch_lines[0]
+
+
+class MidRecoveryRemote(PrewarmRemote):
+    """Cold, without the viewer capability, and with a RECOVERY LOOP RUNNING.
+
+    The one shape that looks like the arm above and must NOT be treated as it:
+    ``_recovering`` means a loop is chasing the owner, and every exit of that
+    loop either attaches this facade or releases it rebindable, so the state is
+    transient by construction. Deliberately keeps ``_can_go_cold`` False, so the
+    budget below is spent on the ``_recovering`` term of ``can_ever_bind``
+    ALONE — without it the one-shot arm above would fire and this test fails.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id, can_go_cold=False)
+        self._recovering = True
+
+
+@pytest.mark.asyncio
+async def test_the_recovering_arm_still_spends_the_whole_budget(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MID-RECOVERY IS TRANSIENT, so the budget is still spent waiting it out.
+
+    The same cold state as the arm above, differing only in ``_recovering`` -
+    which is the whole point of the distinction: an owner loss the recovery loop
+    is chasing heals on its own within ``COLD_FALLBACK_S``, and a caller that
+    treated it as final would tell the user a session on its way back is gone.
+    So this arm must still reach the latch the old way: the whole budget, and
+    the exhausted-retry copy rather than the stopped-session one.
+    """
+    session = MidRecoveryRemote("mid-recovery")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert (
+            session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        ), "a recovering facade was cut short instead of waited out"
+        assert session.dials == 0
+        assert source.display_only is True
+        assert source.connect_attempts == 0
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert "Reconnect failed" in status
+        assert "Select again to retry" in status
+        assert app_module.STOPPED_SESSION_CONNECT_NOTICE not in status
+
+        latch_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "sidebar connect latched" in record.getMessage()
+        ]
+        assert latch_lines, "the latch was not logged at all"
+        assert "retry budget exhausted" in latch_lines[0]
+        assert "can never bind this session" not in latch_lines[0]
+
+
+@pytest.mark.parametrize(
+    "can_go_cold,recovering,disposed,expected",
+    [
+        # The ordinary viewer, cold right now: it binds as soon as it is dialled.
+        (True, False, False, True),
+        # A viewer mid-recovery, and a LEGACY facade mid-recovery: both on their
+        # way back, because the loop's exits leave the facade bindable (`_go_cold`
+        # for a viewer, `_give_up_recovery` setting the flag for the legacy one).
+        (True, True, False, True),
+        (False, True, False, True),
+        # The deliberate stop on the legacy contract: no loop ran, so nothing
+        # ever sets the flag this guard reads. The reachable False.
+        (False, False, False, False),
+        # Disposed: refuses every path. Latent, and still False.
+        (True, False, True, False),
+        (False, False, True, False),
+    ],
+)
+def test_can_ever_bind_is_the_truth_table_the_sidebar_decides_on(
+    can_go_cold: bool, recovering: bool, disposed: bool, expected: bool
+) -> None:
+    """The real property, on the real class, at every combination of its flags.
+
+    Read through the facade rather than restated by a double: the app's verdict
+    (and therefore the sentence the user reads) is this property's answer, and a
+    double that reimplemented it would let the two drift silently.
+    """
+    session = AttachedSession.__new__(AttachedSession)
+    session._can_go_cold = can_go_cold
+    session._recovering = recovering
+    session._disposed = disposed
+
+    assert session.can_ever_bind is expected

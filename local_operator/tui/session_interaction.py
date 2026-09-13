@@ -185,6 +185,17 @@ class SessionInteraction:
     command_frame_pending: bool = False
     connection_task: asyncio.Task[None] | None = field(default=None, repr=False)
     connection_error: str = ""
+    #: True when the connect above ended on a state NO reselection can fix: its
+    #: viewer answered ``can_ever_bind`` False, so the affordance the ordinary
+    #: latch offers ("Select again to retry") would be a promise the app cannot
+    #: keep, and the band says what is actually true instead.
+    #:
+    #: A VERDICT, not a probe: it is set by the arm that decided it, because the
+    #: sentence a user reads must not be re-derived from a facade that may have
+    #: healed between the verdict and the paint (that is the stale-verdict flash
+    #: UX round 1's U3 found one surface over). Written wherever
+    #: `connection_error` is written and cleared wherever it is cleared.
+    can_never_bind: bool = False
     #: Consecutive failed connect attempts for this source, counted so
     #: `_connect_sidebar_source` can retry a transient owner loss instead of
     #: latching it, and still surrender to the user once the budget is spent.
