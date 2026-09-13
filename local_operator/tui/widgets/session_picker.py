@@ -93,6 +93,7 @@ from local_operator.paths import config_dir
 # how one surface ends up finding a fork the other cannot.
 from local_operator.resume import SessionRow, format_age
 from local_operator.session.preview import (
+    GAP_TEXT,
     SessionPreviews,
     clip_to_height,
     demark,
@@ -234,10 +235,22 @@ LIST_MIN = 6
 #: screen.
 LIVE_REFRESH_INTERVAL_S = 1.0
 
+#: The preview header rows that are NEVER shed: the name, the two clocks and
+#: the rule. The ``model · cwd`` row on top of these is optional (D7 — it is
+#: omitted entirely when the row has no checkpoint), which is what makes it the
+#: row the pane sheds when the plan's floor is all it has: reserving it there
+#: left the pane painting its whole header and not one line of the conversation
+#: (UX round 1, U5's shape, one row further down).
+PREVIEW_HEADER_BASE = 3
+
 #: The fewest preview rows that can draw a HEADER AND A LINE OF CONVERSATION.
-#: Four rows of chrome is the worst case (name, the two clocks, an optional
-#: ``model · cwd`` line, the rule), so five is the floor at which the pane is
-#: worth the rows it costs; below it the list takes them (UX round 1, U5).
+#: The value is the WORST-CASE header — ``PREVIEW_HEADER_BASE`` plus the
+#: optional ``model · cwd`` row — and one body line, so five rows is the floor
+#: at which the pane is worth the rows it costs; below it the list takes them
+#: (UX round 1, U5). It is deliberately NOT relaxed to ``PREVIEW_HEADER_BASE``
+#: now that the pane sheds that row: the floor is the LAYOUT's contract about
+#: how many rows the pane may have, and the shed is the PANE's answer for the
+#: smallest row it is given, not a licence to give it fewer.
 PREVIEW_DRAW_MIN = 5
 
 #: Rows the picker's container costs on top of the lines its panes draw.
@@ -1453,8 +1466,17 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._repaint()
 
     def action_pane_end(self) -> None:
-        """Jump the preview to the newest turn."""
-        self._pane_top = max(0, len(self._preview_lines()) - self._pane_height())
+        """Jump the preview to the newest turn.
+
+        THE CLAMP IS THE PAINT'S OWN BUDGET, not the pane's reserved height:
+        reserving a row for the status marker makes the painted window one row
+        shorter than `_pane_height`, so clamping against the latter left the
+        chord named "newest" one line short of the newest turn — the frame read
+        `199–201 of 202` while the line below was reachable (design round 5,
+        D9). Both numbers now come from `_pane_body_rows`.
+        """
+        lines = self._preview_lines()
+        self._pane_top = max(0, len(lines) - self._pane_body_rows(len(lines)))
         self._repaint()
 
     def action_backspace(self) -> None:
@@ -1518,8 +1540,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
     def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
         """Primary-button click on a row resumes it; a click on the preview does nothing.
 
-        This card invited the mouse in with the wheel; a list you can scroll
-        with the mouse and cannot click with it is a half-built affordance.
+        The picker is a full screen the mouse can already SCROLL — the wheel
+        moves the list under the cursor, or the preview under the pointer — and
+        a list you can scroll with the mouse and cannot click with it is a
+        half-built affordance.
 
         Button 1 only. The action behind this disposes the live session and
         reboots, which is not something a right-click asking for a context
@@ -1657,34 +1681,71 @@ class SessionPickerScreen(ModalScreen[str | None]):
             return max(20, measured - 2)
         return max(20, self._layout().preview_width)
 
+    def _content_rows(self) -> int:
+        """Rows INSIDE the pane's own border and padding: its text budget.
+
+        ``content_region.height`` ALREADY EXCLUDES THE BORDER, which its own
+        docstring says ("inside ``widget``'s own border and padding") and a
+        frame measures: at 100x30 the pane's region is 9 rows while its content
+        region and its ``size`` are both 8, and the ninth is the stylesheet's
+        ``border-top``. Subtracting that border a SECOND time cost the pane a
+        line of conversation at EVERY stacked size — measured against the
+        finished frame, 100x20 painted 7 of its 8 rows with a blank tail,
+        100x30 8 of 9, 100x16 5 of 7 — and at 100x16 it is what tipped the pane
+        into the state where its status row could not fit at all, so the
+        affordance D1/U2 added was the line that vanished (agent review round
+        4, both findings).
+        """
+        measured = _content_height(getattr(self, "_preview", None))
+        if measured:
+            return measured
+        # Nothing mounted to measure yet (the screen is not in the tree), so
+        # fall back to the plan — which measures the pane's REGION and so does
+        # count the stacked border row that ``content_region`` does not.
+        plan = self._layout()
+        return max(0, plan.preview_rows - (1 if plan.mode == "stacked" else 0))
+
     def _pane_height(self) -> int:
-        """Body lines the preview can show: its height less its own header.
+        """Body lines the preview can show: its content rows less its header.
 
         The header is the name, the two clocks, an optional ``model · cwd``
         line and the rule, so the reservation is asked of the header the pane
         will actually draw rather than assumed at a constant.
+
+        NO FLOOR. The old ``max(1, ...)`` turned "this pane cannot fit a line of
+        conversation" into "emit one anyway" while the caller had already
+        reserved the status row, and Textual resolved the contradiction by
+        clipping the LAST line — the status row — silently. Zero is a real
+        answer: the plan keeps such a pane from being drawn at all
+        (``PREVIEW_DRAW_MIN``), and the header sheds its optional row before it
+        gets here, so zero is reachable only if the stylesheet gives the pane
+        less room than the plan promised.
         """
-        # The CONTENT region, not `size`: stacked, the pane carries a
-        # `border-top`, and `size.height` counts that border row while the
-        # text does not get it. Budgeting against `size` left one line too
-        # many, so Textual clipped the last one AFTER `clip_to_height` had
-        # already run — and what it clipped was the body line under a role
-        # header, leaving the orphan `▪ lop` D30 exists to prevent. Measured
-        # in a rendered frame at 100x30, not reasoned about.
-        measured = _content_height(getattr(self, "_preview", None))
-        rows = measured or self._layout().preview_rows
-        # STACKED, ONE MORE ROW GOES TO THE BORDER. `content_region.height`
-        # reports the pane's box and does NOT subtract its `border-top` —
-        # measured at 100x30: `size.height == content_region.height == 8` on a
-        # pane the stylesheet gives a one-row top border. Trusting it handed the
-        # text one row it could not paint, and Textual then clipped the LAST
-        # row silently, which is exactly the row the overflow marker occupies:
-        # the frame painted seven rows and no position. Side-by-side the border
-        # is on the LEFT, where it costs cells rather than rows, so only the
-        # stacked case subtracts.
-        if self._layout().mode == "stacked":
-            rows = max(1, rows - 1)
-        return max(1, rows - self._preview_header_rows())
+        return max(0, self._content_rows() - self._preview_header_rows())
+
+    def _pane_body_rows(self, total: int) -> int:
+        """Rows the pane's BODY paints for a ``total``-line conversation.
+
+        ONE definition of the status row's reservation, shared by the paint
+        (``_preview_text``) and by the scroll that has to land inside it
+        (``action_pane_end``). ``ctrl+g`` used to clamp against the RESERVED
+        height while the paint used the reduced budget, so the chord named
+        "newest" stopped one line short of the newest turn — the row it
+        reported and the rows it painted disagreed (design round 5, D9).
+
+        THE ROW IS RESERVED ONLY WHEN THERE IS ONE TO SPARE. Reserving it
+        unconditionally meant ``max(1, height - 1)`` emitted a body line AND a
+        status line into a one-row budget; the status row lost, so the pane
+        either painted chrome and an inverted ``1–0 of N`` with no conversation
+        at all, or painted the conversation and silently dropped the affordance
+        this row exists to provide (agent review round 4, MAJOR; UX round 2,
+        U5). At one row the CONVERSATION wins: it is what the pane is for, and
+        the status row says nothing worth having about a window nobody can read.
+        """
+        height = self._pane_height()
+        if height >= 2 and total > height:
+            return height - 1
+        return height
 
     def _page_rows(self) -> int:
         """Session rows the list can actually DRAW right now.
@@ -1787,15 +1848,39 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._preview_data = None
         self._repaint()
 
+    def _meta_row(self) -> int:
+        """Rows the optional ``model · cwd`` line gets: 1, or 0 when it is shed.
+
+        IT IS SHED BEFORE THE PANE LOSES ITS ONLY LINE OF CONVERSATION. The
+        plan draws the pane from ``PREVIEW_DRAW_MIN`` rows — the SHORTEST header
+        and one body line — and a row carrying a checkpoint makes that header
+        one row longer, so reserving it unconditionally left the smallest drawn
+        pane painting its name, both clocks, the ``model · cwd`` row and its
+        rule and NOT ONE LINE of the conversation (UX round 2, U5's shape one
+        row further down: measured at 40x15 and 100x14 against a row with a
+        checkpoint). The row is already the header's optional one (D7), so it is
+        the one that goes; the name and the two clocks are what identify the row.
+
+        ONE predicate, so the reservation and the paint cannot disagree about
+        whether the line is drawn — the row count and ``_preview_text`` both
+        ask this.
+        """
+        if not self._selected_checkpoint():
+            return 0
+        # ...and the row is kept only when it leaves 1 body line UNDER it, which
+        # is what it is spared for: the header is one row longer while it is
+        # drawn, so the test is against base + meta + 1, not against base.
+        return 1 if self._content_rows() - PREVIEW_HEADER_BASE - 1 >= 1 else 0
+
     def _preview_header_rows(self) -> int:
         """Rows the preview header occupies: name, clocks, optional meta, rule.
 
         Asked of the header that will actually be drawn, because the
         ``model · cwd`` line is omitted ENTIRELY when there is no checkpoint
         (D7) — reserving a row for it would leave the blank the placeholder was
-        removed to avoid.
+        removed to avoid — and shed when the pane cannot spare it (``_meta_row``).
         """
-        return 4 if self._selected_checkpoint() else 3
+        return PREVIEW_HEADER_BASE + self._meta_row()
 
     def _selected_row(self) -> SessionRow | None:
         rows = self.visible_rows
@@ -2143,11 +2228,24 @@ class SessionPickerScreen(ModalScreen[str | None]):
     # about the results pane; the chrome assertions are really about the filter
     # row; and tests must not re-derive the breakpoint arithmetic they check.
     def render_lines_for_test(self) -> list[str]:
-        """The RESULTS pane as plain strings: rows and their context lines."""
+        """The RESULTS pane as plain strings: rows and their context lines.
+
+        THE WIDGET'S OWN TEXT, NOT THE COMPOSITOR. This is the string the widget
+        hands to be painted; Textual may then wrap, clip or drop it, and a test
+        that reads only this plane cannot see any of those. Where the claim under
+        test is about what is ON SCREEN, read the compositor
+        (``painted_rows`` in ``tests/unit/tui/conftest.py``) as well — a round-3
+        guard was believed to be a frame assertion and was this method (agent
+        review round 4, MINOR).
+        """
         return [line.plain for line in self._results_text().split("\n")]
 
     def render_preview_for_test(self) -> list[str]:
-        """The PREVIEW pane as plain strings."""
+        """The PREVIEW pane as plain strings.
+
+        THE WIDGET'S OWN TEXT, NOT THE COMPOSITOR — see
+        :meth:`render_lines_for_test`.
+        """
         return [line.plain for line in self._preview_text().split("\n")]
 
     def render_footer_for_test(self) -> str:
@@ -2256,7 +2354,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         pane's own scrolling is for. One bare ``⋮`` survives at the narrowest,
         which still says "there is more below this".
         """
-        last = min(total, top + drawn)
+        # NEVER AN INVERTED RANGE. A window of zero drawn lines used to print
+        # `1–0 of 299`, an end before its own start, on the frame the pane had
+        # no conversation line to show on (agent review round 4, MAJOR). The
+        # panes now guarantee a drawn line, and this holds the arithmetic to the
+        # same rule rather than relying on that guarantee holding forever.
+        last = max(top + 1, min(total, top + drawn))
         position = f"{top + 1}–{last} of {total}"
         for candidate in (
             f"{position} · ctrl+u/ctrl+d scroll · ctrl+g newest",
@@ -2289,7 +2392,21 @@ class SessionPickerScreen(ModalScreen[str | None]):
             )
 
         out = Text()
-        out.append(f"{row.name or row.id}\n", style=Style(color=fg_colour, bold=True))
+        # ONE ROW PER HEADER LINE, AT EVERY WIDTH. The name and the clock row are
+        # not width-bounded, so on a narrow pane word wrap painted them over two
+        # rows each — rows the header's own reservation does not count, and
+        # Textual paid for the second with the LAST line of the pane, which is the
+        # status row the pane reserves for itself: measured at 40x15 and 40x16
+        # (pane text width 34, clock row 39 cells) and at 30x30, the frame
+        # painted name + clock row over two rows + rule + body and NO `N–M of
+        # total` at all, which is the silent clip D1/U2 exist to prevent.
+        # Truncating keeps the reservation true; teaching it to predict
+        # ``Text.wrap`` would be a second width model beside this one.
+        width = max(10, self._pane_width())
+        out.append(
+            f"{truncate_cells(row.name or row.id, width)}\n",
+            style=Style(color=fg_colour, bold=True),
+        )
         created = 0.0
         try:
             created = self._previews().created_at(row.id) or row.created_at
@@ -2297,19 +2414,23 @@ class SessionPickerScreen(ModalScreen[str | None]):
             created = row.created_at
         started = format_age(max(0.0, self._now - created)) if created else "·"
         worked = format_age(max(0.0, self._now - row.mtime))
-        out.append(f"started {started} · last worked {worked}\n", style=muted)
+        out.append(
+            truncate_cells(f"started {started} · last worked {worked}", width) + "\n",
+            style=muted,
+        )
         # Omitted ENTIRELY when there is no checkpoint (D7), rather than drawn
         # as a bare `· · ·` that reads as a load that never resolved. Measured:
         # on all 113 rows that have one, both model and cwd are present, so the
         # line is fully populated or fully absent.
-        checkpoint = self._selected_checkpoint()
+        checkpoint = self._selected_checkpoint() if self._meta_row() else None
         if checkpoint:
             out.append(
-                f"{_short_model(checkpoint)} · {_short_cwd(checkpoint)}\n",
+                truncate_cells(f"{_short_model(checkpoint)} · {_short_cwd(checkpoint)}", width)
+                + "\n",
                 style=dim,
             )
         # Spans the REAL preview width, or it runs off the edge when stacked.
-        out.append("─" * max(10, self._pane_width()) + "\n", style=faint)
+        out.append("─" * width + "\n", style=faint)
 
         lines = self._preview_lines()
         height = self._pane_height()
@@ -2317,10 +2438,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # pane can show, and the reservation is a property of the SESSION (does
         # it fit?) rather than of the offset — a marker that appears as you
         # scroll to a position is a reflow the design rounds treat as a defect.
-        clipped = len(lines) > height
-        body = max(1, height - 1) if clipped else height
+        # It is spent only when the pane has a row to spare (``_pane_body_rows``).
+        body = self._pane_body_rows(len(lines))
         # Clamped on every paint: the row budget changes with the terminal, and
-        # an offset from a taller geometry would leave the pane blank.
+        # an offset from a taller geometry would leave the pane blank. The clamp
+        # is the SAME budget the window is cut from, or `ctrl+g` lands one line
+        # short of the line it names (D9).
         self._pane_top = max(0, min(self._pane_top, max(0, len(lines) - body)))
         if not lines:
             # AN UNREADABLE FILE IS NOT AN EMPTY ONE. `(no prose in this
@@ -2333,12 +2456,22 @@ class SessionPickerScreen(ModalScreen[str | None]):
             except Exception:  # pragma: no cover - a broken store must not stop the paint
                 unreadable = False
             if unreadable:
-                out.append("transcript could not be read", style=dim)
+                out.append(truncate_cells("transcript could not be read", width), style=dim)
             else:
-                out.append("(no prose in this transcript)", style=dim)
+                out.append(truncate_cells("(no prose in this transcript)", width), style=dim)
             return out
 
         window = clip_to_height(lines, self._pane_top, body)
+        # U12: the statement that the middle was not read is painted at the JOIN,
+        # which on an over-window file is thousands of wrapped lines down (704
+        # `ctrl+u` presses from `ctrl+g`, counted by driving the keys), so a
+        # reader at the very top of the pane has no hint that the transcript as
+        # drawn is a bounded read at all. The row comes out of the body budget
+        # the pane has already spent, and only where there is one to spare: at
+        # one body row the line of conversation wins, because a pane with no
+        # conversation in it is the U5 defect this same row budget closes.
+        if body >= 2 and self._pane_top == 0 and any(kind == "marker" for kind, _ in lines):
+            window = [("marker", GAP_TEXT), *window[: body - 1]]
         for kind, text in window:
             if kind == "gutter":
                 ink = "accent" if text.endswith("you") else "success"
@@ -2359,13 +2492,13 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 # A uniform two-space indent; the wrap already rstripped each
                 # line so a continuation cannot turn it into three (D11).
                 out.append(f"  {text}\n", style=Style(color=fg_colour))
-        if clipped:
-            # The status row is appended LAST and is guaranteed to fit: the
-            # ladder above returns at most `⋮`.
+        if body < height:
+            # The status row is appended LAST, and the reservation is what makes
+            # it fit: the ladder above returns at most `⋮`. `body < height` is
+            # the same predicate `_pane_body_rows` reserved on, not a second
+            # guess at it.
             out.append_text(
-                self._preview_pane_status(
-                    max(1, self._pane_width()), self._pane_top, len(window), len(lines)
-                )
+                self._preview_pane_status(width, self._pane_top, len(window), len(lines))
             )
             out.append("\n")
         return out

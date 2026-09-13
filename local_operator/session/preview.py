@@ -270,10 +270,33 @@ def clip_to_height(
     a window whose last row is that statement is telling the truth about why the
     pane ends there — unlike a trailing gutter, which reads as a turn that
     failed to load.
+
+    THE POPPED ROW IS REFILLED, which is why the loop appends as well as pops.
+    Dropping the trailing label alone left the window one line SHORTER than the
+    budget it was given, and the pane paints the window it is handed: measured
+    on the real app at 100x30, a pane with eight content rows painted seven and
+    the eighth stayed blank, while the status row counted ``199–201 of 202`` at
+    the bottom so the chord named ``ctrl+g newest`` did not reach the newest
+    line (design round 5, D9). The refill takes the label's own first body line,
+    so the row the label vacated carries conversation rather than nothing.
+
+    A truncated body line under no label is the reading D30 already chose at the
+    whole-list level (``wrap_turns`` drops the trailing label for the same
+    reason): a sentence that continues reads as continuation, while a label with
+    nothing beneath it reads as a turn that failed to load.
     """
-    window = list(lines[top : top + max(1, height)])
+    end = min(len(lines), max(0, top) + max(1, height))
+    window = list(lines[max(0, top) : end])
     while window and window[-1][0] == "gutter":
         window.pop()
+        if end >= len(lines):
+            # The list itself never ends on a label — ``wrap_turns`` strips a
+            # trailing one — so this is unreachable for a well-formed list and
+            # exists only so a caller cannot get a window padded past its own
+            # content.
+            break
+        window.append(lines[end])
+        end += 1
     return window
 
 
