@@ -282,9 +282,12 @@ def format_mcp_startup(
         if len(names) == 1:
             # Says FAILED, like the multi-server variant: `gh — command not
             # found: gh` never named the state, so the reader had to infer which
-            # server the head line meant and read the name twice to do it. Both
-            # variants now open on the same word, which is what makes the second
-            # line scannable as a failure list rather than as prose.
+            # server the head line meant and read the name twice to do it. The
+            # transport single-failure line is the one exception and it is
+            # deliberate: its text opens on the marker (``network: …``) and
+            # already names its server by host, which is why
+            # :func:`_fit_failure_line` drops the head for that family (design
+            # review D1-2). Every other family still opens on ``failed: ``.
             detail = _fit_failure_line(names[0], outcome.failures[names[0]], max(1, max_cells))
         else:
             # Multiple failures are a LIST, and when they share one cause the

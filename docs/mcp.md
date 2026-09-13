@@ -131,8 +131,13 @@ the phrase alone (`network: cannot reach <host>`), because the phrase already
 names the server by host and a `failed: <name> —` head would say it twice; a
 **hostless** stdio failure keeps that head, since nothing else in its line
 identifies the server. The durable notice's closing signpost is budgeted the
-same way: it is shed whole to `— /mcp` when the column cannot take
-`— /mcp for details`, never split across a fold. Why: the transport is the one layer a single local fault takes out for
+same way, in four rungs: the full `— /mcp for details`, then the short `— /mcp`
+shed whole, then — for the transport family only — its own `(timed out)` detail
+token dropped so the short form still fits, and finally **no signpost at all**
+when even that cannot fit beside the sentence (around 70 columns and below for
+a long failure). It is never split across a fold, and the sentence is never
+edited to make room for it: an application error's own parenthetical, and the
+host in a transport phrase, both survive whole, and the notice wraps instead. Why: the transport is the one layer a single local fault takes out for
 **every remote server at once**, and the operator's own boot screen — 10 of 11
 servers "failed" with `Request 'initialize' timed out` and nothing saying the
 machine's connection was the problem — was chased through MCP config and OAuth
