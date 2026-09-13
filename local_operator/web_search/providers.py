@@ -354,7 +354,16 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
         for key in ("sources_list", "search_results"):
             rows = event.get(key)
             if isinstance(rows, list) and any(
-                isinstance(row, dict) and row.get("url") for row in rows
+                # ``isinstance`` AND a non-blank string, not truthiness: ``_source``
+                # strips the url and requires a scheme, so ``{"url": 5}``,
+                # ``{"url": True}``, ``{"url": {}}`` and ``{"url": "   "}`` each
+                # produce zero sources while suppressing the wall -- the same hole
+                # one type-check narrower (round-2 review MINOR-1). A blank url is
+                # no url; a non-string is not one either.
+                isinstance(row, dict)
+                and isinstance(row.get("url"), str)
+                and bool(row["url"].strip())
+                for row in rows
             ):
                 served_blocks.add(f"top_level_{key}")
                 break
