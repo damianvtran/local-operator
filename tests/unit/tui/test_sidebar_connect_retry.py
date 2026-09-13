@@ -1809,6 +1809,33 @@ class StoppedOwnerRemote(RecoveringRemote):
         raise ConnectionError("Connect call failed ('127.0.0.1', 54321)")
 
 
+def _write_stop_marker(config: Path, session_id: str, *, stopped: bool = True) -> None:
+    """The wake-index entry a real stop leaves behind, or the same entry reopened.
+
+    ``stopped=True`` is the durable marker ``control._mark_wakes_dormant``
+    stamps through the real stop ladder: one schedule, so an entry exists at all
+    — a wake-less session writes NO entry and therefore no marker, which is the
+    LIMIT (UX U7) this rig also pins by leaving the marker absent.
+
+    ``stopped=False`` is what reopening the session leaves: the same schedules
+    with ``stopped_at`` dropped, exactly as the open-time rewrite does it
+    (``write_entry``'s ``clear``). The two are the shapes the repeat-click arm
+    has to tell apart, so they are built by one function and differ in one key.
+    """
+    from local_operator.harness.wake import WakeSchedule
+    from local_operator.wakes import store as wake_store
+
+    wake_store.write_entry(
+        config,
+        session_id,
+        cwd=str(config),
+        schedules=[
+            WakeSchedule(id="w1", message="check in", next_due_at=1_700_000_060_000, created_at=1)
+        ],
+        preserve={"stopped_at": 1_700_000_000_000} if stopped else None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_row_whose_owner_was_stopped_reports_it_once(
     tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture
@@ -1819,25 +1846,17 @@ async def test_a_row_whose_owner_was_stopped_reports_it_once(
     retry", which the reviewer then followed for another 15 s to the same
     verdict. The durable stop marker says why: this owner is not coming back.
 
-    Asserted structurally: ONE round out of a budget of four, the honest sentence
-    on the band and in the refusal row, and the latch naming the arm. The marker
-    itself is a real file written through the wake store — which is also what
-    pins its LIMIT, since a session with no schedules writes no entry at all.
+    Asserted structurally: NO round at all — the marker is read before the
+    dial, so the round that used to spend the engage envelope on an owner that
+    cannot answer never starts (PR #1049 round 2, U6.1 measured that envelope at
+    12.8-13.9 s of `Saved · Connecting…` before this sentence arrived) — the
+    honest sentence on the band and in the refusal row, and the latch naming the
+    arm. The marker itself is a real file written through the wake store — which
+    is also what pins its LIMIT, since a session with no schedules writes no
+    entry at all.
     """
-    from local_operator.harness.wake import WakeSchedule
-    from local_operator.wakes import store as wake_store
-
     session = StoppedOwnerRemote("stoppedbypeer", config_dir=tmp_path)
-    await asyncio.to_thread(
-        wake_store.write_entry,
-        tmp_path,
-        session.session_id,
-        cwd=str(tmp_path),
-        schedules=[
-            WakeSchedule(id="w1", message="check in", next_due_at=1_700_000_060_000, created_at=1)
-        ],
-        preserve={"stopped_at": 1_700_000_000_000},
-    )
+    _write_stop_marker(tmp_path, session.session_id)
     app = OperatorApp(lambda: _factory(FakeSession()))
     caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1847,7 +1866,12 @@ async def test_a_row_whose_owner_was_stopped_reports_it_once(
         app._start_sidebar_connection(source)
         await _drain_retries(app, source)
 
-        assert session.bind_calls == 1, "the stopped row spent the budget anyway"
+        # ZERO, not one: the pre-flight reads the durable marker before
+        # `bind_runtime`, so this row never opens a round. Asserting the
+        # POSTCONDITION the fix exists for rather than the round count keeps the
+        # test honest in both directions -- a future change that reintroduced a
+        # dial here would spend the envelope again, and this is what would say so.
+        assert session.bind_calls == 0, "the stopped row opened a round anyway"
         assert source.display_only is True
         assert source.connect_attempts == 0
         assert app._status is not None
@@ -1906,6 +1930,113 @@ def _stopped_session_row_click(app: OperatorApp, session_id: str) -> None:
     from local_operator.tui.widgets.session_sidebar import SessionSidebar
 
     app.post_message(SessionSidebar.Selected(session_id))
+
+
+async def _reach_the_stopped_verdict(app: OperatorApp, source: SessionInteraction) -> str:
+    """Drive one real connect to its held verdict; return the error text it holds.
+
+    Shared by the two tests below because the arm they differ about is what a
+    SECOND click does — if they each built the verdict their own way, a
+    difference between them could come from the setup rather than from the
+    click.
+    """
+    app._start_sidebar_connection(source)
+    await _drain_retries(app, source)
+    assert source.can_never_bind is True, "the connect never published a verdict"
+    assert source.connection_error, "the verdict carried no error text"
+    return source.connection_error
+
+
+@pytest.mark.asyncio
+async def test_reclicking_a_stopped_row_answers_without_starting_a_connect(
+    tmp_path, monkeypatch
+) -> None:
+    """UX U6.2: no second click may spend a wait the app has the answer to.
+
+    The two facts this pins are the ones the reviewer measured on the round-2
+    head: the click painted `Saved · Connecting…` OVER the verdict the app had
+    published seconds earlier, then spent the full connect envelope (12.8 s in
+    their run) to re-derive the identical sentence. The verdict here is reached
+    through the real connect, so `can_never_bind` and `connection_error` are the
+    app's own — not values this test wrote onto the source.
+
+    Asserted as a structural ABSENCE rather than as band text: the band comes
+    back to the same sentence in the old code too, so a text-only assertion
+    would pass against the defect. What must not exist is a second connect task,
+    and what must not be painted is the `Connecting…` frame that the old path
+    put over the answer — that frame is the lie, and it is only visible in the
+    task's existence and in the fields it clears on entry.
+    """
+    session = StoppedOwnerRemote("reclickedstopped", config_dir=tmp_path)
+    _write_stop_marker(tmp_path, session.session_id)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        app._session = session
+        _instant_backoff(monkeypatch, attempts=4)
+        held_error = await _reach_the_stopped_verdict(app, source)
+        dials_at_verdict = session.bind_calls
+        # The verdict's own task, still assigned to the source: a finished
+        # connect is not cleared from `connection_task` (the retry re-arm
+        # replaces it, and nothing else writes it), so the identity of THIS
+        # object is what a second click must not change.
+        task_at_verdict = source.connection_task
+
+        _stopped_session_row_click(app, session.session_id)
+        for _ in range(8):
+            await pilot.pause()
+
+        assert source.connection_task is task_at_verdict, (
+            "the repeat click started another connect; the verdict it already held "
+            "was cleared and re-derived"
+        )
+        assert session.bind_calls == dials_at_verdict, "the repeat click opened a round"
+        assert source.can_never_bind is True
+        assert source.connection_error == held_error
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert _stopped_sentence(session) in status
+        assert "Connecting" not in status, "the band went back to promising a dial"
+
+
+@pytest.mark.asyncio
+async def test_reclicking_a_reopened_row_dials_again(tmp_path, monkeypatch) -> None:
+    """The negative control for the arm above: a reopen must still be dialled.
+
+    A held verdict is a fact about the past. Reopening the session — here, the
+    same wake-index entry with `stopped_at` dropped, which is what the
+    open-time rewrite leaves — means an owner may be back, and the app must not
+    answer that click from a verdict it can no longer justify. Without this
+    test the arm above would also pass if the re-click branch gave up whenever
+    `can_never_bind` was set, which is the shape that would strand a session
+    that came back.
+    """
+    session = StoppedOwnerRemote("reopened", config_dir=tmp_path)
+    _write_stop_marker(tmp_path, session.session_id)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        app._session = session
+        _instant_backoff(monkeypatch, attempts=2)
+        await _reach_the_stopped_verdict(app, source)
+
+        # The session is reopened from elsewhere: the marker the verdict rested
+        # on is gone, and nothing about this source has been touched.
+        _write_stop_marker(tmp_path, session.session_id, stopped=False)
+        _stopped_session_row_click(app, session.session_id)
+        # The click's own handler is a worker, so the loop has to turn before an
+        # ordinary connect exists to drain: draining first would await the
+        # FINISHED verdict task and return on the very next line.
+        for _ in range(6):
+            await pilot.pause()
+        await _drain_retries(app, source)
+
+        assert session.bind_calls >= 1, "a reopened session was never dialled again"
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert (
+            _stopped_sentence(session) not in status
+        ), "the app answered a reopened session with the stopped verdict"
 
 
 @pytest.mark.asyncio
