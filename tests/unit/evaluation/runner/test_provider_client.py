@@ -565,7 +565,139 @@ async def test_client_carries_provider_usage_and_cost_into_the_decision() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_direct_provider_call_is_priced_from_the_registry_table() -> None:
+    """A direct provider states tokens and NO dollar amount, and the evidence
+    must still bill the call.
+
+    Only aggregators precompute ``usage.cost``; DeepSeek, Anthropic, OpenAI,
+    Gemini, Kimi and xAI state tokens alone. Reading the receipt alone recorded
+    0 on every request of an episode whose token counts were real, which left
+    ``--max-usd``, the per-cycle ceiling and ``BudgetCapGuard`` unable to fire
+    -- they all key on this figure.
+
+    The counts are a live canary payload. The assertion pins THREE conventions
+    at once, so a regression in any of them fails here:
+
+    * the cache-read rate is applied (3840 tokens at 0.006/M);
+    * the cached prefix is subtracted out of ``input_tokens`` -- DeepSeek's
+      ``prompt_tokens`` CONTAINS ``prompt_cache_hit_tokens``, so billing both
+      would double-count it at 50x the real rate (1992 rather than 838);
+    * ``reasoning_tokens`` are a SUBSET of ``output_tokens`` and are not
+      billed on top (adding them gives 1118).
+    """
+
+    current = observation()
+    usage = Usage(
+        input_tokens=4783,
+        output_tokens=443,
+        reasoning_tokens=225,
+        cache_read_tokens=3840,
+        cache_write_tokens=0,
+    )
+    stream = ScriptedStream(finish_payload(current), usage=usage)
+    spec = ModelSpec(provider="deepseek", model_id="deepseek-flash")
+
+    decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
+
+    assert decision.cost_micros == 838
+
+
+@pytest.mark.asyncio
+async def test_a_provider_receipt_still_wins_over_the_table() -> None:
+    """An aggregator's own bill is ground truth, not an input to the estimate.
+
+    The model here is a PRICED one, so a fallback would produce a number: the
+    receipt has to be returned verbatim anyway, because it already reflects the
+    route the request landed on, its cache discounts and any override a flat
+    table row cannot express.
+    """
+
+    current = observation()
+    usage = Usage(input_tokens=4783, output_tokens=443, usd_cost=0.0007)
+    stream = ScriptedStream(finish_payload(current), usage=usage)
+    spec = ModelSpec(provider="deepseek", model_id="deepseek-flash")
+
+    decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
+
+    assert decision.cost_micros == 700
+
+
+@pytest.mark.asyncio
+async def test_a_reported_zero_is_a_known_zero_and_is_not_re_estimated() -> None:
+    """A provider that bills a route as free reported a real 0.0, which is not
+    the same fact as "no figure" and must not be overwritten by the table."""
+
+    current = observation()
+    usage = Usage(input_tokens=4783, output_tokens=443, usd_cost=0.0)
+    stream = ScriptedStream(finish_payload(current), usage=usage)
+    spec = ModelSpec(provider="deepseek", model_id="deepseek-flash")
+
+    decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
+
+    assert decision.cost_micros == 0
+
+
+@pytest.mark.asyncio
+async def test_the_table_prices_the_route_that_actually_served() -> None:
+    """The price comes from the SERVED spec, not the requested one.
+
+    ``stream_with_failover`` rewrites the request to a fallback and stamps the
+    on-the-wire spec onto the usage; pricing the requested spec instead would
+    file a failover's spend under the model that never ran -- the bug the stamp
+    exists to prevent, reintroduced one layer down.
+
+    The request here names a model the registry cannot price at all, so a
+    fallback to it would read 0: the non-zero answer can only come from the
+    stamp.
+    """
+
+    current = observation()
+    usage = Usage(
+        input_tokens=4783,
+        output_tokens=443,
+        reasoning_tokens=225,
+        cache_read_tokens=3840,
+        provider="deepseek",
+        model_id="deepseek-flash",
+    )
+    stream = ScriptedStream(finish_payload(current), usage=usage)
+    spec = ModelSpec(provider="unpriceable", model_id="no-such-model")
+
+    decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
+
+    assert decision.cost_micros == 838
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_degrades_to_zero_rather_than_a_guess() -> None:
+    """An id no price table knows is legitimate; it must not crash an episode.
+
+    The evidence payload has no "unknown" encoding, so 0 is the honest answer
+    here -- the failure this test separates from is the WRONG zero: a route the
+    registry prices reads 0 only if the table lookup is broken.
+    """
+
+    current = observation()
+    stream = ScriptedStream(
+        finish_payload(current),
+        usage=Usage(
+            input_tokens=5,
+            output_tokens=5,
+            provider="unpriceable",
+            model_id="no-such-model",
+        ),
+    )
+    spec = ModelSpec(provider="unpriceable", model_id="no-such-model")
+
+    decision = await _client(stream, model_spec=spec).decide(current, _turns(current))
+
+    assert decision.cost_micros == 0
+
+
+@pytest.mark.asyncio
 async def test_unreported_cost_is_zero_rather_than_a_guess() -> None:
+    """Neither a receipt nor a table row: 0, without inventing a number."""
+
     current = observation()
     stream = ScriptedStream(finish_payload(current), usage=Usage(input_tokens=5, output_tokens=5))
 
