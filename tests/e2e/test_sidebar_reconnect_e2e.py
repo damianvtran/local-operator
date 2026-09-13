@@ -151,7 +151,7 @@ async def test_an_evicted_viewer_reconnects_without_ever_looking_connected(
     config = headless_tui_env
     servers = {name: await _runtime(config, name) for name in ("origin", "target")}
 
-    def find_owner(_config_dir, session_id):
+    def find_owner(_config_dir, session_id, **_probe):
         server = servers.get(session_id)
         return (server._record, server._record.pid) if server else (None, None)
 
@@ -285,7 +285,7 @@ async def test_a_loss_in_the_bind_to_paint_window_heals_instead_of_latching(
     config = headless_tui_env
     servers = {name: await _runtime(config, name) for name in ("origin", "target")}
 
-    def find_owner(_config_dir, session_id):
+    def find_owner(_config_dir, session_id, **_probe):
         server = servers.get(session_id)
         return (server._record, server._record.pid) if server else (None, None)
 
@@ -384,7 +384,7 @@ async def test_a_plain_socket_loss_reconnects_with_no_attach_pressure(
     session_id = "target"
     server = await _runtime(config, session_id)
 
-    def find_owner(_config_dir, requested):
+    def find_owner(_config_dir, requested, **_probe):
         return (server._record, server._record.pid) if requested == session_id else (None, None)
 
     with patch("local_operator.mobile.attach_client.find_runtime_record", find_owner):

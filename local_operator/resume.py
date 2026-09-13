@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.procstate import is_zombie
+
 #: ``--resume`` with no id. A sentinel rather than a second boolean flag so the
 #: whole "which session" decision stays ONE value threaded through one parameter.
 RESUME_LATEST = "@latest"
@@ -1119,7 +1121,7 @@ def resolve_resume_id(config_dir: Path, requested: str) -> str:
     return resume_dir(config_dir, requested).name
 
 
-def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
+def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
     """Pid of the process currently hosting ``session_id``, or ``None``.
 
     Two writers on one transcript is how a TUI ``/resume`` of a phone-started
@@ -1132,8 +1134,41 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     Consults the session directory's ``.session.pid`` liveness marker — the
     same file the retention sweep uses. Stdlib-only and import-light: this
     module must stay off the engine and the mobile package (see the module
-    docstring). A live TUI or phone-started child always writes that marker
-    when it claims the directory.
+    docstring); the shared probe it uses is the stdlib-only leaf module
+    :mod:`local_operator.procstate`, which is not part of either. A live TUI or
+    phone-started child always writes that marker when it claims the directory.
+
+    **A zombie is not an owner.** Signal 0 succeeds against an exited-but-
+    unreaped process, and this marker is written by the runtime that owns the
+    session — whose parent is often a long-lived TUI that may never reap it.
+    Reporting such a pid as the owner is what turned a killed runtime's session
+    into one that no interface would open: every attach path here refused with
+    "session X is already open in another process (pid N)", naming a corpse,
+    while the lease that decision agrees with kept the claim out of reach of
+    the one mechanism that recovers it. Discovery, the attach guard and the
+    lease all learn the same answer from one probe now; see
+    :func:`local_operator.procstate.is_zombie`.
+
+    ``check_zombie=False`` is for the engage loop's DISCOVERY path, which calls
+    this on every pass of its dense 10 ms grid: the proof costs a `ps` fork
+    (2.4-4.6 ms measured across runs on this host), which is more than the dead
+    time that grid exists to remove. At the three user-facing call sites (the
+    TUI's ``/resume``, ``lop exec --resume`` and the phone's attach) the answer
+    IS the decision, so they keep the default.
+
+    Cheap mode is not merely a wait, and saying so would be wrong. It cannot
+    change ARBITRATION — the loop's decision to attach or spawn still ends in a
+    runtime that has to acquire the lease, and that path always demands the proof
+    — but its answer is also read by ``find_runtime_record`` to SELECT a record,
+    and the two errands that deliver nothing (``WarmErrand``, ``WakeErrand``)
+    treat reaching a live record as the completed errand. So on the one pass
+    where an owner published AND died between two dense polls, the cheap answer
+    can hand back a corpse's record and report that errand ready. The window is a
+    single dense pass (~10-25 ms) because any pass that sees a record ends the
+    grid, the next pass proves the owner dead, and a wake is retried rather than
+    lost (the schedule stays overdue until a runtime loads). It is also strictly
+    narrower than the behaviour before this branch, when such a record read as
+    live for the ~45 s until its heartbeat quieted.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
@@ -1148,7 +1183,8 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
     # Windows has no signal 0 — ``os.kill`` there TERMINATES the target
     # (see ``session.retention._process_alive``). A parseable marker is
     # treated as live rather than probed, so a ``/resume`` cannot kill
-    # the phone-started child it is trying to share (F2).
+    # the phone-started child it is trying to share (F2). Windows also has no
+    # zombie state, so there is nothing the probe below could add there.
     if sys.platform == "win32":
         return pid
     try:
@@ -1159,6 +1195,13 @@ def live_runtime_pid(config_dir: Path, session_id: str) -> int | None:
         return pid
     except OSError:
         return pid
+    if check_zombie and is_zombie(pid):
+        # The probe is spent only here, where signal 0 has already said
+        # "exists". At the user-facing call sites the difference between a
+        # working runtime and its corpse decides whether someone is told to go
+        # and steer a session that nobody is running; on the engage loop's dense
+        # discovery path it is deferred, because there it can only cost a wait.
+        return None
     return pid
 
 

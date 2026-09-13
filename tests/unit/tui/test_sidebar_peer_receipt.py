@@ -112,7 +112,7 @@ async def live_owners(
             await server.start_in_process()
             servers[session_id] = server
 
-        def find(_directory: Path, session_id: str) -> tuple[Any, Any]:
+        def find(_directory: Path, session_id: str, **_probe: Any) -> tuple[Any, Any]:
             server = servers.get(session_id)
             return (server._record, server._record.pid) if server else (None, None)
 
