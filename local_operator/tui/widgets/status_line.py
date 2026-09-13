@@ -1069,8 +1069,18 @@ class StatusLine:
         so the first thing Herdr hears is the band's actual state — ``idle``
         at a prompt, but ``working`` if the app attached it mid-turn (a
         ``/resume`` that adopts a session whose turn is already running).
+
+        The state provider handed over with it is the reporter's heartbeat
+        source (see ``herdr/reporter.py``, "WHY A HEARTBEAT"): it re-asserts
+        the row every 30 s, which is how a row Herdr lost to a server restart
+        comes back without waiting for the next transition. It reads the SAME
+        derivation the sync below pushes, so the heartbeat is a re-assertion
+        and not a second opinion — and it is called off the event loop, which
+        two attribute reads are safe for.
         """
         self._herdr = reporter
+        if reporter is not None:
+            reporter.set_state_provider(lambda: state_from_title(self._title_state()))
         self._sync_terminal_title()
 
     def set_terminal_title(self, title: TerminalTitle | None) -> None:
