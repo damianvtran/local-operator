@@ -2820,6 +2820,13 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
     by default for an ordinary request: the first five come from
     ``stream_with_failover``'s ``isolated`` branch, the sixth from the read-only
     credential resolve it asks for.
+
+    The branch's one sanctioned second attempt — a bearer rejected outright
+    (401/403) followed by a READ-ONLY re-resolve that hides the rejected
+    bearer — is exercised below, and every test around it re-asserts that the
+    widening bought the errand a title WITHOUT buying it any routing decision:
+    no rotation, no block, no demotion, no sticky write, no route state, no
+    sleep, and at most two wire attempts ever.
     """
 
     @staticmethod
@@ -2848,9 +2855,106 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
             ]
         assert specs_seen == ["gpt-4o"], "an isolated call walked onto a fallback model"
 
-    async def test_it_never_rotates_the_sessions_credential(self) -> None:
-        """``rotate_sibling`` moves the session's STICKY credential, so an auth
-        failure on a title would re-point the account the turn transacts on."""
+    class _SiblingResolvingAuth(FakeAuth):
+        """A store whose read-only re-resolve can see past a rejected bearer.
+
+        ``exclude_keys`` hides a row from ONE resolve alone — the real
+        ``AuthStore``'s parameter for the errand's sibling leg. ``FakeAuth``
+        itself ignores it, which is exactly the "same bearer again" case the
+        one-attempt rule must keep covering for stores without the support.
+        """
+
+        async def get_api_key(
+            self, provider: str, session_id: str | None = None, **kwargs: Any
+        ) -> str | None:
+            pool = self.keys.get(provider, [])
+            excluded = set(kwargs.get("exclude_keys") or ())
+            for key in pool:
+                if key not in excluded:
+                    return key
+            return pool[0] if pool else None
+
+    async def test_an_auth_rejection_serves_itself_from_a_sibling_without_rotating(
+        self,
+    ) -> None:
+        """The rewrite of the old ``never_rotates`` test under the auth-retry
+        rule. The wire now sees both bearers — that is the point of the fix —
+        but the ROUTING denial is absolute: ``rotate_sibling`` moves the
+        session's STICKY credential, so the errand must still never call it,
+        and it must leave the pinned route alone while it is at it."""
+        auth = self._SiblingResolvingAuth({"openai": ["bad-key", "good-key"]})
+        used_keys: list[str | None] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                if api_key == "bad-key":
+                    return ScriptedClient(
+                        ProviderError(401, "invalid api key", auth_error=True)
+                    ).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        pinned = FallbackTarget("anthropic/claude-opus-5", "high")
+        state = FailoverRouteState()
+        await state.activate(pinned, "an earlier turn failed over")
+        got = [
+            event
+            async for event in stream_with_failover(
+                self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
+            )
+        ]
+        assert used_keys == [
+            "bad-key",
+            "good-key",
+        ], "the errand did not spend its one auth retry on the sibling"
+        assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+        assert auth.rotations == [], "an isolated call rotated the session's credential"
+        assert state.active == pinned, "the auth retry moved the turn's sticky route"
+
+    async def test_a_dead_pool_ends_the_errand_after_exactly_two_attempts(self) -> None:
+        """The retry is a latch, not a walk. A pool where EVERY key is rejected
+        gets two wire attempts — the rejected bearer plus the one sibling the
+        read-only re-resolve produced — and then the errand dies, even though a
+        third sibling was available. A decorative call must not spend a pool
+        auditing itself for a title nobody asked to see."""
+        auth = self._SiblingResolvingAuth({"openai": ["bad-key", "bad-key-2", "bad-key-3"]})
+        used_keys: list[str | None] = []
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid api key", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
+                )
+            ]
+        assert used_keys == ["bad-key", "bad-key-2"], "the errand walked past its single auth retry"
+        assert auth.rotations == []
+
+    async def test_a_re_resolve_that_yields_the_same_bearer_makes_exactly_one_attempt(
+        self,
+    ) -> None:
+        """The retry is CONDITIONAL on a different bearer: a store that cannot
+        hide the rejected row (no ``exclude_keys`` support — every store predating
+        it, and any pool of one) hands the same bearer back, and re-sending it
+        would be a guaranteed second 401 spent on nothing. That store keeps
+        today's one-attempt behaviour."""
         auth = FakeAuth({"openai": ["bad-key", "good-key"]})
         used_keys: list[str | None] = []
 
@@ -2872,8 +2976,42 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                     self._isolated(), auth, {"retry": {"baseDelayMs": 1}}, client_for
                 )
             ]
-        assert used_keys == ["bad-key"], "an isolated call retried on a second credential"
-        assert auth.rotations == [], "an isolated call rotated the session's credential"
+        assert used_keys == ["bad-key"], "re-sent the rejected bearer"
+        assert auth.rotations == []
+
+    @pytest.mark.parametrize("status", [429, 500])
+    async def test_non_auth_failures_still_make_exactly_one_attempt_and_never_sleep(
+        self, status: int
+    ) -> None:
+        """The widening is auth-shaped ONLY. A 429 says "wait", a 5xx says "the
+        provider is having a moment", and an errand must do neither: one
+        attempt, no backoff sleep, exactly as before the fix."""
+        client = ScriptedClient(ProviderError(status, "boom", retryable=True))
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        async def client_for(spec: ModelSpec) -> Any:
+            return client
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(),
+                        FakeAuth({"openai": ["bad-key", "good-key"]}),
+                        {"retry": {"baseDelayMs": 1}},
+                        client_for,
+                    )
+                ]
+        finally:
+            failover_module._abortable_sleep = original
+        assert client.calls == 1, "a non-auth failure retried on an isolated request"
+        assert slept == [], "an isolated call slept on a backoff"
 
     async def test_it_neither_pins_nor_clears_the_sticky_route(self) -> None:
         """The route state is session-wide: a title pinning a fallback would move
@@ -3023,6 +3161,79 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
             assert (
                 store._sticky[("openai", session_id)] == sibling_row.id
             ), "stickiness did not move on an ordinary request"
+        finally:
+            store.close()
+
+    async def test_the_auth_retry_leaves_the_sticky_pointer_and_block_list_byte_identical(
+        self, tmp_path: Any
+    ) -> None:
+        """The sticky row is where the bug actually lived: the observed failures
+        were sessions whose TURN had pinned the DEAD row (or nothing at all,
+        with the hash pick landing on it), so every naming errand for them
+        resolved the stale key while the turn rotated past it. The fix lets the
+        errand retry on the sibling — and this pins that it does so by HIDING
+        the rejected row from one resolve, not by blocking it or moving the
+        pointer: a real ``AuthStore`` on a temp DB, byte-identical before and
+        after. The ordinary-request control proves the fixture could have
+        mutated both, so the assertions above cannot be vacuous.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-with-a-stale-row-first"
+        dead = store.upsert_credential(
+            "openai", {"key": "stale-key", "source": "login", "type": "api_key"}
+        )
+        good = store.upsert_credential(
+            "openai", {"key": "live-key", "source": "login", "type": "api_key"}
+        )
+        # The turn is sticky on the stale row, exactly as the live sessions
+        # were: the hash pick landed there and the turn's own rotation had not
+        # fired from this errand's point of view.
+        store._sticky[("openai", session_id)] = dead.id
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                if api_key == "stale-key":
+                    rejected = ProviderError(
+                        401, "Authentication Fails, Your api key is invalid", auth_error=True
+                    )
+                    return ScriptedClient(rejected).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        try:
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert store._sticky == {
+                ("openai", session_id): dead.id
+            }, "the auth retry moved the session's sticky credential"
+            assert not store.is_blocked(
+                dead.id, "openai"
+            ), "the auth retry blocked the rejected row"
+            assert (
+                store._active_demotions("openai") == set()
+            ), "the auth retry demoted the rejected row"
+
+            # CONTROL, same store and same 401: an ordinary request DOES block
+            # the stale row and move stickiness to the sibling — which is why
+            # the turn beside a failing errand stayed healthy all along.
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert store.is_blocked(dead.id, "openai"), "the ordinary rotation blocked nothing"
+            assert store._sticky[("openai", session_id)] == good.id
         finally:
             store.close()
 

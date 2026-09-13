@@ -2168,7 +2168,10 @@ class ChatRequest(BaseModel):
     #:    so an auth failure on a title would re-point the turn's account.
     #:    *Denied in* ``stream_with_failover``: ``retry.enabled = False``, which
     #:    also removes the fallback chain and the backoff budget — every
-    #:    rotation path sits behind it.
+    #:    rotation path sits behind it. The one exception is the errand's
+    #:    single auth re-resolve, which deliberately does NOT rotate: it
+    #:    re-reads the pool with the rejected bearer hidden and only spends a
+    #:    second wire attempt when that read yields a different bearer.
     #: 3. ``SessionStreamFn`` consumes a pending message boundary to classify
     #:    auto-effort. Whoever arrives first spends it, so a naming call would
     #:    freeze the turn's effort from ITS prompt and emit an "auto effort"
@@ -2200,22 +2203,30 @@ class ChatRequest(BaseModel):
     #:    ``get_api_key`` → ``AuthStore._resolve``: no ``block_credential``, no
     #:    ``_set_sticky`` write and none cleared.
     #:
-    #: So an isolated request gets exactly ONE attempt on the model it names:
-    #: no fallback chain, no sticky route read or written, no credential
-    #: rotation, no backoff sleep, no preflight, no boundary classification, no
-    #: routing decision taken by its credential resolve, and not the session's
-    #: cache key. It still resolves credentials under the session id, so that
-    #: READ lands on the same account the turn is on whenever that account is
-    #: usable, which is the point. What it cannot do is take the turn anywhere:
-    #: if its own resolve finds the sticky credential's refresh broken it may
-    #: serve ITSELF from a sibling, but the sticky pointer and the block list
-    #: come out of the call exactly as they went in, so the turn's next resolve
-    #: still lands where it did before. A successful OAuth refresh does persist
-    #: the rotated token, which is that account's own bookkeeping rather than a
-    #: decision about where requests go. It fails fast and alone, which is what
-    #: lets the caller swallow the failure (see
-    #: ``session.naming.generate_title``) without the turn ever knowing a second
-    #: call happened.
+    #: So an isolated request gets at most TWO attempts on the model it
+    #: names, and the second only in one case: the bearer it was handed was
+    #: rejected outright (401/403) and a read-only re-resolve that hides that
+    #: bearer produces a different one. Deployment reality widened the original
+    #: one-attempt rule: pools contain stale keys, the pick is a hash of the
+    #: session id, and the turn beside the errand rotates past the dead row on
+    #: its own — so without the re-resolve, every naming call for such a
+    #: session would fail forever while the conversation itself stayed healthy.
+    #: The errand spends one extra request only in that auth case. Everything
+    #: else holds: no fallback chain, no sticky route read or written, no
+    #: credential rotation, no backoff sleep, no preflight, no boundary
+    #: classification, no routing decision taken by its credential resolve,
+    #: and not the session's cache key. It still resolves credentials under
+    #: the session id, so that READ lands on the same account the turn is on
+    #: whenever that account is usable, which is the point. What it cannot do
+    #: is take the turn anywhere: if its own resolve finds the sticky
+    #: credential's refresh broken it may serve ITSELF from a sibling, but the
+    #: sticky pointer and the block list come out of the call exactly as they
+    #: went in, so the turn's next resolve still lands where it did before. A
+    #: successful OAuth refresh does persist the rotated token, which is that
+    #: account's own bookkeeping rather than a decision about where requests
+    #: go. It fails fast and alone, which is what lets the caller swallow the
+    #: failure (see ``session.naming.generate_title``) without the turn ever
+    #: knowing a second call happened.
     #:
     #: Enforced in three places, tested in three: ``stream_with_failover``
     #: (1, 2, and the retry budget), ``SessionStreamFn.__call__`` (3, 4, 5) and
