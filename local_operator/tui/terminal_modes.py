@@ -62,16 +62,91 @@ an unpatched boot was measured doing — ``?2048h`` at byte ~123, ``?1016h`` at
 ~131, reports immediately after — so without the guard our reset would be undone
 within milliseconds of being written, by us.
 
-SO BOTH MECHANISMS ARE LOAD-BEARING AND NEITHER IS REDUNDANT. The reset clears
-the mode AT THE TERMINAL, including a sticky one we inherited; the environment
-guard stops TEXTUAL from turning it straight back on after seeing the reset.
-Remove either one and the divisor latches again — the first on state left set in
-the VT by an earlier app, the second on the driver's reply to its own query.
+A BOOT-TIME RESET CANNOT CATCH A CO-TENANT THAT DIRTIES THE MODE LATER. Mode
+2048 is per-VT state shared by every process on that tty, and the report for the
+resize that REVEALS a dirty mode arrives before any handler could act on it: the
+parser latches ``mouse_pixels`` while parsing that very report.
 
-ORDERING. :func:`reset_in_band_resize` must reach the wire before the driver
-issues its ``CSI ?2048$p`` query at ``linux_driver.py:299``, and
-:func:`guard_pixel_mouse_latch` must run before ``textual.constants`` is
-imported, because ``SMOOTH_SCROLL`` is a ``Final`` read once at import time.
+THE PARSER GATE. :func:`install_pixel_mouse_gate` patches the CLASS method
+``XTermParser.parse_mouse_code`` to clear ``mouse_pixels`` before delegating, so
+that latch can never scale a coordinate we parse. It installs itself only when
+the negotiation is CLOSED — :func:`pixel_mouse_negotiation_open` mirrors the
+gate Textual puts on its own mode-report branch — because with the negotiation
+closed we never put ``?1016h`` on the wire AND we take that mode back off the
+terminal (see THE CO-TENANCY TRADE below), so no delivered report can be a
+legitimate statement that our coordinates are pixels. The decision is read from
+``constants.SMOOTH_SCROLL``/``IS_ITERM`` rather than from
+:func:`guard_pixel_mouse_latch`'s return value, and that matters: the guard
+defers to an inherited ``TEXTUAL_SMOOTH_SCROLL=0`` — which is the value the guard
+itself writes, so every re-entrant boot and every user who followed our own
+documentation would silently lose both halves of this fix. An explicit
+``TEXTUAL_SMOOTH_SCROLL=1`` on a non-iTerm terminal still negotiates and keeps
+upstream behaviour byte for byte, because there no report is illegitimate.
+Provenance: a LOCAL workaround for upstream
+behaviour, deliberately narrow (the one latch, never Textual's resize or
+terminal-size handling), idempotent, and reversible so a test can uninstall it.
+It lives in lop rather than upstream because the trade it implements is OURS: we
+are the ones who chose to stop negotiating pixel coordinates (THE ACCEPTED COST,
+below), so we are the ones who must not let a divisor that is only correct for
+that negotiation keep running — or a pixel-scale stream keep arriving. DELETE IT
+once upstream gates the latch on the mode actually having been requested — the
+issue's own mitigation candidate 3, i.e. ``mouse_pixels`` set only where
+``SMOOTH_SCROLL`` is on. The tripwire that a Textual bump shipping that fix
+trips is ``test_pixel_mouse_latch.py::
+test_env_guard_alone_does_not_stop_a_delivered_report``: it pins
+``SMOOTH_SCROLL=False`` and asserts an UNGATED parser still leaves
+``mouse_pixels`` True after a report, so a release that gates the latch on that
+constant fails it rather than passing silently. The same-shaped
+``test_in_band_report_latches_pixel_mouse_coordinates`` is deliberately NOT the
+tripwire: it does not pin ``SMOOTH_SCROLL``, which defaults to ``1`` and is
+allow-listed as ambient in ``tests/unit/test_ambient_env_isolation.py``, so a
+``SMOOTH_SCROLL``-gated upstream latch would still set ``mouse_pixels`` and leave
+that test green — a tripwire that cannot fire in the default environment is not
+one.
+
+THE MID-SESSION RE-CLEAN. :class:`InBandResizeReclaimer` re-asserts both resets
+(``CSI ?2048l`` and ``CSI ?1016l``) through the app's driver writer on ``Resize``
+and on focus-in — the issue's title, answered within one interaction instead of
+at the next boot. It exists on the same condition as the gate (the app builds one
+only where :func:`pixel_mouse_gate_installed` reports the gate in force), so a
+user whose textual is still negotiating keeps their smooth scrolling and pixel
+coordinates. The sink is ``driver.write`` and not ``sys.__stderr__`` for the
+reason ``terminal_title.py`` and ``tui/images.py`` document: Textual serialises
+every byte it paints through one writer thread, so a second writer interleaves
+an escape into the middle of a frame. Volume: one 16-byte write per delivered
+``Resize`` message and per focus gain, with no per-frame or per-widget
+multiplier. Textual's ``App._on_resize`` (``app.py:4345-4356``) coalesces the
+SCREEN-level re-arrange at 1/120 s and returns early on an unchanged size, but
+that early return is inside its own handler, so the public ``on_resize`` still
+runs for every delivered message — the ceiling is the terminal's SIGWINCH
+delivery rate, the only remaining source in this configuration because the
+in-band path is off. A clock, a flush timer and their tests to turn a
+few-times-a-second 16-byte write into a smaller number of 16-byte writes is not a
+trade worth making, so this deliberately does not coalesce.
+
+SO EACH MECHANISM IS LOAD-BEARING AND NONE IS REDUNDANT. The reset clears the
+modes AT THE TERMINAL — 2048 and, for the reason below, 1016 — including a sticky
+pair we inherited; the environment guard
+stops TEXTUAL from turning it straight back on after seeing the reset; the
+parser gate keeps a report that arrives anyway from scaling our coordinates,
+which no amount of not-asking can do; and the mid-session re-clean closes a mode
+a co-tenant set AFTER boot, which the boot reset cannot reach. Remove any one and
+the divisor latches again — the first on state left set in the VT by an earlier
+app, the second on the driver's reply to its own query, the third on a dirty
+mode that outlived our boot, the fourth on a co-tenant that dirtied it while we
+were running.
+
+ORDERING. :func:`reset_in_band_resize` — both of its sequences — must reach the
+wire before the driver issues its ``CSI ?2048$p`` query at
+``linux_driver.py:299``, and :func:`guard_pixel_mouse_latch` must run before
+``textual.constants`` is imported, because ``SMOOTH_SCROLL`` is a ``Final`` read
+once at import time.
+:func:`install_pixel_mouse_gate` therefore runs AFTER the guard — it imports
+``textual._xterm_parser`` (which imports ``textual.constants``), so it must not
+be what freezes that constant ahead of the guard's write — and its own
+precondition is read from those frozen constants, which is only meaningful after
+they exist. It must run before the app starts reading input, since it patches the
+class the driver's parser is an instance of.
 
 RESIZE STAYS LIVE. Nothing here costs us resize handling. With the negotiation
 suppressed the driver's ``_in_band_window_resize`` stays False, which is the
@@ -85,10 +160,81 @@ therefore take the animated path at ``scrollbar.py:395`` instead of the
 immediate one. A slightly animated scrollbar drag is worth a mouse that points
 where the user is pointing.
 
-Deliberately stdlib-only, importing nothing from this package and — critically —
-nothing from ``textual``: the same leaf discipline as ``terminals.py``, and here
-it is also a correctness requirement, since importing this module must not be
-what pulls ``textual.constants`` in ahead of the guard.
+THE CO-TENANCY TRADE, WHICH IS THE PREMISE THE GATE RESTS ON. Under the guard we
+ask for NEITHER in-band resize reports NOR pixel-scale mouse reporting, so both
+resets are asserted at boot and mid-session: ``?2048l`` (the mode whose report
+reveals the state) and ``?1016l`` (the mode that makes a terminal send PIXELS).
+This is the same class of action #979 already took for 2048, on the same tty and
+for the same reason: a mode THIS PROCESS DID NOT SET, on state shared with every
+process on the tty, that no negotiation of ours clears and that changes what the
+numbers on the wire mean. The trade is therefore explicit rather than implied —
+a co-tenant that wanted pixel mouse loses it — and it is what makes "our
+coordinates are cells" true at the terminal instead of assumed.
+
+The gate's divisor clearing is only correct where the coordinates really are
+cells, and that is exactly what the 1016 reset establishes. The three
+configurations a VT can be in, and why the pair of resets is what collapses them
+to the one our code assumes:
+
+- **2048 only** — cell-scale mouse plus in-band reports: the reported bug
+  (#986), which the latch gate fixes.
+- **2048 and 1016** — genuine PIXEL-scale mouse plus in-band reports, which is
+  what an unpatched ``lop`` boot writes (THE RE-ENABLE BRANCH above) and what a
+  co-tenant enabling pixel mouse sets. Here Textual's division was CORRECT, so a
+  gate that only cleared the divisor inverts the error: cell (5, 2) arrives as
+  the wire's (41, 33) — a measured (8.00, 16.00) cell — and is read as (40, 32);
+  past the screen edge the event is swallowed whole, so the symptom there is
+  dead hover. Clearing 1016 fixes this arm, because the terminal then reports
+  cells.
+- **1016 only** — pixel-scale mouse with no reports, so nothing latches the
+  divisor and pixels are read as cells: a misread that predates this fix and
+  that the same ``?1016l`` fixes.
+
+A WINDOW WE CANNOT CLOSE FROM OUR SIDE. The 2048+1016 arm is fixed from the
+moment our reset is processed, and not before. A co-tenant that sets ``?1016h``
+mid-session — Textual's own re-enable branch writes it beside ``?2048h``, so
+both land together — puts pixel coordinates on the wire, and until the
+``Resize`` that reveals that state reaches
+:meth:`InBandResizeReclaimer.reclaim` the gate is clearing a divisor those events
+never had: they are read as the pixel numbers they are. The window is bounded
+(one round trip, plus whatever input the terminal had already encoded ahead of
+it) and self-healing — the same delivered ``Resize`` that exposes the mode runs
+the re-clean, after which the terminal reports cells again. Measured end to end
+by QA on a real pty (PR #1068): a co-tenant's mid-session ``?1016h`` made cell
+(9, 3) read as (76, 56), and the next ``Resize`` restored (9, 3). It is not
+closable from here because the write is neither ours nor observable, and no
+channel reaches us either: the 1016 half is never queried at all, and for the
+2048 half the query exists but its answer is DISCARDED. Textual does send one
+``CSI ?2048$p`` (``linux_driver.py:156``, sent once at startup from ``:299``) and
+turns a mode reply into ``InBandWindowResize``, which the app surfaces as
+``App.supports_smooth_scrolling`` (``app.py:5019``) — but that parse is gated on
+``constants.SMOOTH_SCROLL and not IS_ITERM`` (``_xterm_parser.py:319-322``),
+exactly the gate this module closes, so under our configuration the reply is
+discarded before anything can read it. And even a delivered reply would report
+only the mode's CURRENT state, not who enabled it or whether that happened after
+our last reset, so polling for it would be new machinery for a window that
+already self-heals on the next ``Resize`` — the same reason this reset is written
+unconditionally rather than negotiated. A co-tenant's mode change need not move
+our geometry either, so no event of ours is guaranteed to fire on it. The only
+signal is the delivered resize the co-tenant's own report produces, and the
+events it carried are the ones described above.
+
+A ``TEXTUAL_SMOOTH_SCROLL=1`` user keeps upstream behaviour untouched: nothing is
+installed for them (the gate and the re-clean both key on the negotiation being
+closed), so their pixel coordinates stay correct. The BOOT reset is
+unconditional, exactly as #979's ``?2048l`` already was — and the driver
+re-enables ``?1016h`` on its own negotiation reply within milliseconds for that
+user (``linux_driver.py:480-482``, the same branch that wrote it in the first
+place), so their pixel mouse is restored by Textual rather than lost to us.
+
+Deliberately stdlib-only at module scope, importing nothing from this package and
+— critically — nothing from ``textual``: the same leaf discipline as
+``terminals.py``, and here it is also a correctness requirement, since importing
+this module must not be what pulls ``textual.constants`` in ahead of the guard.
+:func:`install_pixel_mouse_gate` and :func:`pixel_mouse_gate_installed` import
+``textual._xterm_parser`` INSIDE the call for exactly that reason: patching a
+third-party class is not worth breaking the invariant that this module is safe
+to import at any point in the boot.
 
 All references pinned to textual 8.2.8. Every bare ``linux_driver.py`` means
 ``textual/drivers/linux_driver.py`` — there is no top-level file of that name,
@@ -99,15 +245,41 @@ files of those names in the ``textual`` package root.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
-from typing import MutableMapping, TextIO
+from typing import TYPE_CHECKING, Any, Callable, MutableMapping, TextIO
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never executed
+    # Deliberately NOT a runtime import: see the module docstring's leaf
+    # discipline. These two names exist so the patched method and the reclaimer
+    # can be annotated without pulling ``textual`` in at import time.
+    from textual._xterm_parser import XTermParser as _XTermParser
+    from textual.message import Message
 
 #: ``CSI ? 2048 l`` — reset in-band window resize notifications. Addressed at the
 #: TERMINAL rather than at Textual's view of the mode because mode 2048 is
 #: STICKY per-VT: a previous app can have left it set, and no amount of
 #: not-negotiating on our side clears state we inherited.
 DISABLE_IN_BAND_RESIZE = "\x1b[?2048l"
+
+#: ``CSI ? 1016 l`` — reset pixel-scale mouse reporting. Cleared alongside 2048
+#: and for the same class of reason: it is per-VT state somebody else can set
+#: (Textual's re-enable branch writes ``?2048h`` AND ``?1016h`` together,
+#: ``linux_driver.py:480-482``), and while it is set a compliant VT sends
+#: PIXEL coordinates where we parse cells. Under the guard we ask for neither
+#: mode, so asserting both off is what makes "our coordinates are cells" true
+#: at the terminal instead of assumed — see THE CO-TENANCY TRADE in the module
+#: docstring for the arm this exists for.
+DISABLE_PIXEL_MOUSE = "\x1b[?1016l"
+
+#: Both resets as ONE write, in the mirror-image order of the driver's own
+#: re-enable branch (``?2048h`` then ``?1016h``, ``linux_driver.py:480-482``):
+#: one write because the pair has to reach the driver's serialised writer as one
+#: unit (a frame painted between them would be sized by a mode we have already
+#: given up on), and this order because the only sequence we are undoing is
+#: upstream's — so ours reads as its inverse at a glance.
+DISABLE_PIXEL_SCALE_MODES = DISABLE_IN_BAND_RESIZE + DISABLE_PIXEL_MOUSE
 
 #: Environment kill switch, mirroring ``LOCAL_OPERATOR_NO_TERMINAL_TITLE``
 #: (``terminal_title.py:54``). Wanted by anything capturing raw terminal output
@@ -169,7 +341,12 @@ def guard_pixel_mouse_latch(env: MutableMapping[str, str] | None = None) -> bool
 
 
 def reset_in_band_resize(stream: TextIO | None = None) -> bool:
-    """Write ``CSI ?2048l`` to the terminal; True when the bytes were written.
+    """Write ``CSI ?2048l`` and ``CSI ?1016l``; True when the bytes were written.
+
+    Both modes, because under the guard we ask for neither: see
+    :data:`DISABLE_PIXEL_SCALE_MODES` and THE CO-TENANCY TRADE in the module
+    docstring. The name still says 2048 because that is the mode #979 closed
+    here and the one this function's callers know it for.
 
     Defaults to ``sys.__stderr__``, which is the same handle Textual's driver
     writes its own escapes to (``linux_driver.py:58``), so the reset is
@@ -190,10 +367,195 @@ def reset_in_band_resize(stream: TextIO | None = None) -> bool:
     try:
         if not stream.isatty():
             return False
-        stream.write(DISABLE_IN_BAND_RESIZE)
+        stream.write(DISABLE_PIXEL_SCALE_MODES)
         stream.flush()
     except (OSError, ValueError):
         # Redirected, detached or closed stderr. Nothing to reset, and a
         # cosmetic escape is never worth failing a boot over.
         return False
     return True
+
+
+#: Attribute this module stamps onto the wrapper it installs, so
+#: :func:`install_pixel_mouse_gate` can tell its own wrapper from upstream's
+#: method without comparing against a saved reference (which would be a second
+#: source of truth for "installed").
+_GATE_MARKER = "_lop_pixel_mouse_latch_gate"
+
+
+def pixel_mouse_negotiation_open() -> bool:
+    """True when Textual itself may negotiate pixel-mouse coordinates.
+
+    Mirrors, deliberately one-for-one, the gate Textual 8.2.8 puts on its own
+    mode-report branch (``_xterm_parser.py:319-322``): that branch emits the
+    ``InBandWindowResize`` token — and the driver's ``process_message`` then
+    answers ``;2`` with ``?2048h`` + ``?1016h`` (``linux_driver.py:470-483``) —
+    only when ``constants.SMOOTH_SCROLL`` is on AND the terminal is not iTerm
+    (whose pixel handshake Textual handles its own way). With the branch shut,
+    nothing we do asks the terminal to send an in-band report, so a report that
+    arrives anyway is not a statement about OUR coordinates and dividing by its
+    cell size is wrong.
+
+    Read from the constants rather than from :func:`guard_pixel_mouse_latch`'s
+    return value, and that is a correctness requirement rather than a
+    preference: the guard defers to an inherited ``TEXTUAL_SMOOTH_SCROLL=0`` —
+    a value the guard ITSELF wrote on an earlier boot in this process, and the
+    value any user who followed our own documentation has exported. Keying on
+    "did this call write the variable" would therefore drop both halves of this
+    fix on exactly the configuration we tell people to use.
+
+    Must be called after ``textual.constants`` is imported (both names are
+    frozen at import time), which in production order is after the guard.
+    """
+    from textual import constants
+    from textual._xterm_parser import IS_ITERM
+
+    return bool(constants.SMOOTH_SCROLL and not IS_ITERM)
+
+
+def install_pixel_mouse_gate() -> bool:
+    """Stop the in-band-report latch from scaling coordinates; True if installed.
+
+    Patches the CLASS method ``XTermParser.parse_mouse_code``, which is the only
+    place the divisor is computed (``_xterm_parser.py:94-102``), to clear
+    ``mouse_pixels`` before delegating to the original. The class and not an
+    instance because the driver builds its parser when the app starts, after
+    this runs; a per-instance patch would have to reach into the driver.
+
+    Refuses — installing nothing, returning False — while
+    :func:`pixel_mouse_negotiation_open` is True: a user whose textual still
+    negotiates pixel mouse asked for pixel coordinates, and forcing the divisor
+    off would ignore that, so upstream behaviour stays byte for byte. That
+    precondition is checked HERE rather than at the call site so no caller can
+    install the gate in a configuration where a delivered report is legitimate.
+
+    Narrow on purpose: it touches the ONE one-way latch and nothing else.
+    Textual's resize handling, ``terminal_size``/``terminal_pixel_size``
+    bookkeeping and the ``Resize`` token are all left exactly as upstream has
+    them, so the out-of-band SIGWINCH path the guard puts us on is unaffected.
+
+    Idempotent — single-threaded by contract: the check-then-``setattr`` below
+    takes no lock, and two concurrent installs could both wrap (uninstall would
+    then peel one layer), which is fine because the only caller is the boot
+    thread. Installing over its own wrapper returns False and does not wrap
+    twice. Reversible by :func:`uninstall_pixel_mouse_gate`, which restores the
+    original function object, so a test can leave the class as it found it.
+    """
+    from textual._xterm_parser import XTermParser
+
+    if pixel_mouse_negotiation_open():
+        return False
+
+    current = XTermParser.parse_mouse_code
+    if getattr(current, _GATE_MARKER, False):
+        return False
+    original = current
+
+    # ``functools.wraps`` for the ``__wrapped__`` link uninstall follows, and
+    # because a bare wrapper loses the original's name and docstring in any
+    # traceback that goes through mouse parsing.
+    @functools.wraps(original)
+    def parse_mouse_code(self: _XTermParser, code: str) -> Message | None:
+        # The latch is one-way and ungated upstream (a delivered report sets it
+        # whatever we negotiated), so clearing it here is what keeps the divisor
+        # off every coordinate this parser will ever see.
+        if self.mouse_pixels:
+            self.mouse_pixels = False
+        return original(self, code)
+
+    setattr(parse_mouse_code, _GATE_MARKER, True)
+    # ``setattr`` on the class rather than an annotated assignment: this is a
+    # third-party class we do not import for typing, and the wrapper is a plain
+    # function, so it still binds as a method.
+    setattr(XTermParser, "parse_mouse_code", parse_mouse_code)
+    return True
+
+
+def uninstall_pixel_mouse_gate() -> bool:
+    """Undo :func:`install_pixel_mouse_gate`; False when nothing was installed.
+
+    Restores the ORIGINAL function object rather than unwrapping by hand, so a
+    test that installs and uninstalls leaves ``XTermParser`` byte-identical to
+    how it found it — including after several install/uninstall cycles.
+    """
+    from textual._xterm_parser import XTermParser
+
+    current = XTermParser.parse_mouse_code
+    if not getattr(current, _GATE_MARKER, False):
+        return False
+    original = getattr(current, "__wrapped__", None)
+    if original is None:  # pragma: no cover - the marker implies the link
+        return False
+    setattr(XTermParser, "parse_mouse_code", original)
+    return True
+
+
+def pixel_mouse_gate_installed() -> bool:
+    """True when the parser class currently carries the gate.
+
+    The app asks this rather than remembering the guard's return value, so the
+    gate and the re-clean cannot disagree about which configuration is in
+    force: there is one answer, and it is the state of the class.
+    """
+    from textual._xterm_parser import XTermParser
+
+    return bool(getattr(XTermParser.parse_mouse_code, _GATE_MARKER, False))
+
+
+class InBandResizeReclaimer:
+    """Re-assert the pixel-scale resets mid-session through an injected sink.
+
+    Both halves of :data:`DISABLE_PIXEL_SCALE_MODES` — ``?2048l`` for the report
+    mode the resize reveals, ``?1016l`` for the pixel-mouse mode a co-tenant
+    sets with it, which is what keeps the coordinates arriving as cells.
+
+    The boot reset cannot reach a mode a co-tenant sets while we run, and the
+    report that reveals it arrives before any handler could act, so this is the
+    recency half: :meth:`reclaim` runs on ``Resize`` and on focus-in and closes
+    the mode within one interaction.
+
+    The sink is whatever the caller passes — in the app, ``driver.write``, which
+    is ``App._driver.write`` and the same door ``terminal_title.py``,
+    ``tui/images.py`` and ``tui/notify.py`` use, because Textual serialises
+    everything it paints through one writer thread and a second writer
+    interleaves an escape into the middle of a frame.
+
+    Headless and no-driver gating lives with the caller (the app builds one of
+    these only when it has a driver and is not headless), so this object stays a
+    single-purpose, directly testable thing.
+    """
+
+    __slots__ = ("_env", "_write")
+
+    def __init__(
+        self,
+        write: Callable[[str], Any],
+        *,
+        env: MutableMapping[str, str] | None = None,
+    ) -> None:
+        self._write = write
+        #: Injection point for tests, mirroring :func:`reset_in_band_resize`'s
+        #: stream parameter: production passes nothing and reads ``os.environ``
+        #: at call time, which is what makes the kill switch work when it is set
+        #: after boot.
+        self._env = env
+
+    def reclaim(self) -> bool:
+        """Hand ``CSI ?2048l`` and ``CSI ?1016l`` to the sink; True when sent.
+
+        The kill switch is the same ``LOCAL_OPERATOR_NO_MODE_RESET`` the boot
+        reset honours, and it is read per call rather than cached so setting it
+        mid-session suppresses the next write.
+
+        A failed write is swallowed, like :func:`reset_in_band_resize`'s: a
+        writer thread that has already died must not turn a resize into an
+        exception, and a cosmetic escape is never worth an event.
+        """
+        env = os.environ if self._env is None else self._env
+        if env.get(_ENV_DISABLE):
+            return False
+        try:
+            self._write(DISABLE_PIXEL_SCALE_MODES)
+        except (OSError, ValueError):
+            return False
+        return True
