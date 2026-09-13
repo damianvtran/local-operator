@@ -2368,8 +2368,19 @@ async def test_push_skips_full_tui_clients_but_keeps_welcome_and_daemon() -> Non
 
 
 @pytest.mark.asyncio
-async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixture) -> None:
-    """Test 21: one INFO line per actual removal, naming the reason."""
+async def test_every_drop_logs_its_reason_once_at_one_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test 21: one line per actual removal, naming the reason.
+
+    At the level the reason EARNS: a close the runtime asked for, or one a peer
+    asked for by closing first, is part of a client's ordinary life and stays
+    INFO. Every other reason means a client was removed without asking to
+    leave, and those are WARNING — see `_GRACEFUL_DROP_REASONS` and
+    `test_an_unrequested_drop_is_logged_at_warning`. Both used to be INFO
+    beside every routine close, which is how "the sidebar went cold" ended up
+    with no findable cause in the runtime log.
+    """
     import logging
 
     handle = FakeHandle()
@@ -2382,7 +2393,7 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
         conns = list(runtime._clients.values())
         assert len(conns) == 1
         caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
-        runtime._drop_client(conns[0], reason="test")
+        runtime._drop_client(conns[0], reason="reader eof")
         infos = [
             rec
             for rec in caplog.records
@@ -2391,8 +2402,9 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
         assert len(infos) == 1, [rec.getMessage() for rec in infos]
         assert "dropped attach client" in infos[0].getMessage()
         assert "events=" in infos[0].getMessage()
-        assert infos[0].getMessage().endswith(": test")
-        # Second call (reader-loop finally) must not INFO again.
+        assert infos[0].getMessage().endswith(": reader eof")
+        assert not [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+        # Second call (reader-loop finally) must not log again.
         runtime._drop_client(conns[0], reason="reader eof")
         infos_after = [
             rec
@@ -2400,6 +2412,52 @@ async def test_every_drop_logs_reason_once_at_info(caplog: pytest.LogCaptureFixt
             if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
         ]
         assert len(infos_after) == 1
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unrequested_drop_is_logged_at_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Why the client went is the one thing that must not be buried.
+
+    A viewer dropped for a reason IT did not choose — the attach cap evicting
+    it, an event queue overflowing, a send timing out — learns what happened
+    only as a cold facade. The runtime's own record of the reason is therefore
+    the only place the cause exists at all, and at INFO beside every routine
+    close it was invisible in practice: the operator's report of "Reconnect
+    failed — select again to retry" had nothing to read.
+    """
+    import logging
+
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        _reader, writer = await _dial(record, client="attach")
+        conns = list(runtime._clients.values())
+        assert len(conns) == 1
+        caplog.set_level(logging.INFO, logger="local_operator.session.runtime.server")
+        runtime._drop_client(conns[0], reason="attach cap")
+        warnings = [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.WARNING and "dropped" in rec.getMessage()
+        ]
+        assert len(warnings) == 1, [rec.getMessage() for rec in warnings]
+        assert "dropped attach client" in warnings[0].getMessage()
+        assert warnings[0].getMessage().endswith(": attach cap")
+        # The reason is still ONE line, not a warning plus an info.
+        assert not [
+            rec
+            for rec in caplog.records
+            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+        ]
     finally:
         if writer is not None:
             writer.close()
@@ -2424,7 +2482,7 @@ async def test_attach_cap_drop_reason_is_logged(caplog: pytest.LogCaptureFixture
         messages = [
             rec.getMessage()
             for rec in caplog.records
-            if rec.levelno == logging.INFO and "dropped" in rec.getMessage()
+            if rec.levelno == logging.WARNING and "dropped" in rec.getMessage()
         ]
         assert any(msg.endswith(": attach cap") for msg in messages), messages
     finally:

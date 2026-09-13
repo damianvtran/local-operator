@@ -142,6 +142,17 @@ DEFAULT_CONFIG = Config(
             "max_learnings_history": 50,
             "hosting": "",
             "model_name": "",
+            # The BIRTH-default reasoning effort for new conversations, alongside
+            # the model pair above. ``""`` means "no opinion" — the model's own
+            # documented default stands. Read at session build
+            # (``session_factory._prepare``, ``bootstrap.resolve_model_configuration``)
+            # and clamped to the chosen model's own ladder there: a rung the
+            # model cannot express lands on its nearest rung rather than reaching
+            # the wire, so a stored ``xhigh`` beside a model that stops at
+            # ``high`` is survivable and re-applies ``xhigh`` on a later switch
+            # back to a wider ladder. A BIRTH default only — a resumed
+            # conversation's own stored selection outranks it.
+            "model_effort": "",
             "auto_save_conversation": False,
             # The tool-approval mode a NEW interactive session opens in, written
             # by ``/approvals default <mode>`` and read by the TUI at mount.
@@ -183,6 +194,14 @@ DEFAULT_CONFIG = Config(
                 "openai": {"api": "responses", "use_max_context_window": True},
                 "anthropic": {"cache_ttl_1h_min_context_tokens": 150_000},
                 "openrouter": {
+                    # The one HARNESS-side key in this block: read by
+                    # `SessionStreamFn._affinity_enabled`, never by
+                    # `_openrouter_provider_preferences`, so it does not make
+                    # the shipped config express a wire-level opinion. On by
+                    # default — reusing the host that served the last turn is
+                    # what keeps a long conversation's prompt cache warm, and
+                    # any explicit routing preference below turns it off.
+                    "provider_affinity": True,
                     "sort": "",
                     "order": [],
                     "only": [],

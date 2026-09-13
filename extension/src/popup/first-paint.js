@@ -27,23 +27,39 @@
  * the duplication of both is the price of running before the module system.
  */
 (function () {
-  // Keep in sync with PAIRED_HINT_KEY and applyPendingPin() in popup.ts.
-  var KEY = "lop:paired-hint";
-  var PAIRED_PIN = "86px";
-  var UNPAIRED_PIN = "219px";
-  var paired = false;
+  // Keep in sync with PIN_HINT_KEY, PIN_CONNECTED/PIN_PAIRING/PIN_UNRESPONSIVE
+  // and show() in popup.ts.
+  //
+  // A PIN PER STATE, not a boolean. Two of the three states this can land on
+  // cannot be told apart by a boolean, and the one a boolean has to collapse is
+  // the wedged-but-paired card this popup exists for: pinned to the connected
+  // height it opened 167.8px short of the card it settled on (design D3-1).
+  // popup.ts writes the pin for the card it just rendered, and this script
+  // reproduces that height before the module runs.
+  var KEY = "lop:pin-hint";
+  // The boolean key the previous revision wrote. Read once as a fallback so the
+  // rename does not cost an existing paired browser a resize; "1" meant the
+  // connected card. Mirrors the same fallback in popup.ts.
+  var LEGACY_KEY = "lop:paired-hint";
+  var PIN_CONNECTED = "86px";
+  var PIN_PAIRING = "219px";
+  var PIN_UNRESPONSIVE = "254px";
+  var PINS = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+  var pin = null;
   try {
-    paired = localStorage.getItem(KEY) === "1";
+    var stored = localStorage.getItem(KEY);
+    if (stored !== null && PINS.indexOf(stored) !== -1) pin = stored;
+    else if (localStorage.getItem(LEGACY_KEY) === "1") pin = PIN_CONNECTED;
   } catch (error) {
-    // Storage unavailable (disabled, quota, partitioned). The unpaired pin is
-    // the safe default: it is the state a browser we cannot identify is most
-    // likely to be in on its first open.
+    // Storage unavailable (disabled, quota, partitioned). No hint is the safe
+    // answer: it is the behaviour before this file existed, and it is what a
+    // browser we cannot identify must get.
   }
   // <head> runs before <body> exists, so the pin is applied as a stylesheet
   // rule rather than by reaching for the element. This also keeps it out of the
   // element's inline style, leaving popup.ts's own applyPendingPin() — which
   // runs later and sets an inline style — able to override it without a fight.
   var style = document.createElement("style");
-  style.textContent = "#pending{min-height:" + (paired ? PAIRED_PIN : UNPAIRED_PIN) + "}";
+  style.textContent = "#pending{min-height:" + (pin || PIN_PAIRING) + "}";
   document.documentElement.appendChild(style);
 })();

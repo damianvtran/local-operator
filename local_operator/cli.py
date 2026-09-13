@@ -712,6 +712,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Inspect scheduled wakes and the supervisor that fires them",
         parents=[parent_parser],
     )
+    # DEFAULTS ON THE PARENT, so every route into `wake_command` carries the
+    # flags it dereferences. `wake_command` falls back to "status" when no
+    # subcommand is given, and the status branch reads `json`/`install`/
+    # `uninstall` — so bare `lop wake` and `lop wake install` (which define no
+    # such flags of their own) used to reach it and die on `args.json`. A
+    # subparser that declares `--json` still overrides this, and a branch that
+    # gains a new flag inherits a safe default instead of a crash.
+    wake_parser.set_defaults(json=False, install=False, uninstall=False)
     wake_sub = wake_parser.add_subparsers(dest="wake_command")
     wake_status = wake_sub.add_parser(
         "status",
@@ -728,6 +736,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--uninstall",
         action="store_true",
         help="remove the supervisor; scheduled wakes then fire only when a session is open",
+    )
+    # THE ROLLOUT PATH, and the reason this is a subcommand rather than only a
+    # flag on `status`. Repair-on-demand lives in the install hook, which runs
+    # on a wake PERSIST — so a machine whose supervisor is stale or stopped
+    # cannot be fixed without some session happening to schedule a wake. After
+    # an upgrade that is exactly the wrong dependency: the running supervisor
+    # is still executing the old code, and there may be no session about to
+    # persist. This command makes the repair reachable directly.
+    wake_sub.add_parser(
+        "install",
+        help="install or repair the supervisor now (restarts a stale or stopped one)",
+        parents=[parent_parser],
     )
     wake_list = wake_sub.add_parser(
         "list",
@@ -1259,24 +1279,47 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
-        # Try to convert to int
-        try:
-            if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                value = int(value)
-            # Try to convert to float
-            elif value.replace(".", "", 1).isdigit() or (
-                value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
-            ):
-                value = float(value)
-            # Try to convert to boolean
-            elif value.lower() in ("true", "false"):
-                value = value.lower() == "true"
-            # Handle null/None values
-            elif value.lower() in ("null", "none"):
-                value = None
-        except (ValueError, AttributeError):
-            # Keep as string if conversion fails
-            pass
+        # An ENUM's displayed LABEL is not always its stored VALUE (D11).
+        # `model_effort auto` means the stored ``""``, and the guessed parse
+        # below would hand the literal string ``auto`` to ``validate`` and have
+        # it rejected — a documented choice unreachable from the documented
+        # command. A label is matched case-insensitively and, when it matches,
+        # wins OUTRIGHT: the chain below is skipped, which matters because it
+        # converts the literal word ``none`` to Python ``None`` and ``none`` is
+        # a real rung of ``EFFORT_ORDER``. Values matching no label fall through
+        # to the existing parse unchanged, so no other kind's behaviour moves.
+        matched_choice: settings_io.Choice | None = None
+        if setting.kind is settings_io.Kind.ENUM:
+            typed = str(value).strip().lower()
+            matched_choice = next(
+                (
+                    choice
+                    for choice in setting.resolved_choices
+                    if str(choice.label).strip().lower() == typed
+                ),
+                None,
+            )
+        if matched_choice is not None:
+            value = matched_choice.value
+        else:
+            # Try to convert to int
+            try:
+                if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+                    value = int(value)
+                # Try to convert to float
+                elif value.replace(".", "", 1).isdigit() or (
+                    value.startswith("-") and value[1:].replace(".", "", 1).isdigit()
+                ):
+                    value = float(value)
+                # Try to convert to boolean
+                elif value.lower() in ("true", "false"):
+                    value = value.lower() == "true"
+                # Handle null/None values
+                elif value.lower() in ("null", "none"):
+                    value = None
+            except (ValueError, AttributeError):
+                # Keep as string if conversion fails
+                pass
 
         # Through the facade rather than ``update_config``: a dotted key needs
         # the merge-into-existing-sub-mapping rule (a whole-mapping write drops
@@ -1292,8 +1335,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # the raw input would tell the user their config holds a spelling it
         # does not — the same class of lie as a page displaying a key the
         # runtime never bound.
+        #
+        # An ENUM echoes the LABEL the typed word selected, when it selected one
+        # (D8). The stored form is a wire value, not vocabulary: ``model_effort
+        # auto`` stores ``""``, so the receipt read "Successfully updated
+        # model_effort to " — the user typed a word and the confirmation named
+        # nothing. The same blank met every other member whose value is empty
+        # (``providers.openrouter.* default``), and the label also restores the
+        # words for the members whose value is not their label at all
+        # (``display.nerd_icons auto`` stores ``None`` and used to echo
+        # ``None``). Values that matched no label fall through unchanged, so the
+        # echo of a normalised value is exactly what it was.
         stored = settings_io.read_setting(config_manager, setting)
-        print(f"Successfully updated {args.key} to {stored}")
+        echoed = matched_choice.label if matched_choice is not None else stored
+        print(f"Successfully updated {args.key} to {echoed}")
         return 0
     except settings_io.ConfigUnreadableError as e:
         # Distinct from the schema rejection below: the key and the value are
@@ -1839,14 +1894,50 @@ def browser_command(args: argparse.Namespace) -> int:
         print(f"installed:           {'yes' if result['installed'] else 'no'}")
         print(f"daemon healthy:      {'yes' if result['healthy'] else 'no'}")
         connected = bool(health.get("extension_connected"))
+        unresponsive = bool(health.get("extension_unresponsive"))
         print(f"extension connected: {'yes' if connected else 'no'}")
         print(f"paired:              {'yes' if result['paired'] else 'no'}")
         # A paired-but-not-connected browser is the normal closed/backgrounded
         # state, not a fault; say so rather than leaving a user to guess (N2).
+        # `extension_unresponsive` is the OTHER way to be paired-but-not-
+        # connected — the browser is open and the extension socket is up, but
+        # the worker stopped answering — and telling that user "browser not
+        # currently attached, it reconnects when opened" is precisely the
+        # misdiagnosis that made the wedge expensive. The two lines are
+        # mutually exclusive on purpose: `extension_connected` is false in both
+        # cases, so only the discriminator separates them.
+        #
+        # The unresponsive branch has TWO truthful spellings, chosen by
+        # `link_attached`, because the daemon both observes the state and then
+        # acts on it: while a mute socket is still attached the drop is still
+        # ahead ("will drop and re-dial"); once it has been dropped, the link is
+        # gone and re-dialling is in progress. Printing the future tense after
+        # the drop would assert a severing that already happened, which is the
+        # false trail D3 caught, and printing the past tense before it asserts a
+        # drop nothing has performed yet. Both say the same thing the user needs:
+        # this is not "open your browser".
         if result["paired"] and not connected:
-            print(
-                "                     (browser not currently attached; it reconnects when opened)"
-            )
+            if unresponsive:
+                # Payloads WITHOUT `link_attached` are a daemon from an earlier
+                # head of this very change (the field is additive). There the
+                # tense is unknowable, so say only what is certainly true and
+                # assert no mechanism rather than guess one.
+                attached_now = health.get("link_attached")
+                if attached_now is True:
+                    note = (
+                        "browser attached but not answering; the bridge will drop and re-dial "
+                        "the link — retry once in a few seconds"
+                    )
+                elif attached_now is False:
+                    note = (
+                        "browser attached but not answering; the bridge dropped the link and "
+                        "is re-dialling it — retry once in a few seconds"
+                    )
+                else:
+                    note = "browser attached but not answering; retry once in a few seconds"
+            else:
+                note = "browser not currently attached; it reconnects when opened"
+            print(f"                     ({note})")
         # Driven tabs, PLURAL and counted. `driving: <url>` implied a single
         # system-wide binding; with one tab per session that framing turned a
         # stale URL into "something is holding the bridge". Say how many tabs
@@ -2893,13 +2984,24 @@ def _wake_rows() -> "list[dict[str, Any]]":
 
     from local_operator.paths import config_dir
     from local_operator.wakes.store import read_index
+    from local_operator.wakes.supervisor import STALE_AFTER_S, _session_exists
 
+    root = config_dir()
     now_ms = int(_time.time() * 1000)
     rows: list[dict[str, Any]] = []
-    for session_id, entry in read_index(config_dir()).items():
+    for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
             continue
         dormant = bool(entry.get("stopped_at"))
+        # GHOST, asked with the supervisor's own predicate (round 2, Q4). The
+        # supervisor refuses an entry whose session has no transcript and
+        # retires on a ghost-only store, while this listing had no ghost
+        # notion at all — so the rendered frame said "1 armed, 10m overdue"
+        # about a wake the process had already gone home over. A painted frame
+        # that contradicts the process is the defect class this PR exists to
+        # remove, so the two surfaces share the predicate rather than deriving
+        # it twice.
+        ghost = not dormant and not _session_exists(root, session_id)
         for raw in entry.get("schedules") or ():
             if not isinstance(raw, dict):
                 continue
@@ -2935,6 +3037,22 @@ def _wake_rows() -> "list[dict[str, Any]]":
                     ),
                     "limit": raw.get("limit"),
                     "fired_count": raw.get("fired_count") or 0,
+                    # RELIABILITY FIELDS. The three questions the operator
+                    # could not previously answer about a wake that seemed not
+                    # to fire: is it late right now, how late, and has it been
+                    # late so long the supervisor has given up on it (past
+                    # STALE_AFTER_S it is skipped, deliberately, and left to
+                    # the session's own catch-up). `overdue` is a plain bool
+                    # rather than "due_in_s < 0" recomputed by every consumer.
+                    "overdue": due < now_ms,
+                    "overdue_s": max((now_ms - due) / 1000.0, 0.0),
+                    "stale": (now_ms - due) / 1000.0 > STALE_AFTER_S,
+                    "ghost": ghost,
+                    # Written by the session (the one writer of schedule
+                    # state), absent on an entry that has not fired since the
+                    # fields were added rather than defaulted to a lie.
+                    "last_fired_at": entry.get("last_fired_at"),
+                    "last_attempt_at": entry.get("last_attempt_at"),
                 }
             )
     rows.sort(key=lambda row: row["next_due_at"])
@@ -2973,13 +3091,102 @@ def wake_command(args: argparse.Namespace) -> int:
         if not rows:
             print("no scheduled wakes")
             return 0
+        import shutil
+
         from local_operator.harness.wake import format_duration
         from local_operator.wakes.display import format_wake_time
 
+        # A FIXED-WIDTH TABLE, matching `lop sessions` right next door rather
+        # than inventing a second listing convention. Round 1 (D4): padding a
+        # pre-composed "<abs time> (<rel>)" cell never applies, because that
+        # cell is already 19-31 characters wide, so the id column started at a
+        # different position on every row (measured: 33/27/21/22/29) and a long
+        # message produced a 155-column line that wrapped with no indent.
+        # Splitting the two time facts into their own columns is what makes the
+        # padding mean something.
+        term_width = shutil.get_terminal_size((80, 24)).columns
+        # A RENDERED TIME IS NEVER TRUNCATED (round 2, D11). `format_wake_time`
+        # chooses its own form — a clock alone for today, a date for another
+        # day, a year as well for another year — so its width is 11 to 24
+        # characters depending on the wake, and a fixed 18 cut `Jan 01 2027
+        # 9:00 AM EST` to `Jan 01 2027 9:00 A`: a half meridiem, no zone, and
+        # no marker to say anything was dropped. A time that is wrong is worse
+        # than a time that is absent, and unlike a message (which the reader
+        # can recognise from its start) there is no recovering a mangled clock.
+        #
+        # So the column is sized from THE ROWS BEING RENDERED, and the
+        # renderer's output is printed whole or not at all.
+        when_cells = {row["next_due_at"]: format_wake_time(row["next_due_at"]) for row in rows}
+        when_w = max(len(cell) for cell in when_cells.values())
+        rel_w = 11  # "10m overdue"
+        # SLACK for the id (round 2, R9). Ids are `uuid4().hex[:12]`, and a
+        # 12-wide column truncated a 12-character id to exactly itself with no
+        # room to show that anything was cut — while the 15-character `lr_` ids
+        # that appear in real stores rendered as a DIFFERENT id an operator
+        # cannot paste back. 13 gives a real id slack, and `_elide_id` marks
+        # anything longer instead of silently shortening it.
+        id_w = 13
+        fixed = rel_w + id_w + 2
+        message_floor = 24
+        # WHEN IS THE COLUMN THAT YIELDS on a narrow terminal (round 2, D12 /
+        # QA Q1), because the relative `DUE` cell answers "when does this fire"
+        # in 11 characters and the absolute time is the redundant half. Dropping
+        # it keeps the table aligned at 60 columns instead of wrapping every
+        # row, which is the trade D12 argued for — shed the absolute time
+        # rather than the alignment.
+        show_when = term_width >= when_w + fixed + 1 + message_floor
+        head = fixed + (when_w + 1 if show_when else 0)
+        message_w = max(message_floor, term_width - head - 1)
+        header = f"{'WHEN':<{when_w}} " if show_when else ""
+        # WHAT A NARROW TERMINAL ACTUALLY GETS, measured rather than intended.
+        # `message_w` is a budget for the message column, and the row also
+        # carries a state TAIL (` · every 20m, 12/40 fired`, 25 characters on
+        # the widest real row) that the budget does not include — `room` below
+        # subtracts it and can go negative. So on a terminal narrower than the
+        # row needs, BOTH things happen at once:
+        #
+        #   * the row overflows anyway — measured 50-53 columns at COLUMNS=40,
+        #     53 being a row whose tail is 25 characters; and
+        #   * the message degrades to one character plus an ellipsis (`r…`),
+        #     because `room` is negative and the clamp floors at 1.
+        #
+        # 53 columns is the point at which the widest tailed row stops
+        # overflowing (measured across 40/44/48/50/51/52/53/54/58/60 on the
+        # design round's own fixture), and it is IRREDUCIBLE for that row:
+        # 26 fixed + 1 gap + 25 tail + 1 message character = 53. A wider
+        # message budget cannot help — it makes the row longer, not shorter —
+        # and the only lever that would is clamping the tail, which round 5
+        # (R6/U16) deliberately forbade because the tail carries the bounds a
+        # user cannot be expected to remember. Narrower terminals therefore
+        # wrap, and the message column really does stop saying anything; the
+        # honest fix is a different layout for that width, not a budget tweak.
+        print(f"{header}{'DUE':>{rel_w}} {'SESSION':<{id_w}} WAKE")
         for row in rows:
-            when = f'{format_wake_time(row["next_due_at"])} ({_format_due(row["due_in_s"])})'
-            mark = " (dormant — session stopped)" if row["dormant"] else ""
-            name = row["session_id"]
+            when = when_cells[row["next_due_at"]]
+            # DORMANT WINS, and the overdue/stale marks are suppressed under it
+            # (round 1, Q2/R6). A dormant wake is one nothing is SUPPOSED to
+            # fire, so "(OVERDUE)" — which means "should have fired and did
+            # not" — contradicts it, and "no longer fired by the supervisor" is
+            # true of a dormant wake for an entirely different reason
+            # (reopening the session fires it; nothing revives a stale one).
+            # THE STATE WORD LIVES IN THE DUE COLUMN, and the row carries no
+            # prose repeating it — this is a table, like `lop sessions`, and
+            # the explanation of what "stale" or "dormant" costs belongs on the
+            # `status` summary that has room for a sentence. Keeping both put a
+            # 155-column line in an 80-column terminal (round 1, D4) and
+            # restated on every row what the reader needs told once.
+            if row["dormant"]:
+                state = "dormant"
+            elif row["ghost"]:
+                # Ghost before stale: with no session on disk, nothing can fire
+                # this at all, which is a stronger statement than "the
+                # supervisor stopped retrying" (round 2, Q4).
+                state = "ghost"
+            elif row["stale"]:
+                state = "stale"
+            else:
+                state = _format_due(row["due_in_s"])
+            mark = ""
             # `every …` reuses the same renderer the tool listing and the wake
             # panel use, so one wake reads identically wherever it is shown.
             repeat = ""
@@ -2999,7 +3206,72 @@ def wake_command(args: argparse.Namespace) -> int:
                 left = row.get("until_in_s")
                 if left is not None:
                     repeat += f", until {_format_due(left)}" if left > 0 else ", expired"
-            print(f"{when:>12}  {name}  {row['message']}{repeat}{mark}")
+            elif not row.get("every_ms"):
+                # The TUI wake panel says `once` for a non-recurring schedule
+                # and this listing said nothing, so the same wake read
+                # differently in two places (round 1, D9).
+                repeat = " · once"
+            if row.get("last_fired_at"):
+                repeat += f", last fired {format_wake_time(int(row['last_fired_at']))}"
+            # THE MESSAGE IS WHAT GETS CLAMPED, never the state tail. Clamping
+            # the composed string instead would silently drop `until in 6d`,
+            # `3/5 fired` or `(stale — …)` off the end of a long row — exactly
+            # the bounds an earlier round added because a user cannot be
+            # expected to remember them (round 5, R6/U16). A user-authored
+            # message is the one part of the row they already know.
+            tail = f"{repeat}{mark}"
+            message = row["message"]
+            # `room` GOES NEGATIVE on a narrow terminal, because `message_w` is
+            # a budget for the whole cell and the tail is subtracted from it
+            # here rather than reserved there. The `max(..., 1)` then floors
+            # the message at one character plus an ellipsis (`r…`) and the row
+            # overflows regardless — see the width note above the header for
+            # the measured numbers and why no budget change fixes it.
+            room = message_w - len(tail)
+            if len(message) > room:
+                message = message[: max(room - 1, 1)] + "…"
+            detail = f"{message}{tail}"
+            when_cell = f"{when:<{when_w}} " if show_when else ""
+            print(
+                f"{when_cell}{state:>{rel_w}} "
+                f"{_elide_id(row['session_id'], id_w):<{id_w}} {detail}".rstrip()
+            )
+
+        # ONE legend under the table rather than the same sentence on every
+        # row, and only for the states actually present: what "stale" and
+        # "dormant" COST is the thing a reader needs told, but telling it per
+        # row is what made a single wake occupy 155 columns.
+        # The legend folds to the terminal like the rows do (round 2, D12):
+        # a legend that wraps is the same ragged frame the table just stopped
+        # producing. 9 = the width of the state word plus its gap.
+        def _legend(word: str, text: str) -> None:
+            import textwrap
+
+            print()
+            for line in textwrap.wrap(
+                f"{word:<9}{text}", width=term_width, subsequent_indent=" " * 9
+            ):
+                print(line)
+
+        if any(row["stale"] and not row["dormant"] and not row["ghost"] for row in rows):
+            _legend(
+                "stale",
+                "the supervisor no longer fires these; they are delivered when "
+                "their session is next opened",
+            )
+        if any(row["dormant"] for row in rows):
+            _legend("dormant", "the session was stopped; reopening it re-arms its wakes")
+        if any(row["ghost"] for row in rows):
+            _legend(
+                "ghost",
+                "no session with this id exists on disk; nothing can fire these, and "
+                "nothing clears them automatically",
+            )
+        if not show_when:
+            # The omission is STATED, not silent: the absolute time was dropped
+            # to keep the table aligned on a narrow terminal (round 2, D12), and
+            # the reader is told where it went rather than left to notice.
+            print("\n(WHEN hidden — terminal too narrow)")
         return 0
 
     # status
@@ -3007,6 +3279,7 @@ def wake_command(args: argparse.Namespace) -> int:
         ensure_supervisor_installed,
         is_supported,
         plist_path,
+        supervisor_state,
         uninstall,
     )
 
@@ -3015,46 +3288,343 @@ def wake_command(args: argparse.Namespace) -> int:
         print(f"supervisor: {outcome.reason}")
         return 0
 
+    # NOT `harness.wake.format_duration` here: the status lines use this
+    # command's own single-unit ladder (`_format_duration`), and importing the
+    # compound one alongside it was dead weight flake8 cannot see through a
+    # function-local import (round 1, R5).
+    from local_operator.wakes.supervisor import STALE_AFTER_S
+
+    stale_after_days = STALE_AFTER_S / 86400.0
+
     rows = _wake_rows()
-    installed = is_supported() and plist_path().exists()
-    if getattr(args, "install", False):
+    # `install` as a subcommand and `status --install` are the same operation;
+    # the hook is idempotent and now REPAIRS, so both routes reach the fix.
+    wants_install = command == "install" or getattr(args, "install", False)
+    if wants_install:
         outcome = ensure_supervisor_installed(config_dir())
-        installed = outcome.installed
         print(f"supervisor: {outcome.reason}")
 
-    upcoming = [row for row in rows if not row["dormant"]]
+    # RUNNING, not merely present. `plist_path().exists()` was an even weaker
+    # test than the install hook's `_is_loaded()` — it reported "installed"
+    # for a supervisor that had exited, which is the blind spot that let armed
+    # wakes sit unfired. The file is still reported separately, because "the
+    # plist is there but nothing runs" is a distinct, actionable state.
+    state = supervisor_state(config_dir()) if is_supported() else None
+    plist_present = is_supported() and plist_path().exists()
+    # UNVERIFIABLE is a third state, distinct from stopped and from absent:
+    # the store being asked about is not one launchd can supervise (an
+    # isolated run, a config dir outside the real home), so the global label
+    # answers about a DIFFERENT store. Nothing about it may be rendered here.
+    verifiable = bool(state and state.verifiable)
+    running = bool(state and state.running and state.verifiable)
+    uptime_s: float | None = None
+    if verifiable and state and state.pid:
+        uptime_s = _process_uptime_s(state.pid)
+
+    # FIREABLE is the classification the whole screen now hangs off (round 1,
+    # D2). A wake that is dormant or stale will not be fired by the supervisor,
+    # so counting it as "next" answered "when will my wake fire?" with a date
+    # nine days in the past, on a row that is never coming, while the wake due
+    # in three minutes was absent from the screen entirely.
+    armed = [row for row in rows if not row["dormant"]]
+    dormant = [row for row in rows if row["dormant"]]
+    # GHOST sits beside stale as a reason the supervisor will not fire a row
+    # (round 2, Q4): an index entry whose session has no transcript can never
+    # be engaged, and the supervisor retires on a ghost-only store. Excluded
+    # from `fireable` for exactly the same reason stale is.
+    ghost = [row for row in armed if row["ghost"]]
+    stale = [row for row in armed if row["stale"] and not row["ghost"]]
+    fireable = [row for row in armed if not row["stale"] and not row["ghost"]]
+    overdue = [row for row in fireable if row["overdue"]]
+    upcoming = fireable  # already sorted soonest-first by `_wake_rows`
+
+    # Probed once per session that has a wake, not per row: `wedged_runtime`
+    # reads the registry, and a session with three schedules is still one
+    # process. Only sessions with something armed are worth asking about — a
+    # dormant session's runtime being wedged is not why its wake is not firing.
+    # Each call is a `registry.scan`, which walks the run directory AND reaps
+    # records for dead processes (round 2, R10) — cheap and idempotent at this
+    # scale (measured 19 sessions / 28 ms), but not a free read.
+    from local_operator.wakes.supervisor import wedged_runtime
+
+    wedged: list[tuple[str, int, float]] = []
+    for session_id in dict.fromkeys(row["session_id"] for row in armed):
+        found = wedged_runtime(config_dir(), session_id)
+        if found is not None:
+            wedged.append((session_id, found[0], found[1]))
+
+    # An ENUM plus the human sentence, not a sentence alone (round 1, D6): a
+    # monitoring consumer branching on `state` had to string-match prose, and
+    # the booleans do not distinguish `stopped` from `not_loaded`.
+    if not is_supported():
+        supervisor_state_name = "unsupported"
+    elif not verifiable:
+        supervisor_state_name = "unverifiable"
+    elif running:
+        supervisor_state_name = "running"
+    elif state and state.loaded:
+        supervisor_state_name = "stopped"
+    elif plist_present:
+        supervisor_state_name = "not_loaded"
+    else:
+        supervisor_state_name = "not_installed"
+
     payload = {
         "supported": is_supported(),
-        "installed": installed,
+        # Kept as "a supervisor is in place" for readers that already parse
+        # it, but it now means RUNNING rather than "a file exists".
+        "installed": running,
         "plist": str(plist_path()) if is_supported() else "",
         "scheduled": len(rows),
-        "armed": len(upcoming),
-        "next_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        "armed": len(armed),
+        "dormant": len(dormant),
+        # NAMED FOR WHAT THEY MEAN (round 2, D18). `next_due_in_s` silently
+        # changed meaning in round 1 — it began excluding stale rows, which is
+        # what D2 asked for, under a name that still reads "the soonest due
+        # wake" — and a consumer wanting the raw value had nowhere to get it.
+        # Both are published: the fireable one under an explicit name, the raw
+        # one under the original name so an existing consumer keeps parsing.
+        "next_due_in_s": rows[0]["due_in_s"] if rows else None,
+        "next_fireable_due_in_s": upcoming[0]["due_in_s"] if upcoming else None,
+        "supervisor": {
+            # False whenever the answer would be about another store, so a
+            # monitoring caller cannot read this block as a verdict on THIS
+            # one. The pid is withheld for the same reason.
+            "verifiable": verifiable,
+            "state": supervisor_state_name,
+            "running": running,
+            "loaded": bool(state and state.loaded and verifiable),
+            "plist_present": plist_present,
+            "pid": state.pid if (verifiable and state) else None,
+            "uptime_s": uptime_s,
+            "detail": state.detail if state else "",
+        },
+        # `overdue` counts FIREABLE rows only, which is what makes it
+        # reconcilable: `scheduled` = fireable + dormant + stale + ghost, and
+        # `overdue` is a subset of the fireable ones. Round 2 (D18) noted a
+        # consumer had no way to tell which rows were inside it; the
+        # `unfireable` block below is that breakdown.
+        "overdue": len(overdue),
+        "stale": len(stale),
+        "ghost": len(ghost),
+        # Why each non-firing row will not fire, so the counts above can be
+        # reconciled without re-deriving the classification.
+        "unfireable": {
+            "dormant": [row["session_id"] for row in dormant],
+            "stale": [row["session_id"] for row in stale],
+            "ghost": [row["session_id"] for row in ghost],
+        },
+        "max_overdue_s": max((row["overdue_s"] for row in overdue), default=0.0),
+        # The wedged case: a runtime whose process is alive but whose
+        # heartbeat has gone stale holds the transcript lease without serving,
+        # so its wake cannot fire and the supervisor's only trace was an
+        # ordinary timeout. Reported, never repaired — see `wedged_runtime`.
+        "wedged": [
+            {"session_id": session_id, "pid": pid, "heartbeat_age_s": age}
+            for session_id, pid, age in wedged
+        ],
     }
     if args.json:
         print(_json_dumps(payload))
         return 0
 
-    print(f"supervisor:  {'installed' if installed else 'not installed'}")
-    if installed is False and is_supported() and rows:
-        # The ACTIONABLE branch. Round 1 (D4): this command reported "not
-        # installed" beside three armed wakes and an overdue one, which is
-        # precisely the failure the subcommand exists to surface — and then
-        # stopped, leaving the user to find `--help` to act on the one fact it
-        # had just told them. The unsupported branch below already got two
-        # explanatory lines; the fixable one got none.
-        print("             (nothing will fire these while their sessions are")
-        print("              closed — run 'lop wake status --install')")
+    if state is not None and not verifiable:
+        # Never another store's pid. Saying "running" here would be the very
+        # failure this command exists to remove, one level up: it would report
+        # wakes as supervised while the running process watches a different
+        # store. Observed during validation, where an isolated run printed the
+        # operator's real LaunchAgent pid.
+        print(_wrap_status("cannot be verified for this store", "supervisor:"))
+        print(_wrap_status(f"({state.detail})"))
+        print(_wrap_status("(wakes here fire only while a session is open)"))
+    elif running:
+        detail = f"running (pid {state.pid})" if state and state.pid else "running"
+        # Suppressed under a minute: `up 0s` on a just-started supervisor is
+        # noise, and the pid already says it is there (round 1, D9).
+        if uptime_s is not None and uptime_s >= 60:
+            detail += f", up {_format_duration(uptime_s)}"
+        print(_wrap_status(detail, "supervisor:"))
+    elif state and state.loaded:
+        # The exact state that produced the permanent misses: launchd knows
+        # the job, `launchctl print` returns 0, and nothing is running. The
+        # parenthetical carries the LAUNCHD fact rather than repeating the
+        # state word it was meant to disambiguate (round 1, D9).
+        print(
+            _wrap_status(
+                "loaded but NOT running (launchd has the job; it has exited)", "supervisor:"
+            )
+        )
+    elif plist_present:
+        print(_wrap_status("not loaded (a plist exists but launchd has no job)", "supervisor:"))
+    else:
+        print(_wrap_status("not installed", "supervisor:"))
+    # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and
+    # the ACTIONABLE branch used to fire in the not-loaded state, printing
+    # `run 'lop wake install'` twice in a four-line block.
+    if is_supported() and verifiable and not running:
+        if rows:
+            print(
+                _wrap_status(
+                    "(nothing will fire these while their sessions are closed — "
+                    "run 'lop wake install')"
+                )
+            )
+        else:
+            print(_wrap_status("(run 'lop wake install')"))
     if not is_supported():
         # Honest rather than reassuring: on a platform with no installer the
         # wakes of a CLOSED session do not fire, and saying so is the whole
         # point of this line.
-        print("             (no installer for this platform — wakes fire only while a")
-        print("              session is open)")
-    print(f"scheduled:   {len(rows)} ({len(upcoming)} armed)")
-    if upcoming:
-        print(f"next:        {_format_due(upcoming[0]['due_in_s'])}  {upcoming[0]['message']}")
+        print(
+            _wrap_status(
+                "(no installer for this platform — wakes fire only while a session is open)"
+            )
+        )
+
+    # DORMANCY IS NAMED (round 1, D3). `scheduled: 1 (0 armed)` with no word of
+    # explanation was a dead end for the operator asking "why has nothing
+    # fired?", while `wake list` did state the reason.
+    counts = f"{len(armed)} armed"
+    if dormant:
+        counts += f", {len(dormant)} dormant"
+    print(f"scheduled:   {len(rows)} ({counts})")
+    if dormant and not armed:
+        print(_wrap_status("(dormant — their sessions were stopped; reopening one re-arms it)"))
+
+    # ONE LINE PER DISTINCT STATE (round 1, D5; sharpened in round 2, D16).
+    # `next:` names a wake in the FUTURE; an already-late one is reported by
+    # `overdue:` below, because labelling something late as "next" promises a
+    # future event and says twice what the line below already says (D16).
+    #
+    # SELECT the soonest future row rather than testing the head of the list
+    # (round 3, D19). `upcoming` is sorted soonest-first, so gating on
+    # `upcoming[0]` let ONE overdue row suppress `next:` for every future wake
+    # — a wake a minute away went unnamed on a surface README promises reports
+    # "the soonest wake that will fire".
+    future = [row for row in upcoming if not row["overdue"]]
+    if future:
+        soonest = future[0]
+        print(_wrap_status(f"{_format_due(soonest['due_in_s'])}  {soonest['message']}", "next:"))
+    if overdue:
+        # Counted over FIREABLE rows only, so "worst" is a wake that is
+        # actually coming rather than one the supervisor has given up on. The
+        # soonest overdue row is named, since with nothing in the future this
+        # is the line that answers "what is the supervisor working on".
+        worst = max(row["overdue_s"] for row in overdue)
+        summary = f"{len(overdue)} (worst {_format_duration(worst)})  {overdue[0]['message']}"
+        print(_wrap_status(summary, "overdue:"))
+    if stale:
+        print(
+            _wrap_status(
+                f"{len(stale)} past {int(stale_after_days)}d — delivered when their "
+                "sessions are next opened",
+                "stale:",
+            )
+        )
+    if ghost:
+        # The supervisor refuses these and retires on a ghost-only store
+        # (round 2, Q4). Saying so here is what stops this frame contradicting
+        # the process.
+        #
+        # THE REMEDY IS THE FILE (round 3, D20). The earlier wording said the
+        # entry "is removed when that session id is next written", which no
+        # reader can bring about: both callers of `store.remove_entry` need a
+        # live session (a persist with no schedules left, or `cleanup` after
+        # the session directory goes away), and `lop wake` exposes no cancel.
+        # So a ghost row is permanent, and the only action available is to
+        # delete the entry file — which is what the line now names.
+        # RELATIVE, not the absolute path: an absolute config root is one
+        # unbreakable token long enough to overflow a narrow terminal by
+        # itself, which is the thing D21 asked to stop. `wakes/<id>.json` is
+        # the form the design round suggested, and the ids it needs are on
+        # screen in `lop wake list`.
+        print(
+            _wrap_status(
+                f"{len(ghost)} with no session on disk — nothing can fire these, and "
+                "nothing clears them automatically; delete its "
+                "wakes/<session-id>.json entry to remove one",
+                "ghost:",
+            )
+        )
+    for session_id, pid, age in wedged:
+        # Named on its own line because the remedy is a DIFFERENT command from
+        # every other non-running state (round 2, D14): the surface points at
+        # `lop wake install` elsewhere, and here no wake-subsystem action can
+        # help at all, so it names the two commands that can.
+        print(
+            _wrap_status(
+                f"{session_id} (pid {pid}) has not sent a heartbeat in "
+                f"{_format_duration(age)}; it holds the session lease, so its wake "
+                f"cannot fire. It will not recover on its own — 'lop sessions' shows "
+                f"it, 'lop stop --pid {pid}' ends it",
+                "wedged:",
+            )
+        )
     return 0
+
+
+def _elide_id(session_id: str, width: int) -> str:
+    """A session id that fits, and that SAYS SO when it does not.
+
+    Round 2 (R9): `session_id[:12]` in a 12-wide column rendered a
+    15-character id as a different, shorter id — one an operator cannot paste
+    back into `lop wake list` or `lop stop`, with nothing marking it as cut.
+    Truncating an identifier is not like truncating a message: the reader can
+    recognise a message from its opening words and cannot reconstruct an id.
+    Ids are `uuid4().hex[:12]` so the column fits every id the product mints;
+    anything longer is marked rather than silently shortened.
+    """
+    if len(session_id) <= width:
+        return session_id
+    return session_id[: max(width - 1, 1)] + "…"
+
+
+#: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
+#: Every continuation line on that surface already indents to it, so a new
+#: line that wraps at column 0 reads as a different block (round 2, D13).
+_STATUS_LABEL_W = 13
+
+
+def _wrap_status(text: str, label: str = "") -> str:
+    """One `wake status` line, folded at the surface's own hanging indent.
+
+    Two round-2 findings meet here. D13: the `wedged:` line was 108 columns and
+    the only one whose continuation started at column 0, so the single line an
+    operator must act on was the one rendered as a ragged paragraph. Q2: the
+    `next:`/`overdue:` lines interpolate a user-authored wake message and were
+    never clamped — a 129-character message produced a 156-column line at every
+    terminal width, which is the last unclamped string on either screen.
+
+    Wrapping rather than truncating, because unlike the `wake list` table (one
+    row per wake, where a clamp keeps the columns) these lines are prose and
+    the whole sentence is the payload.
+    """
+    import re
+    import shutil
+    import textwrap
+
+    width = max(shutil.get_terminal_size((80, 24)).columns, _STATUS_LABEL_W + 24)
+    indent = " " * _STATUS_LABEL_W
+    first = f"{label:<{_STATUS_LABEL_W}}{text}" if label else f"{indent}{text}"
+
+    # A QUOTED COMMAND IS ONE TOKEN. Every remedy on this surface is a command
+    # the operator copies — `'lop wake install'`, `'lop stop --pid 4242'` — and
+    # a wrap inside one produces a line that looks like an instruction and is
+    # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
+    # single quotes are hidden from it and restored afterwards.
+    nbsp = "\x00"
+    protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
+    return "\n".join(
+        textwrap.wrap(
+            protected,
+            width=width,
+            subsequent_indent=indent,
+            # A wake message can carry a path or a URL; breaking one makes it
+            # unusable, and an over-long line is the lesser harm.
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    ).replace(nbsp, " ")
 
 
 def _json_dumps(value: Any) -> str:
@@ -3076,6 +3646,45 @@ def _format_due(seconds: float) -> str:
     else:
         text = f"{int(seconds // 86400)}d"
     return f"{text} overdue" if overdue else f"in {text}"
+
+
+def _process_uptime_s(pid: int) -> float | None:
+    """How long ``pid`` has been alive, or ``None`` when it cannot be read.
+
+    ``ps -o etime=`` rather than a dependency: this is one line on a status
+    surface, and ``psutil`` is deliberately not a dependency of this project.
+    Every failure is None — an uptime is a nicety on a line whose real payload
+    is the pid, and a status command must never fail because a subprocess did.
+    """
+    import subprocess as _subprocess
+
+    try:
+        result = _subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["ps", "-p", str(pid), "-o", "etime="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, _subprocess.SubprocessError):
+        return None
+    raw = result.stdout.strip()
+    if result.returncode != 0 or not raw:
+        return None
+    # `[[dd-]hh:]mm:ss` — parsed right to left so every form falls out of the
+    # same loop rather than needing a format branch per shape.
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        if not day_part.isdigit():
+            return None
+        days = int(day_part)
+    parts = raw.split(":")
+    if not all(part.strip().isdigit() for part in parts) or len(parts) > 3:
+        return None
+    seconds = 0.0
+    for power, part in enumerate(reversed(parts)):
+        seconds += int(part) * (60**power)
+    return seconds + days * 86400
 
 
 def stop_command(args: argparse.Namespace) -> int:

@@ -617,14 +617,18 @@ class AssistantBlock(TranscriptBlock):
         Spacing only needs "one row or more"; a full render of a message
         that may be thousands of lines long to learn that is waste. Any
         embedded newline settles it; otherwise the single line is multi-row
-        exactly when it is wider than the block.
+        exactly when it is wider than the block — measured at the LADDER's
+        width, so a block whose destination is already named is judged at it
+        rather than at the 80-column fallback
+        (`TranscriptBlock.spans_multiple_rows` records why that matters to the
+        gaps an insert settles before its mount).
         """
         text = self._full_text.strip()
         if not text:
             return False
         if "\n" in text:
             return True
-        return cell_len(text) > max(self.size.width or 80, 10)
+        return cell_len(text) > max(self.fold_width(80), 10)
 
     def text(self) -> str:
         """The accumulated message text (for tests and export)."""

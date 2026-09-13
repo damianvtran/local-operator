@@ -24,6 +24,7 @@ asserted only in ``test_spawn.py``, and none of them are asserted here.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -41,8 +42,9 @@ from local_operator.evaluation.adapters.api import (
     ResetStartParams,
     ScopedInfraValue,
 )
-from local_operator.evaluation.adapters.rpc import RpcRemoteError
+from local_operator.evaluation.adapters.rpc import MAX_DETAIL_MESSAGE, RpcRemoteError
 from local_operator.evaluation.adapters.worker import _error_detail
+from local_operator.evaluation.evidence.models import ErrorPayload
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.runner.episode import EpisodeRunner
 from tests.unit.evaluation.adapters.osworld import fixtures
@@ -51,6 +53,7 @@ from tests.unit.evaluation.runner.conftest import (
     ScriptedModel,
     build_config,
     build_spec,
+    payloads,
 )
 
 RELEASE_DIGEST = "d" * 64
@@ -446,3 +449,113 @@ async def test_simulator_is_called_once_and_host_finish_is_refused(
     refused = await adapter.ask_user_exchange(begin.model_copy(update={"ask_id": "no-simulator"}))
     assert not refused.accepted and refused.answer is None
     provider.respond.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# A blind read's account reaches the SEALED bundle's error detail
+# ---------------------------------------------------------------------------
+
+# What the AWS provider derives from upstream's failed-attempt logging: a
+# closed set of facts, never upstream's own words (``providers.aws``).
+_BLIND_CAUSE = (
+    "screenshot unavailable: upstream_failures=3 kinds=status,status,status "
+    "codes=502,502,502 first_ms=14 gaps_ms=5004,5002 elapsed_ms=15009"
+)
+
+
+async def _run_blind_episode(
+    tmp_path: Path, episode_id: str, *, blind_cause: str | None
+) -> tuple[Any, Path, str]:
+    """Drive one episode into an exhausted-observation failure and read its detail.
+
+    ``blind_after_observe_calls=1`` keeps reset_start's frame honest, so the run
+    fails where the paid canary runs did: mid-episode, on the read-back after a
+    committed batch, with every earlier step already paid for.
+    """
+
+    provider = FakeProvider(
+        scripted_score=1.0,
+        # More blind reads than the runner has attempts, so recovery is
+        # exhausted and the ORIGINAL failure is the one recorded.
+        blind_observations=5,
+        blind_after_observe_calls=1,
+        blind_cause=blind_cause,
+    )
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    runner = EpisodeRunner(
+        _spec_with_task(episode_id),
+        build_config(tmp_path, observation_retry_delay=0.0),
+        selector=selector,
+        model=ScriptedModel(["step", "step", "finish"]),
+        launch=lambda _selector: _AdapterSupervisorShim(adapter, selector),
+    )
+    outcome = await runner.run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.diagnostic is not None and "no screenshot frame" in outcome.diagnostic
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    detail = fatal[0].detail_artifact
+    assert detail is not None
+    return outcome, root, (root / "artifacts" / detail.sha256).read_bytes().decode()
+
+
+@pytest.mark.asyncio
+async def test_a_blind_reads_cause_reaches_the_sealed_error_detail(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The whole point of the change: a crash bundle can now say WHY.
+
+    The two canary episodes recorded only the fixed string, so nothing in the
+    bundle could prove or refute the mechanism. With a cause, the sealed detail
+    carries the provider's bounded facts -- attempt count, status codes, and the
+    gaps that separate a refused request from one that burned its timeout.
+    """
+
+    _, root, text = await _run_blind_episode(tmp_path, episode_id, blind_cause=_BLIND_CAUSE)
+
+    # The message the harness journals is unchanged...
+    assert "environment returned no screenshot frame" in text
+    # ...and the provider's own account rides beside it, attributed.
+    assert "ObservationCauseError" in text
+    assert _BLIND_CAUSE in text
+    # The degraded reads are still journalled, so the bundle shows the faltering
+    # environment rather than a suspiciously quiet failure.
+    retries = [
+        json.loads(line) for line in (root / "events.jsonl").read_text().splitlines() if line
+    ]
+    assert any(
+        event["kind"] == "error"
+        and event["payload"]["diagnostic_code"] == "observation-phase-retry"
+        for event in retries
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_blind_read_without_a_cause_keeps_the_pre_cause_detail(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """No cause means NO cause: the text must not be embellished or invented."""
+
+    _, _, text = await _run_blind_episode(tmp_path, episode_id, blind_cause=None)
+
+    assert "environment returned no screenshot frame" in text
+    assert "ObservationCauseError" not in text
+    # Exactly the one cause the crossing always produced -- the ObservationError
+    # itself -- with nothing appended to it.
+    assert text.count("cause[") == 1
+    assert text.count("caused by ") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_surfaced_cause_is_bounded_by_the_wire(tmp_path: Path, episode_id: str) -> None:
+    """A pathological cause cannot inflate a bundle past the field bound."""
+
+    _, _, text = await _run_blind_episode(tmp_path, episode_id, blind_cause="x" * 4000)
+
+    cause_line = next(line for line in text.splitlines() if line.startswith("cause[2]: "))
+    assert len(cause_line) <= len("cause[2]: ObservationCauseError: ") + MAX_DETAIL_MESSAGE

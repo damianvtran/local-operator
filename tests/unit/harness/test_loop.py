@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from collections import Counter
@@ -39,6 +40,7 @@ from local_operator.harness.types import (
     NoticeEvent,
     StreamEndEvent,
     StreamEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -216,6 +218,46 @@ async def test_full_turn_text_tool_text():
     # System blocks and converted messages reached the provider.
     assert stream.requests[0].system_blocks == ["sys"]
     assert stream.requests[0].messages[0].text == "go"
+
+
+@pytest.mark.asyncio
+async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
+    """The reasoning channel reaches no surface, and that claim is load-bearing.
+
+    ``stream_with_failover`` carves ``StreamReasoningDelta`` out of its "the
+    caller has seen output" gate on the strength of this property, and the
+    harness claims a consumer that ignores the event renders the old turn
+    unchanged. The loop is the one consumer that could regress silently, so the
+    same turn is run twice -- with and without a leading reasoning fragment --
+    and the two runs are compared: identical event types, identical assembled
+    text, and no emitted event (serialized in full) carrying the fragment.
+    """
+
+    def turn(with_reasoning: bool) -> list[StreamEvent]:
+        leading: list[StreamEvent] = (
+            [StreamReasoningDelta(delta="weighing the options")] if with_reasoning else []
+        )
+        return [*leading, StreamTextDelta(delta="Done"), StreamEndEvent(stop_reason="stop")]
+
+    async def run(with_reasoning: bool) -> list[Any]:
+        stream = ScriptedStream([turn(with_reasoning)])
+        context = LoopContext(system_blocks=["sys"], tools=[])
+        return [
+            event
+            async for event in AgentLoop().run(
+                [Message.user("go")], context, make_config(stream), None
+            )
+        ]
+
+    with_reasoning = await run(True)
+    without = await run(False)
+
+    assert [event.type for event in with_reasoning] == [event.type for event in without]
+    assert with_reasoning[-1].messages[0].text == "Done"
+    assert without[-1].messages[0].text == "Done"
+    assert not any(
+        "weighing" in json.dumps(event.model_dump(mode="json")) for event in with_reasoning
+    )
 
 
 @pytest.mark.asyncio

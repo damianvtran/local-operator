@@ -87,6 +87,20 @@ class ModelDecision(ProtocolModel):
     #: which counts how the model answered: a bundle showing a call against a
     #: request that offered nothing is a state the wire cannot produce.
     offered_tool_count: SafeCount = 0
+    #: How many DECLARED provider reasoning-boundary markers were stripped from
+    #: the head of this attempt's reply before it was judged. Recorded on the
+    #: ACCEPTED path as well as the rejected one, and that is the whole point:
+    #: the strip exists to turn a refused reply into an accepted one, so a
+    #: counter that only appeared on refusals could never show the tolerance
+    #: working -- and could never show it going quiet, which is what a provider
+    #: changing its chat template looks like from here. See
+    #: ``ModelSpec.reasoning_boundary_markers`` for the declaration and
+    #: ``strip_reasoning_boundary_markers`` for what removal is licensed to do.
+    #: Counts strips on the attempt's assembled PROSE channel. A model that
+    #: answered on the reply channel instead was judged on that text, and the
+    #: count still refers to the channel the token arrived on -- it is a record
+    #: of what the assembly did, not a claim about the reply that won.
+    stripped_reply_markers: SafeCount = 0
     prompt_cache_key: StrictIdentifier | None = None
     context_tokens: SafeCount | None = None
     compaction: CompactionRecord | None = None
@@ -110,6 +124,37 @@ class EpisodeTurn(ProtocolModel):
     # the context builder must not reconstruct it as actions and lose its facts.
     public_reply: str | None = None
     ask_answer: str | None = None
+
+
+class StreamShape(ProtocolModel):
+    """The shape of ONE attempt's provider stream, counted per event kind.
+
+    Recorded beside a refusal because the counts are the only thing that says
+    whether an empty-looking reply was empty: a turn with a large
+    ``reasoning_deltas`` and zero ``content_deltas`` produced work on the
+    reasoning channel, while all-zero counts under a normal ``stop`` mean the
+    provider sent nothing at all. Without them a reader of the evidence cannot
+    tell a model that thought and said nothing from a client that discarded
+    what it said -- which is why :class:`StreamReasoningDelta` exists at all.
+
+    Counts of EVENTS, not of tokens or characters: the wire client emits one
+    delta per provider chunk, so these are bounded by the provider's own
+    chunking, and ``stop`` is the provider's raw terminal marker (never
+    normalised, since the marker is exactly what a reader needs to bucket the
+    attempt).
+    """
+
+    content_deltas: SafeCount = 0
+    reasoning_deltas: SafeCount = 0
+    tool_call_deltas: SafeCount = 0
+    #: The provider's raw terminal marker, recorded VERBATIM and deliberately a
+    #: plain ``str`` rather than a ``StrictIdentifier``. The vocabulary here
+    #: belongs to the provider: a marker our identifier pattern would reject
+    #: (``function_call``, a vendor's ``SAFETY``, a future wire client's
+    #: normalisation) would make this record fail validation and turn a refusal
+    #: into a crash -- on a path whose whole job is to describe the refusal. The
+    #: builder truncates it, so it cannot grow the artifact unbounded either.
+    stop: str = "unspecified"
 
 
 class DecisionRejected(Exception):
@@ -152,6 +197,10 @@ class DecisionRejected(Exception):
         prompt_cache_key: str | None = None,
         context_tokens: int | None = None,
         compaction: CompactionRecord | None = None,
+        class_key: str | None = None,
+        evidence_reply: str | None = None,
+        stream_shape: StreamShape | None = None,
+        stripped_reply_markers: int = 0,
     ) -> None:
         super().__init__(diagnostic)
         self.diagnostic = diagnostic
@@ -163,7 +212,39 @@ class DecisionRejected(Exception):
         # "something with a `key` field" and "trailing junk after the JSON";
         # the replies themselves were discarded, so the failure class could
         # not be diagnosed without paying for the run again.
+        #
+        # ``reply`` is the HISTORY rendering of that reply: the words replayed
+        # back as the assistant's own turn so the correction has something to
+        # correct. It is bounded, and for a reply that touched the reserved
+        # envelope it is the placeholder instead of the reply, because that
+        # text is unvalidated and may carry notes the episode's redaction set
+        # forbids replaying. ``evidence_reply`` below is the OTHER boundary --
+        # see its own comment -- and the two must be allowed to differ.
         self.reply = reply
+        # The reply as EVIDENCE may publish it: raw, and bounded and
+        # redaction-scanned by the publisher rather than here, because the
+        # scan needs the episode's resolved-secret set (``episode.py`` has it;
+        # this exception is constructed where the reply is refused).
+        #
+        # Separate from ``reply`` on purpose. Withholding the model's own words
+        # from the bundle made the rejection classes unreadable -- in the
+        # MiniMax campaign 273 of 280 rejection artifacts carried the
+        # placeholder instead of the reply -- while the reason for withholding
+        # (unvalidated notes must not be replayed as history, and no secret may
+        # reach evidence) applies to only one of the two boundaries.
+        self.evidence_reply = evidence_reply
+        # The class the refusal was bucketed into, and the stream that produced
+        # it. Both ride into the rejection artifact so a reader can group
+        # rejections without re-deriving the class from prose, and so an empty
+        # reply can be told apart from a discarded one.
+        self.class_key = class_key
+        self.stream_shape = stream_shape
+        # The reply-assembly tally, for the same reason the class key is here:
+        # a refusal whose reply LOST a provider boundary token explains itself
+        # differently from one that arrived already broken, and only the count
+        # can tell the two apart after the fact -- the recorded reply is the
+        # version the harness judged, i.e. with the marker already gone.
+        self.stripped_reply_markers = stripped_reply_markers
         # The served route matters even for a rejected reply: a fallback that
         # answered badly still moved the run off its pinned route.
         self.route = route

@@ -15,6 +15,7 @@ Usage:
     python scripts/resume_paging_probe.py geometry [SHAPE] [COLSxROWS]
     python scripts/resume_paging_probe.py jitter   [SHAPE] [COLSxROWS]
     python scripts/resume_paging_probe.py reader   [SHAPE] [COLSxROWS]
+    python scripts/resume_paging_probe.py fold     [SHAPE] [COLSxROWS] [OUTDIR]
 
 ``reader`` is the one to show a human: it prints, for every painted frame of a
 page mount, the TEXT of the block at the top of the viewport. A correct insert
@@ -46,6 +47,10 @@ from local_operator.tui.app import (  # noqa: E402
     RESUME_PAGE_MESSAGES,
     RESUME_PAGE_TRIGGER_ROWS,
     OperatorApp,
+)
+from local_operator.tui.widgets.assistant import (  # noqa: E402
+    FALLBACK_WIDTH,
+    AssistantBlock,
 )
 from local_operator.tui.widgets.transcript import (  # noqa: E402
     NoticeBlock,
@@ -437,6 +442,96 @@ async def run_reader(shape: str, size: tuple[int, int]) -> None:
         )
 
 
+async def run_fold(shape: str, size: tuple[int, int], outdir: str | None = None) -> None:
+    """Every fold a page mount performs, and every frame that showed one.
+
+    The width a transcript block authors its rows at is BAKED IN: the rows carry
+    the fold and the height is pinned to the count of them. A page is projected
+    detached, so a block that cannot ask for its destination folds at the
+    80-column fallback and is re-authored by the first layout's resize — a
+    second build per block, and a painted frame whose rows wrap at 78 cells
+    inside a wide pane. This mode prints both halves: the fold widths the mount
+    performed (a value of 80 while the pane is wider is the defect) and the
+    frames in which a fallback-folded block intersected the viewport, which is
+    the half a reader sees. ``OUTDIR`` saves each such frame through the
+    faithful capture helper, so the still can be looked at rather than trusted.
+    """
+    history = SHAPES[shape]()
+    app, _session = await _boot(history, size)
+    folds: list[tuple[str, int]] = []
+    frames: list[str] = []
+    watching = {"on": False}
+    real_apply = AssistantBlock._apply_rows
+
+    def record_apply(self: AssistantBlock, text: Any) -> Any:
+        if watching["on"]:
+            folds.append(("AssistantBlock", self._flat_width()))
+        return real_apply(self, text)
+
+    AssistantBlock._apply_rows = record_apply  # type: ignore[method-assign]
+    try:
+        async with app.run_test(size=size) as pilot:
+            view = await _settle(pilot, app, {})
+            pane = view.scrollable_content_region.width
+            refresh = app.screen._compositor_refresh
+            counter = {"frame": 0, "saved": 0}
+
+            def capture() -> None:
+                refresh()
+                counter["frame"] += 1
+                top, bottom = view.scroll_y, view.scroll_y + view.size.height
+                for block in view.blocks():
+                    if block.size.width <= FALLBACK_WIDTH:
+                        continue
+                    if getattr(block, "_built_width", None) != FALLBACK_WIDTH:
+                        continue
+                    if block.virtual_region.bottom <= top or block.virtual_region.y >= bottom:
+                        continue
+                    line = (
+                        f"frame {counter['frame']}: {type(block).__name__} "
+                        f"box={block.size.width} authored at {FALLBACK_WIDTH}"
+                    )
+                    frames.append(line)
+                    if outdir and counter["saved"] < 4:
+                        counter["saved"] += 1
+                        from scripts.visual_capture import save_capture
+
+                        path = f"{outdir}/fold-frame-{counter['saved']}.svg"
+                        save_capture(app, path)
+                        frames.append(f"  saved {path}")
+
+            app.screen._compositor_refresh = capture
+            watching["on"] = True
+            try:
+                for _ in range(3):
+                    # Park at the top, then post one REAL notch: the trigger
+                    # zone is the top of the travel, so a notch from anywhere
+                    # else is a scroll this probe would misread as no demand.
+                    view.scroll_to(y=0, animate=False, immediate=True)
+                    await pilot.pause()
+                    _wheel_to_trigger(view)
+                    await pilot.pause()
+                    for _ in range(30):
+                        await pilot.pause()
+                    for _ in range(4):
+                        _wheel_to_trigger(view)
+                        await pilot.pause()
+            finally:
+                watching["on"] = False
+                app.screen._compositor_refresh = refresh
+    finally:
+        AssistantBlock._apply_rows = real_apply  # type: ignore[method-assign]
+
+    print(f"shape={shape} grid={size[0]}x{size[1]} pane={pane}")
+    at_fallback = sum(1 for _, width in folds if width == FALLBACK_WIDTH)
+    print(f"folds performed while a page mounted: {len(folds)}")
+    print(f"  at the {FALLBACK_WIDTH}-column fallback: {at_fallback}")
+    print(f"  widths seen: {sorted({w for _, w in folds})}")
+    print(f"frames showing a fallback-folded block inside the viewport: {len(frames)}")
+    for line in frames:
+        print(f"  {line}")
+
+
 def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else "geometry"
     shape = sys.argv[2] if len(sys.argv) > 2 else "agentic"
@@ -448,6 +543,9 @@ def main() -> None:
         asyncio.run(run_jitter(shape, (columns, rows)))
     elif mode == "reader":
         asyncio.run(run_reader(shape, (columns, rows)))
+    elif mode == "fold":
+        outdir = sys.argv[4] if len(sys.argv) > 4 else None
+        asyncio.run(run_fold(shape, (columns, rows), outdir))
     else:
         raise SystemExit(f"unknown mode {mode!r}")
 

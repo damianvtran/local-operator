@@ -40,11 +40,53 @@ ERROR_MESSAGES = {
         "user to close DevTools on that tab."
     ),
     ErrorCode.BUSY: "the browser bridge is busy with another command; retry this action once.",
+    ErrorCode.EXTENSION_UNRESPONSIVE: (
+        # Every clause names an action that measurably works. The remedy it leads
+        # to is the one with a measurement behind it: toggling the extension OFF
+        # then ON in `chrome://extensions` reloads the wedged worker and
+        # PRESERVES pairing (verified on real hardware — GUIDE, "failure UX").
+        #
+        # The previous text sent the reader to "retry in a few seconds", which
+        # landed on EXTENSION_DISCONNECTED — "no browser is attached… ask the
+        # user to open their browser" — for a browser that is open, i.e. the
+        # exact misdirection class this code exists to remove (design D1). The
+        # daemon no longer answers with that string during the cooling-off
+        # window either (see `_drop_unproven_link` / `LINK_DROP_TTL_S`), so a
+        # retry now lands here or on a live link.
+        #
+        # "toggle … OFF then ON" rather than "reload": chrome://extensions also
+        # offers Update and Remove right there, and only the toggle has a
+        # measurement attached (design D7).
+        #
+        # Deliberately NOT reusing EXTENSION_DISCONNECTED's copy.
+        "the browser extension is attached and paired but has stopped answering, so the "
+        "browser cannot be driven. Retry once in a few seconds. If the same action fails "
+        "again the worker is wedged and only a reload clears it: ask the user to toggle "
+        "the Local Operator extension OFF then ON in chrome://extensions — pairing is "
+        "preserved, but open tab handles, snapshot refs and pending site decisions are "
+        "lost, so re-'open' and re-'snapshot' afterwards. A daemon restart does not help."
+    ),
     ErrorCode.PROTO_MISMATCH: (
         "browser bridge protocol mismatch: update Local Operator and the browser extension, "
         "then restart the bridge daemon."
     ),
 }
+
+
+#: The one `extension_disconnected` shape that is NOT "no browser is attached":
+#: the daemon's wire fence detected that the extension REPLACED its connection
+#: while a command was in flight (see `daemon.py`'s `_admit`/`_complete` send and
+#: response fences). The browser is open and the worker has already re-dialled,
+#: so "ask the user to open their browser" names an action that does not apply
+#: and `lop browser install` is not even in scope — it resolves itself in about a
+#: second (design D3-3). Selected by the `phase` the daemon carries, because the
+#: code alone cannot tell this apart from a genuinely absent browser.
+REPLACED_PHASE = "replaced"
+REPLACED_PHASE_MESSAGE = (
+    "the browser extension replaced its connection while this command was in flight, so the "
+    "command was never answered. The browser is open and reconnected — retry the action; no "
+    "user action is needed."
+)
 
 
 class BridgeError(RuntimeError):
@@ -159,6 +201,11 @@ def _origin(value: str) -> str:
 
 def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> str:
     """Map every wire error to one actionable model-facing diagnostic."""
+    # Checked BEFORE the table: this code's own copy is the "no browser is
+    # attached" one, and it is exactly wrong for a replaced wire — the browser is
+    # open, mid-reconnect, and the command may simply be retried (design D3-3).
+    if error.code == ErrorCode.EXTENSION_DISCONNECTED and error.data.get("phase") == REPLACED_PHASE:
+        return REPLACED_PHASE_MESSAGE
     if error.code in ERROR_MESSAGES:
         return ERROR_MESSAGES[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -220,6 +267,48 @@ def format_error(error: BridgeError, *, action: str = "", surface: str = "") -> 
         return (
             f"the browser tab crashed while {action or 'the action'} was running. "
             "'open' the URL again to recover."
+        )
+    if error.code == ErrorCode.INTERNAL and error.data.get("stalled"):
+        # An extension-side per-call deadline fired: the op SETTLED rather than
+        # hung, which is what drains the extension's serialized chains and lets
+        # the next command run. Retry is genuinely correct here, unlike for
+        # EXTENSION_UNRESPONSIVE.
+        return (
+            f"the browser extension stalled on {error.data['stalled']} and gave up on this "
+            "command. Retry; if it repeats, ask the user to toggle the Local Operator "
+            "extension OFF then ON in chrome://extensions (pairing is preserved)."
+        )
+    if error.code == ErrorCode.INTERNAL and error.data.get("undrivable_tab"):
+        # Chrome refuses to attach the debugger to another extension's page
+        # ("Cannot access a chrome-extension:// URL of different extension").
+        # The tab is alive but can never be driven, and the extension has
+        # already pruned the surface, so the session's only move is a new tab.
+        #
+        # No tab is named: the only handle available here is the session's own
+        # opaque `bridge:<tabId>:<nonce>` capability string, and interpolating
+        # it (or a literal `(unknown)` when there is none) puts a useless token
+        # in the middle of prose (design D6).
+        return (
+            "that tab cannot be driven: it is another extension's page, so Chrome refuses "
+            "the debugger attachment. The handle was dropped; use 'open' with a URL to get "
+            "a new tab."
+        )
+    if error.code == ErrorCode.INTERNAL and "timeout_s" in error.data:
+        # The daemon's own budget expired with no typed answer from the
+        # extension. P3 correctly stopped this reading as a version mismatch,
+        # but left it on the generic fallback: a raw internal code and the
+        # daemon's internal verb name for `owner_recover`, with NO remedy, on
+        # the one command whose entire job is recovery (design D5). Name the
+        # action the model took and give the remedy that measurably clears a
+        # wedged worker; the code and the budget stay in details, out of the
+        # sentence.
+        seconds = error.data.get("timeout_s")
+        budget = f" within {seconds:g}s" if isinstance(seconds, (int, float)) else ""
+        return (
+            f"the browser extension received {action or 'the command'} but did not answer"
+            f"{budget}. Retry once; if it repeats, the browser side is unhealthy rather "
+            "than slow — ask the user to toggle the Local Operator extension OFF then ON "
+            "in chrome://extensions (pairing is preserved)."
         )
     return f"browser bridge error ({error.code.value}): {error.message}"
 

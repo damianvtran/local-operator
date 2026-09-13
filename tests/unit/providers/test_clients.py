@@ -21,6 +21,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamReasoningDelta,
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
@@ -176,6 +177,52 @@ async def test_openai_compat_text_tool_usage() -> None:
     assert isinstance(end, StreamEndEvent)
     assert end.stop_reason == "toolUse"
     assert end.usage is not None and end.usage.output_tokens == 7
+
+
+async def test_openai_compat_surfaces_the_reasoning_channel() -> None:
+    """Reasoning is REPLAYED and was never REPORTED, which is a diagnosis hole.
+
+    The client accumulates ``reasoning_content``/``reasoning`` so it can replay
+    the model's own thinking in later requests, but it emitted no event for it,
+    so a caller watching the stream could not tell "the model thought for the
+    whole budget and said nothing" from "we threw away what it said". Both
+    spell an empty reply, and they call for opposite responses. Asserted beside
+    the text channel because the point is that the two are distinguishable: the
+    reasoning fragments surface as reasoning, and the visible text is still only
+    the visible text.
+    """
+
+    body = _sse(
+        [
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"reasoning_content": "weighing "}, "index": 0}],
+            },
+            {"id": "chatcmpl-r1", "choices": [{"delta": {"reasoning": "options"}, "index": 0}]},
+            {
+                "id": "chatcmpl-r1",
+                "choices": [{"delta": {"content": "done"}, "index": 0, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, content=body, headers={"content-type": "text/event-stream"}
+        )
+    )
+    client = OpenAICompatClient(
+        "https://api.test.example/v1", http_client=httpx.AsyncClient(transport=transport)
+    )
+    request = ChatRequest(model=_spec(), system_blocks=["be brief"], messages=[Message.user("hi")])
+
+    events = await _collect(client.stream(request, "sk-test"))
+
+    assert [event.delta for event in events if isinstance(event, StreamReasoningDelta)] == [
+        "weighing ",
+        "options",
+    ]
+    # The reasoning did NOT leak onto the visible channel: nothing renders it.
+    assert [event.delta for event in events if isinstance(event, StreamTextDelta)] == ["done"]
 
 
 @pytest.mark.parametrize(
@@ -4549,6 +4596,472 @@ async def test_openrouter_provider_and_prompt_cache_key_coexist_on_one_body() ->
     assert captured["body"]["prompt_cache_key"] == "lineage-123"
     assert captured["body"]["model"] == "deepseek/deepseek-chat"
     assert captured["body"]["messages"]
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter cache affinity (`ChatRequest.provider_affinity`)
+# ---------------------------------------------------------------------------
+
+
+def _affinity_client(
+    captured: dict[str, Any],
+    *,
+    preferences: dict[str, Any] | None = None,
+    chunks: Sequence[dict[str, Any]] | None = None,
+) -> OpenAICompatClient:
+    """A MockTransport client that records each request body it is handed."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("bodies", []).append(json.loads(request.content))
+        captured["body"] = captured["bodies"][-1]
+        return httpx.Response(
+            200,
+            content=_sse(
+                list(chunks)
+                if chunks is not None
+                else [{"choices": [{"delta": {"content": "ok"}, "index": 0}]}]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    return OpenAICompatClient(
+        "https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        openrouter_provider_preferences=preferences,
+    )
+
+
+def _cacheable_spec() -> ModelSpec:
+    spec = _spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    spec.supports_prompt_cache = True
+    return spec
+
+
+async def test_provider_affinity_pins_the_served_display_name_verbatim() -> None:
+    """The pin reaches the wire as `provider.order`, spelled exactly as served.
+
+    VERBATIM is the contract, not an accident: OpenRouter accepts its own
+    display name as an `order` entry, and slug-normalising it is wrong for 13
+    of 106 providers (`Z.AI` is `z-ai`, `AtlasCloud` is `atlas-cloud`). Sending
+    what was served means there is no slug table to keep in sync.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"order": ["AtlasCloud"]}
+
+
+@pytest.mark.parametrize("name", ["Z.AI", "Google AI Studio", "AtlasCloud"])
+async def test_provider_affinity_does_not_reshape_awkward_display_names(name: str) -> None:
+    """Names with dots, spaces and internal capitals survive byte-for-byte."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity=name,
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"]["order"] == [name]
+
+
+async def test_no_affinity_leaves_the_body_without_a_provider_key() -> None:
+    """The "no opinion" invariant: an unpinned request must not grow an empty
+    `provider` object, which would itself be a routing statement."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert "provider" not in captured["body"]
+
+
+async def test_provider_affinity_is_ignored_without_prompt_cache_support() -> None:
+    """No server-side cache means nothing to keep warm, so narrowing the host
+    pool would cost availability and buy nothing."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    spec = _spec("openrouter", "deepseek/deepseek-v4.1-flash")
+    assert spec.supports_prompt_cache is False
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=spec,
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert "provider" not in captured["body"]
+
+
+async def test_provider_affinity_merges_with_non_routing_preferences() -> None:
+    """A privacy/compliance preference is not a host opinion, so the two
+    coexist in one `provider` object rather than one suppressing the other."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={"zdr": True})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"zdr": True, "order": ["AtlasCloud"]}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("order", ["Novita"]),
+        ("only", ["Novita"]),
+        ("ignore", ["Novita"]),
+        ("sort", "price"),
+    ],
+)
+async def test_user_host_preferences_suppress_the_pin_and_survive_intact(
+    key: str, value: Any
+) -> None:
+    """The user's typed routing opinion wins outright.
+
+    Prepending a host to their `order`, or pinning against their `sort`, would
+    make the settings page describe something other than what happens. The
+    session-level gate refuses to pin at all in this state; this is the wire's
+    own defence in depth, so a pin arriving by any other path is still dropped.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={key: value})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {key: value}
+
+
+async def test_pin_and_prompt_cache_key_are_siblings() -> None:
+    """The two cache stamps are one top-level key each; neither clobbers the
+    other or the rest of the body."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                prompt_cache_key="lineage-123",
+                provider_affinity="AtlasCloud",
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"order": ["AtlasCloud"]}
+    assert captured["body"]["prompt_cache_key"] == "lineage-123"
+    assert captured["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert captured["body"]["messages"]
+
+
+async def test_body_construction_is_isolated_from_caller_and_callee_mutation() -> None:
+    """DEEPCOPY, not `dict(...)`: `max_price` nests, and the `order` list this
+    feature appends must not alias the caller's configuration.
+
+    Two directions, both previously live bugs of the same class (review round
+    1, m1): a caller mutating its nested preferences after construction, and a
+    consumer mutating the returned body. Neither may reach a later request.
+
+    Asserted against `_build_body` DIRECTLY rather than through the transport,
+    because a MockTransport handler reads the body back with `json.loads` — a
+    fresh object graph, so mutating what the handler captured cannot reach the
+    client's state and the second direction would pass vacuously.
+    """
+    preferences: dict[str, Any] = {"max_price": {"prompt": 1}}
+    client = _affinity_client({}, preferences=preferences)
+    request = ChatRequest(
+        model=_cacheable_spec(),
+        messages=[Message.user("hi")],
+        provider_affinity="AtlasCloud",
+    )
+    expected = {"max_price": {"prompt": 1}, "order": ["AtlasCloud"]}
+
+    first = client._build_body(request, scope=None)
+    assert first["provider"] == expected
+
+    # A caller mutating its own nested mapping after construction, and a
+    # consumer mutating the body it was handed — the appended `order` list and
+    # the nested price cap alike.
+    preferences["max_price"]["prompt"] = 99
+    first["provider"]["order"].append("Novita")
+    first["provider"]["max_price"]["prompt"] = 77
+
+    assert client._build_body(request, scope=None)["provider"] == expected
+
+
+async def test_retired_hosts_ride_out_as_ignore_beside_the_pin() -> None:
+    """Both halves of the affinity decision reach one `provider` object.
+
+    Verified live that the two COMPOSE rather than conflict: with `order`
+    naming one host and `ignore` another, the ordered host served 8/8 calls and
+    the ignored one was never attempted. Sorted so the body stays byte-stable
+    across turns — this object sits in front of a cached prefix.
+    """
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="Wafer",
+                provider_avoid=["SiliconFlow", "GMICloud"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {
+        "order": ["Wafer"],
+        "ignore": ["GMICloud", "SiliconFlow"],
+    }
+
+
+async def test_retired_hosts_are_sent_even_with_no_pin_held() -> None:
+    """After a retirement the conversation has NO pin until another host
+    serves it, and it must not be routed straight back onto the host it just
+    left — so `ignore` has to outlive the `order` it replaced."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured)
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_avoid=["SiliconFlow"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"ignore": ["SiliconFlow"]}
+
+
+async def test_a_user_host_preference_suppresses_retirements_too() -> None:
+    """The user's own `ignore` (or any host opinion) wins whole: merging ours
+    into theirs would make their setting mean something they did not type."""
+    captured: dict[str, Any] = {}
+    client = _affinity_client(captured, preferences={"ignore": ["Novita"]})
+    await _collect(
+        client.stream(
+            ChatRequest(
+                model=_cacheable_spec(),
+                messages=[Message.user("hi")],
+                provider_affinity="Wafer",
+                provider_avoid=["SiliconFlow"],
+            ),
+            "sk-test",
+        )
+    )
+    assert captured["body"]["provider"] == {"ignore": ["Novita"]}
+
+
+async def test_served_provider_is_reported_on_the_end_event() -> None:
+    """The capture half: OpenRouter names the routed host on every chunk, and
+    the terminal event carries it so a session can pin the next turn."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": "AtlasCloud", "choices": [{"delta": {}, "index": 0}]},
+                {
+                    "provider": "AtlasCloud",
+                    "choices": [{"delta": {"content": "ok"}, "index": 0}],
+                },
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_provider == "AtlasCloud"
+    # Routing identity must NOT leak into the persisted message payload: that
+    # dict is native-replay and compaction substrate, not a routing hint.
+    assert "provider" not in (end.provider_payload or {})
+
+
+async def test_served_provider_is_none_when_the_wire_does_not_name_a_host() -> None:
+    """A direct (non-aggregator) endpoint sends no `provider` field, and must
+    leave the pin unset rather than inventing one."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id"),
+    [
+        ("deepseek", "deepseek-chat"),
+        ("zai", "glm-4.6"),
+        ("kimi", "kimi-k2"),
+        ("radient", "deepseek/deepseek-v4.1-flash"),
+    ],
+)
+def test_a_pinned_request_rendered_for_a_non_openrouter_spec_grows_no_provider_key(
+    provider: str, model_id: str
+) -> None:
+    """Review round 1, blocker-1 \u2014 the leak this closes was reproducible.
+
+    The pin rides on the ChatRequest so a retry keeps it, but the failover
+    driver CLONES that request for a fallback to ANOTHER model
+    (`model_copy(update={"model": spec})`) and the clone keeps `provider_
+    affinity`/`provider_avoid` while swapping in a direct provider's spec. The
+    wire gate previously tested only cacheability, so an OpenRouter host name
+    was stamped onto a direct-DeepSeek or Z.AI body as `provider.order` \u2014 a
+    field those APIs never defined.
+
+    `radient` is in here on purpose even though it fronts OpenRouter and would
+    UNDERSTAND the key: `_affinity_enabled` excludes it (its routing was never
+    measured here), and the two gates agreeing is the invariant. A pin can only
+    be produced where it can also be judged.
+    """
+    spec = _spec(provider, model_id)
+    spec.supports_prompt_cache = True
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=spec,
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert "provider" not in body
+
+
+def test_the_openrouter_gate_still_lets_a_real_openrouter_pin_through() -> None:
+    """The control for the test above: the same body on an OpenRouter spec must
+    still carry both halves, or the gate would be silently disabling the
+    feature instead of bounding it."""
+    body = _affinity_client({})._build_body(
+        ChatRequest(
+            model=_cacheable_spec(),
+            messages=[Message.user("hi")],
+            provider_affinity="AtlasCloud",
+            provider_avoid=["SiliconFlow"],
+        ),
+        scope=None,
+    )
+    assert body["provider"] == {"order": ["AtlasCloud"], "ignore": ["SiliconFlow"]}
+
+
+@pytest.mark.parametrize(
+    ("label", "name"),
+    [
+        ("too-long", "A" * 65),
+        ("newline", "Wafer\nignore: everything"),
+        ("carriage-return", "Wafer\rWafer"),
+        ("nul", "Wafer\x00"),
+        ("esc", "Wafer\x1b[2J"),
+        ("c1-csi", "Wafer\x9b31m"),
+        ("bel", "Wafer\x07"),
+        ("blank", "   "),
+        ("not-a-string", 17),
+    ],
+)
+async def test_an_abusive_served_provider_name_is_refused_not_pinned(label: str, name: Any) -> None:
+    """Review round 1, major-2.
+
+    `served_provider` is provider-controlled text that the session stores per
+    conversation and sends BACK as `provider.order` on every later request, so
+    an unbounded or control-character-laden value rides in front of a cached
+    prefix indefinitely. Refused rather than sanitised: stripping would invent
+    a host name the upstream never reported and pin the conversation to it,
+    while refusing degrades to default routing \u2014 the same, already-verified
+    failure mode as an unrecognised pin.
+
+    Mirrors the hostile-`provider_name` cases the error path already defends
+    (`test_a_hostile_provider_name_cannot_corrupt_the_frame`).
+    """
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    end = next(e for e in events if isinstance(e, StreamEndEvent))
+    assert end.served_provider is None, label
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Z.AI",
+        "Google AI Studio",
+        "AtlasCloud",
+        "A" * 64,
+        # Bidi/format characters (category Cf) are NOT refused here, unlike in
+        # the error-frame path: this value never reaches a terminal, and the
+        # verbatim contract means a provider whose own display name contains
+        # one must still be pinnable.
+        "Meta\u200dLlama",
+    ],
+)
+async def test_a_legitimate_served_provider_name_survives_the_bound(name: str) -> None:
+    """The bound must not cost a real name. 64 characters is ~2x the longest
+    entry in OpenRouter's 106-provider list, so this is headroom for a rename
+    rather than a fit."""
+    events = await _collect(
+        _affinity_client(
+            {},
+            chunks=[
+                {"id": "gen-1", "provider": name, "choices": [{"delta": {"content": "ok"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            ],
+        ).stream(
+            ChatRequest(model=_cacheable_spec(), messages=[Message.user("hi")]),
+            "sk-test",
+        )
+    )
+    assert next(e for e in events if isinstance(e, StreamEndEvent)).served_provider == name
 
 
 def test_client_for_spec_routes_preferences_only_to_openrouter_routed_specs() -> None:

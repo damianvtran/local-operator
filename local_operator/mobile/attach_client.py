@@ -50,7 +50,10 @@ from local_operator.mobile.types import (
     _projection_from_json,
 )
 from local_operator.session.runtime.registry import scan
-from local_operator.session.runtime.types import DESKTOP_WATCH_CAPABILITY
+from local_operator.session.runtime.types import (
+    DESKTOP_WATCH_CAPABILITY,
+    EVENT_MUTE_CAPABILITY,
+)
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -679,7 +682,7 @@ def _decode_quietly(data_b64: str) -> bytes:
 
 
 def find_runtime_record(
-    config_dir: Path, session_id: str
+    config_dir: Path, session_id: str, *, check_zombie: bool = True
 ) -> tuple[SessionRecord | None, int | None]:
     """Locate the discovery record of the live process hosting ``session_id``.
 
@@ -694,10 +697,17 @@ def find_runtime_record(
     ``(None, pid)`` means an owner exists but no usable record does (old
     binary, registrant failed to start): the caller degrades gracefully.
     ``(None, None)`` means no owner at all.
+
+    ``check_zombie`` is forwarded to :func:`resume.live_runtime_pid`, which owns
+    the decision and documents both modes. It is a parameter because this
+    function is on the engage loop's dense 10 ms path as well as on every attach
+    path, and only the former can afford to defer the proof: there the owner
+    answer can only cause a wait, while an attach turns it into a refusal the
+    user sees.
     """
     from local_operator.resume import live_runtime_pid
 
-    owner = live_runtime_pid(config_dir, session_id)
+    owner = live_runtime_pid(config_dir, session_id, check_zombie=check_zombie)
     if owner is None:
         return None, None
     best: SessionRecord | None = None
@@ -720,6 +730,50 @@ def find_runtime_record(
     if best is not None or fallback is not None:
         return None, owner
     return None, owner
+
+
+def dialable_record_exists(config_dir: Path, pid: int) -> bool | None:
+    """Whether ``pid`` publishes a record this build could dial.
+
+    `find_runtime_record` collapses two very different states into
+    ``(None, pid)``: an owner that publishes no usable record at all (an older
+    binary, or a registrant that failed to start), and the rebind race — a
+    record for that pid that is dialable but is still stamped with the
+    PREVIOUS ``session_id``, which that function's own docstring describes as a
+    state whose record "is returned anyway and the welcome projection's
+    identity check ... arbitrates". A caller about to tell the user the process
+    is an old one must therefore ask this rather than infer it from the tuple;
+    otherwise it reports a cause the code has not established and skips the
+    pacing the race asks for (review m3).
+
+    A WEDGED RECORD ANSWERS ``True``, because that is the whole of "could this
+    pid's record be dialled" (review round 3, MINOR-2). The registry has a
+    third state — the pid is alive and the heartbeat is older than
+    ``HEARTBEAT_TIMEOUT_S``, i.e. the owner is stuck — and `scan` keeps that
+    record for exactly the reason the redial exists: a stuck owner may recover
+    on its own, which is the transient the budget is sized to outlast. Asking
+    only for ``live`` made a wedged owner answer ``False``, so it earned the
+    older-process sentence AND skipped the pacing: a cause the code had not
+    established, on the one state a redial could have healed. ``stale`` (the
+    pid is gone) is the state that is genuinely absent, and it stays ``False``.
+
+    The threshold is ``2``, the same floor `find_runtime_record` uses to decide
+    a record is usable — deliberately NOT `FRONTEND_ATTACH_MIN_PROTOCOL`: the
+    question here is only "could this pid's record be dialled at all", and a
+    record below the frontend attach protocol is a case
+    `frontend_attach_refusal` already answers with its own sentence.
+
+    ``None`` when the registry could not be read at all. Not a plain bool on
+    purpose: a failed read is not evidence of absence, so the caller must pace
+    rather than refuse on it.
+    """
+    try:
+        for record, state in scan(config_dir):
+            if state in ("live", "wedged") and record.pid == pid and record.protocol >= 2:
+                return True
+    except OSError:
+        return None
+    return False
 
 
 class AttachClient:
@@ -782,6 +836,7 @@ class AttachClient:
         self._req_seq = 0
         self._session_id = ""
         self._attention_supported = False
+        self._event_mute_supported = False
         self._connected = False
 
     @property
@@ -791,6 +846,34 @@ class AttachClient:
     @property
     def supports_completion_ack(self) -> bool:
         return self.connected and self._attention_supported
+
+    @property
+    def supports_event_mute(self) -> bool:
+        """Whether this owner advertised ``EVENT_MUTE_CAPABILITY``.
+
+        Read from the RECORD, at dial, the way ``_attention_supported`` is:
+        the owner's build cannot change while it lives, and a record is
+        rewritten on every start, so one read at connect is complete. An
+        owner without the string is exactly the pre-mute behaviour — it keeps
+        sending every frame and the parked controller keeps discarding them —
+        so the caller must gate the send on this and never send blind.
+        """
+        return self.connected and self._event_mute_supported
+
+    async def set_event_muted(self, muted: bool) -> bool:
+        """Ask the owner to stop (``True``) or resume delta-grade event frames.
+
+        Best-effort by contract: the mute is an optimisation over the parked
+        controller's app-side discard, so a refusal or a dead connection here
+        costs delivery, never correctness. Returns whether the owner acked;
+        callers that cannot wait (a synchronous park toggle) run this in a
+        task and ignore the result. The op is idempotent, which is what makes
+        the reconnect re-assert legal rather than a special case.
+        """
+        if not self.supports_event_mute:
+            return False
+        await self._request("event_mute" if muted else "event_unmute")
+        return True
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Dial, authenticate as an attach client, and verify identity.
@@ -806,6 +889,7 @@ class AttachClient:
             raise ConnectionError(f"owner runs protocol v{record.protocol}; attach needs >= 2")
         self._session_id = session_id
         self._attention_supported = "completion-ack-v1" in record.capabilities
+        self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
