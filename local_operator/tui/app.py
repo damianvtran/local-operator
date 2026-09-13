@@ -309,6 +309,7 @@ from local_operator.tui.widgets.subagent_panel import (
 )
 from local_operator.tui.widgets.subagent_view import SubagentView, SubagentViewDismissed
 from local_operator.tui.widgets.toast import (
+    _NETWORK_MARKER,
     TOAST_DEFAULT_MS,
     TOAST_FAILURE_MS,
     Toast,
@@ -2518,24 +2519,34 @@ _MCP_ANNOUNCE_KEY_CELLS = 10**6
 _MCP_NOTICE_POINTER_FULL = " — /mcp for details"
 _MCP_NOTICE_POINTER_SHORT = " — /mcp"
 
+#: The ONE parenthetical the notice may shed, and it is the transport family's own
+#: detail token: its timeout phrase reads ``no response from <host> (timed out)``.
+#: Mirrored rather than imported, like the marker, and pinned against the manager's
+#: phrase table by the notice's own test. WHY so narrow: the first cut shed ANY
+#: trailing ``(...)``, and measured it turned ``server returned 500 (Internal
+#: Server Error)`` into ``MCP slack failed: server returned 500 — /mcp`` at 70
+#: columns — a substantive clause dropped to make room for the signpost (review
+#: round 2, R2-2). The marker the drop is gated on is the WIDGET's mirror
+#: (``toast._NETWORK_MARKER``, imported above) rather than a third copy declared
+#: here: one TUI-side mirror, pinned to the manager's constant by test.
+_NOTICE_DROPPABLE_PARENTHETICAL = " (timed out)"
 
-def _drop_trailing_parenthetical(text: str) -> str:
-    """``no response from h (timed out)`` → ``no response from h``.
 
-    The ONLY droppable piece of a transport phrase, and it is droppable because
-    it is the classifier's own detail token rather than part of the claim: the
-    sentence already says no response arrived, and the parenthetical only names
-    which of the ways it did not. Used as the notice's third rung, where the
-    alternative is losing the signpost or wrapping the sentence (design review
-    D1-1). Deliberately narrow — a trailing group only, and nothing is removed
-    when the text does not end in one.
+def _drop_trailing_parenthetical(error: str) -> str:
+    """Shed the transport family's droppable tail, or return ``error`` unchanged.
+
+    Two guards, both load-bearing: the text must be the transport family's own
+    copy (its marker leads) and must end in exactly the detail token that only
+    restates the phrase (R2-2). Anything else — an application error's own
+    parenthetical, a phrase that merely happens to end in one — is left whole;
+    the notice wraps rather than edit a sentence it does not own.
     """
-    if not text.endswith(")"):
-        return text
-    opener = text.rfind("(")
-    if opener <= 0:
-        return text
-    return text[:opener].rstrip()
+    if not error.startswith(_NETWORK_MARKER) or not error.endswith(_NOTICE_DROPPABLE_PARENTHETICAL):
+        return error
+    trimmed = error[: -len(_NOTICE_DROPPABLE_PARENTHETICAL)].rstrip()
+    # A text that IS the token has nothing left to say; keep it rather than
+    # returning an empty sentence.
+    return trimmed or error
 
 
 #: Owner tag for the IN-FLIGHT read card, deliberately distinct from
@@ -15482,10 +15493,11 @@ class OperatorApp(App[None]):
 
         1. the full signpost, when the sentence leaves room for it;
         2. the short one (``— /mcp``), shed whole rather than split;
-        3. the classifier's trailing parenthetical — ``(timed out)`` — dropped so
-           the short signpost fits: it is the DETAIL TOKEN, not the statement
-           (``no response from <host>`` is already the whole claim), and the
-           signpost is what the user needs next;
+        3. the transport family's ONE droppable detail token
+           (:data:`_NOTICE_DROPPABLE_PARENTHETICAL`) dropped so the short signpost
+           fits: ``(timed out)`` restates the phrase rather than adding to it, and
+           the signpost is what the user needs next. Nothing else is ever shed —
+           an application error's own parenthetical is left whole (R2-2);
         4. no signpost at all, when even that would not fit beside the sentence —
            the sentence is what the user came for, and an orphaned half-pointer
            is worse than none.

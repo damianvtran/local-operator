@@ -956,18 +956,31 @@ async def test_the_announce_keeps_its_semantic_lamp() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("columns", [100, 80, 70, 60, 50, 44, 40])
-async def test_the_notice_pointer_is_never_split_at_any_width(columns: int) -> None:
-    """The pointer is only worth adding if the user can read it WHOLE.
+async def test_the_notice_signpost_is_whole_and_present_wherever_it_fits(columns: int) -> None:
+    """The signpost is only worth adding if the user can read it WHOLE — and it
+    must actually be there where the column can hold it.
 
-    The toast was excluded from U4 precisely because it truncates; the notice
-    was chosen not for wrapping but for being able to hold the signpost at all.
+    The toast was excluded from U4 precisely because it truncates; the notice was
+    chosen not for wrapping but for being able to hold the signpost at all.
     Design round 1 (D1-1) then measured what wrapping actually did to the longer
     ``network: …`` sentence: the fold SPLIT the pointer (``— /mcp`` / ``for
-    details``) and the row count changed again when the boot card stood down. The
-    contract is therefore that the pointer is never the thing the fold decides
-    about — it is either whole, or shed whole to its short form — and this asserts
-    it against the painted cell grid, because only the frame shows what wrapping
-    did.
+    details``) and the row count changed again when the boot card stood down.
+
+    The contract has FOUR rungs, and the last two are the ones a "never split"
+    assertion cannot see (review round 2, R2-3):
+
+    1. the full ``— /mcp for details`` (100 and 80 columns here);
+    2. the short ``— /mcp``, shed whole (70 columns for this fixture — 53 cells
+       against a 62-cell budget);
+    3. the transport family's own ``(timed out)`` shed so rung 2 fits;
+    4. NO signpost at all, when even the short form cannot fit beside the
+       sentence (60 columns and below here) — the sentence is what the user came
+       for, and an orphaned half-pointer would be worse than none.
+
+    So this asserts BOTH halves per width: nothing split at any width (against
+    the painted cell grid, because only the frame shows what wrapping did), and
+    the signpost present in one of its two forms wherever the column can hold it
+    — which is what pins rung 2 at 70 rather than leaving it merely unpinned.
     """
     session = _session(_outcome(**_SLACK_DOWN), session_id="a")
     app = OperatorApp(lambda: _factory(session))
@@ -996,12 +1009,132 @@ async def test_the_notice_pointer_is_never_split_at_any_width(columns: int) -> N
                 assert line.endswith(
                     "\u2014 /mcp for details"
                 ), f"the pointer was split at {columns}: {line!r}"
+        signpost = [
+            line
+            for line in lines
+            if line.endswith("\u2014 /mcp") or line.endswith("\u2014 /mcp for details")
+        ]
         if columns >= 80:
-            # Where the boot column has room, the full form is what ships — a
-            # budget that shed it here would be shedding for nothing.
+            # Rung 1: room for the full form, so shedding it would be shedding
+            # for nothing.
             assert any(
                 line.endswith("\u2014 /mcp for details") for line in lines
-            ), f"the signpost was dropped where it fits, at {columns} columns"
+            ), f"the full signpost was dropped where it fits, at {columns} columns"
+        elif columns >= 70:
+            # Rung 2: the short form fits (53 ≤ 62 at 70 columns), so a change
+            # that ships NO signpost here must fail rather than pass quietly.
+            assert signpost, f"the signpost vanished where the short form fits, at {columns}"
+        else:
+            # Rungs 3/4: measured, the short form cannot fit beside this sentence
+            # from 60 columns down, so the contract is only "nothing split".
+            assert not signpost or all(
+                line.endswith("\u2014 /mcp") or line.endswith("\u2014 /mcp for details")
+                for line in signpost
+            )
+
+
+def test_the_droppable_parenthetical_mirrors_the_managers_own_detail_token() -> None:
+    """The shed token is gated on the manager's phrase, so it must BE that phrase.
+
+    Same class of mirror as ``toast._NETWORK_MARKER``: a divergence here would
+    silently stop rung 3 firing (or start it firing on copy that is not the
+    transport family's), and nothing else in the tree compares the two. The
+    marker the drop is gated on is checked against the manager as well, and the
+    app is asserted to REUSE the widget's mirror rather than declare a third.
+    """
+    from local_operator.mcp import manager as manager_module
+    from local_operator.tui import app as app_module
+    from local_operator.tui.widgets import toast as toast_module
+
+    assert app_module._NOTICE_DROPPABLE_PARENTHETICAL == " (timed out)"
+    assert manager_module._TRANSPORT_DETAIL_TEXT["timeout"].endswith(
+        app_module._NOTICE_DROPPABLE_PARENTHETICAL
+    )
+    assert app_module._NETWORK_MARKER is toast_module._NETWORK_MARKER
+    assert toast_module._NETWORK_MARKER == manager_module.NETWORK_FAILURE_MARKER
+
+
+def test_only_the_transport_familys_own_token_is_ever_shed() -> None:
+    """R2-2: the first cut shed ANY trailing ``(...)``, which mangled copy.
+
+    Measured on that cut, ``server returned 500 (Internal Server Error)``
+    rendered ``MCP slack failed: server returned 500 — /mcp`` at 70 columns — a
+    substantive clause dropped to make room for the signpost. The drop is now
+    gated on the transport marker AND on the one detail token that only restates
+    the phrase, so an application error's own parenthetical survives, and so does
+    a hostless transport line (no marker, no host to point at).
+    """
+    from local_operator.mcp.manager import (
+        NETWORK_FAILURE_MARKER,
+        McpTransportError,
+        _transport_failure_text,
+    )
+    from local_operator.tui.app import _drop_trailing_parenthetical
+
+    assert _drop_trailing_parenthetical("some plain error") == "some plain error"
+    assert (
+        _drop_trailing_parenthetical("server returned 500 (Internal Server Error)")
+        == "server returned 500 (Internal Server Error)"
+    )
+    # The hostless stdio copy carries no marker, so its trailing group is not a
+    # transport detail token and stays put.
+    hostless = "transport failed before the server answered (retrying)"
+    assert NETWORK_FAILURE_MARKER not in hostless
+    assert _drop_trailing_parenthetical(hostless) == hostless
+    # And the phrase it IS meant to shed.
+    timeout_line = NETWORK_FAILURE_MARKER + "no response from slack.example.com (timed out)"
+    assert (
+        _drop_trailing_parenthetical(timeout_line)
+        == NETWORK_FAILURE_MARKER + "no response from slack.example.com"
+    )
+    # The token alone has nothing left to say: keep the sentence.
+    assert _drop_trailing_parenthetical(" (timed out)") == " (timed out)"
+    # Sanity: the classifier's timeout phrase is what the fixture composes.
+    composed = _transport_failure_text(
+        McpTransportError("https://slack.example.com/mcp", "timeout")
+    )
+    assert composed is not None
+    assert _drop_trailing_parenthetical(composed) == (
+        NETWORK_FAILURE_MARKER + "no response from slack.example.com"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_notice_never_edits_a_parenthetical_it_does_not_own() -> None:
+    """R2-2 on the painted frame, at the width where the mangling appeared.
+
+    At 70 columns the first cut shed any trailing parenthetical to make room for
+    the signpost: ``server returned 500 (Internal Server Error)`` painted as
+    ``MCP slack failed: server returned 500 — /mcp``. The clause now survives
+    whole. The recorded cost, and the reason rung 4 has to be named in the
+    contract: at this width the sentence (60 cells) fits the 62-cell budget
+    without the signpost, so the notice keeps what the server said and drops the
+    signpost rather than editing the sentence to keep it.
+    """
+    session = _session(
+        _outcome(
+            **{
+                **_SLACK_DOWN,
+                "failures": {"slack": "server returned 500 (Internal Server Error)"},
+            }
+        ),
+        session_id="a",
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(70, 24)) as pilot:
+
+        def _grid() -> str:
+            return "\n".join(
+                "".join(segment.text for segment in strip).rstrip()
+                for strip in app.screen._compositor.render_strips()
+            )
+
+        assert await _until(pilot, lambda: "MCP slack" in _grid())
+        # Wrapped rows are joined with a space so a fold mid-sentence cannot hide
+        # the clause the assertion is about.
+        painted = " ".join(line.strip() for line in _grid().splitlines() if line.strip())
+        assert "Internal Server Error)" in painted, painted
+        assert "server returned 500 — /mcp" not in painted, painted
 
 
 @pytest.mark.asyncio

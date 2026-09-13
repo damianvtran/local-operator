@@ -254,6 +254,23 @@ def test_the_wide_card_carries_the_whole_grouped_footer() -> None:
     assert text.plain.split("\n")[1] == "network: linear, slack"
 
 
+def test_the_mirrored_marker_is_the_managers_own() -> None:
+    """``_NETWORK_MARKER`` is a mirror, so the two spellings must stay equal.
+
+    The widget renders an outcome and deliberately does not import from the
+    SDK-backed manager module, so the marker is a copy. Two behaviours lean on
+    it: the D1-2 head-drop rung (a line the marker leads names its host, which is
+    what makes the duplicated head removable) and the D1-6 one-spelling property
+    across the card, the notice and ``/mcp``. Nothing else in the tree compares
+    the two, so a divergence would disable both silently with every test green
+    (agent review round 2, R2-5).
+    """
+    from local_operator.mcp.manager import NETWORK_FAILURE_MARKER
+    from local_operator.tui.widgets.toast import _NETWORK_MARKER
+
+    assert _NETWORK_MARKER == NETWORK_FAILURE_MARKER
+
+
 def _fills(text) -> dict[str, str]:  # type: ignore[no-untyped-def]
     """``{span text: hex fill}`` for every styled span in a rendered message."""
     return {
