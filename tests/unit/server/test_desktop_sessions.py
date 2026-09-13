@@ -3,13 +3,20 @@
 import asyncio
 import base64
 import json
+import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
+from local_operator.config import ConfigManager
 from local_operator.harness.types import Message
+from local_operator.server.routes import capabilities, desktop_sessions
 from local_operator.server.routes.desktop_sessions import Answer, Command, Image, Prompt
 from local_operator.server.utils import desktop_sessions as module
 from local_operator.server.utils.desktop_receipts import (
@@ -17,6 +24,7 @@ from local_operator.server.utils.desktop_receipts import (
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.session.runtime import registry
 from local_operator.session.transcript import Transcript, read_transcript_page
 
 
@@ -1294,3 +1302,129 @@ async def test_the_desktop_event_payload_still_carries_inline_base64(tmp_path):
     block = payload["result"]["content"][1]
     assert block["data"] == stored
     assert "attachment" not in block
+
+
+@pytest_asyncio.fixture
+async def draft_api(tmp_path: Path, monkeypatch):
+    """A minimal app over THIS test's config root, shared by the preview tests.
+
+    Deliberately not the shared ``test_app_client``: that one carries the legacy
+    chat surface, and the property under test is what the preview route does to
+    the filesystem, so the root has to be the test's own ``tmp_path`` and the
+    session pool has to close before the assertions about disk state run.
+    """
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "draft-preview-test")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer draft-preview-test"},
+    ) as client:
+        yield client, tmp_path
+    if hasattr(app.state, "desktop_sessions"):
+        await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_a_draft_preview_resolves_without_creating_a_session(draft_api) -> None:
+    """A new-conversation pane gets its readings without costing a session.
+
+    The pane has no session to cold-GET, and creating one at pane open would
+    leave a visible empty row in the sidebar for every draft the user abandons.
+    So the preview answers the question the first send will ask — which model will
+    run — while writing nothing: no directory, no marker, no runtime record.
+    """
+    client, root = draft_api
+    config = ConfigManager(config_dir=root)
+    config.update_config({"hosting": "anthropic", "model_name": "claude-opus-5"})
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root)},
+    )
+    assert result.status_code == 200
+    snapshot = result.json()["result"]["frontend"]["snapshot"]
+    # The resolution a real cold open would produce for this session.
+    assert snapshot["session_id"] == ""
+    model = snapshot["selected_model"]
+    assert model["provider"] == "anthropic" and model["model_id"] == "claude-opus-5"
+    assert snapshot["effective_model"]["model_id"] == "claude-opus-5"
+    # Nothing has been sent, so nothing may be claimed about it.
+    assert snapshot["context_tokens"] is None
+    assert snapshot["cumulative_parent_cost"] is None
+
+    # No session record: neither the durable directory nor a runtime lease.
+    assert not (root / "sessions").exists(), "a draft pane must not create a session"
+    assert registry.scan(root) == []
+
+    capabilities = await client.get("/v1/capabilities")
+    assert (
+        capabilities.json()["result"]["features"]["draft_preview"] == 1
+    ), "the strip that renders a draft is gated on this key, so it must be published"
+
+
+@pytest.mark.asyncio
+async def test_a_draft_preview_does_not_go_through_the_create_path(draft_api, monkeypatch) -> None:
+    """The route cannot be "fixed" by creating the record it is previewing.
+
+    Pins the mechanism rather than the observation: the directory assertion above
+    would also pass if the route created a session and cleaned it up, and this
+    makes any use of the create path an immediate failure.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-5"}
+    )
+
+    async def _boom(*args, **kwargs):
+        raise AssertionError("a preview must not create a session")
+
+    monkeypatch.setattr(DesktopSessions, "create", _boom)
+
+    result = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root)},
+    )
+    assert result.status_code == 200
+    assert result.json()["result"]["frontend"]["snapshot"]["selected_model"]["model_id"] == (
+        "claude-opus-5"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_preview_refuses_a_working_directory_that_does_not_exist(draft_api) -> None:
+    """m2: one body answers the same way on both routes.
+
+    A cwd that cannot be created cannot host a session, so a preview describing one
+    would publish readings for a session the first send could never create — the
+    same refusal the design states for an unresolvable profile, and now the same
+    shared admission (`resolve_working_directory`) `create` applies.
+    """
+    client, root = draft_api
+    ConfigManager(config_dir=root).update_config(
+        {"hosting": "anthropic", "model_name": "claude-opus-5"}
+    )
+    missing = root / "no-such-directory"
+
+    preview = await client.post(
+        "/v1/desktop/sessions/preview",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(missing)},
+    )
+    create = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(missing)},
+    )
+
+    assert preview.status_code == 409, "a preview must not describe a session that cannot exist"
+    assert create.status_code == 409
+    assert preview.json() == create.json(), "the two routes must answer the same body the same way"
+    assert not missing.exists(), "neither route may create the directory it was refused"
+    assert not (root / "sessions").exists()

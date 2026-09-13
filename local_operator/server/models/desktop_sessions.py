@@ -108,6 +108,23 @@ class SnapshotPayload(BaseModel):
     cold: bool
 
 
+class DraftPreviewPayload(BaseModel):
+    """The strip's readings for a conversation that does not exist yet.
+
+    The SAME canonical projection a cold session publishes (``bridge.state()``),
+    so the renderer keeps one arithmetic path and the draft's chips are computed
+    by the code that will compute them a moment later for the real session.
+
+    What is deliberately absent is the rest of a snapshot: no ``session_id``
+    (there is none — ``frontend.snapshot.session_id`` is empty), no history page
+    and no ``cold`` flag. This payload is handed to the status strip ONLY and
+    never admitted to the canonical store, so a renderer must not treat it as a
+    session it can address.
+    """
+
+    frontend: FrontendSync
+
+
 class SessionSnapshot(BaseModel):
     session_id: str
     epoch: str
