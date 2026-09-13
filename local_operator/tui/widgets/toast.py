@@ -128,17 +128,23 @@ _FAILURE_REASON_SEP = " — "
 #: is what makes one marker legible across all three surfaces (design reviews
 #: D1-6).
 #: The lead-ins a transport phrase puts before the host it names, in the order the
-#: manager's own phrase table composes them. WHY they are listed rather than
-#: searching the whole phrase for the server's name: a short name (``net``,
-#: ``reach``, ``or``) occurs in the layer wording itself, so a substring test
-#: drops the head for a server the phrase never names — the D2-3 harm one step
-#: over (review round 4, R4-4).
+#: manager's own phrase table composes them (``_TRANSPORT_DETAIL_TEXT``: the
+#: tokens are unreachable, timeout, dns, tls, closed). The order itself carries
+#: no meaning — no lead is a prefix of another, so the first match is the only
+#: match — but keeping it aligned makes the mirror reviewable side by side with
+#: the table, and ``test_the_transport_phrases_and_the_host_mirror_agree`` pins
+#: that every phrase in that table resolves its host through this tuple rather
+#: than trusting either side to remember (review round 5, R5-1/R5-2).
+#: WHY they are listed rather than searching the whole phrase for the server's
+#: name: a short name (``net``, ``reach``, ``or``) occurs in the layer wording
+#: itself, so a substring test drops the head for a server the phrase never names
+#: — the D2-3 harm one step over (review round 4, R4-4).
 _HOST_LEADS = (
     "cannot reach ",
-    "cannot resolve ",
     "no response from ",
-    "the connection to ",
+    "cannot resolve ",
     "TLS handshake with ",
+    "the connection to ",
 )
 
 
@@ -238,14 +244,15 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       carries (review round 4, R4-4). The hostless stdio copy has no host and
       therefore keeps the head, which is why the marker (only ever composed WITH
       a host) is what selects this rung.
-    * **Rung 1** — the whole row, whenever it fits. Byte-identical to the clamp
-      for the corpus design review D9 verified, but 2 cells narrower than that
-      corpus: the detail row now opens on its own glyph (D2-2), and that glyph
-      comes out of the same budget, so at the default 58-cell card the 57-cell
-      D9 row no longer fits rung 1 — it sheds one cell of copy and moves the
-      ellipsis, ``,(401) —…`` → ``,(401)…``. The pinned rows are re-measured at the
-      painted width rather than left describing the pre-glyph one (review round
-      4, R4-3).
+    * **Rung 1** — the whole row, whenever it fits. Two cells narrower than the
+      corpus design review D9 verified: the detail row now opens on its own glyph
+      (D2-2), and that glyph comes out of the same budget, so at the default
+      58-cell card the 57-cell D9 row no longer fits rung 1. Measured, the copy
+      that goes is the two cells of ``— `` (the row is 55 cells where it was 57,
+      while the budget is 56 — the *shortfall* is one cell) and the ellipsis moves
+      into their place, ``…(401) —…`` → ``…(401)…``. The pinned rows are
+      re-measured at the painted width rather than left describing the pre-glyph
+      one (review round 4, R4-3; round 5, R5-3).
     * **Rung 2** — the command, marked as having shed the reason. The reason is
       the right part to lose: it is the only piece that is not a command the
       user has to be able to type, and ``/mcp`` plus the durable transcript
