@@ -517,14 +517,25 @@ def test_gzip_leaves_a_head_request_and_an_incompressible_body_alone():
             self.method = method
             self.headers = {"accept-encoding": "gzip"}
 
-    body = os.urandom(_GZIP_MIN_BYTES + 100)
-
-    head = Response(content=body)
+    # The two halves need DIFFERENT bodies, and that is the whole point rather
+    # than tidiness. Sharing one random body made this test vacuous: gzip always
+    # expands random bytes, so the incompressible early-return satisfied the HEAD
+    # assertion by itself and the HEAD guard could be deleted with the suite
+    # still green. A guard asserted for a reason unrelated to the guard is not
+    # coverage. So HEAD is checked against a body that WOULD compress — leaving
+    # the early return the only thing that can keep the encoding off it.
+    compressible = b"a" * (_GZIP_MIN_BYTES + 100)
+    head = Response(content=compressible)
     assert _maybe_gzip(_Request("HEAD"), head) is head
     assert "content-encoding" not in head.headers
     assert head.headers["vary"] == "Accept-Encoding"
+    # The same body over GET must compress, which is what proves the assertion
+    # above is about the METHOD and not about this payload being unshrinkable.
+    getted = Response(content=compressible)
+    _maybe_gzip(_Request("GET"), getted)
+    assert getted.headers["content-encoding"] == "gzip"
 
-    incompressible = Response(content=body)
+    incompressible = Response(content=os.urandom(_GZIP_MIN_BYTES + 100))
     original = len(incompressible.body)
     _maybe_gzip(_Request(), incompressible)
     assert "content-encoding" not in incompressible.headers
