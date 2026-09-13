@@ -818,14 +818,18 @@ def _failure_notices(app) -> list[str]:  # noqa: ANN001 — a Textual app, untyp
     ]
 
 
-async def _app_with_engage(tmp_path: Path, monkeypatch, engage) -> Any:  # noqa: ANN001
+async def _app_with_engage(
+    tmp_path: Path, monkeypatch, engage, *, session_id: str = "s1"
+) -> Any:  # noqa: ANN001
     """A real app over a cold viewer whose engage is ``engage``.
 
     Shared by the tests below because they differ only in what the engage does
     and how long it takes — which is exactly the axis the patience gate reads.
+    ``session_id`` is a parameter for the one case that needs two bindings of the
+    SAME conversation (review round 2, R6).
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "sessions" / "s1").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
     _configure_provider(tmp_path)
 
     from local_operator.session.attached import AttachedSession
@@ -837,7 +841,7 @@ async def _app_with_engage(tmp_path: Path, monkeypatch, engage) -> Any:  # noqa:
         raise AssertionError("takeover was not expected")
 
     viewer = await AttachedSession.cold(
-        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        session_id, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
     )
 
     async def factory():
@@ -880,7 +884,7 @@ async def test_a_watched_mount_failure_is_reported_once_with_the_next_step(
                 "the notice must name the next step; it was the only account of "
                 f"what happened: {notice!r}"
             )
-            assert app._start_engage_reported_for == viewer.session_id
+            assert app._start_engage_reported_for == (app._binding_epoch, viewer.session_id)
     finally:
         await viewer.dispose()
 
@@ -996,9 +1000,13 @@ async def test_the_notice_is_per_binding_not_per_keystroke(tmp_path: Path, monke
 async def test_a_new_binding_reports_again(tmp_path: Path, monkeypatch) -> None:
     """Per BINDING, not per app: `/new` and `/resume` are cold again and owe it.
 
-    The flag is reset on the one edge that changes the binding
-    (``_adopt_session``), which is what keeps the suppression from outliving the
-    session whose failure it described.
+    The latch is keyed on the binding TOKEN minted by ``_bind_viewer``
+    (``(epoch, session_id)``), so it cannot outlive the binding whose failure it
+    described. It used to be a boolean reset on the one edge then believed to
+    change the binding (``_adopt_session``); the key replaced that reset because
+    the routes that move the binding are several, and because a conversation id
+    is not a binding — see the same-id case in
+    ``test_a_same_conversation_rebind_reports_again``.
     """
     monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
     attempts: list[str] = []
@@ -1121,7 +1129,7 @@ async def test_a_prompt_in_flight_owns_the_failure_not_the_band(
 async def test_a_stale_engage_cannot_report_against_the_binding_that_replaced_it(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Review round 1, R1 — the report and its latch carry BINDING IDENTITY.
+    """Review round 1 R1, made deterministic in round 2 (R7) — BINDING IDENTITY.
 
     The engage worker outlives the binding it was started for on the SIDEBAR
     route: ``_select_sidebar_session`` cancels the ``"session"`` worker group
@@ -1129,13 +1137,28 @@ async def test_a_stale_engage_cannot_report_against_the_binding_that_replaced_it
     ``_cancel_runtime_engage`` clears, and that is wired to `/new` and `/resume`
     alone) — so the outgoing facade is parked, the swap commits, and the old
     engage still fails at its own 30 s deadline. Without an identity gate that
-    tail paints session A's failure as the user's *current* session, and it
+    tail paints session A's failure as the user's *current* binding, and it
     consumes B's one notice on A's behalf, so B's own genuine failure is silent.
 
-    Driven through ``_adopt_session`` (the sidebar's own commit edge) with the
-    two failures told apart by their CLASS: A's is the live-but-silent ceiling
-    and B's is the no-record one, so one notice present and the other absent
-    says which binding reported.
+    Both engages are released by ``asyncio.Event``s this test sets, in the order
+    the two failures must interleave, because both assertions are about ORDER:
+
+    1. A's late failure lands while B is bound and B has not reported — the frame
+       R1 is about. It must be dropped, so the transcript is still empty, and it
+       must not consume B's slot.
+    2. B's own failure then lands, and it must be reported: exactly one notice,
+       and the latch carries B's token.
+
+    Round 1's version raced the pump with a ``sleep`` (review round 2, R7): under
+    load the adopt landed late enough that A's notice was legitimate and
+    PRE-swap, so the pin went red in 1 of 3 runs for a reason that was not a
+    regression — and the round's own evidence became unattributable. Waiting on
+    the events instead is the discipline the deferral e2e already uses to hold
+    its wiring open, and 10 consecutive runs on a host at load 300+ are green.
+
+    The two failures are told apart by their CLASS: A's is the live-but-silent
+    ceiling and B's is the no-record one, so which sentence is on screen says
+    which binding reported.
     """
     monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
 
@@ -1150,17 +1173,25 @@ async def test_a_stale_engage_cannot_report_against_the_binding_that_replaced_it
     from local_operator.tui.app import OperatorApp
 
     attempts: list[str] = []
+    # Appended the moment an engage RAISES: its worker reports in the same task
+    # step as the raise, so this is the last point before the report can run and
+    # the frame below is therefore awaited rather than raced.
+    raised: list[str] = []
+    release_departed = asyncio.Event()
+    release_arriving = asyncio.Event()
 
     async def swap_failure(
         session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
     ):  # noqa: ANN001
         attempts.append(str(session_id))
-        # s1 fails LATE, i.e. after the swap below has already committed — the
-        # 30 s deadline's shape, compressed. s2 fails promptly, so its own
-        # report lands while s1's engage is still parked.
-        await asyncio.sleep(0.6 if str(session_id) == "s1" else 0.05)
         if str(session_id) == "s1":
+            # The 30 s deadline's shape, compressed and made deterministic: this
+            # failure is held until the swap below has committed.
+            await release_departed.wait()
+            raised.append("s1")
             raise RuntimeUnresponsiveError("the runtime is not responding")
+        await release_arriving.wait()
+        raised.append("s2")
         raise ConnectionError("the runtime is reconnecting")
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", swap_failure)
@@ -1183,30 +1214,172 @@ async def test_a_stale_engage_cannot_report_against_the_binding_that_replaced_it
             # there; here nothing is, which is the worst case the gate must hold.
             assert await _pump_until(pilot, lambda: attempts == ["s1"])
             app._adopt_session(second)
+            # The arriving binding's latch is pristine at the adopt — the
+            # condition the assertions below depend on, checked as a condition
+            # rather than inferred from something failing later.
+            # Read through getattr and tested for FALSINESS rather than `None`:
+            # this is a precondition, not the finding, so it must hold both on
+            # this head (`None`) and on a tree that predates the key (`""`, or no
+            # attribute at all) without becoming the thing that goes red.
+            assert not getattr(
+                app, "_start_engage_reported_for", ""
+            ), "the latch was already spent when the arriving binding was adopted"
             # The mount engage the arriving binding owes, triggered the way the
             # route triggers it (`_engage_runtime_eagerly`, the same call the
-            # sidebar commit and `/resume` make) — s1's worker stays parked.
+            # sidebar commit and `/resume` make).
             app._engage_runtime_eagerly()
+            assert await _pump_until(pilot, lambda: attempts == ["s1", "s2"])
 
-            # B's own failure is reported: the latch was not spent on A's behalf.
+            # (1) The departed binding's failure, now that B is bound.
+            release_departed.set()
+            assert await _pump_until(
+                pilot, lambda: "s1" in raised
+            ), "the departed binding's engage never failed"
+            for _ in range(10):
+                await pilot.pause()
+            assert _notice_texts(app) == [], (
+                "a departed binding's failure was painted against the bound session: "
+                f"{_notice_texts(app)!r}"
+            )
+            assert not getattr(
+                app, "_start_engage_reported_for", ""
+            ), "a departed binding consumed the arriving binding's one notice"
+
+            # (2) The arriving binding's own failure.
+            release_arriving.set()
             assert await _pump_until(
                 pilot, lambda: any(FAIL_START_FRAGMENT in t for t in _notice_texts(app))
             ), "the arriving binding's own failure was suppressed by the departed one"
-            # And A's late failure is NOT: one notice, and it is not A's sentence.
-            for _ in range(30):
-                await pilot.pause()
-            await asyncio.sleep(0.7)
-            for _ in range(30):
-                await pilot.pause()
             texts = _notice_texts(app)
-            assert not any(SILENT_OWNER_FRAGMENT in t for t in texts), (
-                "a departed binding's failure was painted against the bound session: " f"{texts!r}"
-            )
             assert len([t for t in texts if FAIL_START_FRAGMENT in t]) == 1
-            assert app._start_engage_reported_for == "s2"
+            assert not any(SILENT_OWNER_FRAGMENT in t for t in texts)
+            # The latch names the ARRIVING binding, in whatever shape the key
+            # has: `"s2"` on the trees that keyed on the bare id and used to be
+            # reset by a swap route, `(epoch, "s2")` here. Deliberately loose, so
+            # this line pins the binding the notice belongs to rather than the
+            # token's representation — that is `test_a_same_conversation_...`'s
+            # job, where the two bindings share an id.
+            reported = app._start_engage_reported_for
+            assert "s2" in str(
+                reported
+            ), f"the latch does not name the arriving binding: {reported!r}"
     finally:
         await first.dispose()
         await second.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_same_conversation_rebind_reports_again(tmp_path: Path, monkeypatch) -> None:
+    """Review round 2, R6 — a CONVERSATION is not a binding.
+
+    `/resume <the id you are already on>` re-resolves the conversation to a fresh
+    cold facade carrying the SAME ``session_id``, and ``_reload_session`` replays
+    the transcript so the earlier notice is no longer on screen. Keyed on the id
+    alone, the latch answered "already reported" for a binding that had never
+    reported, and the second failure was silent.
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    async def failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        await asyncio.sleep(0.1)
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, failure)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: len(_notice_texts(app)) == 1)
+
+            # The re-bind: a NEW facade for the SAME conversation, adopted the way
+            # the resume route adopts it.
+            from local_operator.session.attached import AttachedSession
+
+            async def _never():
+                raise AssertionError("takeover was not expected")
+
+            again = await AttachedSession.cold(
+                "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+            )
+            try:
+                app._adopt_session(again)
+                app._engage_runtime_eagerly()
+                assert await _pump_until(
+                    pilot, lambda: len(_notice_texts(app)) == 2
+                ), "a same-conversation re-bind was swallowed by the previous binding's latch"
+                # The shape, checked after the behaviour it causes: the token
+                # belongs to the binding that just reported.
+                assert app._start_engage_reported_for == (app._binding_epoch, "s1")
+            finally:
+                await again.dispose()
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_same_id_stale_engage_cannot_paint_over_its_successor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review round 2, R6 — the other half: two bindings of ONE conversation.
+
+    The token distinguishes two bindings that share a ``session_id``, which a
+    bare-id comparison cannot: a stale engage whose facade carries the same id
+    passes the round-1 gate ("the id is still current") and, when the successor
+    has not reported, finds the latch empty too — so it paints its own failure as
+    the successor's. Reachable only through the takeover path, which `lop` does
+    not use, so this is the structural half of R6 rather than a production repro.
+
+    The successor's engage fails BELOW the patience threshold on purpose: it is
+    silent by design, so any notice at all on this screen can only be the
+    departed binding's, and the assertion is "none" rather than "not that
+    sentence".
+    """
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+
+    from local_operator.session.attached import RuntimeUnresponsiveError
+
+    attempts: list[str] = []
+    release_first = asyncio.Event()
+
+    async def same_id_failure(
+        session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
+    ):  # noqa: ANN001
+        attempts.append(str(session_id))
+        if len(attempts) == 1:
+            # The departing binding's engage, held open across the swap.
+            await release_first.wait()
+            raise RuntimeUnresponsiveError("the runtime is not responding")
+        # The arriving binding's engage: a quick failure, silent by design.
+        raise ConnectionError("the runtime is reconnecting")
+
+    app, viewer = await _app_with_engage(tmp_path, monkeypatch, same_id_failure, session_id="same")
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert await _pump_until(pilot, lambda: attempts == ["same"])
+            from local_operator.session.attached import AttachedSession
+
+            async def _never():
+                raise AssertionError("takeover was not expected")
+
+            successor = await AttachedSession.cold(
+                "same", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+            )
+            try:
+                app._adopt_session(successor)
+                app._engage_runtime_eagerly()
+                assert await _pump_until(pilot, lambda: len(attempts) == 2)
+                release_first.set()
+                assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+                for _ in range(10):
+                    await pilot.pause()
+                texts = _notice_texts(app)
+                assert (
+                    texts == []
+                ), f"a same-id departed binding painted over its successor: {texts!r}"
+            finally:
+                await successor.dispose()
+    finally:
+        await viewer.dispose()
 
 
 @pytest.mark.asyncio
