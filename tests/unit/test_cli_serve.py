@@ -105,7 +105,11 @@ def test_port_zero_announces_the_port_it_actually_bound(
             "the environment: nothing this daemon spawns may inherit its address"
         )
         announced = serve_registry.advertised_address(asgi_app)
-        assert announced == ("127.0.0.1", bound), "the app carries the address it serves"
+        # ``is not None`` and not just the equality below: the type gate sees the
+        # ``None`` branch unless it is narrowed, and this is the only narrowing
+        # the return type offers.
+        assert announced is not None, "the app carries the address it serves"
+        assert announced == ("127.0.0.1", bound)
         record = serve_registry.build_record(instance_id="instance", announced=announced)
         assert (record.host, record.port) == ("127.0.0.1", bound)
     finally:
