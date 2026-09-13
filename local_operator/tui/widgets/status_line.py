@@ -1599,6 +1599,23 @@ class StatusLine:
 
     # -- rendering ----------------------------------------------------------
     def _render(self, width: int) -> Text:
+        if width <= 0:
+            # Nothing to compose into, and ``Text.truncate`` cannot express that:
+            # at a non-positive width it does NOT empty the text — ``truncate(0)``
+            # keeps the cell count and swaps the tail for an ellipsis, and
+            # ``truncate(-n)`` KEEPS ``cell_len - n`` cells (measured on pinned
+            # rich 15.0.0: 39 cells in, 38 out at -1 and 34 at -5) — so every row
+            # builder below would paint nearly all of itself past a box it was
+            # told was empty. Guarded once here rather than at each of the three
+            # sites that pass a non-positive cap down to ``truncate`` (the
+            # connection row's left group, and the irreducible tail's two),
+            # because the bound is a property of the row and not of any one of
+            # its segments. Unreachable today: ``refresh`` clamps to
+            # ``max(self._dock.size.width, 10)`` and Textual does not paint a
+            # zero-width widget. The row should not depend on a caller's
+            # arithmetic for its own bound, and that clamp is one line away from
+            # moving (review MINOR-1 on #1048).
+            return Text()
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         # Separators must sit BELOW the things they separate or they read as
@@ -1639,9 +1656,38 @@ class StatusLine:
                 connection,
                 style=muted if connecting else Style(color=theme_mod.semantic_color("danger")),
             )
-            left.truncate(max(0, width), overflow="ellipsis")
-            right = Text(self._conversation_name, style=dim)
-            right.truncate(max(0, width - left.cell_len - 3), overflow="ellipsis")
+            left.truncate(width, overflow="ellipsis")
+            # The gap this row reserves for the name must be the one ``_compose``
+            # will actually insert. It pads with ``max(_MIN_GROUP_GAP, …)``, so a
+            # literal 3 — the width of the ` · ` separator used INSIDE a group,
+            # not the deliberately wider seam BETWEEN the groups — composed the
+            # row one cell past its own box. Textual then word-wrapped the
+            # name's last word onto a row the 1-row band cannot show, and the
+            # name painted short with no ellipsis: at 100x30 with the sidebar
+            # docked the failed row asked 63 against a 62-cell box, painted 55,
+            # and the name read `Fix` (D1 on #1040, pre-existing there). The
+            # bar is unchanged: the name still spends only the cells it inks,
+            # so a short title leaves the seam wide instead of a blank run.
+            spare = width - left.cell_len - _MIN_GROUP_GAP
+            if spare <= 0:
+                # No room for even the seam, so the name is not part of this
+                # row. The branch is load-bearing rather than defensive: on
+                # pinned rich 15.0.0 ``Text.truncate`` at a non-positive width
+                # keeps ``cell_len - n`` cells at ``-n`` and the full cell count
+                # at 0, so it does not empty the name — it would compose nearly
+                # the whole thing past the box's edge. It fires at every width at
+                # or below the left group's own ink plus the seam
+                # (``left.cell_len + _MIN_GROUP_GAP``): 10..52 for this row's
+                # 48-cell `Reconnect failed` text, 10..60 for the longest the app
+                # publishes (``Saved excerpt`` + the same tail, 56 cells).
+                return self._compose(left, Text(), width, dim)
+            # ``truncate_name``, not an ellipsis-truncate of the ``Text``: the
+            # latter does not rstrip, so a cut landing after the last space left
+            # a DETACHED ellipsis — `Fix sidebar reconnect …` at 80x24 — which
+            # reads as a rendering fault rather than as "this was cut". It is
+            # also what the ladder's own title cut uses one method below, so the
+            # band cuts its conversation name one way and not two.
+            right = Text(truncate_name(self._conversation_name, spare), style=dim)
             return self._compose(left, right, width, dim)
         fitted = self._fit(width, dim, muted, seam, accent)
         if fitted is not None:
