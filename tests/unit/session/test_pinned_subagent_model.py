@@ -419,3 +419,80 @@ def test_pinned_child_transient_failure_is_left_alone():
 def test_unpinned_child_failure_is_left_alone():
     rendered = "authentication failed (HTTP 401): bad key"
     assert _describe_child_failure(rendered, None) == rendered
+
+
+# ---------------------------------------------------------------------------
+# the operator's choice vs. the harness honouring a tier it was GIVEN
+# ---------------------------------------------------------------------------
+
+
+def test_a_role_pin_is_honoured_under_the_operator_default(tmp_path, monkeypatch):
+    """``subagents.model_choice`` gates CHOOSING a tier, never honouring one.
+
+    The sequence here is the one that matters: the shipped default is in force
+    (the key is absent, so it reads ``operator``), and the session still launches
+    a ``reviewer`` on the model the OPERATOR pinned it to. A gate in the shared
+    resolver would break this — and would break it for callers that are not the
+    model at all (session naming's ``lo`` preference, ``hub op='resume'``'s
+    re-resolution of a recorded tier) — which is why the refusal lives at the
+    tool-argument boundary instead.
+
+    The pin is written through the real writer with NO validation context, which
+    is what an operator's own surface (and ``/v1/desktop/profiles``) does. That
+    absence is the contract: a call that cannot be shown to come from a model is
+    the operator's, so it may name a tier.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.subagent import read_model_choice
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+    assert read_model_choice() == "operator", "this test is about the shipped default"
+
+    registry = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        registry,
+        AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        ),
+        creating=True,
+    )
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+
+    spec = session._resolve_subagent_model("reviewer", None, strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5")
+    # And an explicit launch argument still outranks the pin, as before.
+    override = session._resolve_subagent_model("task", "hi", strict=True)
+    assert override is not None and override.model_id == "claude-opus-5"
+
+
+def test_a_recorded_tier_still_re_resolves_strictly_under_the_operator_default(
+    tmp_path, monkeypatch
+):
+    """A resumed child's recorded tier is honoured — and still strictly checked.
+
+    ``SubagentComms.resume`` calls ``_resolve_subagent_model(agent, effort,
+    strict=True)`` with the tier RECORDED on the job, which is a tier the
+    operator's own launch created. Refusing it under the default would make
+    ``model_choice=operator`` silently convert every resumed child onto the
+    parent's model while its panel still displayed ``hi`` — the substitution the
+    strict path exists to prevent. The unconfigured case is asserted beside it
+    so "honoured" cannot quietly mean "no longer checked".
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+    session = make_session(tmp_path)
+
+    spec = session._resolve_subagent_model("task", "hi", strict=True)
+    assert spec is not None and spec.model_id == "claude-opus-5"
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._resolve_subagent_model("task", "med", strict=True)
+    assert caught.value.tier == "med"

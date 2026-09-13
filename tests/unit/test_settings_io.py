@@ -42,6 +42,7 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+    from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -107,6 +108,10 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
+        # The reader's own fallback, which is also what every unrecognised
+        # shape resolves to — so the page cannot advertise a default the
+        # delegating model's tier picker disagrees with.
+        "subagents.model_choice": DEFAULT_MODEL_CHOICE,
         "providers.openai.api": DEFAULT_CONFIG.values["providers"]["openai"]["api"],
         "providers.openai.use_max_context_window": OPENAI_USE_MAX_CONTEXT_WINDOW,
         # The client-side constant is the real consumer (``_anthropic_cache_ttl_
@@ -1448,3 +1453,56 @@ class TestTheModelRowsHelpBudget:
         # carries an em dash and a middot, so a character count is not a cell
         # count (review round 3, NIT-1). It measures the same today.
         assert cell_len(f"{setting.help} · default: —") <= 71, setting.help
+
+
+class TestTheSubagentModelChoiceRow:
+    """``subagents.model_choice``'s default, and the caller it must NOT gate.
+
+    Two obligations of the same key. The first is the registry's ordinary one,
+    already covered by ``_consumer_defaults`` and asserted here by name so a
+    reader of the ROW can find the pairing: the page's default and the reader's
+    fallback are the same member. The second is the boundary the key must not
+    cross — it stops a delegating MODEL spending on another model, so a caller
+    that cannot be shown to be a model is the operator and may name a tier.
+    """
+
+    def test_the_row_ships_the_readers_own_fallback(self) -> None:
+        from local_operator.harness.subagent import (
+            DEFAULT_MODEL_CHOICE,
+            MODEL_CHOICE_OPERATOR,
+        )
+
+        setting = settings_io.resolve_key("subagents.model_choice")
+        assert setting is not None
+        assert setting.default == DEFAULT_MODEL_CHOICE == MODEL_CHOICE_OPERATOR
+
+    def test_an_operator_side_pin_is_accepted_without_a_validation_context(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``/v1/desktop/profiles`` and the operator's own surfaces build
+        ``AgentParams`` directly, with no advertised schema behind them.
+
+        An absent context cannot be evidence of a model, so the pin is allowed —
+        the same direction the vanished-tier branch takes, and the reason a role
+        pinned to a tier keeps working under the shipped default. The tier has to
+        be CONFIGURED for the call to be valid at all: the policy gate is what
+        this asserts, and the ``model_choice`` key deliberately does not touch
+        ``effort_tier_rejection``'s ordinary "no such tier" refusal.
+        """
+        from local_operator.tools.agent_tool import AgentParams
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        (config_dir / "config.yml").write_text(
+            "values:\n  subagents:\n    models:\n      hi: anthropic/claude-opus-5\n"
+        )
+
+        params = AgentParams(
+            op="create",
+            name="reviewer",
+            description="Reviews a diff",
+            instructions="Review it.",
+            effort="hi",
+        )
+        assert params.effort == "hi"

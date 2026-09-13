@@ -405,13 +405,15 @@ SECTIONS: tuple[Section, ...] = (
     ),
     # LIVE: ``max_running`` is pushed into the running ``AsyncJobManager`` by
     # ``Session._apply_config_change`` (raising it lets the next launch through;
-    # lowering it lets running jobs finish — nothing is evicted), and the
-    # ``models.*`` tiers are read at every spawn.
+    # lowering it lets running jobs finish — nothing is evicted), the
+    # ``models.*`` tiers are read at every spawn, and ``model_choice`` is read
+    # both by the rebuild that re-renders the two tool schemas and by the
+    # tool-argument refusal itself.
     Section(
         "subagents",
         "Subagents",
         Scope.LIVE,
-        "Concurrency cap and the model each effort tier runs on.",
+        "Concurrency cap, who picks a child's model, and the model each tier runs on.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -1534,6 +1536,35 @@ SETTINGS: tuple[Setting, ...] = (
         help="Ceiling on concurrent subagents and backgrounded bash, which share one pool.",
         minimum=1,
         maximum=64,
+    ),
+    Setting(
+        key="subagents.model_choice",
+        path=("subagents", "model_choice"),
+        section="subagents",
+        label="Who picks a subagent's model",
+        kind=Kind.ENUM,
+        # The literal, not an import: this module reports defaults for the page
+        # and deliberately keeps `local_operator.tools.*` off its own import
+        # path (`BASH_SHELL_DEFAULT` is restated for the same reason). The
+        # consumer constant the value must equal is `DEFAULT_MODEL_CHOICE` in
+        # `harness/subagent.py`, and `test_settings_io`'s `_consumer_defaults`
+        # guards that pair — which is what stops this literal and the reader's
+        # fallback drifting apart into a page that lies about the default.
+        default="operator",
+        help="Lets a delegating model swap a child onto a configured model tier.",
+        choices=(
+            Choice(
+                "operator",
+                "the operator",
+                "children inherit this session's model; role pins still apply",
+            ),
+            Choice(
+                "model",
+                "the model",
+                "a delegating model may pick a configured tier — the child can then run "
+                "on a different, costlier model",
+            ),
+        ),
     ),
     Setting(
         key="subagents.models.lo",

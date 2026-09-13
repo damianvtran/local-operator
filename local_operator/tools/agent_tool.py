@@ -83,6 +83,7 @@ from local_operator.agent_profiles import (
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
+    model_may_choose_tier,
 )
 from local_operator.harness.types import (
     AbortSignal,
@@ -92,6 +93,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.tools.builtin import (
+    INHERIT_EFFORT,
     _advertise_effort_tiers,
     _error,
     _guard,
@@ -172,7 +174,7 @@ class AgentParams(BaseModel):
         explicit ``inherit`` spelling to models and providers.
         """
 
-        return "inherit" if value == "" else value
+        return INHERIT_EFFORT if value == "" else value
 
     @field_validator("effort")
     @classmethod
@@ -186,11 +188,18 @@ class AgentParams(BaseModel):
 
         ``info`` carries what the schema advertised, which is what decides
         whether a refusal is the model's fault or the operator's — see
-        :func:`_validate_effort_tier`.
+        :func:`_validate_effort_tier`. ``pin=True`` selects the refusal wording
+        for a role pin, which is a different act from choosing a running
+        child's model: it says what to do with the pin, not how to relaunch.
+
+        The sentinel never reaches the gate: ``inherit`` is the way a model
+        says "no pin", and it is ACCEPTED in both modes — the operator owning
+        the tier choice means the operator owns the value too, and a pin-clearing
+        call must not become impossible to make.
         """
-        if value == "inherit":
+        if value == INHERIT_EFFORT:
             return value
-        return _validate_effort_tier(value, info)
+        return _validate_effort_tier(value, info, pin=True)
 
     delegate: bool | None = Field(
         default=None,
@@ -1049,7 +1058,7 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
     else:
         tools = current.tools if current is not None else None
 
-    if params.effort == "inherit":
+    if params.effort == INHERIT_EFFORT:
         effort = None
     elif params.effort is not None:
         effort = params.effort
@@ -1214,13 +1223,26 @@ async def execute_agent(
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 
-def _effort_pin_description() -> str:
+def _effort_pin_description(model_choice: bool) -> str:
     """The ``effort`` description for create/update, matching the live schema.
 
-    With tiers configured it names what each resolves to so a role is pinned
-    on information; with none it says so and that ``inherit`` (the only
-    member left in the enum) is the whole choice. Short: billed every turn.
+    With model choice ON and tiers configured it names what each resolves to so
+    a role is pinned on information; with none it says so and that ``inherit``
+    (the only member left in the enum) is the whole choice. Short: billed every
+    turn.
+
+    With model choice OFF the enum is ``inherit`` either way, but the reason is
+    not "no tiers are configured" — the operator owns the choice, so the enum
+    is ``inherit`` even where tiers exist. Saying "no tiers are configured"
+    there would be FALSE, which is why this takes the flag rather than reading
+    ``configured_effort_tiers()`` for its zero-tier arm.
     """
+    if not model_choice:
+        return (
+            "create/update: no effort tiers are yours to choose "
+            "(values.subagents.model_choice=operator); 'inherit' clears a pin, and the "
+            "operator sets tier pins."
+        )
     tiers = configured_effort_tiers()
     if not tiers:
         return (
@@ -1244,10 +1266,14 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
 
     if getattr(context, "agent_registry", None) is None:
         return None
+    # ONE read of the policy per build, shared by the schema, the description
+    # and the validator's wrapper — see ``build_task_tool``.
+    model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         AgentParams.model_json_schema(),
-        description=_effort_pin_description(),
-        extra=("inherit",),
+        description=_effort_pin_description(model_choice),
+        extra=(INHERIT_EFFORT,),
+        model_choice=model_choice,
     )
     return AgentTool(
         name="agent",
@@ -1272,5 +1298,5 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_agent, parameters),
+        execute=_with_advertised_effort(execute_agent, parameters, model_choice=model_choice),
     )
