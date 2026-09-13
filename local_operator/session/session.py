@@ -3705,7 +3705,7 @@ class Session:
             return set()
         return unanswered_tail_call_ids(self._context.messages)
 
-    def live_tool_start_epochs(self) -> dict[str, float]:
+    def live_tool_start_epochs(self) -> dict[str, float | None]:
         """The instant each in-flight call began, keyed by call id.
 
         The local owner answers from its own folded state, which is the same
@@ -3716,8 +3716,10 @@ class Session:
         Empty rather than raising when the store has not been built: the
         accessor is read through ``getattr`` by hosts that may hold a reduced
         facade, and "no live calls" is the honest answer for a session that
-        has never published state. Callers must treat a missing call id the
-        same way: withholding the clock, never defaulting the epoch.
+        has never published state. Callers must treat a missing call id as "no
+        start was announced" (so a replayed row for it is not painted running)
+        and a ``None`` value as "started, instant unknown" (so its clock stays
+        blank) — the two questions the map answers, see the Protocol member.
 
         Through the STORE, not ``frontend_state``: this runs once per tool
         start on the event loop, and the property deep-copies the whole state
