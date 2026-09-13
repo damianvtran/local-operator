@@ -27,7 +27,21 @@ async def capabilities():
                 "catalogues": 1,
                 "profile_catalogue": 1,
                 "team_catalogue": 1,
-                "session_catalogue": 2,
+                # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
+                # session's runtime without submitting work to it.
+                #
+                # A BUMP rather than a new key, and the rule is the one
+                # `session_search` states below rather than "subsystems never
+                # get a key per route" -- which that entry would contradict,
+                # being a route in this very subsystem with its own key. The
+                # real question is what a client must NOT be gated on: a
+                # separate key exists so an EXISTING surface keeps working
+                # against a backend that lacks the new route. Nothing here is
+                # gated: warming is an optimisation on the send path a client
+                # already has, so a renderer reading < 3 simply never calls it
+                # and pays the cold engage on its first send, exactly as
+                # before. Gating nothing, it needs no key of its own.
+                "session_catalogue": 3,
                 # Searching past conversations by their CONTENT (name, id, exact
                 # body, bounded soft match) rather than by the page a client
                 # already holds. Its own key rather than a bump of

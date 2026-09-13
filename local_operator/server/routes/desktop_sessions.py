@@ -35,6 +35,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionList,
     SessionSearch,
     SessionSnapshot,
+    WarmReceipt,
     WatchReceipt,
 )
 from local_operator.server.models.schemas import CRUDResponse
@@ -176,6 +177,17 @@ class Watch(Input):
     subscription_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     visible: StrictBool
     can_notify: StrictBool
+
+
+class Warm(Input):
+    """No fields, and closed to any that arrive.
+
+    The session is already named by the path and a warm carries no intent
+    beyond "start one" — there is nothing a caller could usefully say here.
+    Declared as a model rather than omitted so ``extra="forbid"`` still
+    applies: a client that invents an option gets a 422 naming it, instead of
+    having it silently ignored and believing it took effect.
+    """
 
 
 def host(request: Request) -> DesktopSessions:
@@ -608,6 +620,53 @@ async def watch(session_id: str, body: Watch, request: Request):
     async with errors(), host(request).session(session_id) as bridge:
         await bridge.watch(body.subscription_id, visible=body.visible, can_notify=body.can_notify)
         return reply({"lease_seconds": 45})
+
+
+@router.post("/v1/desktop/sessions/{session_id}/warm", response_model=CRUDResponse[WarmReceipt])
+async def warm(session_id: str, body: Warm, request: Request):
+    """Start this session's runtime without submitting anything to it.
+
+    Closes the one gap that made the desktop app feel slower than the TUI:
+    every other route here either reads or mutates, so the first message POST
+    for a session paid the entire cold engage inline (1146 ms median; 12-42 ms
+    once engaged). The renderer calls this on the first keystroke, so the spawn
+    overlaps the time the user spends finishing their sentence.
+
+    PRECONDITION, AND IT BINDS THE CALLER: a warm issued while nothing else
+    holds the bridge is cancelled when its own request returns; the desktop UI
+    satisfies this by firing the warm from the mounted, subscribed session
+    panel. The bridge is reference-counted and detaching cancels an in-flight
+    warm (a spawn must not outlive the facade it was started against), and this
+    request is itself a user of that bridge. A caller with no subscription open
+    therefore gets a 200, a ``warming`` receipt, and no warm — the send that
+    follows pays the full cold engage exactly as it does today. Stated here
+    because the symptom is a benchmark anomaly rather than a failure, and the
+    next reader should not have to rediscover it from one.
+
+    RECEIPT-FREE, unlike every mutating route beside it, and that is the point
+    rather than an omission. Receipts buy at-most-once for calls that admit
+    WORK, so a retried POST cannot run a turn twice. A warm admits nothing and
+    is idempotent by construction, so a receipt would add a sqlite write per
+    keystroke-debounce on the hottest new path in the app — and would put this
+    route on the ``ReceiptConflict`` 409 ladder, where a speculative warm-up
+    could answer a typing user with an error.
+
+    ALWAYS 2xx FOR A WARMING FAILURE. The state at return time is genuinely
+    "an engage was started"; what becomes of it is not this request's to
+    report, and the send that follows reports it properly through its own
+    ladder. The non-2xx answers that remain are the ones that mean the call
+    itself was not admissible at all: an unknown session (404) and a full
+    bridge table (409), both from ``errors()``.
+
+    ``body`` is declared and never read: it exists so FastAPI validates the
+    request against a closed model. Dropping the parameter would make the route
+    accept any JSON at all, which is the opposite of what the empty model is
+    for.
+    """
+    del body
+    async with errors(), host(request).session(session_id) as bridge:
+        assert bridge.remote is not None
+        return reply({"state": await bridge.warm()})
 
 
 @router.get("/v1/desktop/sessions/{session_id}/events")
