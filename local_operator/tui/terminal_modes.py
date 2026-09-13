@@ -202,12 +202,22 @@ it) and self-healing — the same delivered ``Resize`` that exposes the mode run
 the re-clean, after which the terminal reports cells again. Measured end to end
 by QA on a real pty (PR #1068): a co-tenant's mid-session ``?1016h`` made cell
 (9, 3) read as (76, 56), and the next ``Resize`` restored (9, 3). It is not
-closable from here because the write is neither ours nor observable: the mode is
-VT state set by another process, we have no channel to read it back — the same
-reason this reset is written unconditionally rather than negotiated — and a
-co-tenant's mode change need not move our geometry, so no event of ours is
-guaranteed to fire on it. The only signal is the delivered resize the co-tenant's
-own report produces, and the events it carried are the ones described above.
+closable from here because the write is neither ours nor observable, and no
+channel reaches us either: the 1016 half is never queried at all, and for the
+2048 half the query exists but its answer is DISCARDED. Textual does send one
+``CSI ?2048$p`` (``linux_driver.py:156``, sent once at startup from ``:299``) and
+turns a mode reply into ``InBandWindowResize``, which the app surfaces as
+``App.supports_smooth_scrolling`` (``app.py:5019``) — but that parse is gated on
+``constants.SMOOTH_SCROLL and not IS_ITERM`` (``_xterm_parser.py:319-322``),
+exactly the gate this module closes, so under our configuration the reply is
+discarded before anything can read it. And even a delivered reply would report
+only the mode's CURRENT state, not who enabled it or whether that happened after
+our last reset, so polling for it would be new machinery for a window that
+already self-heals on the next ``Resize`` — the same reason this reset is written
+unconditionally rather than negotiated. A co-tenant's mode change need not move
+our geometry either, so no event of ours is guaranteed to fire on it. The only
+signal is the delivered resize the co-tenant's own report produces, and the
+events it carried are the ones described above.
 
 A ``TEXTUAL_SMOOTH_SCROLL=1`` user keeps upstream behaviour untouched: nothing is
 installed for them (the gate and the re-clean both key on the negotiation being
