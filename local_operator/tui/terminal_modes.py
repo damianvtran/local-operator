@@ -69,11 +69,19 @@ parser latches ``mouse_pixels`` while parsing that very report.
 
 THE PARSER GATE. :func:`install_pixel_mouse_gate` patches the CLASS method
 ``XTermParser.parse_mouse_code`` to clear ``mouse_pixels`` before delegating, so
-that latch can never scale a coordinate we parse. It is installed only when the
-guard applied: with ``TEXTUAL_SMOOTH_SCROLL`` at 0 we never put ``?1016h`` on
-the wire, so no delivered report can be a legitimate statement that our
-coordinates are pixels, while an explicit ``TEXTUAL_SMOOTH_SCROLL=1`` keeps
-upstream behaviour byte for byte. Provenance: a LOCAL workaround for upstream
+that latch can never scale a coordinate we parse. It installs itself only when
+the negotiation is CLOSED — :func:`pixel_mouse_negotiation_open` mirrors the
+gate Textual puts on its own mode-report branch — because with the negotiation
+closed we never put ``?1016h`` on the wire and no delivered report can be a
+legitimate statement that our coordinates are pixels. The decision is read from
+``constants.SMOOTH_SCROLL``/``IS_ITERM`` rather than from
+:func:`guard_pixel_mouse_latch`'s return value, and that matters: the guard
+defers to an inherited ``TEXTUAL_SMOOTH_SCROLL=0`` — which is the value the guard
+itself writes, so every re-entrant boot and every user who followed our own
+documentation would silently lose both halves of this fix. An explicit
+``TEXTUAL_SMOOTH_SCROLL=1`` on a non-iTerm terminal still negotiates and keeps
+upstream behaviour byte for byte, because there no report is illegitimate.
+Provenance: a LOCAL workaround for upstream
 behaviour, deliberately narrow (the one latch, never Textual's resize or
 terminal-size handling), idempotent, and reversible so a test can uninstall it.
 It lives in lop rather than upstream because the trade it implements is OURS: we
@@ -87,11 +95,14 @@ fix is visible there.
 
 THE MID-SESSION RE-CLEAN. :class:`InBandResizeReclaimer` re-asserts ``CSI
 ?2048l`` through the app's driver writer on ``Resize`` and on focus-in — the
-issue's title, answered within one interaction instead of at the next boot. The
-sink is ``driver.write`` and not ``sys.__stderr__`` for the reason
-``terminal_title.py`` and ``tui/images.py`` document: Textual serialises every
-byte it paints through one writer thread, so a second writer interleaves an
-escape into the middle of a frame. Volume: one 8-byte write per delivered
+issue's title, answered within one interaction instead of at the next boot. It
+exists on the same condition as the gate (the app builds one only where
+:func:`pixel_mouse_gate_installed` reports the gate in force), so a user whose
+textual is still negotiating keeps their smooth scrolling and pixel
+coordinates. The sink is ``driver.write`` and not ``sys.__stderr__`` for the
+reason ``terminal_title.py`` and ``tui/images.py`` document: Textual serialises
+every byte it paints through one writer thread, so a second writer interleaves
+an escape into the middle of a frame. Volume: one 8-byte write per delivered
 ``Resize`` message and per focus gain, with no per-frame or per-widget
 multiplier. Textual's ``App._on_resize`` (``app.py:4345-4356``) coalesces the
 SCREEN-level re-arrange at 1/120 s and returns early on an unchanged size, but
@@ -119,9 +130,10 @@ issues its ``CSI ?2048$p`` query at ``linux_driver.py:299``, and
 imported, because ``SMOOTH_SCROLL`` is a ``Final`` read once at import time.
 :func:`install_pixel_mouse_gate` therefore runs AFTER the guard — it imports
 ``textual._xterm_parser`` (which imports ``textual.constants``), so it must not
-be what freezes that constant ahead of the guard's write — and it must run
-before the app starts reading input, since it patches the class the driver's
-parser is an instance of.
+be what freezes that constant ahead of the guard's write — and its own
+precondition is read from those frozen constants, which is only meaningful after
+they exist. It must run before the app starts reading input, since it patches the
+class the driver's parser is an instance of.
 
 RESIZE STAYS LIVE. Nothing here costs us resize handling. With the negotiation
 suppressed the driver's ``_in_band_window_resize`` stays False, which is the
@@ -268,6 +280,36 @@ def reset_in_band_resize(stream: TextIO | None = None) -> bool:
 _GATE_MARKER = "_lop_pixel_mouse_latch_gate"
 
 
+def pixel_mouse_negotiation_open() -> bool:
+    """True when Textual itself may negotiate pixel-mouse coordinates.
+
+    Mirrors, deliberately one-for-one, the gate Textual 8.2.8 puts on its own
+    mode-report branch (``_xterm_parser.py:319-322``): that branch emits the
+    ``InBandWindowResize`` token — and the driver's ``process_message`` then
+    answers ``;2`` with ``?2048h`` + ``?1016h`` (``linux_driver.py:470-483``) —
+    only when ``constants.SMOOTH_SCROLL`` is on AND the terminal is not iTerm
+    (whose pixel handshake Textual handles its own way). With the branch shut,
+    nothing we do asks the terminal to send an in-band report, so a report that
+    arrives anyway is not a statement about OUR coordinates and dividing by its
+    cell size is wrong.
+
+    Read from the constants rather than from :func:`guard_pixel_mouse_latch`'s
+    return value, and that is a correctness requirement rather than a
+    preference: the guard defers to an inherited ``TEXTUAL_SMOOTH_SCROLL=0`` —
+    a value the guard ITSELF wrote on an earlier boot in this process, and the
+    value any user who followed our own documentation has exported. Keying on
+    "did this call write the variable" would therefore drop both halves of this
+    fix on exactly the configuration we tell people to use.
+
+    Must be called after ``textual.constants`` is imported (both names are
+    frozen at import time), which in production order is after the guard.
+    """
+    from textual import constants
+    from textual._xterm_parser import IS_ITERM
+
+    return bool(constants.SMOOTH_SCROLL and not IS_ITERM)
+
+
 def install_pixel_mouse_gate() -> bool:
     """Stop the in-band-report latch from scaling coordinates; True if installed.
 
@@ -277,6 +319,13 @@ def install_pixel_mouse_gate() -> bool:
     instance because the driver builds its parser when the app starts, after
     this runs; a per-instance patch would have to reach into the driver.
 
+    Refuses — installing nothing, returning False — while
+    :func:`pixel_mouse_negotiation_open` is True: a user whose textual still
+    negotiates pixel mouse asked for pixel coordinates, and forcing the divisor
+    off would ignore that, so upstream behaviour stays byte for byte. That
+    precondition is checked HERE rather than at the call site so no caller can
+    install the gate in a configuration where a delivered report is legitimate.
+
     Narrow on purpose: it touches the ONE one-way latch and nothing else.
     Textual's resize handling, ``terminal_size``/``terminal_pixel_size``
     bookkeeping and the ``Resize`` token are all left exactly as upstream has
@@ -285,13 +334,11 @@ def install_pixel_mouse_gate() -> bool:
     Idempotent: installing over its own wrapper returns False and does not wrap
     twice. Reversible by :func:`uninstall_pixel_mouse_gate`, which restores the
     original function object, so a test can leave the class as it found it.
-
-    Call it only when :func:`guard_pixel_mouse_latch` returned True. With an
-    explicit ``TEXTUAL_SMOOTH_SCROLL=1`` the user asked for smooth scrolling and
-    pixel coordinates; forcing the divisor off would ignore that, so install
-    NOTHING there and leave upstream behaviour untouched.
     """
     from textual._xterm_parser import XTermParser
+
+    if pixel_mouse_negotiation_open():
+        return False
 
     current = XTermParser.parse_mouse_code
     if getattr(current, _GATE_MARKER, False):

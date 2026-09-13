@@ -20549,10 +20549,10 @@ class OperatorApp(App[None]):
         all reach here that way).
 
         The third gate is the configuration itself: this object exists only when
-        ``run_tui`` installed the parser gate, i.e. when the guard closed the
-        negotiation. A user who set ``TEXTUAL_SMOOTH_SCROLL=1`` asked for smooth
-        scrolling and pixel coordinates, and a mid-session ``?2048l`` would
-        switch that off underneath them.
+        ``run_tui`` installed the parser gate, i.e. only while the negotiation is
+        closed. A configuration that still negotiates pixel-mouse coordinates
+        wants smooth scrolling and pixel positions, and a mid-session ``?2048l``
+        would switch that off underneath it.
 
         The mode can be dirtied by any process sharing the tty, so this is
         constructed at mount rather than lazily on the first resize: the report

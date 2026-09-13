@@ -522,13 +522,15 @@ def test_the_guard_leaves_a_value_textual_actually_reads(
 #: time, which is what makes this a test of the production path rather than of
 #: the child: remove a call from ``run_tui`` and no recorder fires.
 #:
-#: ``guard`` is a WRAPPER around the real guard rather than a recorder that
-#: returns True: the gate is installed on the guard's own return value, so a
-#: stubbed return would make the deferral arm below assert nothing.
+#: ``guard`` and ``gate`` are WRAPPERS around the real functions rather than
+#: recorders that return True: both decide for themselves what to do from the
+#: frozen constants, so a stub's return value would make every arm below assert
+#: the same thing.
 _WIRING_CHILD = """
 import asyncio, json, os, sys, types
 
 import local_operator.tui as tui
+from local_operator.tui.terminal_modes import pixel_mouse_gate_installed
 
 calls = []
 textual_loaded_at_call = None
@@ -560,9 +562,20 @@ def _guard(*args, **kwargs):
     return _real_guard(*args, **kwargs)
 
 
+# The REAL gate, wrapped rather than stubbed: its whole point is that it decides
+# for itself whether it applies, and a stub returning True would make every
+# shape below assert the same thing. The guard is wrapped for the same reason.
+_real_gate = tui.install_pixel_mouse_gate
+
+
+def _gate(*args, **kwargs):
+    _record("gate")
+    return _real_gate(*args, **kwargs)
+
+
 tui.reset_in_band_resize = _recorder("reset")
 tui.guard_pixel_mouse_latch = _guard
-tui.install_pixel_mouse_gate = _recorder("gate")
+tui.install_pixel_mouse_gate = _gate
 
 
 inherited = sys.argv[1]
@@ -582,7 +595,15 @@ try:
 except ImportError:
     pass
 
-print(json.dumps({"calls": calls, "textual_loaded_at_call": textual_loaded_at_call}))
+print(
+    json.dumps(
+        {
+            "calls": calls,
+            "installed": pixel_mouse_gate_installed(),
+            "textual_loaded_at_call": textual_loaded_at_call,
+        }
+    )
+)
 """
 
 
@@ -592,7 +613,10 @@ def _run_wiring_child(tmp_path: Path, inherited: str) -> dict[str, Any]:
     ``inherited`` is ``""`` for absent: the child needs to distinguish absent
     from an empty string, which is one of the shapes the guard deliberately
     treats as absent, so it is passed as an argv value rather than through the
-    environment.
+    environment. The child's environment is built for it and carries no
+    ``TEXTUAL_SMOOTH_SCROLL`` of its own, so the three shapes here are the three
+    shapes under test — a developer whose shell exports ``0`` cannot make the
+    absent row pass for the wrong reason.
     """
     import json
     import subprocess
@@ -632,20 +656,41 @@ def test_run_tui_calls_the_guard_before_importing_textual(tmp_path: Path) -> Non
     result = _run_wiring_child(tmp_path, "")
 
     assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is True, result
     assert result["textual_loaded_at_call"] is False, result
 
 
-def test_run_tui_installs_the_gate_only_when_the_guard_applied(tmp_path: Path) -> None:
-    """The third call is conditional, and the condition is the guard's answer.
+def test_run_tui_installs_the_gate_for_an_inherited_zero(tmp_path: Path) -> None:
+    """The recommended configuration must not lose the gate.
 
-    ``TEXTUAL_SMOOTH_SCROLL=1`` is a user asking for smooth scrolling and pixel
-    coordinates: Textual honours it, the guard defers, and no gate may be
-    installed — with one installed the latch would clear a divisor that is
-    correct, and the re-clean would switch the mode off underneath them (see
-    ``terminal_modes``). The unset arm is the same child, so the difference here
-    is the configuration and not the harness.
+    ``TEXTUAL_SMOOTH_SCROLL=0`` is what the operator's own runtime exports, what
+    a ``replace_self`` re-entry inherits, and what our documentation tells users
+    to set. The guard DEFERS to it — it is an integer Textual honours — so this
+    is the row that fails if the install is keyed on the guard's return value
+    instead of on the negotiation, which is exactly what it used to do.
+    """
+    result = _run_wiring_child(tmp_path, "0")
+
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is True, result
+    assert result["textual_loaded_at_call"] is False, result
+
+
+def test_run_tui_installs_nothing_while_textual_negotiates_pixel_mouse(
+    tmp_path: Path,
+) -> None:
+    """``TEXTUAL_SMOOTH_SCROLL=1`` on a non-iTerm terminal keeps upstream.
+
+    That user's textual still negotiates pixel mouse, so a delivered report IS a
+    statement about their coordinates and the divisor is correct: the gate must
+    install nothing, and the re-clean must not fire (it is keyed on the gate
+    being in force). The call is still MADE — the refusal lives inside it, so no
+    caller can install the gate in a configuration where upstream behaviour is
+    the right answer — which is why the sequence assertion below stays at three
+    calls and the meaning is carried by ``installed``.
     """
     result = _run_wiring_child(tmp_path, "1")
 
-    assert result["calls"] == ["reset", "guard"], result
+    assert result["calls"] == ["reset", "guard", "gate"], result
+    assert result["installed"] is False, result
     assert result["textual_loaded_at_call"] is False, result
