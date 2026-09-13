@@ -230,9 +230,46 @@ class Hello(WireModel):
 
 
 class HelloAck(WireModel):
+    """Daemon -> extension: the handshake verdict.
+
+    ``role`` and ``authorized_count`` are ADDITIVE and always optional at the
+    reader: the daemon answers with them, a released daemon never did, and the
+    extension must therefore treat an absent ``role`` as "driver", i.e. behave
+    exactly as it did before this existed. That is what keeps the compat matrix
+    open in BOTH directions without a ``PROTO_VERSION`` bump — a bump would
+    close the published store build with 4001, whose popup copy is an unfixable
+    "update needed" card (design §7).
+    """
+
     event: Literal["hello_ack"] = "hello_ack"
     proto: int = PROTO_VERSION
     paired: bool
+    #: Which side of the pairing this socket is. "standby" means: paired, and
+    #: deliberately not sent any Request, because another authorised identity is
+    #: driving. The extension detaches its debugger sessions and clears its
+    #: surface map on this answer — a standby that kept them would leave the
+    #: user with "Local Operator is debugging this browser" banners on tabs
+    #: nothing can reach (design §2.3).
+    role: Literal["driver", "standby"] = "driver"
+    #: How many identities this daemon will accept. Defaults to 1 for the older
+    #: daemon that predates the allow-list.
+    authorized_count: int = 1
+
+
+class Role(WireModel):
+    """Daemon -> extension: this link's role CHANGED while it was connected.
+
+    Sent on a failover and on an explicit ``lop browser drive``. A new EVENT
+    rather than a new field on an existing model, deliberately: the daemon's
+    receive loop dispatches on the event name and falls through to
+    ``Response.model_validate`` for anything it does not recognise, which raises
+    and is ignored — so a released daemon silently ignores this frame instead of
+    closing the socket (design §7.1 rule 3). A standby that misses it still
+    re-learns its role at its next ``hello``.
+    """
+
+    event: Literal["role"] = "role"
+    role: Literal["driver", "standby"] = "driver"
 
 
 class PairRequest(WireModel):

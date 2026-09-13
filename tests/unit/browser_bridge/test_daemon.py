@@ -52,6 +52,12 @@ def test_pairing_issues_token_then_authenticates(tmp_path: Path) -> None:
                 "event": "hello_ack",
                 "proto": PROTO_VERSION,
                 "paired": False,
+                # Additive since multi-identity: the wire ack now names the
+                # role and how many identities are authorised. An older
+                # EXTENSION ignores both; an older DAEMON never sent them, which
+                # is why the extension must default an absent `role` to driver.
+                "role": "driver",
+                "authorized_count": 0,
             }
             code = pairing_status(tmp_path)["pending_code"]
             socket.send_json({"event": "pair", "code": code})

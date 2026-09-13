@@ -48,7 +48,21 @@ export type Response =
 export interface Hello {
   event: 'hello'; proto: number; token: string; extension_version: string; browser: string;
 }
-export interface HelloAck { event: 'hello_ack'; proto: number; paired: boolean; }
+export interface HelloAck {
+  event: 'hello_ack'; proto: number; paired: boolean;
+  // ADDITIVE: a daemon released before multi-identity simply does not send
+  // these, so an absent `role` MUST be read as 'driver' (behave exactly as
+  // before). `authorized_count` defaults to 1 for the same reason. Nothing is
+  // added to `Hello` instead: the daemon validates it with extra="forbid", so
+  // a new field THERE would be closed 4001 by every already-released daemon.
+  role?: 'driver' | 'standby';
+  authorized_count?: number;
+}
+// Daemon -> extension: this link's role CHANGED while it stayed connected
+// (a failover, or `lop browser drive`). A separate EVENT rather than a field on
+// an existing model, so a released daemon that does not know it ignores the
+// frame instead of closing the socket.
+export interface Role { event: 'role'; role: 'driver' | 'standby'; }
 export interface PairRequest { event: 'pair'; code: string; }
 export interface PairResult { event: 'pair_result'; ok: boolean; token: string; message: string; }
 export interface Ping { event: 'ping'; }
@@ -64,4 +78,4 @@ export interface OriginDecision {
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
   | Unpair | OriginDecision;
-export type DaemonMessage = HelloAck | PairResult | Ping | Request;
+export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;

@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -393,6 +394,80 @@ def stale_heartbeat_age(root: Path | None = None) -> float | None:
     if status_value is not state_store.Liveness.STALE or current is None:
         return None
     return state_store.heartbeat_age(current)
+
+
+def pin_driver(target: str, port: int | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Ask the daemon to make one authorised extension THE driver.
+
+    The escape hatch from the incumbency rule (design §8.2): with two installs
+    connected, the one already driving keeps the wheel, and reconnecting the
+    other cannot take it — so without this command the operator's only lever is
+    quitting a browser.
+
+    Carries the discovery file's session key, exactly as the session leg does:
+    moving the wheel to another browser is the same authority a session already
+    holds, and the key is what keeps that decision off the loopback interface
+    for any other local user.
+    """
+    current = state_store.read(root)
+    resolved_port = port or (current.port if current else DEFAULT_PORT)
+    if current is None or not state_store.pid_alive(current.pid):
+        return {
+            "ok": False,
+            "error": "no running bridge daemon; run 'lop browser install' first.",
+        }
+    body = json.dumps({"target": target}).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{resolved_port}/driver",
+        data=body,
+        method="POST",
+        headers={"X-Bridge-Key": current.session_key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload: Any = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            # An older daemon answers /health but has no /driver. Saying so beats
+            # reporting a generic failure the user would read as "my id is wrong".
+            return {
+                "ok": False,
+                "error": (
+                    f"the daemon on port {resolved_port} predates this command. Run "
+                    "'lop browser restart' to load the current build."
+                ),
+            }
+        body_text = ""
+        with suppress(Exception):
+            body_text = error.read().decode()
+        return {
+            "ok": False,
+            "error": f"daemon returned HTTP {error.code} on port {resolved_port}: {body_text}",
+            "authorized_extension_ids": _ids_from_payload(body_text),
+        }
+    except Exception as error:  # noqa: BLE001 - report, do not raise, at a CLI edge
+        return {
+            "ok": False,
+            "error": (
+                f"daemon is not answering on port {resolved_port} ({error}); "
+                "run 'lop browser restart'."
+            ),
+        }
+    return {"ok": bool(payload.get("ok")), "driver_extension_id": payload.get("driver_extension_id", "")}
+
+
+def _ids_from_payload(body_text: str) -> list[str]:
+    """The authorised ids a failed /driver response names, or [] if it names none.
+
+    Best-effort: this only feeds the CLI's "did you mean" list, so an
+    unparseable body must not turn one error into a different one.
+    """
+    with suppress(Exception):
+        parsed = json.loads(body_text)
+        listed = parsed.get("authorized_extension_ids")
+        if isinstance(listed, list):
+            return [str(item) for item in listed]
+    return []
 
 
 def repair(port: int | None = None, root: Path | None = None) -> dict[str, Any]:
@@ -906,7 +981,9 @@ def status(port: int | None = None) -> dict[str, object]:
         "state": current.model_dump(mode="json", exclude={"session_key"}) if current else None,
         "paired": pairing["paired"],
         "extension_id": pairing["extension_id"],
+        "identities": pairing["identities"],
         "pending_code": pairing["pending_code"],
+        "pending": pairing["pending"],
         "pending_expires_at": pairing["pending_expires_at"],
         # The location the output is ACTUALLY readable from, which on a systemd
         # too old for `append:` is the journal, not a file that never exists.

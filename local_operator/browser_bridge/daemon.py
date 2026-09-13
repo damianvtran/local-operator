@@ -164,27 +164,235 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def pairing_status(root: Path | None = None) -> dict[str, Any]:
-    """Return only display-safe pairing metadata; token hashes stay private."""
-    saved = _read_json(_pairing_path(root))
-    pending = _read_json(_pending_path(root))
-    now = time.time()
-    return {
-        "paired": saved is not None,
-        "extension_id": str(saved.get("extension_id", "")) if saved else "",
-        "pending_code": (
-            str(pending.get("code", ""))
-            if pending and float(pending.get("expires_at", 0)) > now
-            else ""
-        ),
-        "pending_expires_at": float(pending.get("expires_at", 0)) if pending else 0.0,
-    }
+def _identities_from(saved: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Every authorised identity in one pairing record, schema 1 or 2.
+
+    ONE reader, so the schema-1 upgrade path exists in exactly one place: a
+    legacy ``{extension_id, token_sha256, paired_at}`` record IS the sole
+    identity, which is what makes an already-paired operator never have to
+    re-pair when this build lands.
+
+    Deliberately a PURE read: it never rewrites the file into schema 2. A write
+    on a read path is the defect class ``state.py`` documents (a full disk made
+    a read fail as a write), and the pairing file is read on every handshake,
+    every revocation tick and every ``lop browser pair``.
+    """
+    if not saved:
+        return []
+    listed = saved.get("identities")
+    if isinstance(listed, list) and listed:
+        return [entry for entry in listed if isinstance(entry, dict)]
+    return [saved]
 
 
-def reset_pairing(root: Path | None = None) -> None:
+def _identities(root: Path | None = None) -> list[dict[str, Any]]:
+    return _identities_from(_read_json(_pairing_path(root)))
+
+
+def _identity_ids(root: Path | None = None) -> set[str]:
+    return {str(entry.get("extension_id", "")) for entry in _identities(root)} - {""}
+
+
+def _write_pairing(
+    root: Path | None, identities: list[dict[str, Any]], *, driver_id: str = ""
+) -> None:
+    """Write the allow-list, keeping the legacy trio as the DRIVER's record.
+
+    The top-level ``extension_id``/``token_sha256``/``paired_at`` keys are the
+    DOWNGRADE CONTRACT, not redundancy: an older daemon (or an older `lop`)
+    reading this file still finds whichever identity is currently driving, so a
+    rollback degrades to single-identity instead of breaking pairing.
+
+    ``driver_id`` falls back to the most recently paired entry because a caller
+    that revokes the identity which happened to be driving must still leave a
+    coherent trio behind rather than an empty one.
+    """
+    chosen: dict[str, Any] | None = None
+    if driver_id:
+        chosen = next(
+            (entry for entry in identities if entry.get("extension_id") == driver_id), None
+        )
+    if chosen is None and identities:
+        chosen = max(identities, key=lambda entry: float(entry.get("paired_at", 0) or 0))
+    payload: dict[str, Any] = {}
+    if chosen is not None:
+        payload["extension_id"] = chosen.get("extension_id", "")
+        payload["token_sha256"] = chosen.get("token_sha256", "")
+        payload["paired_at"] = chosen.get("paired_at", 0.0)
+    payload["schema"] = 2
+    payload["identities"] = identities
+    _private_write(_pairing_path(root), payload)
+
+
+def add_identity(
+    root: Path | None,
+    extension_id: str,
+    token_sha256: str,
+    *,
+    label: str = "",
+) -> None:
+    """Authorise one extension identity, replacing any existing entry for it.
+
+    Re-pairing the same identity (a wiped token, a new browser profile that
+    happens to derive the same id) must ROTATE its credential rather than add a
+    second entry, or the old hash would stay live alongside the new one and a
+    stale token could still authenticate.
+
+    One token per identity, never one shared token: revocation has to be a fact
+    about the file rather than a hope about a spoofable Origin header
+    (design decision 2), and per-identity hashes cost one dict lookup.
+    """
+    identities = [entry for entry in _identities(root) if entry.get("extension_id") != extension_id]
+    identities.append(
+        {
+            "extension_id": extension_id,
+            "token_sha256": token_sha256,
+            "paired_at": time.time(),
+            "label": label,
+            # Seeded from the pairing time: the daemon reports a LIVE last-seen
+            # over /health while it is running, so the file only ever needs the
+            # value it last had a reason to write. Refreshing this on every
+            # reconnect would put an atomic write on the handshake path for a
+            # purely cosmetic field.
+            "last_seen_at": time.time(),
+        }
+    )
+    _write_pairing(root, identities, driver_id=extension_id)
+
+
+def revoke_identity(root: Path | None, extension_id: str) -> None:
+    """Remove ONE identity, and only that one, from the allow-list.
+
+    The remaining identities keep their own hashes, so a revoke is a real
+    revocation for the caller and a no-op for everybody else — which is what
+    makes "revoke the dev build" possible without disturbing the store build.
+    Emptying the list removes the file entirely, so "nothing is authorised" has
+    one representation rather than two.
+    """
+    identities = [
+        entry for entry in _identities(root) if str(entry.get("extension_id", "")) != extension_id
+    ]
+    if not identities:
+        with suppress(OSError):
+            _pairing_path(root).unlink()
+        return
+    _write_pairing(root, identities)
+
+
+def revoke_all(root: Path | None = None) -> None:
+    """Revoke EVERY identity and drop any waiting code (``pair --reset``)."""
     for path in (_pairing_path(root), _pending_path(root)):
         with suppress(OSError):
             path.unlink()
+
+
+def reset_pairing(root: Path | None = None) -> None:
+    revoke_all(root)
+
+
+def _pending_entries(root: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Live pairing codes keyed by extension ID, schema 1 tolerated.
+
+    Per-ID is mandatory rather than tidy: a single-slot record let a second
+    identity's dial rotate the FIRST identity's live code away, after which the
+    first failed with "That code didn't match" for a code the user had read
+    correctly. That is unreachable while only one identity may connect at all,
+    and becomes a live footgun the moment the allow-list lands (design §1.3).
+    """
+    saved = _read_json(_pending_path(root))
+    if not saved:
+        return {}
+    entries = saved.get("pending")
+    if isinstance(entries, dict):
+        return {
+            str(key): value
+            for key, value in entries.items()
+            if isinstance(value, dict) and key
+        }
+    # Schema 1: the record was the single waiting identity's entry.
+    extension_id = str(saved.get("extension_id", ""))
+    return {extension_id: saved} if extension_id else {}
+
+
+def _write_pending(root: Path | None, entries: dict[str, dict[str, Any]]) -> None:
+    if not entries:
+        with suppress(OSError):
+            _pending_path(root).unlink()
+        return
+    _private_write(_pending_path(root), {"pending": entries})
+
+
+def _browser_label(user_agent: str, extension_version: str) -> str:
+    """A short, human-recognisable name for one install's pairing entry.
+
+    Derived from what the peer tells us at ``hello`` (it never sends a friendly
+    name) and deliberately includes the extension version: the whole point of
+    the label is to let an operator tell two installs of the SAME browser apart,
+    and differing extension builds are exactly how the reported case presents
+    (a store build and a locally-loaded one).
+    """
+    order = (
+        ("Edg/", "Edge"),
+        ("OPR/", "Opera"),
+        ("Brave", "Brave"),
+        ("Arc", "Arc"),
+        ("Chromium", "Chromium"),
+        ("Chrome/", "Chrome"),
+    )
+    agent = user_agent or ""
+    name = next((label for token, label in order if token in agent), "")
+    if not name:
+        return f"extension {extension_version}" if extension_version else "extension"
+    return f"{name} {extension_version}" if extension_version else name
+
+
+def pairing_status(root: Path | None = None) -> dict[str, Any]:
+    """Return only display-safe pairing metadata; token hashes stay private.
+
+    ``extension_id`` and ``pending_code`` are kept verbatim for the callers
+    that predate the allow-list (``install.py`` prints the code at the end of
+    its run, and every released CLI reads the id), and the list-shaped
+    additions are what the multi-identity surfaces read.
+    """
+    saved = _read_json(_pairing_path(root))
+    identities = _identities_from(saved)
+    now = time.time()
+    live = [
+        (extension_id, entry)
+        for extension_id, entry in _pending_entries(root).items()
+        if float(entry.get("expires_at", 0)) > now
+    ]
+    # Deterministic primary: the oldest unexpired code (a constant TTL means
+    # that is the smallest expiry), so the legacy single-code field cannot
+    # flap between two waiting identities on successive calls.
+    live.sort(key=lambda item: float(item[1].get("expires_at", 0)))
+    primary = live[0] if live else None
+    return {
+        "paired": bool(identities),
+        "extension_id": str(saved.get("extension_id", "")) if saved else "",
+        "identities": [
+            {
+                "extension_id": str(entry.get("extension_id", "")),
+                "label": str(entry.get("label", "")),
+                "paired_at": float(entry.get("paired_at", 0) or 0),
+                "last_seen_at": float(entry.get("last_seen_at", 0) or 0),
+                "driving": bool(saved)
+                and str(entry.get("extension_id", "")) == str(saved.get("extension_id", "")),
+            }
+            for entry in identities
+        ],
+        "pending_code": str(primary[1].get("code", "")) if primary else "",
+        "pending_expires_at": float(primary[1].get("expires_at", 0)) if primary else 0.0,
+        "pending": [
+            {
+                "extension_id": extension_id,
+                "code": str(entry.get("code", "")),
+                "expires_at": float(entry.get("expires_at", 0)),
+                "label": str(entry.get("label", "")),
+            }
+            for extension_id, entry in live
+        ],
+    }
 
 
 #: Key for driven-tab records that arrive without a surface handle (an older
@@ -257,12 +465,28 @@ class ExtensionLink:
         # socket has since been nulled (which identity-with-None cannot: a
         # never-connected daemon and a dropped link would look alike).
         self.generation = 0
+        # Monotonic time this socket was installed. The failover rule promotes
+        # the LONGEST-ATTACHED standby, which needs an order that a re-dial
+        # cannot fake — generation is monotonic too, but it is bumped by every
+        # accept including the promoted link's own past lives, so it says
+        # nothing about how long THIS socket has been up.
+        self.attached_at = 0.0
+        # "driver" or "standby". Set by the handshake and by promotion; read by
+        # `/health`, the CLI and the hello ack. Only the driver's link object is
+        # ever returned by `BridgeService.link`, so this is a statement about
+        # the role of a socket, not a second source of truth for who drives.
+        self.role = "driver"
         # Set by the receive loop on EVERY frame, so an await can wait for the
         # peer to speak instead of polling `last_frame_at`. Used only by the
         # liveness probe (`_peer_answers_a_solicited_ping`).
         self.frame_event = asyncio.Event()
         self.extension_id = ""
         self.browser = ""
+        # Reported in `hello` and kept so the pairing entry can be labelled with
+        # the build it belongs to. The label is what lets an operator tell two
+        # installs of the same browser apart in `lop browser pair --list`, which
+        # is the whole point of naming them.
+        self.extension_version = ""
         self.paired = False
         self.pending: dict[str, asyncio.Future[Response]] = {}
         # Request ids the extension has told us are blocked on a human origin
@@ -464,11 +688,20 @@ class ExtensionLink:
         else:
             self.driven.clear()
 
-    def attach(self, websocket: WebSocket) -> int:
-        """Make ``websocket`` the authoritative link and return its generation."""
-        self.generation += 1
+    def attach(self, websocket: WebSocket, generation: int) -> int:
+        """Install ``websocket`` as this link's socket at ``generation``.
+
+        The generation is passed IN rather than bumped here because it must stay
+        globally monotonic across every socket this daemon has ever installed:
+        per-link counters would collide, and `is_authoritative`'s "the link I
+        decided about is still the link" is only a total order while the ids do
+        not repeat. #996 threaded that fence through this path; it is not
+        rewritten, only fed from one counter on the service.
+        """
+        self.generation = generation
         self.websocket = websocket
-        return self.generation
+        self.attached_at = time.monotonic()
+        return generation
 
     def is_authoritative(self, websocket: WebSocket | None, generation: int) -> bool:
         """Whether ``(websocket, generation)`` is still the live link.
@@ -524,7 +757,24 @@ class BridgeService:
     def __init__(self, port: int = DEFAULT_PORT, root: Path | None = None) -> None:
         self.port = port
         self.root = root
-        self.link = ExtensionLink()
+        # Every socket this daemon has ever installed, keyed by its global
+        # generation, plus the IDLE link at generation 0 — the object
+        # `self.link` resolves to when NOTHING drives.
+        #
+        # The idle link is a real member of the map rather than a
+        # separately-returned stand-in so that "the link" is ONE notion
+        # everywhere: severing, retiring, publishing and the wire fences all
+        # take a link object, and the empty state has to be expressible as one
+        # of those objects or every one of them grows a "nothing attached"
+        # special case. Generation 0 is never handed to a real link
+        # (`next_generation` increments first), so it cannot collide.
+        self._idle_link = ExtensionLink()
+        self._idle_link.generation = 0
+        self.links: dict[int, ExtensionLink] = {0: self._idle_link}
+        self.driver_generation = 0
+        # Global, monotonic across every accept on this daemon: see
+        # `ExtensionLink.attach` for why it cannot be per link.
+        self._generation = 0
         self.started_at = time.time()
         self.state = state_store.BridgeState(
             pid=os.getpid(),
@@ -551,8 +801,158 @@ class BridgeService:
         # "nobody holds it yet, a queued caller is about to" — `asyncio.Lock`
         # reports the former during the hand-off window that IS the latter. See
         # `_release_key` (audit A4).
+        # Set only by `_drop_unproven_link`, and MIRRORED onto the service.
+        #
+        # The link the latch belongs to is retired in the same breath as it is
+        # latched, so a reader that resolves `self.link` afterwards finds a
+        # fresh idle link and would report `extension_unresponsive: false` — the
+        # #996 wedge copy going false at the exact moment the daemon acted on
+        # it, which is the misdiagnosis that copy exists to prevent. The mirror
+        # carries the reason across the retire; `clear_drop_latch` is called
+        # wherever the link-level latch used to be cleared, so the lifetime is
+        # unchanged.
+        self._drop_latch_at = 0.0
+        self._drop_latch_silence_s = 0.0
+        # Strong references to in-flight role frames; see `_announce_role`.
+        self._role_tasks: set[asyncio.Task[None]] = set()
         self._key_callers: dict[str, int] = {}
         self._tab_locks: dict[str, asyncio.Lock] = {}
+
+    @property
+    def link(self) -> ExtensionLink:
+        """The DRIVING link, or an idle link when nothing drives.
+
+        Kept as a property rather than renamed to `links` everywhere because
+        every one of the ~106 existing `self.link.<attr>` call sites is about the
+        link that serves COMMANDS: `rpc`, `_admit`, `_complete`, `/health`,
+        `repair`, `publish` and the whole lock topology stay correct by
+        construction while standby links are served only by the handshake and
+        the receive loop. Rewriting those sites into an explicit parameter would
+        be a far larger diff across exactly the code #996 just fenced.
+
+        The generation fence is preserved, not weakened: a standby's
+        ``(socket, generation)`` can never equal the driver's, so
+        `is_authoritative` keeps failing for it by construction.
+        """
+        link = self.links.get(self.driver_generation)
+        return link if link is not None else self._idle_link
+
+    def latch_drop(self, link: ExtensionLink, silence_s: float) -> None:
+        """Record that the daemon severed this link for silence, and why."""
+        link.note_unproven_drop(silence_s)
+        self._drop_latch_at = time.monotonic()
+        self._drop_latch_silence_s = silence_s
+
+    def clear_drop_latch(self) -> None:
+        """Forget the unresponsive reason: the state it described is over."""
+        self._drop_latch_at = 0.0
+        self._drop_latch_silence_s = 0.0
+
+    def drop_latched(self) -> bool:
+        """Whether the daemon has latched "I severed the driver for silence".
+
+        The single read for `extension_unresponsive` and its two tenses.
+        """
+        if self.link.dropped_unproven():
+            return True
+        return self._drop_latch_at > 0.0 and (
+            time.monotonic() - self._drop_latch_at
+        ) <= LINK_DROP_TTL_S
+
+    def drop_silence_value(self) -> float:
+        """Seconds the peer had been quiet when it was severed (0.0 if never)."""
+        latched = self.link.recent_drop_silence()
+        return latched if latched > 0.0 else self._drop_latch_silence_s
+
+    def next_generation(self) -> int:
+        self._generation += 1
+        return self._generation
+
+    def standby_links(self) -> list[ExtensionLink]:
+        """Attached links that are not the driver, oldest attachment first."""
+        return [
+            link
+            for generation, link in sorted(self.links.items())
+            if generation != self.driver_generation and link.websocket is not None
+        ]
+
+    def _promote_standby(self) -> ExtensionLink | None:
+        """Make the longest-attached surviving standby the driver, or give up.
+
+        "Longest-attached" and not "most recently seen": during a driver
+        disappearance every standby is equally idle, so recency is noise, while
+        attachment age is a fact the operator can reason about ("the one that
+        was already there keeps the wheel").
+
+        "Surviving" means PROVEN. Promoting a mute standby would hand the wheel
+        to a peer the daemon already believes is unresponsive, which is the
+        wedge this whole link layer exists to avoid; leaving it as a standby
+        costs nothing, because a re-dial from that identity finds
+        ``driver_generation`` pointing at nothing and takes the wheel itself
+        (see `extension`).
+
+        Decides and publishes with NO await in between (audit A1's discipline):
+        the caller may only await the role frame AFTER this returns.
+        """
+        candidates = [link for link in self.standby_links() if link.proven]
+        if not candidates:
+            return None
+        promoted = max(candidates, key=lambda link: link.attached_at)
+        self.driver_generation = promoted.generation
+        promoted.role = "driver"
+        for link in self.standby_links():
+            link.role = "standby"
+        self.publish_safely()
+        return promoted
+
+    async def _tell_role(self, link: ExtensionLink) -> None:
+        """Inform a link it has been promoted or demoted, best effort.
+
+        Additive on the wire and therefore safe for the released store build,
+        which parses frames without a schema and ignores an event it does not
+        know (`worker.ts`). A standby that misses this frame still learns its
+        role on its next hello ack, and a promoted one that misses it keeps
+        serving commands regardless — the daemon's own state is what gates
+        commands, never the extension's belief.
+        """
+        payload = {"event": "role", "role": link.role}
+        with suppress(Exception):
+            await link.send(payload)
+
+    def _retire_link(self, link: ExtensionLink) -> ExtensionLink | None:
+        """Retire a link whose socket has ended; promote a standby if it drove.
+
+        Returns the promoted link so the caller can await its role frame — the
+        decision itself must happen with no await in between (audit A1).
+
+        A driver change follows the socket actually being gone, not a timer: the
+        demoted install's surfaces keep their debugger attachments until its own
+        worker learns it is a standby, and a daemon that decided earlier would
+        have published a handover that had not happened.
+        """
+        if link is self._idle_link:
+            # The link `self.link` resolves to when NOTHING is attached. Retiring
+            # it is the empty transition, and it has to be expressible: it is a
+            # real member of the map, so a caller that reaches it while severing
+            # must clear its claim and republish (failing anything parked on it)
+            # rather than fall through the "already replaced" guard and leave a
+            # half-cleared state behind.
+            link.disconnect()
+            self.publish_safely()
+            return None
+        if self.links.get(link.generation) is not link:
+            return None
+        was_driver = link.generation == self.driver_generation
+        self.links.pop(link.generation, None)
+        link.disconnect()
+        promoted = self._promote_standby() if was_driver else None
+        if was_driver and promoted is None:
+            # Nothing drives now. Point the wheel at the idle link so every
+            # `self.link` read says "no driver" from ONE place, rather than
+            # from whatever object the retired generation used to name.
+            self.driver_generation = self._idle_link.generation
+        self.publish_safely()
+        return promoted
 
     def publish(self) -> None:
         # `proven`, never `websocket is not None` (see ExtensionLink.proven).
@@ -571,7 +971,7 @@ class BridgeService:
         # and a drop writes `extension_connected=false` — without this the file
         # is indistinguishable from a host with no bridge, which is how a paired
         # running bridge got told to run `lop browser install` (design D3-2).
-        self.state.extension_unresponsive = self.link.dropped_unproven()
+        self.state.extension_unresponsive = self.drop_latched()
         state_store.publish(self.state, self.root)
 
     def publish_safely(self) -> bool:
@@ -670,6 +1070,32 @@ class BridgeService:
 
     async def _ping_tick(self) -> None:
         await asyncio.sleep(PING_INTERVAL_S)
+        # EVERY attached link, not just the driver's. A standby receives no
+        # commands, so a ping is the ONLY traffic it ever sees; without one its
+        # liveness would decay past LINK_SILENCE_TIMEOUT_S within the first
+        # promotion window, and the failover rule — which promotes only a
+        # SURVIVING standby — could never promote anybody. Keeping standbys
+        # proven is what makes `_promote_standby`'s proof test meaningful
+        # instead of vacuously false.
+        for standby in self.standby_links():
+            if standby.websocket is None:
+                continue
+            if not standby.proven:
+                await self._drop_unproven_standby(
+                    standby,
+                    f"no frame for {standby.silent_for():.0f}s "
+                    f"(deadline {LINK_SILENCE_TIMEOUT_S:.0f}s)",
+                )
+                continue
+            try:
+                await asyncio.wait_for(
+                    standby.send({"event": "ping"}, wire=standby.websocket),
+                    timeout=LINK_SEND_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                await self._drop_unproven_standby(standby, "ping send exceeded its deadline")
+            except Exception:  # noqa: BLE001 - the receive loop owns teardown
+                logger.debug("browser extension standby ping failed", exc_info=True)
         if self.link.websocket is None:
             return
         # Capture the wire this tick is ABOUT before its first await. The ping
@@ -699,6 +1125,29 @@ class BridgeService:
             await self._drop_unproven_link("ping send exceeded its deadline", expected=wire)
         except Exception:  # noqa: BLE001 - receive loop owns teardown
             logger.debug("browser extension ping failed", exc_info=True)
+
+    async def _drop_unproven_standby(self, link: ExtensionLink, reason: str) -> bool:
+        """Sever a STANDBY link the daemon no longer trusts.
+
+        A standby serves no commands, so the driver's wider teardown (whose
+        purpose is to answer waiting sessions with a typed refusal) has nothing
+        to do here. What matters is that a mute standby is not left standing
+        between the driver and a healthy one: `_promote_standby` takes only
+        PROVEN links, and re-dialling re-enters as a fresh, probe-able socket.
+        """
+        if self.links.get(link.generation) is not link:
+            return False
+        websocket = link.websocket
+        if websocket is None:
+            return False
+        logger.warning("browser bridge dropped an unresponsive standby: %s", reason)
+        self._retire_link(link)
+        with suppress(Exception):
+            # Bounded and scoped to the captured socket (audit A2), like every
+            # other close on this wire: 4000 means "reconnect" to every
+            # released worker, so a standby simply re-dials and re-registers.
+            await asyncio.wait_for(websocket.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        return True
 
     async def _peer_answers_a_solicited_ping(self) -> bool:
         """Ask the peer directly whether it is still listening.
@@ -769,7 +1218,7 @@ class BridgeService:
             self.link.websocket is not None and self.link.websocket is not expected[0]
         ):
             return "replaced"
-        if self.link.websocket is None and self.link.dropped_unproven():
+        if self.link.websocket is None and self.drop_latched():
             return "severed"
         return "gone"
 
@@ -781,8 +1230,8 @@ class BridgeService:
         truth about why the link went away, so prefer it while the latch is
         live (review R3-4's sibling case).
         """
-        latched = self.link.recent_drop_silence()
-        return latched if self.link.dropped_unproven() and latched > 0.0 else measured
+        latched = self.drop_silence_value()
+        return latched if self.drop_latched() and latched > 0.0 else measured
 
     async def _drop_unproven_link(
         self,
@@ -834,7 +1283,8 @@ class BridgeService:
         # nulls the socket: this is the answer `_drop_unproven_link` is about to
         # give, and without the latch it would be gone by the time anyone (the
         # next RPC, `/health`, the CLI or the popup) could read it.
-        self.link.note_unproven_drop(self.link.silent_for())
+        link = self.link
+        self.latch_drop(link, link.silent_for())
         # Clear the link BEFORE the close, not after. `disconnect()` is what
         # fails every pending future, i.e. what turns three waiting sessions into
         # three typed answers; `websocket.close()` is a SEND, so it can block on
@@ -843,8 +1293,14 @@ class BridgeService:
         # teardown itself the next thing that can hang, which is the class of bug
         # this whole change exists to remove. The close still goes out, and a
         # peer that never sees it is already the disconnected path.
-        self.link.disconnect()
-        self.publish_safely()
+        #
+        # `_retire_link` also hands the wheel to the longest-attached surviving
+        # standby: a driver the daemon just severed is gone by every definition,
+        # and leaving the daemon with no driver until a standby happens to
+        # re-dial would fail the next session's RPC instead of serving it.
+        promoted = self._retire_link(link)
+        if promoted is not None:
+            await self._tell_role(promoted)
         if websocket is not None:
             # BOUNDED, and scoped to the captured socket (audit A2). The caller
             # is the RPC gate, the command-timeout path or the ping supervisor,
@@ -863,78 +1319,121 @@ class BridgeService:
     async def _ping(self) -> None:
         await self._supervise("ping", self._ping_tick)
 
-    def _live_pairing_matches(self) -> bool:
-        """Whether the ON-DISK pairing still authorizes the connected extension.
+    def _identity_listed(self, extension_id: str) -> bool:
+        """Whether the ON-DISK allow-list still authorises this identity.
 
-        Read from disk, never from ``self.link.paired`` alone, because
-        ``lop browser pair --reset`` runs in a SEPARATE process and can only
-        touch the file (findings A5/U1). A revoke there must take authority
-        away from an already-connected socket immediately, not merely at the
-        next reconnect, so the gate and the watcher both consult the file.
+        Read from disk, never from ``link.paired`` alone, because
+        ``lop browser pair --reset`` / ``--revoke`` runs in a SEPARATE process
+        and can only touch the file (findings A5/U1). A revoke there must take
+        authority away from an already-connected socket immediately, not merely
+        at the next reconnect, so the gate and the watcher both consult the
+        file — now per identity, since one identity's revocation must leave
+        every other identity's authority untouched.
         """
-        saved = _read_json(_pairing_path(self.root))
-        return bool(saved and saved.get("extension_id") == self.link.extension_id)
+        return bool(extension_id) and extension_id in _identity_ids(self.root)
 
-    async def revoke(self) -> None:
-        """Drop the pairing AND cut the live connection.
+    def _live_pairing_matches(self) -> bool:
+        """Whether the on-disk pairing still authorises the DRIVING link."""
+        return self._identity_listed(self.link.extension_id)
+
+    async def _sever_identity(self, extension_id: str, *, link: ExtensionLink | None = None) -> None:
+        """Remove ONE identity from the allow-list and sever only ITS sockets.
 
         Flipping ``paired`` false is not enough on its own: an open socket the
         extension already holds would keep delivering RPCs until it happened to
-        disconnect. So this closes the socket too, which is what makes the
-        popup's \"take this back any time\" and the CLI's \"revoked\" promise real.
+        disconnect. So the sockets are closed too, which is what makes the
+        popup's take-this-back-any-time affordance and the CLI's revoked promise
+        real.
+
+        Per IDENTITY and not "all": with an allow-list, revoking the dev build
+        must leave the store build driving, and the file is emptied only when
+        nothing is left authorised (design §3.5.2).
         """
-        reset_pairing(self.root)
-        self.link.paired = False
-        # An unpair is not a wedge: forget any latched unresponsive reason, or a
-        # deliberate revoke would keep reading as "attached but not answering".
-        self.link.clear_unproven_drop()
-        websocket = self.link.websocket
-        # The socket AND its generation, captured together before the close
-        # below yields: the guard after it asks whether this revoke is still
-        # looking at the live link, not merely whether some socket exists
-        # (audit A1, the revoke/replacement crossing).
-        generation = self.link.generation
-        if websocket is not None:
-            with suppress(Exception):
-                # 4003 = unpaired, the same code the handshake uses so the
-                # popup renders \"waiting to pair\" rather than a mystery drop.
-                await asyncio.wait_for(websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S)
-            if not self.link.is_authoritative(websocket, generation):
-                # A handshake installed itself while that close was in flight.
-                # The revoke must NOT clear the link it did not close: doing so
-                # tore down the socket that replaced the revoked one and forgot
-                # its state, so the replacement's own re-dial was reported as
-                # gone.
-                #
-                # Preserving that connection is not the same as authorizing it.
-                # The new handshake computed its own `paired` from the pairing
-                # file `reset_pairing` had already removed, so it answers
-                # through the same `not_paired` gate as every other unpaired
-                # peer — nothing here revives a revoked token.
-                return
-        self.link.disconnect()
+        revoke_identity(self.root, extension_id)
+        targets = [entry for entry in self.links.values() if entry.extension_id == extension_id]
+        if link is not None and link in targets:
+            # The sender first: it is the socket whose unpair the user is
+            # watching, and its close is the one the popup renders.
+            targets = [link] + [entry for entry in targets if entry is not link]
+        for target in targets:
+            target.paired = False
+            # An unpair is not a wedge: forget any latched unresponsive reason,
+            # or a deliberate revoke would keep reading as "attached but not
+            # answering".
+            target.clear_unproven_drop()
+            if target.generation == self.driver_generation:
+                # Revoking the driver ends the state the latch describes, so the
+                # service mirror goes too: "attached but not answering" over a
+                # deliberately unpaired bridge is a claim about a pairing that
+                # no longer exists (review R2-1).
+                self.clear_drop_latch()
+            websocket = target.websocket
+            # The socket AND its generation, captured together before the close
+            # below yields: the guard after it asks whether this revoke is still
+            # looking at the live link, not merely whether some socket exists
+            # (audit A1, the revoke/replacement crossing).
+            generation = target.generation
+            if websocket is not None:
+                with suppress(Exception):
+                    # 4003 = unpaired, the same code the handshake uses so the
+                    # popup renders "waiting to pair" rather than a mystery drop.
+                    await asyncio.wait_for(
+                        websocket.close(code=4003), timeout=LINK_CLOSE_TIMEOUT_S
+                    )
+                if not target.is_authoritative(websocket, generation):
+                    # A handshake installed itself while that close was in flight.
+                    # The revoke must NOT clear the link it did not close: doing
+                    # so tore down the socket that replaced the revoked one and
+                    # forgot its state, so the replacement's own re-dial was
+                    # reported as gone.
+                    #
+                    # Preserving that connection is not the same as authorizing
+                    # it. The new handshake computed its own `paired` from the
+                    # pairing file this revoke had already rewritten, so it
+                    # answers through the same `not_paired` gate as every other
+                    # unpaired peer — nothing here revives a revoked token.
+                    continue
+            # Retires the link and hands the wheel to a standby if this was the
+            # driver (the ONE retire path, so a revoke cannot diverge from a
+            # driver loss).
+            promoted = self._retire_link(target)
+            if promoted is not None:
+                await self._tell_role(promoted)
         self.publish_safely()
 
     async def _revocation_tick(self) -> None:
         await asyncio.sleep(REVOKE_WATCH_S)
-        if not self.link.extension_id or self._live_pairing_matches():
+        if not self.links:
             return
-        # The pairing is gone ON DISK. Clear the latched drop reason HERE, before
-        # any socket test, because `revoke()` is unreachable once a drop has
-        # happened: `disconnect()` nulls the socket AND `paired`, so the guard
-        # below is false forever exactly while the latch is live (review R2-1,
-        # confirming QA Q2-1). Clearing it only in `revoke()` therefore left a
-        # deliberately unpaired bridge answering "attached and paired … pairing
-        # is preserved" for the rest of LINK_DROP_TTL_S — a claim about a pairing
-        # that no longer exists.
-        #
-        # The bound is one watch period: a revoke is reflected within
-        # REVOKE_WATCH_S of the file changing, the same order as the `/health`
-        # and RPC answers that read it.
-        self.link.clear_unproven_drop()
-        if self.link.websocket is not None and self.link.paired:
+        listed = _identity_ids(self.root)
+        for target in list(self.links.values()):
+            if not target.extension_id or target.extension_id in listed:
+                continue
+            # The pairing is gone ON DISK. Clear the latched drop reason HERE,
+            # before any socket test, because the severing below is unreachable
+            # once a drop has happened: `disconnect()` nulls the socket AND
+            # `paired`, so the guard is false forever exactly while the latch is
+            # live (review R2-1, confirming QA Q2-1). Clearing it only in the
+            # revoke path therefore left a deliberately unpaired bridge
+            # answering "attached and paired … pairing is preserved" for the rest
+            # of LINK_DROP_TTL_S — a claim about a pairing that no longer exists.
+            #
+            # The bound is one watch period: a revoke is reflected within
+            # REVOKE_WATCH_S of the file changing, the same order as the
+            # `/health` and RPC answers that read it.
+            target.clear_unproven_drop()
+            if target.generation == self.driver_generation:
+                self.clear_drop_latch()
+            if not target.paired:
+                # An UNPAIRED link holds no authority to take away, so there is
+                # nothing to sever: this is an install sitting on the pairing
+                # form (or with a stale token) and its popup must stay up while
+                # the user types the code. Severing it would close the very
+                # socket the code is submitted on — which is why the guard is
+                # "is it paired", not "is it listed".
+                continue
             logger.info("pairing revoked on disk; closing the live extension socket")
-            await self.revoke()
+            await self._sever_identity(target.extension_id, link=target)
 
     async def _watch_revocation(self) -> None:
         """Poll the pairing file so an out-of-process revoke severs a live link.
@@ -978,58 +1477,86 @@ class BridgeService:
             return ""
         return extension_id
 
-    def _rotate_pending(self, extension_id: str) -> None:
-        """Mint a brand-new code, unconditionally invalidating any prior one.
+    def _rotate_pending(self, extension_id: str, label: str = "") -> None:
+        """Mint a brand-new code for ONE identity, invalidating only its prior one.
 
         Used when the attempt cap is reached or the code expires: rotating is
         what turns the documented 5-guess limit into a real lockout — the
         exhausted code stops working the instant a fresh one is issued, so a
         local brute-force process cannot keep guessing the same secret until
         the TTL lapses (finding A1).
-        """
-        _private_write(
-            _pending_path(self.root),
-            {
-                "extension_id": extension_id,
-                "code": f"{secrets.randbelow(1_000_000):06d}",
-                "expires_at": time.time() + PAIR_TTL_S,
-                "attempts": 0,
-            },
-        )
 
-    def _ensure_pending(self, extension_id: str) -> None:
-        """Guarantee a live pending code exists, reusing a valid one.
+        Keyed by extension id, because a single slot let a SECOND identity's
+        dial rotate the first identity's live code away — after which the first
+        failed with "That code didn't match" for a code the user had read
+        correctly (design §1.3).
+        """
+        entries = _pending_entries(self.root)
+        entries[extension_id] = {
+            "code": f"{secrets.randbelow(1_000_000):06d}",
+            "expires_at": time.time() + PAIR_TTL_S,
+            "attempts": 0,
+            # The label lives on the CODE, not only on the pairing record: with
+            # two installs waiting, `lop browser pair` has to say which popup
+            # each code belongs to, and at that moment neither install is paired
+            # yet — so there is no pairing entry to name them from.
+            "label": label,
+        }
+        _write_pending(self.root, entries)
+
+    def _ensure_pending(self, extension_id: str, label: str = "") -> None:
+        """Guarantee a live pending code exists for this identity, reusing one.
 
         A code is reused only while it is unexpired AND still under the attempt
         cap; anything else rotates. The cap check here is the second half of
         the A1 fix: even if a caller forgets to rotate on cap, an exhausted
         code is never handed back out as "still live".
         """
-        pending = _read_json(_pending_path(self.root))
+        entry = _pending_entries(self.root).get(extension_id)
         if (
-            pending
-            and pending.get("extension_id") == extension_id
-            and float(pending.get("expires_at", 0)) > time.time()
-            and int(pending.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
+            entry is not None
+            and float(entry.get("expires_at", 0)) > time.time()
+            and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
         ):
             return
-        self._rotate_pending(extension_id)
+        self._rotate_pending(extension_id, label)
 
     def _valid_saved_token(self, extension_id: str, token: str) -> bool:
-        saved = _read_json(_pairing_path(self.root))
-        if not saved or saved.get("extension_id") != extension_id or not token:
+        """Whether ``token`` is the secret stored for THIS identity, and no other.
+
+        One token per identity, selected by id: a shared token would make
+        "revoke the dev build" a claim about the Origin header — which any local
+        process can forge and which the contract's own threat model does not
+        treat as a boundary — instead of a fact about the file.
+        """
+        if not token:
             return False
         digest = hashlib.sha256(token.encode()).hexdigest()
-        return secrets.compare_digest(str(saved.get("token_sha256", "")), digest)
+        for entry in _identities(self.root):
+            if str(entry.get("extension_id", "")) != extension_id:
+                continue
+            return secrets.compare_digest(str(entry.get("token_sha256", "")), digest)
+        return False
 
-    async def _try_pair(self, request: PairRequest) -> PairResult:
-        pending = _read_json(_pending_path(self.root))
-        if not pending or pending.get("extension_id") != self.link.extension_id:
-            self._ensure_pending(self.link.extension_id)
+    async def _try_pair(self, request: PairRequest, link: ExtensionLink) -> PairResult:
+        """Submit a code for ONE link's identity.
+
+        ``link`` is passed in rather than read from ``self.link`` because this
+        is served on a STANDBY link too: the popup opens its own socket to
+        submit the code, and with an allow-list that socket is a standby
+        whenever another identity is already driving. Requiring driver status
+        here would make pairing a second install deadlock on itself (§3.5).
+        """
+        extension_id = link.extension_id
+        entry = _pending_entries(self.root).get(extension_id)
+        if entry is None:
+            self._ensure_pending(
+                extension_id, _browser_label(link.browser, link.extension_version)
+            )
             return PairResult(ok=False, message="No live pairing code. Run lop browser pair again.")
-        attempts = int(pending.get("attempts", 0)) + 1
-        expired = float(pending.get("expires_at", 0)) <= time.time()
-        matches = secrets.compare_digest(str(pending.get("code", "")), request.code)
+        attempts = int(entry.get("attempts", 0)) + 1
+        expired = float(entry.get("expires_at", 0)) <= time.time()
+        matches = secrets.compare_digest(str(entry.get("code", "")), request.code)
         if expired or attempts >= PAIR_MAX_ATTEMPTS or not matches:
             # Reaching the cap (or expiry) rotates to a fresh code, so the
             # guessed-at code is dead the moment this branch runs — the
@@ -1039,7 +1566,13 @@ class BridgeService:
             # rotated — finding A1). ``attempts >= cap`` on this, the cap-th
             # failure, is deliberate: the cap-th wrong guess is the last one.
             if attempts >= PAIR_MAX_ATTEMPTS or expired:
-                self._rotate_pending(self.link.extension_id)
+                # The label rides along: it is the only thing that names this
+                # install in `lop browser pair`, and dropping it here would
+                # leave a waiting install anonymous exactly after a lockout,
+                # when the user most needs to know which popup to re-open.
+                self._rotate_pending(
+                    extension_id, str(entry.get("label", ""))
+                )
                 message = (
                     "Too many attempts. That code is now dead — run 'lop browser "
                     "pair' for a fresh one."
@@ -1047,8 +1580,7 @@ class BridgeService:
                     else "That code expired. Run 'lop browser pair' for a fresh one."
                 )
             else:
-                pending["attempts"] = attempts
-                _private_write(_pending_path(self.root), pending)
+                self._set_pending_attempts(extension_id, attempts)
                 # Two lines at the popup's 300px width, not three. The popup
                 # reserves a fixed slot for this message so a failed attempt
                 # cannot resize the window (extension/src/popup/popup.css), and
@@ -1060,19 +1592,35 @@ class BridgeService:
                 message = "That code didn't match. Codes expire after two minutes — check the app."
             return PairResult(ok=False, message=message)
         token = secrets.token_urlsafe(32)
-        _private_write(
-            _pairing_path(self.root),
-            {
-                "extension_id": self.link.extension_id,
-                "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
-                "paired_at": time.time(),
-            },
+        # Rotation, not insertion: re-pairing the same identity must invalidate
+        # the hash it held before, or a stale token would stay live beside the
+        # new one. The label is derived from what the peer reported at `hello`
+        # and kept verbatim if this daemon has no fresh value for it.
+        add_identity(
+            self.root,
+            extension_id,
+            hashlib.sha256(token.encode()).hexdigest(),
+            label=_browser_label(link.browser, link.extension_version),
         )
-        with suppress(OSError):
-            _pending_path(self.root).unlink()
-        self.link.paired = True
+        self._drop_pending(extension_id)
+        link.paired = True
         self.publish_safely()
         return PairResult(ok=True, token=token)
+
+    def _set_pending_attempts(self, extension_id: str, attempts: int) -> None:
+        """Persist the incremented guess counter for one identity's code."""
+        entries = _pending_entries(self.root)
+        entry = entries.get(extension_id)
+        if not entry:
+            return
+        entry["attempts"] = attempts
+        _write_pending(self.root, entries)
+
+    def _drop_pending(self, extension_id: str) -> None:
+        """Retire one identity's pending code, leaving every other one live."""
+        entries = _pending_entries(self.root)
+        if entries.pop(extension_id, None) is not None:
+            _write_pending(self.root, entries)
 
     async def extension(self, websocket: WebSocket) -> None:
         # The four rejections below (and the ORIGIN one above) close WITHOUT a
@@ -1097,32 +1645,48 @@ class BridgeService:
         if hello.proto != PROTO_VERSION:
             await websocket.close(code=4001)
             return
-        saved = _read_json(_pairing_path(self.root))
-        if saved and saved.get("extension_id") != extension_id:
+        listed = _identity_ids(self.root)
+        if listed and extension_id not in listed:
+            # Still BEFORE `attach()`: the unbounded-close rule above is preserved
+            # verbatim. An allow-list only widens WHICH ids may install a link;
+            # an unknown id is refused exactly as the single pin refused it.
             await websocket.close(code=4004)
             return
 
-        # A later extension wins. This prevents two browser profiles from both
-        # receiving commands while preserving reconnect after worker death.
+        # A later extension wins WITHIN an identity; incumbency holds ACROSS
+        # identities. Two profiles can therefore both stay connected instead of
+        # evicting each other forever (a mutual-eviction war at the alarm period:
+        # each side's `onopen` resets its reconnect attempt counter, so a 4000
+        # eviction buys it a 1 s re-dial — see worker.ts), while reconnect after
+        # worker death keeps working because a same-identity dial still replaces
+        # the incumbent.
         #
-        # The replacement is INSTALLED before the old socket is closed, so the
-        # supersession is atomic: from here every frame the old socket is still
-        # draining is ignored (the receive-loop fence below), and the close is a
-        # bounded courtesy to a peer that is no longer authoritative. Doing it
-        # the other way round left the old socket authoritative across the close
-        # await — precisely the window in which a superseded frame could stamp
-        # liveness or publish into the new connection's driven record (audit A1).
-        previous = self.link.websocket
+        # A distinct link object per SOCKET, not per daemon. Every frame, latch
+        # and pending future below belongs to the socket draining it, so a
+        # superseded socket cannot write into the live connection's state at all
+        # — #996's fences, made structural rather than re-derived.
+        link = ExtensionLink()
+        link.extension_id = extension_id
+        link.browser = hello.browser
+        link.extension_version = hello.extension_version
+        previous = next(
+            (entry for entry in self.links.values() if entry.extension_id == extension_id), None
+        )
+        previous_wire: WebSocket | None = None
         if previous is not None:
             # The superseded link's work is abandoned NOW: its futures can never
             # be answered by the connection replacing it, so the waiters get the
             # typed disconnect instead of burning their budgets. Its OWN socket
-            # is left in place for the bounded close below — clearing the field
-            # here would wipe the replacement this same block installs.
-            self.link.forget_link_state()
-        generation = self.link.attach(websocket)
+            # is kept for the bounded close below — `disconnect` clears the link's
+            # claim to it, which is what makes its still-running receive loop
+            # stand down on its very next frame instead of stamping liveness.
+            previous_wire = previous.websocket
+            previous.disconnect()
+            self.links.pop(previous.generation, None)
+        generation = self.next_generation()
+        self.links[generation] = link
         # ── THE AUTHORITATIVE INSTALL IS ONE UNINTERRUPTED BLOCK ────────────
-        # Nothing between `attach` above and `publish_safely` below may await,
+        # Nothing between the line above and `publish_safely` below may await,
         # and every write below is a SHARED-state write (identity, pairing,
         # liveness, latch). The install used to sit after the superseded
         # socket's bounded close, and `close` is an await: a third handshake
@@ -1132,28 +1696,39 @@ class BridgeService:
         # rejected was thereby authorized and drove RPCs (audit A1). Ordering
         # is the whole guard here: a handshake that no longer owns the link has
         # nothing left to write, because all of its writes already happened.
-        self.link.extension_id = extension_id
-        self.link.browser = hello.browser
+        link.attach(websocket, generation)
         # A fresh authoritative socket supersedes any latched drop reason from
         # the link it just replaced (including the "later connection wins"
         # eviction above), so a reconnect cannot inherit a mute label.
-        self.link.clear_unproven_drop()
+        link.clear_unproven_drop()
+        self.clear_drop_latch()
         # The peer has just proven it is listening by sending `hello`; stamp it
         # so `proven` is true from the first instant of the connection instead
         # of waiting for the first pong.
-        self.link.last_frame_at = time.monotonic()
-        self.link.paired = self._valid_saved_token(extension_id, hello.token)
-        if not self.link.paired:
-            self._ensure_pending(extension_id)
+        link.last_frame_at = time.monotonic()
+        link.paired = self._valid_saved_token(extension_id, hello.token)
+        # Cold-start tie-break AND within-identity later-wins, in one test: the
+        # wheel is free whenever nothing holds it — the previous same-identity
+        # link is already gone from `links`, so if it was driving, the wheel is
+        # idle and this socket takes it. A different identity's live driver is
+        # still holding the wheel, so this one becomes a standby and receives no
+        # commands. Deliberately not a configured priority: a preferred install
+        # that reclaimed the wheel on EVERY reconnect would reproduce the
+        # eviction war at the alarm period instead of at 1 Hz.
+        if self.link.websocket is None:
+            self.driver_generation = generation
+        link.role = "driver" if self.driver_generation == generation else "standby"
+        if not link.paired:
+            self._ensure_pending(extension_id, _browser_label(link.browser, link.extension_version))
         self.publish_safely()
         # Only now, with this handshake fully installed, is the socket it
         # replaced closed: a bounded courtesy to a peer that is already
         # non-authoritative, whose outcome this handshake's authority must not
         # depend on (audit A2).
-        if previous is not None:
+        if previous_wire is not None:
             with suppress(Exception):
-                await asyncio.wait_for(previous.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
-        if not self.link.is_authoritative(websocket, generation):
+                await asyncio.wait_for(previous_wire.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
+        if not link.is_authoritative(websocket, generation):
             # A newer handshake installed itself while the superseded socket was
             # being closed, so this one is now the superseded side. It must not
             # speak: an ack on a wire that is no longer current tells a peer it
@@ -1167,23 +1742,35 @@ class BridgeService:
             # handshake answer is the first thing a superseded write would
             # misdeliver, and a peer that stopped draining must not park the
             # accept path (audit A1/A2).
+            #
+            # `role` and `authorized_count` are ADDITIVE. The released store
+            # build parses frames without a schema and ignores what it does not
+            # know, and an older DAEMON simply never sent them — which is why the
+            # extension must read an absent `role` as "driver" (design §7.2).
+            # `Hello` itself gains nothing: a new field THERE would be closed 4001
+            # by every already-released daemon (`extra="forbid"`).
             await asyncio.wait_for(
-                self.link.send(
-                    HelloAck(paired=self.link.paired).model_dump(mode="json"), wire=websocket
+                link.send(
+                    HelloAck(
+                        paired=link.paired,
+                        role=link.role,
+                        authorized_count=len(_identity_ids(self.root)),
+                    ).model_dump(mode="json"),
+                    wire=websocket,
                 ),
                 timeout=LINK_SEND_TIMEOUT_S,
             )
         except Exception:  # noqa: BLE001 - an undeliverable handshake is a dead dial
             with suppress(Exception):
                 await asyncio.wait_for(websocket.close(code=4000), timeout=LINK_CLOSE_TIMEOUT_S)
-            if self.link.websocket is websocket:
-                self.link.disconnect()
-                self.publish_safely()
+            promoted = self._retire_link(link)
+            if promoted is not None:
+                await self._tell_role(promoted)
             return
         try:
             while True:
                 frame = await websocket.receive_json()
-                if not self.link.is_authoritative(websocket, generation):
+                if not link.is_authoritative(websocket, generation):
                     # A replacement connection is authoritative now and this
                     # socket is a superseded one still draining buffered frames.
                     # Its events must not stamp liveness, publish into the driven
@@ -1198,17 +1785,26 @@ class BridgeService:
                 # this event, so it is set on the same line as the stamp: a
                 # frame that counts as liveness but not as an answer would leave
                 # the probe blind to a peer that is plainly talking.
-                self.link.last_frame_at = time.monotonic()
-                self.link.frame_event.set()
+                #
+                # Stamped on THIS link, never on `self.link`: a standby's frame
+                # must not read as the driver being alive, and a superseded one
+                # cannot reach here at all.
+                link.last_frame_at = time.monotonic()
+                link.frame_event.set()
                 if frame.get("event") == "pair":
                     try:
                         pair = PairRequest.model_validate(frame)
                     except ValidationError:
                         continue
-                    result = await self._try_pair(pair)
+                    # Served on a STANDBY link too (§3.5.1): the popup submits its
+                    # code over its own socket, and with an allow-list that socket
+                    # is a standby whenever another identity drives. Requiring
+                    # driver status here would make pairing a second install
+                    # deadlock on itself.
+                    result = await self._try_pair(pair, link)
                     with suppress(Exception):
                         await asyncio.wait_for(
-                            self.link.send(result.model_dump(mode="json"), wire=websocket),
+                            link.send(result.model_dump(mode="json"), wire=websocket),
                             timeout=LINK_SEND_TIMEOUT_S,
                         )
                     continue
@@ -1218,7 +1814,7 @@ class BridgeService:
                     # (A3) and the popup/status can show what is pending (U2).
                     request_id = str(frame.get("id", ""))
                     if request_id:
-                        self.link.awaiting_origin[request_id] = str(frame.get("origin", ""))
+                        link.awaiting_origin[request_id] = str(frame.get("origin", ""))
                         self.publish_safely()
                     continue
                 if frame.get("event") == "awaiting_origin_cleared":
@@ -1228,20 +1824,23 @@ class BridgeService:
                     # a prompt the popup can no longer resolve — the stale echo
                     # is what looped the approval popup on "Request changed."
                     request_id = str(frame.get("id", ""))
-                    if request_id and request_id in self.link.awaiting_origin:
-                        self.link.awaiting_origin.pop(request_id, None)
+                    if request_id and request_id in link.awaiting_origin:
+                        link.awaiting_origin.pop(request_id, None)
                         self.publish_safely()
                     continue
                 if frame.get("event") == "unpair":
                     # The options page "Unpair this browser" reaches the daemon
                     # here so revocation severs THIS live socket, mirroring the
-                    # CLI --reset path (findings A5/U1).
-                    await self.revoke()
+                    # CLI --revoke path (findings A5/U1). Per identity: the
+                    # install that asked to unpair must be the only one dropped,
+                    # which is what makes the two-install case usable instead of
+                    # a race to re-pair both.
+                    await self._sever_identity(link.extension_id, link=link)
                     return
                 if frame.get("event") == "tab_update":
                     # Pushed by the extension on navigation so the popup reflects
                     # the driven site promptly even between commands (U3).
-                    self.link.note_driven(
+                    link.note_driven(
                         str(frame.get("tab", "")),
                         str(frame.get("url", "")),
                         str(frame.get("title", "")),
@@ -1253,7 +1852,7 @@ class BridgeService:
                     # only that tab is dropped: with several sessions driving a
                     # tab each, blanking everything on one close (as this did)
                     # would have reported the survivors as gone.
-                    self.link.note_closed(str(frame.get("tab", "")))
+                    link.note_closed(str(frame.get("tab", "")))
                     self.publish_safely()
                     continue
                 if frame.get("event") in ("pong", "origin_decision"):
@@ -1269,26 +1868,146 @@ class BridgeService:
                     if isinstance(url, str) and url:
                         title = response.result.get("title")
                         handle = response.result.get("tab")
-                        self.link.note_driven(
+                        link.note_driven(
                             handle if isinstance(handle, str) else "",
                             url,
                             title if isinstance(title, str) else "",
                         )
-                self.link.awaiting_origin.pop(response.id, None)
-                future = self.link.pending.pop(response.id, None)
+                link.awaiting_origin.pop(response.id, None)
+                future = link.pending.pop(response.id, None)
                 if future is not None and not future.done():
                     future.set_result(response)
         except WebSocketDisconnect:
             pass
         finally:
-            if self.link.websocket is websocket:
+            if link.websocket is websocket:
                 # The peer ended this link itself (worker died, browser closed,
                 # tab torn down). That is NOT the unresponsive path — the daemon
                 # did not sever it — so drop any latched unresponsive reason and
                 # let the honest "not currently attached" state stand.
-                self.link.clear_unproven_drop()
-                self.link.disconnect()
-                self.publish_safely()
+                link.clear_unproven_drop()
+                if link.generation == self.driver_generation:
+                    self.clear_drop_latch()
+                # If this was the driver, the wheel passes to the
+                # longest-attached surviving standby HERE: a driver change must
+                # follow the socket actually being gone, not a timer, or the
+                # demoted install's tabs would keep their debugger attachments
+                # while nothing could reach them.
+                promoted = self._retire_link(link)
+                if promoted is not None:
+                    self._announce_role(promoted)
+
+    async def driver(self, http_request: HttpRequest) -> JSONResponse:
+        """Pin the driving extension explicitly: ``lop browser drive <id-or-label>``.
+
+        The escape hatch from the incumbency rule. It exists because that rule is
+        deliberately self-STABLE rather than clever: with two installs up, the
+        one already driving keeps the wheel, and reconnecting the other cannot
+        take it (a same-identity dial replaces only that identity's own link).
+        Without this the operator's only lever is quitting a browser — which is
+        the situation this whole change exists to remove.
+
+        Authenticated with the session key exactly as ``/rpc`` is: choosing which
+        extension drives the user's browser is the same authority the session leg
+        already carries, and this is HTTP rather than the WS protocol so a
+        released extension never has to know it exists.
+        """
+        supplied = http_request.headers.get("x-bridge-key", "")
+        if not secrets.compare_digest(supplied, self.state.session_key):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            payload = json.loads(await http_request.body() or b"{}")
+        except ValueError:
+            return JSONResponse({"error": "invalid_request"}, status_code=422)
+        target = str(payload.get("target", "") if isinstance(payload, dict) else "")
+        link = self._resolve_extension(target)
+        if link is None:
+            return JSONResponse(
+                {
+                    "error": "unknown_extension",
+                    "authorized_extension_ids": sorted(_identity_ids(self.root)),
+                    "standby_extension_ids": [
+                        entry.extension_id for entry in self.standby_links()
+                    ],
+                },
+                status_code=404,
+            )
+        if link.generation == self.driver_generation and link.role == "driver":
+            # Already driving: report success rather than churning the link, so
+            # `drive` is idempotent and safe to script.
+            return JSONResponse({"ok": True, "driver_extension_id": link.extension_id})
+        previous = self.link
+        if previous.websocket is not None and previous.role == "driver":
+            previous.role = "standby"
+        # Decide and publish together, then tell the peers (audit A1): the
+        # demoted install learns it holds nothing of its own from the role
+        # frame, and until it does, the daemon is already refusing it commands.
+        self.driver_generation = link.generation
+        link.role = "driver"
+        self.publish_safely()
+        for entry in [link, previous]:
+            if entry.websocket is not None:
+                await self._tell_role(entry)
+        return JSONResponse({"ok": True, "driver_extension_id": link.extension_id})
+
+    def _announce_role(self, link: ExtensionLink) -> None:
+        """Deliver a role frame as its own task rather than awaiting it here.
+
+        Used from the receive loop's `finally`, which also runs when the task is
+        being CANCELLED (connection teardown, server shutdown). An `await` there
+        raises `CancelledError` before the frame leaves the process, so a
+        promoted install would go on believing it is a standby — serving
+        commands while its popup says otherwise — until something made it
+        re-dial. The daemon's own state already gates commands, so the frame is
+        the courtesy half, but a courtesy that silently never arrives on exactly
+        the path that just moved the wheel is how a mystery gets planted.
+        """
+        task = asyncio.get_running_loop().create_task(self._tell_role(link))
+        # asyncio keeps only a WEAK reference to a running task, so a frame in
+        # flight while nothing else is scheduled can be collected before it is
+        # sent. The set is the strong reference; the callback drops it.
+        self._role_tasks.add(task)
+        task.add_done_callback(self._role_tasks.discard)
+
+    def _resolve_extension(self, target: str) -> ExtensionLink | None:
+        """Resolve ``<id-or-label>`` to an attached link, or None.
+
+        Accepts an exact id, an unambiguous id PREFIX (the operator copies 32
+        opaque characters; matching the first few is the difference between one
+        command and a copy-paste exercise), or a case-insensitive label
+        SUBSTRING. An ambiguous target resolves to nothing rather than to a
+        guess: silently moving the wheel to the wrong browser is worse than
+        asking for one more character.
+        """
+        wanted = target.strip().lower()
+        if not wanted:
+            return None
+        candidates = [entry for entry in self.links.values() if entry.websocket is not None]
+        exact = [entry for entry in candidates if entry.extension_id.lower() == wanted]
+        if exact:
+            return exact[0]
+        labels = _identities(self.root)
+        by_prefix = [
+            entry for entry in candidates if entry.extension_id.lower().startswith(wanted)
+        ]
+        if len(by_prefix) == 1:
+            return by_prefix[0]
+        by_label = []
+        for entry in candidates:
+            label = next(
+                (
+                    str(saved.get("label", ""))
+                    for saved in labels
+                    if str(saved.get("extension_id", "")) == entry.extension_id
+                ),
+                "",
+            )
+            if label and wanted in label.lower():
+                by_label.append(entry)
+        unique = {entry.generation: entry for entry in by_label}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        return None
 
     async def rpc(self, http_request: HttpRequest) -> JSONResponse:
         supplied = http_request.headers.get("x-bridge-key", "")
@@ -1313,8 +2032,8 @@ class BridgeService:
             # it means anything: the value is 0.0 both for "never dropped" and
             # for "dropped at time zero", so trusting it before the check invites
             # reading an ambiguous number as a fact (review R2-6).
-            if self.link.dropped_unproven():
-                dropped_for = self.link.recent_drop_silence()
+            if self.drop_latched():
+                dropped_for = self.drop_silence_value()
                 return self._error_response(
                     request.id,
                     ErrorCode.EXTENSION_UNRESPONSIVE,
@@ -1349,7 +2068,11 @@ class BridgeService:
         # (findings A5/U1). If the file is gone, sever the socket now too.
         if not self.link.paired or not self._live_pairing_matches():
             if self.link.paired:
-                await self.revoke()
+                # Per identity: the on-disk record still authorises OTHER
+                # installs, so severing only this one leaves a standby driving
+                # rather than dropping every socket because one token went
+                # stale.
+                await self._sever_identity(self.link.extension_id, link=self.link)
             return self._error_response(request.id, ErrorCode.NOT_PAIRED, "extension is not paired")
         if request.method not in COMMAND_TIMEOUTS:
             return self._error_response(
@@ -1920,6 +2643,15 @@ class BridgeService:
         # (U3) and any in-flight approval (U2) without a separate RPC.
         pending = sorted(set(self.link.awaiting_origin.values()))
         connected = self.link.proven
+        driver_id = self.link.extension_id
+        driver_label = next(
+            (
+                str(entry.get("label", ""))
+                for entry in _identities(self.root)
+                if str(entry.get("extension_id", "")) == driver_id and driver_id
+            ),
+            "",
+        )
         return JSONResponse(
             {
                 "status": "ok",
@@ -1947,7 +2679,7 @@ class BridgeService:
                 # them to, reads "browser not currently attached" about a browser
                 # that is open (design D2/R1-5, QA Q1).
                 "extension_unresponsive": (self.link.websocket is not None and not connected)
-                or self.link.dropped_unproven(),
+                or self.drop_latched(),
                 # Whether a link is attached RIGHT NOW, which is not the same as
                 # healthy (`extension_connected` owns that). It exists so the
                 # status line can word the same observation truthfully in both
@@ -1960,7 +2692,7 @@ class BridgeService:
                 "link_silent_s": (
                     self.link.silent_for()
                     if self.link.websocket is not None
-                    else self.link.recent_drop_silence()
+                    else self.drop_silence_value()
                 ),
                 # How many tabs are driven, and their URLs. `current_url` alone
                 # framed a multi-tab world as one binding, so a stale value
@@ -1973,6 +2705,26 @@ class BridgeService:
                     )
                 ],
                 "pending_origin": pending[0] if pending else "",
+                # ── Multi-identity: additive, optional, driver-scoped ────────
+                #
+                # Every field ABOVE keeps describing the DRIVER, deliberately:
+                # the popup's wedge card, `lop browser status` and
+                # `backend._health_ok` are all asking about the link that serves
+                # commands, and re-pointing them at "some link" would have made
+                # a standby-only bridge look connected. What is new is only the
+                # answer to "who else is here".
+                #
+                # `extension_connected`/`paired`/`link_attached`/`link_silent_s`
+                # therefore mean what they always meant. The READER that needs
+                # more asks for it by name.
+                "driver_extension_id": driver_id,
+                "standby_extension_ids": [link.extension_id for link in self.standby_links()],
+                "authorized_extension_ids": sorted(_identity_ids(self.root)),
+                # The driver's human label, so the standby popup can NAME the
+                # install holding the wheel rather than saying "another one".
+                # Empty when the file has no label for it (an entry paired
+                # before labels existed), which the card words accordingly.
+                "driver_label": driver_label,
             }
         )
 
@@ -2063,6 +2815,7 @@ def create_app(port: int = DEFAULT_PORT, root: Path | None = None) -> Starlette:
         routes=[
             Route("/health", service.health, methods=["GET"]),
             Route("/repair", service.repair, methods=["POST"]),
+            Route("/driver", service.driver, methods=["POST"]),
             Route("/rpc", service.rpc, methods=["POST"]),
             WebSocketRoute("/extension", service.extension),
         ],

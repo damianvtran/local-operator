@@ -489,6 +489,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pair_browser.add_argument(
         "--reset", action="store_true", help="Revoke the paired browser first"
     )
+    pair_browser.add_argument(
+        "--list",
+        action="store_true",
+        help="List the authorised browser extensions, and which one is driving",
+    )
+    pair_browser.add_argument(
+        "--revoke",
+        metavar="ID-OR-LABEL",
+        default=None,
+        help="Revoke ONE authorised extension (its id, an unambiguous id prefix, "
+        "or part of its label), leaving every other one paired",
+    )
+    drive_browser = browser_subparsers.add_parser(
+        "drive", help="Choose which authorised extension drives the browser"
+    )
+    drive_browser.add_argument(
+        "target", help="Extension id (or an unambiguous prefix), or part of its label"
+    )
     logs_browser = browser_subparsers.add_parser("logs", help="Tail the daemon log")
     logs_browser.add_argument("--lines", type=int, default=100)
     logs_browser.add_argument("--follow", "-f", action="store_true")
@@ -1676,6 +1694,73 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _short_extension_id(extension_id: str) -> str:
+    """The 8-character prefix of an extension id, with an ellipsis.
+
+    Enough to tell two coexisting installs apart in a terminal line, which is
+    all a human ever needs one for; the full 32 characters are still what
+    `--revoke` and `drive` accept, and `pair --list` never hides an id the
+    operator might have to paste elsewhere.
+    """
+    return f"{extension_id[:8]}…" if len(extension_id) > 8 else extension_id
+
+
+def _resolve_pairing_target(target: str, identities: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Resolve an id, an id PREFIX, or a label substring against the authorised set.
+
+    Ambiguity resolves to None and the caller prints the candidates, because
+    revoking the wrong install is not a mistake this command gets to make
+    silently — and neither is handing the wheel to the wrong browser. An exact
+    id always wins, so a label that happens to contain another install's id
+    cannot shadow it.
+    """
+    wanted = target.strip().lower()
+    if not wanted:
+        return None
+    for entry in identities:
+        if str(entry.get("extension_id", "")).lower() == wanted:
+            return entry
+    prefixed = [
+        entry
+        for entry in identities
+        if str(entry.get("extension_id", "")).lower().startswith(wanted)
+    ]
+    if len(prefixed) == 1:
+        return prefixed[0]
+    labelled = [entry for entry in identities if wanted in str(entry.get("label", "")).lower()]
+    return labelled[0] if len(labelled) == 1 else None
+
+
+def _print_identities(pairing: dict[str, Any], health: dict[str, Any] | None) -> None:
+    """Print which extensions are authorised, and which one has the wheel.
+
+    The role comes from the live daemon (`/health`) when it answers, because
+    only the daemon knows which socket is driving; the FILE can only say who is
+    authorised. With no daemon running the list is still printed, without roles,
+    rather than implying a connection state nobody observed.
+    """
+    identities = pairing.get("identities") or []
+    if not identities:
+        return
+    driver = str((health or {}).get("driver_extension_id") or "")
+    standby = {str(item) for item in (health or {}).get("standby_extension_ids") or []}
+    kind = "authorised" if len(identities) == 1 else "authorised"
+    print(f"identities:          {len(identities)} {kind}")
+    for entry in identities:
+        extension_id = str(entry.get("extension_id", ""))
+        label = str(entry.get("label", "")) or "unnamed install"
+        if health is None:
+            print(f"                     - {label} ({_short_extension_id(extension_id)})")
+            continue
+        if extension_id == driver:
+            role = "driving"
+        elif extension_id in standby:
+            role = "standby"
+        else:
+            role = "paired, not connected"
+        print(f"                     - {label} ({_short_extension_id(extension_id)}) {role}")
+
+
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
@@ -1864,7 +1949,11 @@ def browser_command(args: argparse.Namespace) -> int:
         return serve_main(["--port", str(args.port)])
 
     from local_operator.browser_bridge import install as browser_install
-    from local_operator.browser_bridge.daemon import pairing_status, reset_pairing
+    from local_operator.browser_bridge.daemon import (
+        pairing_status,
+        reset_pairing,
+        revoke_identity,
+    )
 
     if command == "install":
         result = browser_install.install(args.port)
@@ -1938,6 +2027,15 @@ def browser_command(args: argparse.Namespace) -> int:
             else:
                 note = "browser not currently attached; it reconnects when opened"
             print(f"                     ({note})")
+        # WHICH extensions are paired, and which one has the wheel. Paired
+        # alone stopped answering the question the moment two installs could be
+        # authorised at once: a user with both a store build and a locally
+        # loaded one needs to know which of them the agent is actually driving,
+        # and `drive`/`pair --revoke` are addressed by exactly these names.
+        # Printed from the FILE plus live /health, so it works with the daemon
+        # down as well. Above the driven-tabs block so the reader learns WHO is
+        # driving before WHAT.
+        _print_identities(pairing_status(), health if result["healthy"] else None)
         # Driven tabs, PLURAL and counted. `driving: <url>` implied a single
         # system-wide binding; with one tab per session that framing turned a
         # stale URL into "something is holding the bridge". Say how many tabs
@@ -1998,6 +2096,48 @@ def browser_command(args: argparse.Namespace) -> int:
             print(f"\n\033[1;33munclaimed registration:\033[0m {ambiguous}")
         return 0 if result["healthy"] else 1
     if command == "pair":
+        if getattr(args, "list", False):
+            result = browser_install.status()
+            pairing = pairing_status()
+            if not pairing.get("identities"):
+                print("no browser extension is paired. Run 'lop browser pair' to pair one.")
+                return 0
+            _print_identities(pairing, result.get("health"))
+            pending = pairing.get("pending") or []
+            for item in pending:
+                label = str(item.get("label", "")) or _short_extension_id(
+                    str(item.get("extension_id", ""))
+                )
+                print(f"                     waiting: {item.get('code')}  ({label})")
+            return 0
+        if getattr(args, "revoke", None):
+            pairing = pairing_status()
+            identities = pairing.get("identities") or []
+            target = _resolve_pairing_target(args.revoke, identities)
+            if target is None:
+                print(
+                    f"\033[1;31mno single authorised extension matches "
+                    f"'{args.revoke}'.\033[0m"
+                )
+                for entry in identities:
+                    print(
+                        f"  {_short_extension_id(str(entry.get('extension_id', '')))}"
+                        f"  {entry.get('label', '') or 'unnamed install'}"
+                    )
+                if not identities:
+                    print("  (nothing is paired)")
+                return 1
+            # File-level, exactly like --reset: the daemon's revocation watcher
+            # then severs THIS identity's live socket within a few seconds and
+            # leaves every other identity's authority untouched.
+            revoke_identity(target["extension_id"])
+            label = str(target.get("label", "")) or _short_extension_id(
+                str(target.get("extension_id", ""))
+            )
+            print(
+                f"revoked {label}; any live connection for it is dropped within a few seconds."
+            )
+            return 0
         if args.reset:
             # File unlink here; the running daemon's revocation watcher (and
             # the per-request pairing re-check) sever any LIVE socket within a
@@ -2018,16 +2158,44 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("open the extension popup to pair a browser again.")
             return 0
         pair = pairing_status()
+        pending = pair.get("pending") or []
+        if len(pending) > 1:
+            # Two installs waiting at once cannot be told apart by a bare code:
+            # the user is looking at two popups and a terminal. Name the install
+            # each code belongs to, from the label the daemon recorded when the
+            # code was minted (design §3.4).
+            for item in pending:
+                label = str(item.get("label", "")) or _short_extension_id(
+                    str(item.get("extension_id", ""))
+                )
+                print(f"pairing code: {item.get('code')}   ({label})")
+            print("enter each code in the matching Local Operator extension popup.")
+            return 0
         code = pair.get("pending_code")
         if code:
             print(f"pairing code: {code}")
             print("enter this 6-digit code in the Local Operator extension popup.")
             return 0
         if pair.get("paired"):
-            print("browser extension is already paired. Use --reset to pair another profile.")
+            print(
+                "browser extension is already paired. Use --list to see which, or "
+                "--reset to pair another profile."
+            )
             return 0
         print("no extension is waiting to pair. Open the extension popup, then retry.")
         return 1
+    if command == "drive":
+        result = browser_install.pin_driver(args.target)
+        if not result.get("ok"):
+            print(f"\033[1;31m{result.get('error', 'could not pin the driver')}\033[0m")
+            for extension_id in result.get("authorized_extension_ids") or []:
+                print(f"  {_short_extension_id(str(extension_id))}")
+            return 1
+        print(
+            "now driving: "
+            f"{_short_extension_id(str(result.get('driver_extension_id', '')))}"
+        )
+        return 0
     if command in ("start", "stop", "restart"):
         result = browser_install.service_action(command)
         if not result["ok"]:
@@ -2081,7 +2249,10 @@ def browser_command(args: argparse.Namespace) -> int:
         if warning:
             print(f"\033[1;33mnote:\033[0m {warning}")
         return 0 if result.get("ok") else 1
-    print("usage: lop browser {install|status|start|stop|restart|pair|logs|uninstall|serve}")
+    print(
+        "usage: lop browser "
+        "{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}"
+    )
     return 1
 
 
