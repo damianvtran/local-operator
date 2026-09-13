@@ -6266,10 +6266,10 @@ class Session:
           through the frontend mutation path, so the band paints the pre-rebuild
           state (today's behaviour) until the correction lands;
         - **nothing on the event loop, the SCAN included** (review R1-5):
-          ``all_usage_rows`` copies one dict per row and ``journal_shrank``
+          ``all_usage_rows`` copies one dict per row and `lost_money_rows`
           walks the same list again, over an entry list the worst real session
           measures at ~255 MB / 8,466 rows. The worker therefore does scan,
-          shrink check and price, and only the publish returns to the loop;
+          loss check and price, and only the publish returns to the loop;
         - **never decreasing a persisted total**, checked again after the work.
         """
         if self._spend_rebuild_started or self._spend_recorded:
