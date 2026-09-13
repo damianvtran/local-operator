@@ -1180,3 +1180,60 @@ async def test_a_warm_survives_its_own_request_while_a_subscriber_holds_the_brid
         release.set()
         await holder.__aexit__(None, None, None)
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_second_warm_never_orphans_the_first_task(tmp_path):
+    """Review round 1, MINOR-1: the bridge must reference every task it starts.
+
+    `engage_in_flight` samples the facade's bind lock, which says nothing about
+    whether THIS BRIDGE already owns a warm task that has not reached the lock
+    yet. A second request resumed out of `acquire()` ahead of the first task's
+    first step therefore passed the predicate, and assigning `warm_task` again
+    dropped the first task's only reference -- reviewer's repro reported 2 tasks
+    started with the bridge holding the second, the first escaping `_detach()`'s
+    cancel.
+
+    Driven at the seam rather than over HTTP: the hazard is the guard, and
+    scheduling two real requests to interleave at exactly that point is not
+    something a test can make deterministic.
+    """
+    started: list[asyncio.Task[None]] = []
+    release = asyncio.Event()
+
+    async def parked_warm() -> None:
+        # Never reaches the bind lock, which is the whole point: the second
+        # caller must be refused by the bridge's own bookkeeping, not by a
+        # lock the first task has not taken.
+        await release.wait()
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote.warm_runtime = parked_warm  # type: ignore[method-assign]
+        real_create_task = asyncio.create_task
+
+        def recording_create_task(coro):
+            task = real_create_task(coro)
+            started.append(task)
+            return task
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(asyncio, "create_task", recording_create_task)
+            first = await bridge.warm()
+            second = await bridge.warm()
+            assert (first, second) == ("warming", "warming")
+            assert len(started) == 1, f"a second warm started another task: {len(started)}"
+            assert bridge.warm_task is started[0]
+            release.set()
+            await started[0]
+            # A SETTLED warm must not wedge the path: the engage may have
+            # failed, leaving the viewer cold, and the next keystroke has to
+            # be free to try again.
+            release.clear()
+            assert await bridge.warm() == "warming"
+            assert len(started) == 2 and bridge.warm_task is started[1]
+            release.set()
+            await started[1]
+    await pool.close()

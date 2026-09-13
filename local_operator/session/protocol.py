@@ -560,9 +560,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 84 public members and a POSITIVE
+    than stylistic. This protocol carries 108 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
+
+    The figure is ``len(typing._get_protocol_attrs(ViewerSessionProtocol))`` —
+    exactly the set a positive ``isinstance`` walks, which is what makes it the
+    right number to quote beside the timing. It counts INHERITED members too,
+    so it is larger than the viewer-only population
+    ``test_viewer_protocol.py`` pins; the two answer different questions and
+    must not be reconciled. It read 84 for some time while the protocol grew
+    past it (106 before the warm members were added, 108 with them), so recompute
+    it rather than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
