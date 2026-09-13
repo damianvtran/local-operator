@@ -56,6 +56,8 @@ from local_operator.tui.app import (
     Band,
     OperatorApp,
 )
+from local_operator.tui.session_catalog import SidebarSettings
+from local_operator.tui.session_interaction import SessionInteraction
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import (
@@ -85,6 +87,10 @@ SIZES = [(16, 10), (20, 12), (40, 20), (80, 24), (200, 40)]
 #: Enough of the composer's placeholder to find its row, minus the trailing
 #: ellipsis — a truncated placeholder is still the row this looks for.
 PLACEHOLDER_HEAD = "Message Local Operator"
+
+#: A session name long enough that the band's row has a tail to clip. Used where
+#: the claim is about the row the terminal is sent rather than about the name.
+NAME = "Fix sidebar reconnect on session switch"
 
 
 class FakeSession:
@@ -341,15 +347,44 @@ def _clamp() -> tuple[int, int, int]:
 def _expected_card_width(terminal_width: int) -> int:
     """The width the panel actually renders at, clamp AND threshold.
 
+    The CLOSED-layout form: with no sidebar docked the lane IS the screen's
+    content box. The docked form, and the box it resolves in, are
+    :func:`_panel_width_in` and :func:`_lane_width`.
+    """
+    return _panel_width_in(terminal_width - 2)  # the screen's one-cell inset each side
+
+
+def _panel_width_in(box: int) -> int:
+    """Width the panel renders at inside a composer lane of ``box`` cells.
+
     ``min(box, cap, max(floor, proportion))`` when that leaves at least
     ``BOOT_CARD_MIN_INSET`` cells of ground, else the full box: an inset of one to
     three cells is not a card, so the app does not ask for one (see
-    ``OperatorApp._sync_boot_card``).
+    ``OperatorApp._sync_boot_card``). The clamp is resolved in the LANE rather
+    than in the terminal because that is the box the dock is laid out in and the
+    box the sheet resolves the percentage against — the two disagreed only while
+    the decision was taken on the terminal's width.
     """
     percent, floor, cap = _clamp()
-    box = terminal_width - 2  # the screen's one-cell left and right inset
     card = min(box, cap, max(floor, box * percent // 100))
     return card if box - card >= BOOT_CARD_MIN_INSET else box
+
+
+def _lane_width(app: OperatorApp, terminal_width: int) -> int:
+    """Cells the composer is laid out in: the content box minus a DOCKED sidebar.
+
+    Stated here from the same two inputs the app reads — the sidebar's resolved
+    stylesheet width and the workspace's overlay class — so the expectation is an
+    independent statement of the rule rather than a copy of the app's own return
+    value. An overlay drawer displaces nothing, so it is not subtracted.
+    """
+    box = terminal_width - 2
+    sidebar = app._session_sidebar
+    sidebar_width = sidebar.styles.width
+    if sidebar.display and sidebar_width is not None:
+        if not app.query_one("#session-workspace").has_class("sidebar-overlay"):
+            box = max(0, box - int(sidebar_width.value))
+    return box
 
 
 @pytest.mark.asyncio
@@ -681,6 +716,13 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
     computed against a different box than the card's own and drifted a cell at
     four of them.
 
+    The composition is scoped to the LANE, and a docked sidebar narrows it. Where
+    the lane has no room for a card — a 33-cell drawer leaves 65 of 100 columns —
+    the panel is the full-width bar of its lane and there is no card column to
+    share: the notice is a spine block, the same degradation a terminal too narrow
+    for a card already gets. Both regimes are asserted here; what is never allowed
+    in either is a block wider than the screen it is drawn on.
+
     The TEXT inside it is left-aligned on the hanging indent, NOT centred. Rows
     centred on their own widths made the ink's left edge a function of sentence
     length — a stack of three notices drew four ragged edges, the same "diamond"
@@ -696,11 +738,20 @@ async def test_a_notice_under_the_splash_sits_on_the_card_not_the_spine(
         await _settle(pilot)
         card = app.query_one("#input-shell").region
         notice = app.query_one(NoticeBlock).region
-        if not sidebar_open:
-            assert card.width == _expected_card_width(terminal_width)
-        assert notice.width == card.width, (notice.width, card.width)
-        # The BLOCK shares the card's column, not only its width.
-        assert notice.x == card.x, (terminal_width, notice.x, card.x)
+        # The clamp resolves in the LANE the dock is laid out in, docked or not.
+        lane = _lane_width(app, terminal_width)
+        assert card.width == _panel_width_in(lane), (terminal_width, lane, card.width)
+        if app.screen.has_class(BOOT_CARD_CLASS):
+            assert notice.width == card.width, (notice.width, card.width)
+            # The BLOCK shares the card's column, not only its width.
+            assert notice.x == card.x, (terminal_width, notice.x, card.x)
+        else:
+            # No card at this lane: the notice is back on the spine, and the one
+            # thing that must hold there is that it is drawn on the screen at all
+            # (it is `1fr` of the transcript's content box, so nothing else can
+            # make it overflow — but the base of this test measured 73 cells of
+            # block at x=35 on a 100-cell terminal, right edge 108).
+            assert notice.x + notice.width <= terminal_width, (notice, terminal_width)
         # The narrow drawer intentionally covers the transcript, not the dock.
         # Assert its geometry above, but do not mistake occlusion for alignment.
         if app.query_one("#session-workspace").has_class("sidebar-overlay"):
@@ -728,6 +779,16 @@ async def test_a_boot_notice_starts_on_the_composers_own_text_column(
     places (`_sync_boot_column_width` against the card, the composer by the
     stylesheet), so they can drift apart without either looking wrong alone.
 
+    Scoped to the CARDED lane, which is where the claim has meaning: the card's
+    own column and the composer's text column are the same column by
+    construction. With the card withheld — a docked sidebar leaves 65 of 100
+    columns, under the 75-cell floor the card would need — the notice is a spine
+    block, and a spine block's indent sits one cell right of the composer's text
+    column. That difference is pre-existing and the app's narrow-terminal shape
+    (measured on the base at 70, 80 and 84 columns with no sidebar: sentence at
+    6, composer text at 5), so it is asserted as "stays on the screen" rather
+    than as column equality.
+
     Measured against the editor's CONTENT box rather than `chevron.x + 2`: the
     editor carries its own one-cell left padding, so the chevron-relative form
     is off by one and would pin the wrong column.
@@ -745,6 +806,9 @@ async def test_a_boot_notice_starts_on_the_composers_own_text_column(
         await _settle(pilot)
         notice = app.query_one(NoticeBlock).region
         sentence_x = notice.x + NoticeBlock.GLYPH_COLS
+        if not app.screen.has_class(BOOT_CARD_CLASS):
+            assert notice.x + notice.width <= terminal_width, (notice, terminal_width)
+            return
         composer_text_x = app.query_one(Editor).content_region.x
         assert sentence_x == composer_text_x, (
             terminal_width,
@@ -780,14 +844,37 @@ async def test_boot_notice_tracks_sidebar_toggles_and_resizes(
         app._system_notice("this session is running an older version", "note")
         await _settle(pilot)
         block = app.query_one(NoticeBlock)
-        frames: list[tuple[int, int, int, int]] = []
+        frames: list[tuple[int, int, int, int, bool]] = []
         painted = Screen._compositor_refresh
 
         def record(screen: "Screen[object]") -> None:
             painted(screen)
             notice = block.region
             card = app.query_one("#input-shell").region
-            frames.append((notice.x, notice.width, card.x, card.width))
+            frames.append(
+                (
+                    notice.x,
+                    notice.width,
+                    card.x,
+                    card.width,
+                    app.screen.has_class(BOOT_CARD_CLASS),
+                )
+            )
+
+        def consistent(frame: tuple[int, int, int, int, bool], width: int) -> bool:
+            """Is this painted frame the column the live layout asks for?
+
+            Carded, the notice takes the card's column exactly. With the card
+            withheld (a docked drawer leaving under the floor) it is a spine
+            block, and the claim that survives is the one the base violated: the
+            block is drawn ON the screen. Sampled per frame rather than only on
+            the settled one, because a stale column is a wrong frame even when the
+            next paint corrects it.
+            """
+            nx, nw, cx, cw, carded = frame
+            if carded:
+                return nx == cx and nw == cw
+            return nx + nw <= width
 
         monkeypatch.setattr(Screen, "_compositor_refresh", record)
         previous_width = 190
@@ -808,8 +895,159 @@ async def test_boot_notice_tracks_sidebar_toggles_and_resizes(
             await _settle(pilot)
             assert frames, "premise: the changed layout painted"
             checked = frames if width == previous_width else frames[-2:]
-            assert all(nx == cx and nw == cw for nx, nw, cx, cw in checked), frames
+            assert all(consistent(frame, width) for frame in checked), checked
             previous_width = width
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ((100, 30), (160, 40)))
+@pytest.mark.parametrize("conversation_started", (False, True))
+@pytest.mark.parametrize("sidebar_open", (False, True))
+async def test_the_docked_composer_band_is_measured_against_its_lane(
+    size: tuple[int, int],
+    conversation_started: bool,
+    sidebar_open: bool,
+) -> None:
+    """The band's box is the width the shell HAS, docked or not, cold or live.
+
+    The defect this pins, measured on the base at 100x30 with the drawer docked on
+    an EMPTY session: `#input-dock` resized (98 -> 65) while `#input-shell` did
+    not, so the shell stayed 75 cells wide at x=34 — right edge 109 on a 100-cell
+    terminal — and `#status-band`, which is the shell's own child, inherited the
+    same phantom box: region `[35, 26, 73, 2]`, a 72-cell box where 62 remained.
+    The row was painted clipped at the screen edge with no ellipsis, on the one
+    row the reconnection sentence lives on.
+
+    Root cause, and why the numbers are asserted rather than the ink: the app
+    decided the boot card from the TERMINAL's width while the sheet resolved the
+    clamp against the DOCK's content box, and `min-width: 75` is an absolute floor.
+    A docked drawer therefore made the two disagree by 33 cells, and nothing
+    text-only could see it — the band still produced a perfectly good row for the
+    box it believed it had.
+
+    Both conversation states are asserted against ONE expression, which is the
+    second half of the defect: a harness that measures the band on an empty
+    session used to read a 72-cell box where a seeded one read 62 (the drawer
+    leaves the same 65-cell lane either way).
+    """
+    terminal_width, _height = size
+    app = _make_app()
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        if conversation_started:
+            app._append_block(UserBlock("hello"))
+            await _settle(pilot)
+        app._set_sidebar_open(sidebar_open)
+        await _settle(pilot)
+
+        dock = app.query_one("#input-dock").region
+        shell = app.query_one("#input-shell").region
+        band_widget = app.query_one("#status-band")
+        band = band_widget.region
+
+        # The lane the app measured IS the lane the dock got, and — while the boot
+        # card is up — the clamp resolves inside it. That agreement is the fix:
+        # the two disagreed on the base whenever a drawer was docked.
+        lane = _lane_width(app, terminal_width)
+        assert lane == dock.width, (lane, dock.width)
+        if app.screen.has_class(BOOT_CARD_CLASS):
+            assert shell.width == _panel_width_in(lane), (shell.width, lane)
+        else:
+            assert shell.width == lane, (
+                "no card: the panel is the full width of its lane",
+                shell.width,
+                lane,
+            )
+
+        # The shell never leaves its own lane, in either direction.
+        assert shell.x >= dock.x, (shell, dock)
+        assert shell.x + shell.width <= dock.x + dock.width, (shell, dock)
+
+        # The band is the shell's child, one cell of `#input-shell {padding: 1}`
+        # in from each edge, and one more cell of its own right padding. Its
+        # region is what the fit ladder measured against; its content box is the
+        # width the row is drawn in — 62 on the docked 100x30 frame, the number
+        # the base reported as 72.
+        assert band.width == shell.width - 2, (band, shell)
+        assert band_widget.content_region.width == shell.width - 3, (
+            band_widget.content_region,
+            shell,
+        )
+        assert band.x + band.width <= terminal_width, (band, terminal_width)
+
+        # And the row the band holds LANDS ON THE SCREEN. This is the claim the
+        # geometry above exists to make, stated the way the symptom appears: the
+        # band right-aligns the name's ink to the right edge of the box it was
+        # fitted to, so a box that runs past the screen edge clips the name
+        # mid-word — on the base, `... retry    Fix sidebar reconnec…` fitted to a
+        # 72-cell box at x=35 could only land 65 of its cells, and the painted row
+        # read `... retry    Fix sidebar  ` with no ellipsis anywhere.
+        status = app._status
+        assert status is not None
+        held = cell_len(status.render_text(band_widget.content_region.width).plain.rstrip())
+        assert band_widget.content_region.x + held <= terminal_width, (
+            band_widget.content_region,
+            held,
+            terminal_width,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_docked_cold_session_paints_the_connection_row_whole() -> None:
+    """The reported frame: 100x30, drawer docked, empty session, failed reconnect.
+
+    `#status-band` is a child of `#input-shell`, so the phantom box of the docked
+    boot card reached the connection row itself — the one row in the app that
+    carries "Reconnect failed · Select again to retry". The base fitted that row
+    to 72 cells inside a form 65 cells wide, at x=35 on a 100-cell terminal: right
+    edge 108, and the name cut mid-word at the screen edge with no ellipsis.
+
+    Asserted on the numbers, because the text-only view of this surface was green
+    throughout: the band produced a perfectly well-formed row for the box it
+    believed it had. The text is asserted too, but as the user-visible claim it is
+    — the sentence intact on the row the terminal is sent.
+    """
+    session = FakeSession()
+    session.set_conversation_name(NAME)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _settle(pilot)
+        app._sidebar_settings = SidebarSettings(False, "left")
+        await pilot.press("ctrl+b")
+        await _settle(pilot)
+        source = SessionInteraction(session)
+        source.display_only = True
+        source.connection_error = "the runtime is not responding"
+        app._interaction = source
+        app._interactions[id(session)] = source
+        status = app._status
+        assert status is not None
+        status.update(conversation_name=NAME)
+        app._show_sidebar_connection(source)
+        await _settle(pilot)
+
+        band_widget = app.query_one("#status-band")
+        band = band_widget.region
+        content = band_widget.content_region
+        lane = _lane_width(app, 100)
+        assert lane == 65, ("premise: the docked drawer leaves the lane this narrow", lane)
+        assert app.query_one("#input-shell").region.width == _panel_width_in(lane) == lane
+        assert band.width == lane - 2, band
+        assert content.width == lane - 3, content
+        assert band.x + band.width <= 100, band
+
+        # The row the band holds for its own box must land inside the screen —
+        # 35 + 72 cells did not on the base, which is the whole defect.
+        held = status.render_text(content.width).plain
+        assert content.x + cell_len(held.rstrip()) <= 100, (content, held)
+
+        # And the row the terminal is actually sent still carries the sentence:
+        # this is the surface the session has been fixing, and it must not be
+        # traded for a geometry that merely measures well.
+        painted = _rows(app)[content.y][content.x : content.x + content.width]
+        assert "Reconnect failed · Select again to retry" in painted, painted
 
 
 @pytest.mark.asyncio
