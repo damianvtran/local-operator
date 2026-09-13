@@ -1930,6 +1930,18 @@ SETTINGS: tuple[Setting, ...] = (
         # provider consumes it; every other provider already returns snippets.
         help="Adds a per-page quote and relevance score after a DeepSeek search.",
     ),
+    Setting(
+        key="web_search.read_enabled",
+        path=("web_search", "read_enabled"),
+        section="web_search",
+        label="Read from search",
+        kind=Kind.BOOL,
+        default=True,
+        # On by default because it is inert until used: the tool refuses (telling
+        # the model to fetch instead) whenever no readable page context exists,
+        # so a session that never uses it pays nothing but a tool schema.
+        help="Offer web_read: answer from pages a search already retrieved, no refetch.",
+    ),
     # -- web fetch ----------------------------------------------------------
     Setting(
         key="web_fetch.enabled",

@@ -23,6 +23,7 @@ import httpx
 
 from local_operator.credentials import CredentialManager
 from local_operator.web_search.cost import estimate_search_cost
+from local_operator.web_search.pages import PAGE_CONTEXTS
 from local_operator.web_search.models import (
     PROVIDER_IDS,
     ProviderStatus,
@@ -819,6 +820,15 @@ async def _deepseek_evidence_pass(
     return parse_deepseek_evidence(text), usage
 
 
+async def resolve_deepseek_key(credentials: CredentialManager) -> str:
+    """Public entry point for the DeepSeek key, for the page reader.
+
+    A thin wrapper rather than a rename so the private resolver keeps its
+    monkeypatchable name in tests while the reader gets a documented entry point.
+    """
+    return await _resolve_deepseek_key(credentials)
+
+
 def _deepseek_usage(payload: object) -> SearchUsage:
     """DeepSeek's billed tokens for one Messages call.
 
@@ -953,6 +963,23 @@ async def _search_deepseek(
         sources = _apply_deepseek_evidence(sources, evidence)
     else:
         evidence_failure = None
+
+    # Capture the page context whatever else happened: the blocks are what make
+    # "read the pages this search found" possible without a fetch, and that is
+    # independent of the evidence pass. A capture failure must not fail the
+    # search -- the links are still usable.
+    try:
+        context = PAGE_CONTEXTS.store(
+            provider="deepseek",
+            query=query,
+            blocks=payload.get("content") or [],
+            sources=[source.model_dump(mode="json") for source in sources],
+            enriched=bool(settings.deepseek_evidence and evidence),
+        )
+        page_context_id = context.context_id if context is not None else None
+    except Exception:  # noqa: BLE001 -- capture is an optimization, not the result
+        page_context_id = None
+
     return SearchResponse(
         provider="deepseek",
         auth_mode="api-key",
@@ -962,6 +989,7 @@ async def _search_deepseek(
         failures=[evidence_failure] if evidence_failure else [],
         usage=usage,
         cost=estimate_search_cost("deepseek", usage),
+        page_context_id=page_context_id,
     )
 
 

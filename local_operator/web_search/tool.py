@@ -429,6 +429,7 @@ async def execute_web_search(
     # ledger is session-keyed, so /session can show this session's total and
     # /analytics can show the cross-session one, with per-provider detail.
     from local_operator.web_search.cost import SEARCH_SPEND
+    from local_operator.web_search.pages import PAGE_CONTEXTS
 
     session_id = context.session_id if context is not None else ""
     entry = SEARCH_SPEND.record(session_id, response.provider, response.cost)
@@ -441,6 +442,11 @@ async def execute_web_search(
         "session_searches": session_totals.searches,
         "provider_searches": None if entry is None else entry.searches,
     }
+
+    # Hand the captured page context to THIS session, so `web_read` can answer
+    # from these pages without a fetch. Attaching is per-session by design: the
+    # pages a search retrieved belong to the session that asked for them.
+    PAGE_CONTEXTS.attach(session_id, response.page_context_id)
     details["context_max_chars"] = MODEL_CONTEXT_MAX_CHARS
     details["context_truncated"] = omitted > 0
     return _result(tool_call_id, text, details=details)
