@@ -185,6 +185,24 @@ between decision and publish" discipline as `daemon.py:1124-1148`.
 
 The promotion is *not* free for sessions holding a handle. See §5.3.
 
+**Measured takeover latency, and what the standby card promises.** A *peer close*
+(a browser closed, a worker torn down) ends the link, so the promotion above is
+immediate. A *wedge* — a socket still attached to a worker that has stopped
+answering — is only discoverable by silence, and silence is bounded twice: by
+`LINK_SILENCE_TIMEOUT_S` (50 s, the deadline `proven` measures) and by
+`PING_INTERVAL_S` (the tick that notices the deadline has passed). Measured on an
+isolated daemon with two real sockets, the driver answering nothing and the standby
+answering every ping: the standby is promoted at **t+60.1 s, 60.1 s, 60.2 s in
+three runs**, with no interval in which the wheel was unattended
+(`driver_extension_id` never read `""` — the sever and the promotion are one step
+inside `_drop_unproven_link`). The one case where the wheel does stay idle is when
+there is no *proven* survivor to promote: a standby the daemon had itself dropped as
+unproven is not a candidate, which is what "longest-attached **surviving** standby"
+means. So the standby card's "if that one disconnects, this browser takes over" is
+true as written — a disconnect is immediate, a wedge takes the ~60 s above — and the
+number is recorded here rather than left as a card promising a latency the daemon
+does not have. Reproduced with `~/workspace/bridge-1038-evidence/promotion_latency.py`.
+
 ### 2.3 The failure mode where two installs collide
 
 They cannot hold the same handle: a surface handle is `bridge:<tabId>:<nonce>`
