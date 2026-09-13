@@ -541,7 +541,7 @@ input:disabled {
  *
  *   86px  -> the connected card (207.2px)
  *   219px -> the pairing form (340.2px)
- *
+ *   193px -> the standby card (314.27px)
  * A value per state rather than a paired/unpaired boolean (design D3-1), and
  * ONLY for states that are durable properties of the browser. A pin is a bet
  * that the next open repeats this state: paired stays paired, unpaired stays

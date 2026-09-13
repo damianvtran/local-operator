@@ -28,6 +28,20 @@ type State =
   | "disconnected"
   | "incompatible"
   | "unresponsive"
+  // Paired and connected, but deliberately not taking commands because another
+  // authorised install holds the wheel. Its own card, because neither
+  // "connected" (the agent cannot drive THIS browser) nor a fault state (the
+  // user has nothing to fix) is the truth, and the user needs the one fact only
+  // this surface can tell them: which install IS driving.
+  | "standby"
+  // Paired, and NOT connected to anything: the daemon severed the wheel-holder
+  // for silence and nothing has taken the wheel since (driver field empty,
+  // `link_attached` false, `extension_unresponsive` true). Its own card because
+  // the two cards around it both lie here: `paired` claims a connection that
+  // does not exist ("Code accepted. Connecting this browser…" — UX round 4,
+  // U10) and `unresponsive` names a culprit the daemon cannot identify once the
+  // driver field is cleared, so neither install can be singled out.
+  | "severed"
   | "origin"
   | "origin-ack"
   // The neutral pre-render placeholder. Never shown BY render() — it is the
@@ -40,10 +54,87 @@ const sections = [
   "disconnected",
   "incompatible",
   "unresponsive",
+  "standby",
+  "severed",
   "origin",
   "origin-ack",
   "pending",
 ].map((id) => document.getElementById(id));
+
+// ── The standby card's promise, and the two facts that qualify it ───────────
+//
+// The card's paragraph was static markup and said one thing: "If that one
+// disconnects, this browser takes over". That is true of a CLEAN disconnect and
+// was false-looking for the event a standby actually waits through — the driver
+// going mute, where the daemon holds the wheel for up to a minute before it
+// promotes anybody. UX round 3 measured 50.3 s of that window rendering a frame
+// byte-identical to the healthy one, and round 4 (U9) closed it: the same facts
+// the daemon already publishes (`link_silent_s`, `takeover_within_s`) now pick
+// between three sentences.
+//
+// Captured from the markup rather than duplicated in TS: the paragraph is
+// rewritten on every standby render, and a health payload that stops reporting
+// silence has to put the SHIPPED sentence back — otherwise the last clause stays
+// on screen and the healthy frame stops being the byte-identical one the design
+// rounds approved. Whitespace is normalised once here because the markup carries
+// the source's newlines and indentation, and appending to that would depend on a
+// trailing space that a future edit to popup.html could remove.
+const STANDBY_PROMISE_DEFAULT = (
+  document.getElementById("standby-promise")?.textContent ?? ""
+)
+  .replace(/\s+/g, " ")
+  .trim();
+
+// Seconds of silence from the wheel-holder after which the standby card stops
+// implying that an immediate takeover is what this browser is waiting for.
+//
+// The number is derived from the daemon's own bound, not chosen: a healthy
+// worker answers a ping on the socket's own `onmessage` handler and emits
+// nothing else while idle, so ONE `PING_INTERVAL_S` (20 s) is its longest
+// legitimate silence and the daemon declares the link unproven at
+// `LINK_SILENCE_TIMEOUT_S` (50 s) — which is where `takeover_within_s` starts
+// counting from. 30 s is 1.5 x the healthy sawtooth, the same multiple
+// `_peer_answers_a_solicited_ping` measured against: past a late ping tick, and
+// still ~20 s before the daemon commits, so the clause lands before the fact it
+// qualifies rather than with it.
+const SILENT_WHEEL_AFTER_S = 30;
+
+// The countdown's granularity. `takeover_within_s` is an upper bound computed
+// from the silence deadline plus one ping tick, so a to-the-second render would
+// imply a precision the wire does not carry. Rounded to the nearest 5 s and
+// floored at one step: a value under 2.5 s rounds to 0, and "in about 0 seconds"
+// is a sentence the card must not be able to print.
+const TAKEOVER_ROUNDING_S = 5;
+
+/** The standby card's paragraph for the health payload on screen.
+ *
+ * Three states, in order of what the daemon is actually doing: a takeover
+ * committed (`takeover_within_s` non-null) gets the countdown the field was
+ * added for; a wheel that is attached and past the healthy silence bound gets
+ * the clause that names this event; everything else — a healthy driver, a wheel
+ * nobody holds, an older daemon sending neither field — gets the shipped
+ * sentence untouched.
+ */
+function standbyPromise(health: Health): string {
+  const takeover = health.takeover_within_s;
+  if (typeof takeover === "number" && Number.isFinite(takeover)) {
+    const seconds = Math.max(
+      TAKEOVER_ROUNDING_S,
+      Math.round(takeover / TAKEOVER_ROUNDING_S) * TAKEOVER_ROUNDING_S,
+    );
+    return `${STANDBY_PROMISE_DEFAULT} The other install has stopped answering. Switching to this browser in about ${seconds} seconds.`;
+  }
+  const silence = health.link_silent_s;
+  if (
+    health.link_attached === true &&
+    typeof silence === "number" &&
+    Number.isFinite(silence) &&
+    silence > SILENT_WHEEL_AFTER_S
+  ) {
+    return `${STANDBY_PROMISE_DEFAULT} If it stops answering instead, this browser takes over as soon as Local Operator gives up on it, usually within about a minute.`;
+  }
+  return STANDBY_PROMISE_DEFAULT;
+}
 
 // True once THIS popup saw pair_result.ok. The daemon confirms pairing on the
 // popup's own socket before /health reports paired (the worker still has to
@@ -129,8 +220,47 @@ interface Health {
   /** Whether a link is attached right now; not the same as healthy. Paired
    * with the flag above so a render can say what it actually observes. */
   link_attached?: boolean;
+  /** How long the DRIVER's link has been silent, in seconds (a daemon-side
+   * measurement that outlives the socket by `LINK_DROP_TTL_S`). Declarative for
+   * most cards; the standby card reads it to stop implying that a normal
+   * disconnect is the only event worth naming (UX round 4, U9). Optional — a
+   * daemon predating the field sends none, and the card then keeps the shipped
+   * sentence. */
+  link_silent_s?: number;
+  /** Seconds until the daemon gives up on a mute wheel-holder and promotes
+   * somebody, or `null` when nothing is pending. Present ONLY while the
+   * wheel-holding link is attached and not answering, which is the window the
+   * standby card used to spend promising an immediate takeover. An UPPER BOUND,
+   * not a schedule — the daemon derives it from its silence deadline plus one
+   * ping tick — so the card rounds it rather than implying precision. Optional
+   * for the same reason as the field above: an older daemon sends nothing, and
+   * `null`/absent both mean "no countdown to show". */
+  takeover_within_s?: number | null;
   paired: boolean;
   browser: string;
+  /** Which install is driving, and what to call it. Optional because a daemon
+   * predating multi-identity does not send either — and a driver we cannot name
+   * is still a driver, which is why the standby card words itself either way. */
+  driver_extension_id?: string;
+  driver_label?: string;
+  /** The driver's SHORT id, for the one case `driver_label` cannot cover: two
+   * installs running the same build share a label byte for byte, and then the
+   * card whose whole job is to answer "which browser is it driving?" answers
+   * with a string this popup prints about itself. The id prefix always resolves
+   * in `lop browser drive`. Optional — a daemon predating it sends none, and the
+   * card then renders the label alone. */
+  driver_short_id?: string;
+  /** Labels of the installs standing by, so a reader can act on a property of the
+   * standby instead of asking the operator to evaluate it. */
+  standby_labels?: string[];
+  /** Identities the daemon has ACCEPTED but is not routing commands to. */
+  standby_extension_ids?: string[];
+  /** Every identity the daemon currently authorises. The popup compares this
+   * against `chrome.runtime.id` to answer a question the driver-scoped fields
+   * above cannot: "is THIS install paired?" — see the card gate below. Optional
+   * because a daemon predating multi-identity sends no such list, and the
+   * fallback then is exactly the old single-identity reading. */
+  authorized_extension_ids?: string[];
   current_url?: string;
   current_title?: string;
   pending_origin?: string;
@@ -151,6 +281,18 @@ const TONE: Record<State, string> = {
   // agent cannot do it for them. It is emphatically NOT success — a green card
   // over a mute worker is the symptom the incident was made of.
   unresponsive: "var(--danger)",
+  // Neutral, NOT success and NOT danger. Nothing is broken and nothing needs
+  // recovering — this browser is paired and healthy and simply not the one
+  // holding the wheel — so the card takes the same hairline as the other
+  // transitional states rather than claiming an achievement or an error.
+  standby: "var(--hairline-strong)",
+  // Neutral, and deliberately NOT danger (UX round 4, U10). The state is "this
+  // browser is not connected", which is also what a HEALTHY standby shows for
+  // the ~0.5 s between the wheel being severed and its own promotion — measured
+  // flipping to Connected in 0.53 s. Painting that transient red would be the
+  // same class of false alarm the per-install gate on `unresponsive` was added
+  // to remove, and the copy is conditional for the same reason.
+  severed: "var(--hairline-strong)",
   origin: "var(--hairline-strong)",
   // Placeholder only: the ack's real tone is per-decision (success for allow,
   // neutral for deny) and showOriginAck overrides it right after show().
@@ -227,13 +369,50 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 //   connected card      207.16px  ->  86px
 //   pairing form        339.52px  -> 219px
+//   standby card        314.27px  -> 193px
 //
 // The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
 // cards, i.e. sub-pixel rounding on one shared value), so `card = pin + 121`.
 // Measured by sweeping the pin in a real headless Chrome at 300x600 dpr=2 and
 // reading the card back; that invariant is what makes the sweep a solve rather
 // than a guess. Re-measure the same way if either card's copy or controls
-// change: an eyeballed pin IS the reflow this block exists to prevent.
+// change: an eyeballed pin IS the reflow this block exists to prevent.//
+// THE STANDBY CARD IS DURABLE TOO, and it is the reason this whole change
+// exists: an install paired while ANOTHER install drives stays exactly that way
+// across every open — the roles do not flicker between opens the way a wedge
+// does — so the bet the pin makes pays there as much as it does for `connected`.
+// Its height is measured with the driver line FILLED, because render() always
+// fills it (the daemon's label or the generic sentence) and both spellings stay
+// on one line at 300px. Measured the same way as the two above and in the same
+// run: `node scripts/popup-states-shot.mjs dist <out>`, which is the harness the
+// numbers in this table come from.
+//
+// The pin stays 193px after U9, deliberately, and the arithmetic is worth
+// spelling out because the card is no longer one height. The standby card now
+// renders at three heights, all measured with that harness and that payload:
+//
+//   healthy driver (shipped sentence)          294.77px  <- the pinned shape
+//   driver attached, silent past 30 s          353.27px  (+58.5, three lines)
+//   takeover committed, counting down          333.77px  (+39.0, two lines)
+//
+// Only the first is pinned, for exactly the reason `unresponsive` is not pinned
+// below: the two taller variants exist only while the daemon is between a wedge
+// and a severance — around a minute — and their whole job is to be acted on,
+// whereas the healthy shape is the one a reopen actually repeats. Because
+// show() records the pin for the card it PAINTS, a render inside the wedge still
+// writes 193px, so the reopen that follows a cleared wedge lands on the healthy
+// height exactly. Measuring the variants INTO the constant would make every
+// healthy open pay their height instead, which is the trade the wedge pin was
+// rejected for further down this comment.
+//
+// (The recorded 314.27px for this card did NOT reproduce in that same run, on
+// this head or on the pre-change one: the payload above measures 294.77px on
+// both, so the constant may over-reserve ~19.5px — one line — for the healthy
+// case. That is pre-existing and not this change's: the copy the healthy state
+// renders is byte-identical either side of it, and the difference is most likely
+// a longer driver-line payload in whichever run produced 314.27px. Re-measure
+// with both spellings of the handle before changing the constant; do not
+// re-derive it from this paragraph.)
 //
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and
@@ -287,10 +466,12 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // measurement correction on this branch, not a second card.)
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
-const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING];
+const PIN_STANDBY = "193px";
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
   pairing: PIN_PAIRING,
+  standby: PIN_STANDBY,
 };
 
 /** The pinned height this browser last settled on, or null for "no hint". */
@@ -309,6 +490,12 @@ function readPinHint(): string | null {
 
 function writePinHint(pin: string): void {
   try {
+    // Read first and skip an identical write. show() runs on every render, and
+    // most renders paint the card that is already up (a storage event from the
+    // worker, a Retry, the poll-free re-render paths below); writing the same
+    // value again is pure work, and a synchronous localStorage write on a
+    // render path is exactly the kind of cost that shows up as jank later.
+    if (localStorage.getItem(PIN_HINT_KEY) === pin) return;
     localStorage.setItem(PIN_HINT_KEY, pin);
   } catch {
     // A hint that cannot be stored simply is not used next time.
@@ -608,9 +795,12 @@ async function renderOnce(): Promise<void> {
 
   // The worker records the last close reason so a protocol mismatch renders
   // "Update needed" rather than sending the user back to code entry (D2).
-  const { connState } = (await chrome.storage.session.get(["connState"])) as {
-    connState?: string;
-  };
+  // `revoked` is the same channel's second fact: the worker saw 4003, i.e. this
+  // install was UNPAIRED rather than never paired (UX round 3, U5).
+  const { connState, revoked } = (await chrome.storage.session.get([
+    "connState",
+    "revoked",
+  ])) as { connState?: string; revoked?: boolean };
   if (!health) {
     show(connState === "incompatible" ? "incompatible" : "disconnected");
     return;
@@ -634,6 +824,63 @@ async function renderOnce(): Promise<void> {
   // clears, the card returns to normal, because this reads /health on every
   // render like everything else here.
   //
+  // -------- WHICH INSTALL AM I? (QA round 1, Q1) --------------------------
+  //
+  // Every driver-scoped field above (`paired`, `extension_connected`,
+  // `extension_unresponsive`, the url/title) is the daemon's statement about
+  // the link it is ROUTING TO — `daemon.py` builds them from `self.link`. That
+  // is the right answer to "can the agent drive this browser right now?" and
+  // the wrong answer to "is this install paired?". The two questions were the
+  // same while one identity could be authorised at all; they are not any more.
+  //
+  // Reading the driver's `paired` as this install's own made a never-paired
+  // second install render "Connected. Local Operator can use this browser."
+  // with the pairing form HIDDEN — in exactly the state this feature exists for
+  // (store build paired and driving, dev build just loaded), so the user could
+  // not reach the code field the daemon was holding for them, even though the
+  // install's own worker already knew the truth (`connState: "pairing"`).
+  //
+  // So ask about this id. `chrome.runtime.id` is the install's own identity and
+  // /health lists the authorised set, which is the file-backed authority
+  // (`authorized_extension_ids`), not the link's copy of it. A daemon predating
+  // the list sends none, and then the driver-scoped `paired` IS this install's
+  // answer — one identity could be authorised — which is exactly what the
+  // pre-multi-identity code assumed, so that direction is unchanged.
+  const selfId = chrome.runtime.id;
+  const listedIds = health.authorized_extension_ids;
+  const selfAuthorized = Array.isArray(listedIds) ? listedIds.includes(selfId) : null;
+  // `authorized_extension_ids` is the FILE's allow-list: it says this id MAY
+  // authenticate, not that this link DID. Reading it as "paired" was the round-2
+  // major (QA R2-2): an install whose worker holds no token — storage cleared,
+  // build removed and re-added, the same committed-key build loaded in another
+  // profile — rendered "Standing by. This one takes over if that one
+  // disconnects", hiding the code field, while /health did not list it as a
+  // standby at all and its own worker was reporting "pairing".
+  //
+  // So the file is allowed to widen AUTHORITY only. The link's own state, which
+  // the worker writes from THIS link's `hello_ack.paired`, asserts
+  // authentication: `"pairing"` means this install is not paired, whatever the
+  // file says about its id, and that is the state where the code field must be
+  // offered. A daemon predating the list (null) keeps the old single-identity
+  // reading.
+  const filePaired = selfAuthorized === null ? health.paired : selfAuthorized;
+  const selfPaired = connState === "pairing" ? false : filePaired;
+  // "Is the wheel in THIS install?" The daemon names the driver explicitly, and
+  // there are three cases, not two (review R2-3): the field is ABSENT (a daemon
+  // that predates it — a single-identity daemon, so this install drives), the
+  // field is EMPTY (a multi-identity daemon with nothing attached — nobody
+  // drives, and this install is not standing by for anyone either: it will take
+  // the wheel on its next dial), or it NAMES an id.
+  const driverFieldPresent = typeof health.driver_extension_id === "string";
+  const drivesThis = driverFieldPresent ? health.driver_extension_id === selfId : true;
+  // The daemon's LIVE answer on whether this install is standing by. Belt and
+  // braces for the same class as QA R2-2: a stale `connState: "standby"` — the
+  // worker has not re-dialled since the token went away — must not keep claiming
+  // a role the daemon does not list it in. `null` (a daemon predating the list)
+  // leaves the pre-change reading in place.
+  const standbyIds = health.standby_extension_ids;
+  const healthStandby = Array.isArray(standbyIds) ? standbyIds.includes(selfId) : null;
+
   // Read BEFORE the `paired` gate, deliberately. `paired` here is link-derived
   // (`daemon.py`: it is false once the daemon has severed the link), while the
   // daemon's own `paired:` line — and the pairing on disk — are still true. So a
@@ -643,11 +890,97 @@ async function renderOnce(): Promise<void> {
   // browser that is paired on disk and about to re-dial (QA Q2-3 / review R2-5).
   // Keyed on the latch, which is the daemon's statement about the link, not on
   // the link's own copy of `paired`.
-  if (health.extension_unresponsive === true) {
+  // Gated on this install as well (review R2-2): `extension_unresponsive` is the
+  // driver's latch, so without the guard a NEVER-PAIRED second install rendered
+  // "the extension has stopped responding" — a false statement about itself,
+  // offering a Reload that reloads its own worker and clears nothing — while the
+  // driver was the wedged one. Skipped only when the daemon explicitly says this
+  // id is not authorised (`false`); a daemon with no list (`null`) keeps the
+  // pre-multi-identity reading, where the driver IS the only install.
+  // Gated on this install DRIVING (design D2 / UX U1 / review R3-1). The wedge
+  // latch is the DRIVER's: `extension_unresponsive` is built from `self.link`,
+  // so an authorised, healthy STANDBY was reading the driver's diagnosis as its
+  // own and being offered a Reload that would reload the install currently
+  // serving commands (measured: red card on a standby whose own worker was
+  // answering, while the daemon listed it as a standby, and it outlived the
+  // state by ~30s). `selfAuthorized !== false` did not exclude it — a paired
+  // standby is authorised — and the standby card below was never reached because
+  // this branch returns first.
+  //
+  // `drivesThis` is the exact predicate: it is false for a paired standby, false
+  // for an unpaired dial (which then falls through to the pairing form, R2-2),
+  // false for the empty-field "nobody drives" state, and true for a single-
+  // identity daemon whose driver field is absent — so nothing that SHOULD reach
+  // the wedge card loses it.
+  if (health.extension_unresponsive === true && drivesThis) {
     show("unresponsive");
     return;
   }
-  if (health.paired) {
+
+  if (selfPaired && !drivesThis) {
+    // Paired, and not driving. THREE sub-states, and the daemon's own live answer
+    // separates them:
+    //   * it LISTS this install as a standby — a durable role, worth naming who
+    //     holds the wheel, because that is the question this card answers;
+    //   * it lists NOTHING and no link is attached while the unresponsive latch
+    //     is up — the wheel was severed and nobody has taken it, so this browser
+    //     is not connected to anything (the `paired` card below would claim
+    //     "Code accepted. Connecting this browser…" over a connection that does
+    //     not exist: UX round 4, U10);
+    //   * it lists nothing otherwise — an idle wheel (a restart or a worker
+    //     wake, in the ~1 s before the next dial takes it) or a link the daemon
+    //     has not accepted yet. The "Paired. Code accepted. Connecting this
+    //     browser…" card says exactly that, and it is what this state rendered
+    //     before the per-install gate existed (review R2-3). Never the pairing
+    //     form, which would invite re-submitting a code for an install that
+    //     holds a token; never the connected card, which claims the agent can
+    //     drive it now.
+    //
+    // The order matters: the severed state is checked BEFORE the `paired` card,
+    // and it is keyed on the two facts the daemon is unambiguous about — no link
+    // attached AND the unresponsive latch up. That pair also covers a HEALTHY
+    // standby's ~0.5 s pre-promotion window (measured flipping to Connected in
+    // 0.53 s), which is why the card it reaches is neutral and its copy is
+    // conditional rather than naming this install's worker.
+    if (healthStandby !== false) {
+      const other = document.getElementById("standby-driver");
+      if (other) {
+        const label = health.driver_label;
+        // The short id rides along when the daemon sends one (UX U2 / design
+        // D3): with two installs of the SAME build the label alone is a string
+        // this popup prints about itself, and the id prefix is the token the
+        // user can paste into `lop browser drive`. Rendered in parentheses so a
+        // missing id degrades to exactly the previous sentence.
+        const handle = health.driver_short_id ? ` (${health.driver_short_id}…)` : "";
+        other.textContent = label
+          ? `${label}${handle} is driving right now.`
+          : "The other install is driving right now.";
+      }
+      // Handoff complete IN THIS ROLE TOO. The latch exists only for the window
+      // between a successful pair and health confirming it, and being listed as
+      // a standby is that confirmation — the same fact the connected branch reads
+      // below. Clearing it only when this install DROVE left a second install
+      // latched for as long as it stood by, so a later revoke rendered the
+      // success view ("paired") instead of putting the code field back.
+      locallyPaired = false;
+      // The paragraph is rewritten per render, not only when a clause applies:
+      // this branch runs on EVERY standby render, and a driver that starts
+      // answering again has to put the shipped sentence back. Cheap and
+      // unconditional rather than a compare-then-write, because the DOM
+      // assignment is idempotent and the branch below is the only writer.
+      const promise = document.getElementById("standby-promise");
+      if (promise) promise.textContent = standbyPromise(health);
+      show("standby");
+      return;
+    }
+    if (health.extension_unresponsive === true && health.link_attached === false) {
+      show("severed");
+      return;
+    }
+    show("paired");
+    return;
+  }
+  if (selfPaired && drivesThis) {
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
     // unpair (daemon revoke → close 4003) renders the form again instead of a
@@ -684,8 +1017,20 @@ async function renderOnce(): Promise<void> {
     show("connected");
     return;
   }
-  // Health has not confirmed the new token yet: keep the success view if this
-  // popup already paired (the race above), otherwise offer the form.
+  // This install is not paired (or is, but /health does not say so yet: the
+  // window between a successful pair and its confirmation — `viewForHealth`'s
+  // latch case, which is why the fall-through still passes `locallyPaired`).
+  // Either way the CODE FIELD is what this install needs, and it is now reached
+  // whenever THIS install is unpaired, whatever the driver is doing.
+  //
+  // The revoked line accompanies the form only when the worker saw a 4003
+  // (UX U5): without it, the install's own popup is indistinguishable from a
+  // fresh one, so the one destructive-feeling transition in this flow had no
+  // signal where the user was looking. Cleared by a successful pair in the
+  // worker, so it cannot survive into a working install.
+  document
+    .getElementById("pair-unpaired")
+    ?.classList.toggle("hidden", revoked !== true);
   show(viewForHealth(false, locallyPaired));
 }
 
@@ -750,6 +1095,12 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
   error.classList.add("hidden");
   setPairBusy(true);
   const { token, port = DEFAULT_PORT } = await getLocal();
+  // Whether the daemon ANSWERED this dial. Declared outside the try because the
+  // failure branch is what needs it: a close after an answer is not
+  // unreachability, and saying so was the last lie of the revoked-install dead
+  // end (design D1 / UX U3) — a popup that was fetching /health from the daemon
+  // the whole time told the user it could not reach it.
+  let answered = false;
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
     // ONE shared rejection wired to error AND close for every await below: a
@@ -789,6 +1140,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       }),
     );
     await nextMessage();
+    answered = true;
     wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
     const verdict = await nextMessage();
     const outcome = pairVerdict(JSON.parse(String(verdict.data)));
@@ -834,7 +1186,17 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       input.select();
     }
   } catch {
-    error.textContent = "Could not reach Local Operator on this machine.";
+    // Two different failures, two different sentences. The old single string
+    // blamed reachability even when the daemon had answered and then closed the
+    // socket — the exact shape of the revoked-install dead end (design D1), and
+    // a claim the popup's own /health polls were disproving. Kept to two lines
+    // at the card's width on purpose: `#pair-error`'s reserved slot is sized to
+    // the longest string that can land in it, so a longer one would resize the
+    // card at the moment of failure, which is what the reservation exists to
+    // prevent.
+    error.textContent = answered
+      ? "Local Operator closed the connection. Reopen the popup to try again."
+      : "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
     // Unlock BEFORE selecting, for the same reason as the rejected-code branch
@@ -932,6 +1294,12 @@ document.getElementById("reload-extension")?.addEventListener("click", reloadExt
 // Same remedy, reached from the consent card's inline banner (U1/Q5/D3). One
 // handler for both so the two surfaces cannot drift apart.
 document.getElementById("origin-wedge-reload")?.addEventListener("click", reloadExtension);
+// The same remedy once more, from the "not connected" card (UX round 4, U10).
+// With the wheel severed, the only thing the user can act on is their own
+// worker, and it is the only route this card can offer: the daemon clears the
+// driver field when it severs, so it cannot say WHICH install was the wedged
+// one, and the copy is worded conditionally for that reason.
+document.getElementById("severed-reload")?.addEventListener("click", reloadExtension);
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {

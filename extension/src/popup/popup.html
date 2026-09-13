@@ -79,6 +79,16 @@
 
         <section id="pairing" class="state hidden">
           <h1 class="title">Pair with Local Operator</h1>
+          <!-- Shown when the worker was told this browser was UNPAIRED (a
+               per-identity revoke, close code 4003), and hidden otherwise. The
+               form alone is indistinguishable from a fresh install, which left
+               the one destructive-feeling transition in this flow with no
+               signal in the surface that shows it (UX round 3, U5). A separate
+               line rather than rewritten sub-copy, so the never-paired case
+               keeps the exact wording it was reviewed with. -->
+          <p class="sub hidden" id="pair-unpaired">
+            This browser was unpaired from Local Operator.
+          </p>
           <p class="sub">Enter the code shown in Local Operator.</p>
           <form id="pair-form">
             <label class="field-label" for="pair-code">Pairing code</label>
@@ -221,6 +231,80 @@
                needs next: the remedies first, then the status of the last
                probe. -->
           <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
+        </section>
+
+        <!-- Paired and connected, but NOT driving: another authorised install of
+             this same extension holds the wheel. Deliberately not an error state
+             — nothing here needs fixing — and deliberately not the connected
+             card, which would claim the agent can drive a browser it is
+             receiving no commands for.
+
+             The copy states the arrangement, the failover, and the COST in the
+             reader's terms (copy review round 1, C2; round 2, C12/C14). The
+             previous wording — "another Local Operator install is driving the
+             agent … because a tab handle belongs to the install that opened it" —
+             inverted the subject (the agent drives the browser, not the reverse),
+             spent the word "driving" in the opposite sense to the Connected
+             card's "Driving" label, and explained the cost with an internal noun
+             ("handle") that its reader has no way to look up; the em dash joining
+             the two clauses was the surface's one AI-ism tell. Round 2 then
+             pointed out the composition still used "driving" twice on one card
+             with two subjects — the agent drove one browser while an extension
+             drove the wheel — so the paragraph says "connected to" and leaves
+             "driving" to mean exactly one thing everywhere; "it" in the last
+             clause is named rather than inferred.
+
+             The second line names the other install when /health reports a
+             label for it — plus its id prefix, because with two installs of the
+             SAME build the label is a string this popup also prints about itself
+             and the prefix is the token `lop browser drive` accepts (UX U2 /
+             design D3). Where the label or the id is unknown the line degrades
+             to "The other install is driving right now." -->
+        <section id="standby" class="state hidden" role="status">
+          <h1 class="title">Standing by.</h1>
+          <!-- The promise carries an id because popup.ts now rewrites it: two
+               further sentences qualify it, both built from facts the daemon
+               already publishes and neither true of the healthy case above
+               (UX round 4, U9). While the wheel is attached and merely silent
+               it gains the clause naming THIS event (the driver going mute),
+               because the driver's silence is what a standby usually waits
+               through; once the daemon commits it is replaced by the countdown
+               from /health.takeover_within_s. The paragraph this ships with is
+               what every other case renders — including the healthy one, which
+               is why it must keep rendering byte-identically to the frame the
+               earlier design and UX rounds approved. -->
+          <p class="sub" id="standby-promise">
+            This browser is paired, but the agent is connected to another browser right now.
+            If that one disconnects, this browser takes over and the agent opens a new tab;
+            the tab the agent was using stays open where it is.
+          </p>
+          <p class="sub" id="standby-driver"></p>
+        </section>
+
+        <!-- Paired, and connected to NOTHING: the daemon severed the wheel-holder
+             for silence and no install has taken the wheel since, so
+             `driver_extension_id` is empty, `link_attached` is false and the
+             unresponsive latch is up (UX round 4, U10).
+
+             This is not the `paired` card's state — that card says "Code
+             accepted. Connecting this browser…" over a connection that does not
+             exist and offers the user nothing to do — and it is not the
+             `unresponsive` card either, because once the driver field is cleared
+             the daemon cannot say WHICH install went mute, so the copy has to be
+             true of both installs and the sentence must not claim "yours"
+             stopped answering. The same condition also covers a healthy
+             standby's ~0.5 s pre-promotion window, which is why the tone is the
+             neutral hairline rather than danger: a red flash there would be a
+             false alarm about a browser that is about to start serving. -->
+        <section id="severed" class="state hidden" role="status">
+          <h1 class="title">Not connected.</h1>
+          <p class="sub">
+            Local Operator isn't driving this browser right now. If this browser's extension
+            has stopped answering, reload it.
+          </p>
+          <div class="actions">
+            <button id="severed-reload" class="btn block">Reload the extension</button>
+          </div>
         </section>
 
         <!-- Origin-decision acknowledgement, shown from the click alone

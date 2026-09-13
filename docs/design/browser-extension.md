@@ -865,6 +865,18 @@ Binds are loopback-only (`127.0.0.1`), as the mobile daemon's are
    paired state. Re-pairing (new browser profile, token wipe) is the same
    flow; `lop browser pair --reset` revokes the stored hash first.
 
+**2026-09-12 (extension 0.1.13):** the daemon now accepts an ALLOW-LIST of
+installations rather than one pinned id, because the store build and a locally
+loaded build are different identities and the operator wants both paired at
+once. The file keeps the legacy trio above verbatim as the DRIVING identity's
+record — so an older daemon still reads it, and no already-paired operator ever
+re-pairs — and adds an `identities` list carrying **one token_hash per
+identity**. Every identity still goes through this same code dance: there is
+deliberately no `pair --allow <id>`, so the terminal→browser secret flow above
+holds for the second install exactly as it does for the first. At most one
+identity DRIVES; the others are standbys that receive no Request. See
+`docs/design/browser-multi-identity-pairing.md`.
+
 ### 6.3 Per-origin allowlist (extension-enforced)
 
 Default-deny. On `open`/`goto`/click-navigation to an origin not in the

@@ -37,8 +37,11 @@ class BridgeState(BaseModel):
     extension_id: str = ""
     browser_name: str = ""
     #: Whether the daemon has latched "the attached extension stopped answering"
-    #: and dropped its link for it (the same fact `/health` reports as
-    #: `extension_unresponsive`). Published because the reader that needs it most
+    #: and dropped its link for it. Related to `/health`'s `extension_unresponsive`
+    #: but NOT equal to it by design (review round 5, NIT 4): `/health` reports the
+    #: latch only while no proven link is serving, so for the TTL window after a
+    #: promotion this file says "latched" where `/health` says "the driver is
+    #: answering". Published because the reader that needs it most
     #: cannot ask: `_execute_browser`'s demotion guard runs on the ABSENT side of
     #: `liveness`, where the contract forbids a socket probe, and since a drop
     #: writes `extension_connected=false` the file alone would otherwise look
