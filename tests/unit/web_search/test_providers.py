@@ -1141,6 +1141,8 @@ async def test_a_single_candidate_message_keeps_the_provider_name_once(
     # The provider is named once, in the scope note -- not again as a prefix.
     assert "perplexity: Fetch" not in message
     assert message.count("perplexity") == 1
+
+
 @pytest.mark.asyncio
 async def test_a_keyed_search_reports_usage_so_it_is_not_priced_free(tmp_path) -> None:
     """MAJOR-1, end to end: the keyed branch handed back a usage-less response."""
