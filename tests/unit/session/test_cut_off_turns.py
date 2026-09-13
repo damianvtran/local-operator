@@ -275,6 +275,52 @@ def test_restored_rows_without_records_keep_todays_behaviour(tmp_path: Path) -> 
     assert rows[0].cut_off_cause == "owner-lost"
 
 
+def test_a_restored_row_addresses_its_child(tmp_path: Path) -> None:
+    """QA Q1-1: a restored row carries the child's session identity.
+
+    A LIVE row is stamped from the comms node at snapshot time
+    (``frontend_state._with_lineage``). A restored row was not, so both
+    ``session_id`` and ``session_dir`` came back ``None`` on a cold
+    conversation even though the record the row was resolved FROM carries the
+    directory — which left the run sidebar's child reader with nothing to
+    address, so a restored conversation's children could not be opened. The
+    row now carries the same two values a live one does, for settled rows as
+    well as running ones (a roster row is openable in either state).
+    """
+    from local_operator.session.restored_rows import resolve_restored_rows
+
+    child = _child_dir(tmp_path, "abcdef012345")
+    records = [
+        {"job_id": job_id, "outcome": "completed", "session_dir": str(child)}
+        for job_id in ("a", "running-one")
+    ]
+    rows = resolve_restored_rows([_row("a", "completed"), _row("running-one")], records=records)
+
+    assert [row.session_id for row in rows] == ["abcdef012345"] * 2
+    assert [row.session_dir for row in rows] == [str(child)] * 2
+
+
+def test_a_restored_owner_row_gains_no_wire_only_field(tmp_path: Path) -> None:
+    """The identity stamp is conditional on the row SHAPE, not on the record.
+
+    ``AsyncJob`` (the owner's manager row) declares neither field and forbids
+    extras, and ``model_copy`` does not validate — so an unconditional update
+    would write two non-fields onto it. The identity belongs to the wire shape
+    (``JobState``) only; the owner reaches its child's directory through the
+    comms registry.
+    """
+    from local_operator.harness.jobs import AsyncJob
+    from local_operator.session.restored_rows import resolve_restored_rows
+
+    child = _child_dir(tmp_path, "abcdef012345")
+    row = AsyncJob(id="a", type="task", status="running", label="a", start_time=1.0)
+    rows = resolve_restored_rows([row], records=[{"job_id": "a", "session_dir": str(child)}])
+
+    assert rows[0].restored is True
+    assert "session_dir" not in vars(rows[0])
+    assert "session_id" not in vars(rows[0])
+
+
 def test_a_settled_row_is_never_relitigated(tmp_path: Path) -> None:
     """A terminal status the last runtime settled is left exactly as it was."""
     from local_operator.session.restored_rows import resolve_restored_rows

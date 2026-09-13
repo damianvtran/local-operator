@@ -52,6 +52,12 @@ from local_operator.session.transcript import (
 
 logger = logging.getLogger(__name__)
 
+#: The page ceiling one child read may ask for, in ONE place. The route declares
+#: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
+#: handler runs) and the adapter refuses a direct caller the same way, so the
+#: sentence and the number cannot drift apart (review round 1, R1-6).
+CHILD_PAGE_LIMIT = 500
+
 SESSION_ID = re.compile(r"^[a-f0-9]{12}$")
 REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
@@ -758,20 +764,30 @@ def _persisted_children(parent_dir: Path) -> list[Any]:
       current runtime writes; then
     * the legacy ``subagent_roster`` transcript custom entry, written once by
       builds that predate the sidecar, so a conversation last run by one of
-      those still opens its children.
+      those still opens its children — **accepted only when it was appended
+      after this session's fork boundary**.
 
-    That is exactly ``Session._load_subagent_roster``'s order and
-    ``AttachedSession._restore_cold_subagents``'s, and it is deliberately NOT
-    re-derived here: two readers of one ownership record that disagree is the
-    defect ``session/restored_rows.py`` exists to prevent. The design's
-    ``subagent_roster`` custom-entry wording predates the v0.40.0 sidecar; the
-    sidecar holds the same ``records`` list and is newer, so it is consulted
-    first and the entry is the fallback, never the other way round.
+    That is exactly ``Session._load_subagent_roster``'s order AND its fork
+    guard, deliberately not re-derived here: two readers of one ownership
+    record that disagree is the defect ``session/restored_rows.py`` exists to
+    prevent, and the fork case is where this reader used to be the one that
+    disagreed (review round 1, R1-1). ``fork_session`` CLONES the parent's
+    transcript — so the parent's entry is present VERBATIM in the fork — while
+    ``fork.EXCLUDED_SIDECARS`` leaves the sidecar behind. Without the guard a
+    fork inherits the original's children as its own and can read them through
+    its own route; with it, only a fork's OWN roster (written after
+    ``forked_at``) counts. Re-stamping the sidecar happens on the fork's first
+    roster move, so the fallback is what a fresh fork rides until then.
+
+    The design's ``subagent_roster`` custom-entry wording predates the v0.40.0
+    sidecar; the sidecar holds the same ``records`` list and is newer, so it is
+    consulted first and the entry is the fallback, never the other way round.
 
     Runs off the event loop like every other reader here: the legacy fallback
     constructs a ``Transcript``, which parses the parent's whole journal, and a
     roster read must not block the loop a streaming turn is using.
     """
+    from local_operator.fork import fork_instant
     from local_operator.session.session import (
         SUBAGENT_ROSTER_CUSTOM_TYPE,
         SUBAGENT_ROSTER_SIDECAR,
@@ -780,7 +796,14 @@ def _persisted_children(parent_dir: Path) -> list[Any]:
 
     payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
     if payload is None:
-        payload = Transcript(parent_dir).latest_custom(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        # The entry's TIMESTAMP is the half of the fork rule the sidecar makes
+        # unnecessary: an entry at or before ``forked_at`` belongs to the
+        # conversation this one was cloned from.
+        entry = Transcript(parent_dir).latest_custom_entry(SUBAGENT_ROSTER_CUSTOM_TYPE)
+        forked_at = fork_instant(parent_dir)
+        if entry is None or (forked_at is not None and not entry.ts > forked_at):
+            return []
+        payload = dict(entry.payload.get("details", {}))
     return list(roster_records(payload))
 
 
@@ -806,12 +829,23 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
       ``session_dir`` must point at exactly ``sessions/<child_id>`` with the
       resolved sessions root as its parent, so a hand-edited record cannot
       redirect a read outside the store.
+    * **The target resolves inside the store.** The id cannot be a path, but the
+      DIRECTORY it names can be a link, and the store is writable by anything
+      running as the user — so a symlinked ``sessions/<12-hex>`` would take the
+      read (and the checks below) out of the store while every clause above
+      still passed (review round 1, R1-2). The path is resolved and the
+      resolved path is what the rest of this function — and the caller — then
+      treats as the child, so the thing checked is the thing read. That is the
+      same gate ``session/cleanup.py`` applies before it removes a directory
+      and the legacy chat route applies before it opens a file.
     * **A child that is still on disk is marked a subagent.** Reversing the
       parent's rule: a user conversation or a fork must be unreadable through
       this route even if it somehow appears in a roster. A directory that is
-      MISSING is not refused here — the caller answers that with the derived
+      ABSENT is not refused here — the caller answers that with the derived
       ``gone`` state, which is the one case where the absence itself is the
-      answer.
+      answer. A path that EXISTS and is not a directory is not a child session
+      at all, so it is refused too rather than reported as ``gone``: it claims
+      a deletion that never happened (review round 1, R1-5).
 
     Deliberately does NOT acquire a desktop bridge: answering must never start,
     attach to or wake a runtime. The live comms graph may *confirm* membership
@@ -825,8 +859,14 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     parent_dir = sessions / session_id
     if not parent_dir.is_dir() or not is_user_session(parent_dir):
         raise SubagentChildUnavailable()
-    child_dir = sessions / child_id
     resolved_root = sessions.resolve()
+    try:
+        child_dir = (sessions / child_id).resolve()
+    except (OSError, RuntimeError):
+        # A path that cannot be resolved (a symlink loop) is not a child.
+        raise SubagentChildUnavailable() from None
+    if not child_dir.is_relative_to(resolved_root):
+        raise SubagentChildUnavailable()
     named = False
     for record in _persisted_children(parent_dir):
         raw_dir = record_field(record, "session_dir")
@@ -838,7 +878,9 @@ def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
             break
     if not named:
         raise SubagentChildUnavailable()
-    if child_dir.is_dir() and session_origin(child_dir) != ORIGIN_SUBAGENT:
+    if child_dir.exists() and (
+        not child_dir.is_dir() or session_origin(child_dir) != ORIGIN_SUBAGENT
+    ):
         raise SubagentChildUnavailable()
     return child_dir
 
@@ -1011,12 +1053,24 @@ class DesktopSessions:
         NO bridge is acquired and no runtime is started — the containment proof
         refuses before anything else runs, and the whole body rides a worker
         thread because it stats, reads and parses files.
+
+        ``limit`` is checked here as well as in the route's ``Query``: a route
+        is not the only caller of an adapter, and a page ceiling that exists
+        only in a declaration is one a second caller can walk around.
         """
+        if not 1 <= limit <= CHILD_PAGE_LIMIT:
+            raise ValueError(f"limit must be between 1 and {CHILD_PAGE_LIMIT}")
 
         def read() -> dict[str, Any]:
             child_dir = _contained_child_dir(self.root, session_id, child_id)
             if not child_dir.is_dir():
-                return _absent_child_page("gone")
+                # `gone` carries the cursor exactly as `pending` does below and
+                # as `/history` does when the whole file is absent: a caller
+                # that paged into a transcript which is no longer there is in
+                # the same position either way, and the envelope's answer to
+                # both is "re-read the tail and dedupe by id" (review round 1,
+                # R1-3).
+                return _absent_child_page("gone", before_id=before_id)
             if not (child_dir / TRANSCRIPT_FILENAME).exists():
                 return _absent_child_page("pending", before_id=before_id)
             try:
