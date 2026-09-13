@@ -870,6 +870,22 @@ def _synthetic_port() -> int:
         return probe.getsockname()[1]
 
 
+def _refusal_from_an_unreachable_control_plane() -> ValueError:
+    """The failure the tunnel client raises when its refresh cannot connect.
+
+    Built as the client actually produces it — the transport error on
+    `__cause__` of a ValueError — because that chain is the whole reason a
+    surface can tell this apart from an expired login.
+    """
+    try:
+        try:
+            raise httpx.ConnectError("network is unreachable")
+        except httpx.ConnectError as transport:
+            raise ValueError("The tunnel's Radient login could not be refreshed.") from transport
+    except ValueError as refusal:
+        return refusal
+
+
 def test_harness_port_change_in_the_console_alone_cannot_repoint_the_tunnel(connection):
     """A3: the console may replace harness ports wholesale, and the gateway
     attaches this device's relay credential to whatever answers on them. Only
@@ -1396,6 +1412,13 @@ async def test_tunnel_status_survives_a_foreign_listener_on_the_gateway_port(
             "check /login radient",
             "could not reach Radient to renew the relay authorization",
         ),
+        # A refresh that could not reach Radient is a ValueError too, so the
+        # exception class cannot carry this decision: only the chain can.
+        (
+            _refusal_from_an_unreachable_control_plane(),
+            "could not reach Radient to renew the relay authorization",
+            "check /login radient",
+        ),
     ],
 )
 async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
@@ -1403,9 +1426,9 @@ async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
 ):
     """One shared line sent both causes to /login radient.
 
-    They are different jobs for the operator — one is a plugged-in cable, the
-    other is an interactive login — and the cloud read is unavailable for both,
-    so the status command is the only place that can tell them apart.
+    They are different jobs for the operator — one is a connection, the other an
+    interactive login — and the cloud read is unavailable for both, so the status
+    command is the only place that can tell them apart.
     """
     from local_operator.tunnels import cli
 

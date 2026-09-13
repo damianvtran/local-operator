@@ -17,7 +17,11 @@ import httpx
 
 from local_operator.tunnels import config, gateway
 from local_operator.tunnels.api import RadientTunnels, credential_id
-from local_operator.tunnels.service import cloudflared_binary, tunnel_path
+from local_operator.tunnels.service import (
+    authorization_failure_reason,
+    cloudflared_binary,
+    tunnel_path,
+)
 
 
 def _read_origin_auth(path: Path) -> dict[str, str]:
@@ -313,18 +317,20 @@ async def dispatch(args: argparse.Namespace) -> str:
                 record = await RadientTunnels(value["credential_id"], client).request(
                     "GET", tunnel_path(value)
                 )
-        except httpx.HTTPError:
+        except (ValueError, httpx.HTTPError) as failure:
             # A network fault and an unusable login are different jobs for the
-            # operator, and one shared line sent both to /login radient. This is
-            # the same sentence the relay reports for this cause, so a lost
-            # network reads identically wherever the operator meets it.
+            # operator, and one shared line sent both to /login radient. Telling
+            # them apart takes the classifier, not the exception class: a refresh
+            # that could not reach Radient during this very request arrives as a
+            # ValueError too (see `RadientTunnels.request`), and the cloud read is
+            # unavailable in both cases, so this is the only surface that can.
+            if authorization_failure_reason(failure) != gateway.UNREACHABLE:
+                return _summary(record) + "\nCloud status unavailable; check /login radient."
             return (
                 _summary(record)
                 + "\nCloud status unavailable. "
                 + gateway.TERMINAL_DETAIL[gateway.UNREACHABLE]
             )
-        except ValueError:
-            return _summary(record) + "\nCloud status unavailable; check /login radient."
         healthy = False
         connected = False
         served = False
