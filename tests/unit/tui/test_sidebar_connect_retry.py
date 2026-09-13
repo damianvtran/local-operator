@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -64,6 +65,7 @@ from unittest.mock import Mock
 import pytest
 from rich.text import Text
 
+from local_operator.mobile.attach_client import AttachClient
 from local_operator.session.attached import (
     COLD_FALLBACK_S,
     FRONTEND_ATTACH_MIN_PROTOCOL,
@@ -117,18 +119,28 @@ class RecoveringRemote(AttachedSession):
     Deliberately does NOT call ``AttachedSession.__init__``: constructing a real
     one dials a runtime. Only the surface the connect path reads is provided.
 
-    THE THREE FLAGS ARE PART OF THAT SURFACE, and they are the real ones the
-    inherited ``can_ever_bind`` reads: this double is a VIEWER that HEALS, so it
-    carries the capability (``_can_go_cold`` True) and no loop of its own
-    (``_recovering`` False, because the SILENT RETURN is what this double models
-    and the budget is what the tests below spend against it). The mid-recovery
-    answer is pinned separately, on the arm that has to answer True for a facade
-    that does NOT heal — see ``MidRecoveryRemote``.
+    THE FLAGS ARE PART OF THAT SURFACE, and they are the real ones the inherited
+    ``can_ever_bind`` reads: this double is a VIEWER that HEALS, so it carries
+    the capability (``_can_go_cold`` True), no loop of its own (``_recovering``
+    False, because the SILENT RETURN is what this double models and the budget is
+    what the tests below spend against it), and no socket at all (``_client``
+    None — cold means nothing is connected here). The mid-recovery answer is
+    pinned separately, and so is the arm that has a socket while it is cold — see
+    ``MidRecoveryRemote`` and ``RefreshNotSyncedRemote``.
     """
 
     _can_go_cold = True
     _recovering = False
     _disposed = False
+    _client = None
+    #: Read FIRST by the real ``session_was_stopped``, which the connect now
+    #: consults on a failed round: this double never issued a stop, so the real
+    #: method falls through to the durable marker and answers False — the "no
+    #: stop proven" shape. The path is deliberately one that cannot exist, so no
+    #: real marker can leak into these arms; the marker arm sets its own config
+    #: directory per instance (``StoppedOwnerRemote``).
+    _deliberate_stop = False
+    _config_dir = Path("/nonexistent-local-operator-config")
 
     def __init__(self, session_id: str, *, heals_after: int | None = None) -> None:
         self._session_id = session_id
@@ -1566,11 +1578,12 @@ async def test_a_facade_that_can_never_bind_reports_once_and_spends_no_budget(
         assert source.connect_attempts == 0
         assert app._status is not None
         status = app._status.render_text(160).plain
-        assert app_module.STOPPED_SESSION_CONNECT_NOTICE in status
+        assert _stopped_sentence(session) in status
         assert "Select again to retry" not in status
         # The composer's own row answers with the same verdict rather than the
-        # reselect it cannot honour; one string, so the two cannot drift.
-        assert app._unavailable_hint() == f" {app_module.STOPPED_SESSION_CONNECT_NOTICE}."
+        # reselect it cannot honour, and with no "until connected" prefix: ONE
+        # string, so the two surfaces cannot drift (UX U3/U4, round 1).
+        assert app._unavailable_notice("Send") == _stopped_sentence(session)
 
         # AND THE LATCH LINE NAMES THE ARM, so the arm is diagnosable from the
         # log the way the budget arm already is. `attempts=1` is the count of
@@ -1636,7 +1649,7 @@ async def test_the_recovering_arm_still_spends_the_whole_budget(
         status = app._status.render_text(160).plain
         assert "Reconnect failed" in status
         assert "Select again to retry" in status
-        assert app_module.STOPPED_SESSION_CONNECT_NOTICE not in status
+        assert _stopped_sentence(session) not in status
 
         latch_lines = [
             record.getMessage()
@@ -1648,36 +1661,377 @@ async def test_the_recovering_arm_still_spends_the_whole_budget(
         assert "can never bind this session" not in latch_lines[0]
 
 
+def _live_client() -> Any:
+    """A REAL ``AttachClient`` whose socket is up, built without dialling.
+
+    ``AttachClient.connected`` reads ``self._connected``, so a bare instance with
+    that flag set IS the real object in the real state these arms read: no
+    double, and pyright sees the attribute's own type. Nothing else on the client
+    is reached by ``is_cold``, ``can_ever_bind`` or ``session_was_stopped``.
+    """
+    client = AttachClient.__new__(AttachClient)
+    client._connected = True
+    return client
+
+
+class RefreshNotSyncedRemote(RecoveringRemote):
+    """A LIVE session mid display-refresh, on the LEGACY attach contract.
+
+    The third cause of coldness, and the one the verdict this file pins must NOT
+    read as a permanent state: ``is_cold``'s last disjunct is
+    ``not _ready_for_events``, and ``_refresh_display_history`` clears that flag
+    while the client STAYS CONNECTED and the runtime keeps serving
+    (``attached.py`` says so at its own ``/move`` seam). The socket is up, the
+    session is alive, and the window ends on its own — so this must retry and
+    then commit, exactly as the reviewer's A/B showed the old budget doing.
+
+    ``is_cold`` is the REAL expression rather than a hand-flipped flag, which is
+    what makes the state visible to the suite at all: a double that hard-codes
+    coldness cannot represent it, and this arm's defect (a live session told it
+    was stopped) passed every test in this file. ``_can_go_cold`` stays False —
+    the legacy contract — because that is what made the wrong verdict decisive:
+    with the capability set, the predicate answers True for another reason and
+    the bug hides.
+    """
+
+    def __init__(self, session_id: str, *, syncs_on_bind: int = 2) -> None:
+        super().__init__(session_id)
+        self._client = _live_client()
+        self._ready_for_events = False
+        self._can_go_cold = False
+        self._syncs_on_bind = syncs_on_bind
+        self.dials = 0
+
+    @property
+    def is_cold(self) -> bool:
+        # The real predicate, term for term (``attached.py``): a double that
+        # restated it as a flag is how MAJOR-1 stayed invisible.
+        return self._client is None or not self._client.connected or not self._ready_for_events
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+        # The refresh COMPLETING, not a dial, and on the round after the one that
+        # finds the window open — which is the shape under test: the first round
+        # sees cold, the retry waits, the second round finds the sync landed. The
+        # real class dials nothing here either (a legacy facade still returns
+        # from `_ensure_bound`'s first guard), so what heals is the SYNC.
+        if self.bind_calls >= self._syncs_on_bind:
+            self._ready_for_events = True
+
+
+@pytest.mark.asyncio
+async def test_a_live_session_mid_refresh_is_retried_not_reported_as_stopped(
+    monkeypatch,
+) -> None:
+    """THE STATE MAJOR-1 WAS ABOUT: connected, not yet synced, and alive.
+
+    A legacy-contract facade with its socket UP while ``_refresh_display_history``
+    rebuilds the window is cold by ``is_cold``'s third disjunct and un-bindable by
+    ``_can_go_cold`` — two facts that together look exactly like the deliberate
+    stop the one-shot arm reports. They are not: the refresh finishes, the facade
+    stops being cold, and the NEXT round commits. So a verdict that reads only
+    the guard's two flags tells the user a live session was stopped and drops the
+    retry that would have healed it.
+
+    The window is one round wide, so this fails on the head that had the one-shot
+    arm alone: one attempt, the stopped sentence, no commit.
+    """
+    session = RefreshNotSyncedRemote("mid-refresh")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        _instant_backoff(monkeypatch)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        # THE RETRY HAPPENED AND IT HEALED: a second round, and a commit.
+        assert session.bind_calls == 2, "the mid-refresh window was not waited out"
+        assert session.is_cold is False
+        assert source.display_only is False, "the connect never committed"
+        assert source.connection_error == ""
+        assert source.can_never_bind is False
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert _stopped_sentence(session) not in status
+        assert app._unavailable_notice("Send") != _stopped_sentence(session)
+
+
+def _stopped_sentence(session: Any) -> str:
+    """The app's stopped-session sentence for ``session``, id spliced in.
+
+    Built from the module constant rather than retyped, so a copy change is not
+    a silent test rewrite: what these tests assert is that the SURFACES carry
+    this sentence, in this shape (UX U3, round 1 — the id is the point of it).
+    """
+    return app_module.STOPPED_SESSION_NOTICE.format(session_id=session.session_id)
+
+
+class StoppedOwnerRemote(RecoveringRemote):
+    """A VIEWER whose owner was stopped before its row was clicked.
+
+    The arm UX round 1 measured on the surface users reach most naturally (F9,
+    then a click on a stopped session's row): the row leases a viewer facade, the
+    DIAL fails on every round (``Connect call failed``), and the app has no stop
+    notice of its own to go on — ``_on_disconnected`` never ran for this viewer,
+    because it never had a socket to lose. The durable marker is the only signal,
+    so ``session_was_stopped`` is the REAL implementation here, reading a real
+    wake-index entry the test writes through the store; nothing about the marker
+    read is stubbed.
+
+    ``_can_go_cold`` is True — a viewer, exactly as the sidebar's lease builds —
+    which is the point: ``can_ever_bind`` cannot catch this arm, and before the
+    marker was consulted it spent the whole budget promising a reselect.
+    """
+
+    def __init__(self, session_id: str, *, config_dir: Any) -> None:
+        super().__init__(session_id)
+        self._config_dir = config_dir
+        self._can_go_cold = True
+        self.dials = 0
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+        # The measured shape: a record that exists with nothing listening, so
+        # every round fails the dial rather than returning from a guard.
+        raise ConnectionError("Connect call failed ('127.0.0.1', 54321)")
+
+
+@pytest.mark.asyncio
+async def test_a_row_whose_owner_was_stopped_reports_it_once(
+    tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """UX U2: the stopped ROW reaches the same verdict as the stopped facade.
+
+    Eight rounds and 16 s of ``Connecting…`` used to end on "Select again to
+    retry", which the reviewer then followed for another 15 s to the same
+    verdict. The durable stop marker says why: this owner is not coming back.
+
+    Asserted structurally: ONE round out of a budget of four, the honest sentence
+    on the band and in the refusal row, and the latch naming the arm. The marker
+    itself is a real file written through the wake store — which is also what
+    pins its LIMIT, since a session with no schedules writes no entry at all.
+    """
+    from local_operator.harness.wake import WakeSchedule
+    from local_operator.wakes import store as wake_store
+
+    session = StoppedOwnerRemote("stoppedbypeer", config_dir=tmp_path)
+    await asyncio.to_thread(
+        wake_store.write_entry,
+        tmp_path,
+        session.session_id,
+        cwd=str(tmp_path),
+        schedules=[
+            WakeSchedule(id="w1", message="check in", next_due_at=1_700_000_060_000, created_at=1)
+        ],
+        preserve={"stopped_at": 1_700_000_000_000},
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=4)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert session.bind_calls == 1, "the stopped row spent the budget anyway"
+        assert source.display_only is True
+        assert source.connect_attempts == 0
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert _stopped_sentence(session) in status
+        assert "Select again to retry" not in status
+        assert app._unavailable_notice("Send") == _stopped_sentence(session)
+
+        latch_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "sidebar connect latched" in record.getMessage()
+        ]
+        assert latch_lines, "the latch was not logged at all"
+        assert "the session was stopped" in latch_lines[0]
+        assert "attempts=1" in latch_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_the_stopped_row_verdict_needs_the_marker_not_just_a_cold_source(
+    tmp_path, monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same rows and rounds WITHOUT the marker still spend the budget.
+
+    The negative half of the arm above, and the reason it cannot pass vacuously:
+    a cold viewer whose dial keeps failing and whose session carries no stop
+    marker is a DEAD OWNER as far as the app can tell, and a dead owner is what
+    the budget exists for (a successor can republish its record). Without the
+    marker the round count and the exhausted-retry copy are unchanged.
+    """
+    session = StoppedOwnerRemote("neverstarted", config_dir=tmp_path)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert "Reconnect failed" in status
+        assert _stopped_sentence(session) not in status
+        latch_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "sidebar connect latched" in record.getMessage()
+        ]
+        assert latch_lines and "the session was stopped" not in latch_lines[0]
+
+
+def _stopped_session_row_click(app: OperatorApp, session_id: str) -> None:
+    """Click a row the way the sidebar does, through the real message."""
+    from local_operator.tui.widgets.session_sidebar import SessionSidebar
+
+    app.post_message(SessionSidebar.Selected(session_id))
+
+
+@pytest.mark.asyncio
+async def test_clicking_the_current_sessions_stopped_row_answers_with_the_verdict(
+    monkeypatch,
+) -> None:
+    """UX U5: the click on the CURRENT stopped session is no longer inert.
+
+    The session was live, then its owner was stopped while it was on screen, so
+    ``display_only`` is False and no connect runs on the click — the row did
+    nothing at all. The app already knows the stop here (``_stopped_session_id``
+    is set by the very handler that painted the notice), so the click publishes
+    the same verdict a stopped row reached from elsewhere does.
+
+    ``display_only`` is deliberately NOT set: this session is not a saved view,
+    its composer is open, and `/resume` is runnable from it — which is what the
+    verdict says to do.
+    """
+    session = RecoveringRemote("currentstopped")
+    session._recovering = False
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        # The click handler's current-session branch is keyed on the app's own
+        # session, so the row's session has to BE it — the state under test is
+        # "the session on screen lost its owner ages ago".
+        app._session = session
+        # Cold, as a stopped session's facade is, with the app's own record of
+        # the stop it announced. `display_only` is FALSE — that is the whole
+        # point of this arm: the session was live and lost its owner, so no
+        # connect runs and the row click has nothing to repaint.
+        session._cold = True
+        source.display_only = False
+        app._stopped_session_id = session.session_id
+
+        _stopped_session_row_click(app, session.session_id)
+        for _ in range(6):
+            await pilot.pause()
+
+        assert source.can_never_bind is True
+        assert source.display_only is False
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert _stopped_sentence(session) in status
+        assert "Select again to retry" not in status
+
+
+@pytest.mark.asyncio
+async def test_resume_is_runnable_in_the_state_whose_verdict_names_it(monkeypatch) -> None:
+    """UX U1: the command the verdict names must not be the one gate refuses.
+
+    Drives the real gate and the real dispatch: in the stopped/un-bindable state
+    the composer accepts `/resume <id>` and the dispatcher REACHES the handler.
+    Two states that legitimately refuse are asserted in the same test so the
+    widening cannot be read as "everything is allowed": a session transition
+    already in flight (``_session_transition_pending``, which answers before the
+    allowlist is consulted) and a command that is not a saved-view command.
+    """
+    session = PrewarmRemote("stoppedargv", can_go_cold=False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        _instant_backoff(monkeypatch, attempts=2)
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+        assert source.can_never_bind is True, "the state under test did not arrive"
+
+        called: list[tuple[str, str]] = []
+        monkeypatch.setattr(app, "_cmd_resume", lambda arg, notice: called.append(("resume", arg)))
+
+        # THE GATE, then the DISPATCH: both consult `_SAVED_LOCAL_COMMANDS`, and
+        # both used to refuse this command in this state.
+        assert app.composer_submission_blocked(f"/resume {session.session_id}") is False
+        dispatched = app._run_slash_command(f"/resume {session.session_id}")
+        if dispatched is not None:
+            await dispatched
+        assert called == [("resume", session.session_id)]
+
+        # STILL REFUSED WHERE A REFUSAL IS THE TRUTH. A transition in flight owns
+        # the composer; a command that needs an owner is not a saved-view one.
+        app._session_transition_pending = True
+        try:
+            assert app.composer_submission_blocked(f"/resume {session.session_id}") is True
+            assert app.composer_submission_blocked("/model gpt-4o") is True
+        finally:
+            app._session_transition_pending = False
+        assert app.composer_submission_blocked("/model gpt-4o") is True
+        assert called == [("resume", session.session_id)]
+
+        # And the refusal ROW for a command that needs an owner is the verdict
+        # with no "until connected" prefix (UX U4, round 1).
+        assert app._unavailable_notice("Commands") == _stopped_sentence(session)
+        assert "until connected" not in app._unavailable_notice("Commands")
+
+
 @pytest.mark.parametrize(
-    "can_go_cold,recovering,disposed,expected",
+    "can_go_cold,recovering,disposed,connected,expected",
     [
         # The ordinary viewer, cold right now: it binds as soon as it is dialled.
-        (True, False, False, True),
+        (True, False, False, False, True),
         # A viewer mid-recovery, and a LEGACY facade mid-recovery: both on their
         # way back, because the loop's exits leave the facade bindable (`_go_cold`
         # for a viewer, `_give_up_recovery` setting the flag for the legacy one).
-        (True, True, False, True),
-        (False, True, False, True),
-        # The deliberate stop on the legacy contract: no loop ran, so nothing
-        # ever sets the flag this guard reads. The reachable False.
-        (False, False, False, False),
+        (True, True, False, False, True),
+        (False, True, False, False, True),
+        # A LIVE session the display is mid-refresh on: the socket is UP and the
+        # runtime is serving, so `is_cold` is true through its third disjunct
+        # alone. Retrying is what waits the window out — MAJOR-1, round 1.
+        (False, False, False, True, True),
+        (True, False, False, True, True),
+        # The deliberate stop on the legacy contract: no loop ran, no socket is
+        # up, so nothing ever sets the flag this guard reads. The reachable False.
+        (False, False, False, False, False),
         # Disposed: refuses every path. Latent, and still False.
-        (True, False, True, False),
-        (False, False, True, False),
+        (True, False, True, False, False),
+        (False, False, True, False, False),
     ],
 )
 def test_can_ever_bind_is_the_truth_table_the_sidebar_decides_on(
-    can_go_cold: bool, recovering: bool, disposed: bool, expected: bool
+    can_go_cold: bool, recovering: bool, disposed: bool, connected: bool, expected: bool
 ) -> None:
-    """The real property, on the real class, at every combination of its flags.
+    """The real property, on the real class, at every combination of its inputs.
 
     Read through the facade rather than restated by a double: the app's verdict
     (and therefore the sentence the user reads) is this property's answer, and a
     double that reimplemented it would let the two drift silently.
+
+    ``connected`` is a separate axis rather than a footnote because it is a
+    separate CAUSE of coldness: `_ready_for_events` is cleared while the socket
+    stays up, so a facade can be cold, un-diallable and perfectly alive at once.
     """
     session = AttachedSession.__new__(AttachedSession)
     session._can_go_cold = can_go_cold
     session._recovering = recovering
     session._disposed = disposed
+    session._client = _live_client() if connected else None
 
     assert session.can_ever_bind is expected

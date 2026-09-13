@@ -560,7 +560,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 109 public members and a POSITIVE
+    than stylistic. This protocol carries 110 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -664,20 +664,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         Its own question, and not a refinement of :attr:`is_cold`. A facade is
         cold for many reasons that all clear on their own — a socket blip, an
         owner loss the recovery loop is already chasing, a never-bound row that
-        has not been asked to dial yet — and every one of those binds. This
-        asks the one thing a caller cannot wait out: whether the facade is
-        closed to dialling BY CONSTRUCTION.
+        has not been asked to dial yet, a live owner whose display history is
+        mid-refresh — and every one of those binds or syncs. This asks the one
+        thing a caller cannot wait out: whether the viewer is closed to dialling
+        BY CONSTRUCTION, with nothing reachable on the other end.
 
-        False is the two halves of the guard at the top of
-        ``AttachedSession._ensure_bound``, which returns without dialling:
+        It is therefore NOT the negation of the guard at the top of
+        ``AttachedSession._ensure_bound``, which returns in states this answers
+        True for (a mid-refresh client, a facade with a recovery loop running).
+        False is that guard with no live owner behind it:
 
         * the LEGACY attach contract (``_can_go_cold`` false, what ``connect``
           builds unless a caller asks for the viewer contract) once its owner is
           gone. That facade never dials, and what normally releases it is its
           own recovery loop (``_give_up_recovery`` sets the flag before going
-          cold). A DELIBERATE stop is the arm where no loop ever runs —
-          ``_on_disconnected`` returns before starting one — so nothing sets the
-          flag and the state is permanent;
+          cold). A DELIBERATE stop is both the arm where no loop ever runs —
+          ``_on_disconnected`` returns before starting one, and
+          ``_recover_runtime`` returns instead of giving up when its own wake
+          marker says the session was stopped — and the arm where nothing sets
+          the flag, so the state is permanent;
         * a DISPOSED facade, which refuses every path.
 
         ``_recovering`` must answer True, and the distinction is load-bearing:
@@ -744,6 +749,25 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         The desktop host calls this on a cold viewer so that serving a history
         read never promotes a reader into an executor: losing the runtime must
         not move execution into the HTTP worker.
+        """
+        ...
+
+    async def session_was_stopped(self) -> bool:
+        """Whether this session ended DELIBERATELY rather than dying.
+
+        A host that watched the disconnect can classify it from the wire, but a
+        host that did not — the sidebar re-dials a row clicked later — has only
+        this: the durable ``stopped_at`` marker the stop path stamps, plus this
+        viewer's own ``request_stop``. The question it answers is the one that
+        decides whether re-dialling is worth anything, so the answer must live
+        here rather than be re-probed by each front end.
+
+        FALSE IS "NOT PROVEN STOPPED", not "proven alive", and the difference
+        matters to a caller composing a verdict: the marker is written by
+        ``control._mark_wakes_dormant``, which writes NOTHING for a session with
+        no wake schedules (an absent index file is the store's own "no wakes"),
+        and it is cleared when the session is next opened. A wake-less stop
+        therefore leaves no trace here at all.
         """
         ...
 
