@@ -19,9 +19,9 @@
  *
  * Usage: node scripts/popup-states-shot.mjs <dist-dir> <out-dir>
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -353,8 +353,36 @@ async function main() {
   } finally {
     teardown();
     await sleep(2000);
+    sweepProfile(profile);
     console.error(`profile=${profile}`);
   }
+}
+
+/** Kill whatever still holds this capture's profile, then remove the directory.
+ *
+ * SIGTERM to the process group is not enough on its own: AGENTS.md §6 measured
+ * 0-5 helpers surviving it across 11 runs on Chrome 152 with no stable pattern by
+ * timing, which is exactly why one run "looks" clean. So the sweep is
+ * `pkill -f <this run's mktemp prefix>` followed by a pgrep ASSERTION, and the
+ * directory is only removed once the count is 0 — scoped to that unique prefix,
+ * so it can never touch another session's Chrome or the operator's.
+ *
+ * The assertion is the load-bearing half. Without it this harness leaked one
+ * profile per run (measured: four from this session's four captures, among ten
+ * others under /tmp from earlier ones), and a `rm -rf` under a live helper is the
+ * kind of failure that reports success: the directory reappears as soon as that
+ * helper writes again.
+ */
+function sweepProfile(profile) {
+  spawnSync("pkill", ["-f", profile], { stdio: "ignore" });
+  const survivors = spawnSync("pgrep", ["-f", profile], { encoding: "utf8" });
+  const count = (survivors.stdout ?? "").trim().split("\n").filter(Boolean).length;
+  if (count > 0) {
+    console.error(`NOT removed, ${count} process(es) still hold it: ${profile}`);
+    return false;
+  }
+  rmSync(profile, { recursive: true, force: true });
+  return true;
 }
 
 /** Open the popup as a page with /health stubbed BEFORE any script runs, so the
