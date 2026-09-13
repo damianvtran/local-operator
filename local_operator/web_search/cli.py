@@ -15,6 +15,7 @@ from local_operator.web_search.models import PROVIDER_IDS, SearchProviderId
 
 _API_KEY_NAMES: dict[SearchProviderId, str] = {
     "tavily": "TAVILY_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "perplexity": "PERPLEXITY_API_KEY",
     "brave": "BRAVE_API_KEY",
     "exa": "EXA_API_KEY",
@@ -157,6 +158,20 @@ def _setup_provider(args: argparse.Namespace) -> int:
             _store_api_key(provider_id, credentials)
         elif provider_id == "perplexity" and args.api_key:
             _store_api_key(provider_id, credentials)
+        elif provider_id == "deepseek":
+            if args.api_key:
+                _store_api_key(provider_id, credentials)
+            else:
+                # DeepSeek search has no search-specific secret: it bills the
+                # same key the model route uses. Saying so is the whole setup, and
+                # the availability gate reads the login store, so this only has to
+                # point at `login` when neither tier is populated yet.
+                print(
+                    "DeepSeek search reuses the DeepSeek model key (one model turn "
+                    "per search). If it is not set yet, run "
+                    "`local-operator login deepseek`; the provider becomes available "
+                    "on the next search. Pass --api-key to store a separate key."
+                )
         elif provider_id in ("brave", "exa", "serpapi"):
             _store_api_key(provider_id, credentials)
         elif provider_id == "searxng":

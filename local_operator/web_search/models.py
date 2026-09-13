@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 SearchProviderId = Literal[
     "duckduckgo",
     "tavily",
+    "deepseek",
     "perplexity",
     "brave",
     "exa",
@@ -25,6 +26,7 @@ SearchStrategy = Literal["round_robin", "ordered"]
 PROVIDER_IDS: tuple[SearchProviderId, ...] = (
     "duckduckgo",
     "tavily",
+    "deepseek",
     "perplexity",
     "brave",
     "exa",

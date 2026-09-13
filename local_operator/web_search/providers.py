@@ -8,9 +8,12 @@ Each transport stays dependency-free beyond the project's existing ``httpx``.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import re
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -403,6 +406,362 @@ async def _search_perplexity(
     )
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek native search (Anthropic-format Messages API)
+# ---------------------------------------------------------------------------
+#
+# DeepSeek exposes no dedicated search endpoint: the only server-side search it
+# serves is the Anthropic `web_search_20250305` server tool on the
+# Anthropic-compatible Messages route. This transport mirrors the reference
+# implementation in DeepSeek's own harness
+# (`@deepseek-ai/dsh-web-search-deepseek`) so both agree on the wire shape and on
+# what counts as a usable result:
+#
+#   * ONE auxiliary model turn per search, carrying exactly
+#     "Perform a web search for the query: <query>" as its user text;
+#   * `max_uses: 1` -- across 31 measured live searches DeepSeek issued exactly
+#     one server-side search (`usage.server_tool_use.web_search_requests == 1`
+#     every time), so a higher cap only risks paying for a second one;
+#   * `max_tokens: 1024` -- observed completions were 507-1444 output tokens and
+#     the sources arrive in `web_search_tool_result` blocks independently of how
+#     much prose follows, so a small cap cannot lose a source;
+#   * sources come from `web_search_tool_result` items only. The turn's prose is
+#     a synthesized answer, NOT a source of results, so it is returned as
+#     `answer` and never parsed for URLs;
+#   * a response with no result block, or with no usable item, RAISES. Returning
+#     the prose as a successful answer would repeat the anonymity-wall defect the
+#     Perplexity transport has, where a non-empty string stops the fallback chain
+#     with nothing the model can act on.
+#
+# Two measured limitations belong here rather than in a ticket:
+#
+#   * `web_search_result` items carry `page_age` in the schema but it arrived
+#     EMPTY on all 310 items observed, and text blocks carried no `citations`
+#     array at all (thinking and non-thinking alike), so DeepSeek's own harness
+#     note holds: "Uncited results carry no `snippet`". Sources are therefore
+#     title+URL on this path, weaker than DuckDuckGo/Tavily/Brave, and the
+#     synthesized `answer` is the only descriptive text the model gets.
+#   * Cost is a full model turn: median 14.5k input + 0.9k output tokens per
+#     search (cached page content dominates the input side), i.e. ~$0.0024
+#     off-peak / ~$0.0048 peak at deepseek-flash list price (2026-09). That is
+#     more than the free transports and than Tavily's monthly plans, so this
+#     provider is credential-gated and belongs in an `ordered` chain behind the
+#     free paths rather than in the default rotation.
+
+DEEPSEEK_SEARCH_ENDPOINT = "https://api.deepseek.com/anthropic/v1/messages"
+DEEPSEEK_BALANCE_ENDPOINT = "https://api.deepseek.com/user/balance"
+#: Anthropic-format model name. `deepseek-v4-flash` is an accepted alias of the
+#: current Flash model, kept because the DeepSeek harness pins it.
+DEEPSEEK_SEARCH_MODEL = "deepseek-v4-flash"
+DEEPSEEK_API_VERSION = "2023-06-01"
+DEEPSEEK_SEARCH_MAX_TOKENS = 1_024
+DEEPSEEK_SEARCH_MAX_USES = 1
+#: Balance below which a search is not attempted. One search bills a full model
+#: turn, so an account with cents left must be skipped in favour of the free
+#: transports instead of failing mid-chain.
+DEEPSEEK_MIN_BALANCE_USD = 0.50
+#: How long a balance verdict is trusted. The probe is one keyless GET, but a
+#: burst of searches must not pay it per call; a minute is short enough that a
+#: topped-up or drained account flips on the next real search.
+DEEPSEEK_BALANCE_TTL_SECONDS = 60.0
+
+_DEEPSEEK_BALANCE_LOCK = threading.Lock()
+_DEEPSEEK_BALANCE: tuple[float, bool] | None = None
+#: In-flight balance refreshes. Held so a background probe is never garbage
+#: collected mid-request and so its exception is always retrievable.
+_DEEPSEEK_BALANCE_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _deepseek_citation_snippets(blocks: list[Any]) -> dict[str, str]:
+    """Excerpts DeepSeek attaches to its answer text, keyed by source URL.
+
+    Empty in practice (see the module note above) but kept because it is the
+    only mechanism that can ever give this provider a snippet, and dropping it
+    would silently discard the field if DeepSeek starts emitting citations.
+    """
+    snippets: dict[str, str] = {}
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        for citation in block.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            url = str(citation.get("url") or "")
+            text = str(citation.get("cited_text") or "").strip()
+            if url and text and url not in snippets:
+                snippets[url] = text
+    return snippets
+
+
+def _deepseek_answer(blocks: list[Any]) -> str | None:
+    """The turn's prose, which is an answer summary and never a result list."""
+    parts = [
+        str(block.get("text") or "").strip()
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    answer = "\n\n".join(part for part in parts if part).strip()
+    return answer or None
+
+
+def parse_deepseek_search(
+    payload: object, limit: int
+) -> tuple[list[SearchSource], str | None]:
+    """Normalize one Anthropic-format Messages response into sources + answer.
+
+    Dedupes by URL because a `max_uses > 1` request can surface the same page
+    from more than one server-side search; the DeepSeek harness normalizer does
+    the same for the same reason.
+    """
+    if not isinstance(payload, dict):
+        raise RuntimeError("DeepSeek returned a non-object response")
+    blocks = payload.get("content")
+    if not isinstance(blocks, list):
+        raise RuntimeError("DeepSeek returned no content blocks")
+
+    snippets = _deepseek_citation_snippets(blocks)
+    sources: list[SearchSource] = []
+    seen: set[str] = set()
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+            continue
+        items = block.get("content")
+        if not isinstance(items, list):
+            # Error-shaped tool results (a dict instead of a list) carry no
+            # sources; the transport's no-result check below turns a wholly
+            # failed search into the fallback trigger.
+            continue
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            source = _source(
+                title=item.get("title"),
+                url=url,
+                snippet=snippets.get(url),
+                published_date=item.get("page_age"),
+            )
+            if source is None:
+                continue
+            seen.add(url)
+            sources.append(source)
+            if len(sources) >= limit:
+                break
+        if len(sources) >= limit:
+            break
+
+    if not sources:
+        raise RuntimeError(
+            "DeepSeek returned no web_search results; the request may not have "
+            "triggered native search"
+        )
+    return sources, _deepseek_answer(blocks)
+
+
+def _deepseek_login_present() -> bool:
+    """Whether a DeepSeek API key was stored by ``lop login deepseek``.
+
+    The model key and the search key are deliberately the same credential, which
+    is why this provider needs no search-specific setup step. Read through the
+    auth store because that is where ``login`` writes it; the env/credentials.env
+    tier is checked first by the caller, so this stays a pure store probe.
+    """
+    try:
+        from local_operator.providers.auth_store import AuthStore
+
+        return bool(AuthStore().list_credentials("deepseek"))
+    except Exception:  # noqa: BLE001 -- an unreadable store is simply "unknown"
+        return False
+
+
+async def _resolve_deepseek_key(credentials: CredentialManager) -> str:
+    """The key the search will bill: env/credentials.env first, then the login.
+
+    ``read_only=True`` because a search must never decide model routing: it must
+    not consume an OAuth rotation slot, clear session stickiness, or flip the
+    auth tier the conversation's next request will resolve from.
+    """
+    key = _credential(credentials, "DEEPSEEK_API_KEY")
+    if key:
+        return key
+    try:
+        from local_operator.providers.auth_store import AuthStore
+
+        return await AuthStore().get_api_key("deepseek", read_only=True) or ""
+    except Exception:  # noqa: BLE001 -- resolution failure is "no key"
+        return ""
+
+
+def _cached_deepseek_balance_verdict() -> bool | None:
+    """The last balance verdict within its TTL, or None when there is none."""
+    global _DEEPSEEK_BALANCE
+    with _DEEPSEEK_BALANCE_LOCK:
+        if _DEEPSEEK_BALANCE is None:
+            return None
+        checked_at, allowed = _DEEPSEEK_BALANCE
+    if time.monotonic() - checked_at > DEEPSEEK_BALANCE_TTL_SECONDS:
+        return None
+    return allowed
+
+
+def _remember_deepseek_balance(allowed: bool) -> None:
+    global _DEEPSEEK_BALANCE
+    with _DEEPSEEK_BALANCE_LOCK:
+        _DEEPSEEK_BALANCE = (time.monotonic(), allowed)
+
+
+def reset_deepseek_balance_cache_for_tests() -> None:
+    """Deterministic state for tests, mirroring the round-robin reset."""
+    global _DEEPSEEK_BALANCE
+    with _DEEPSEEK_BALANCE_LOCK:
+        _DEEPSEEK_BALANCE = None
+    _DEEPSEEK_BALANCE_TASKS.clear()
+
+
+async def _deepseek_balance_ok(client: httpx.AsyncClient, key: str) -> bool:
+    """Whether the account can still pay for a search.
+
+    Deliberately a live probe rather than a read of the cached usage report: the
+    shared usage cache key is derived from the account fingerprint, and a second
+    derivation in this module would drift from the controller's the first time
+    the tier list changes. A failed probe is treated as ``ok`` -- a balance
+    endpoint outage must not silently remove a paid transport from the chain,
+    and the search itself will surface a real funding problem as its own error.
+    """
+    try:
+        response = await client.get(
+            DEEPSEEK_BALANCE_ENDPOINT,
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        )
+        if not response.is_success:
+            return True
+        payload = response.json()
+    except Exception:  # noqa: BLE001 -- see docstring: unknown is permissive
+        return True
+    if not isinstance(payload, dict):
+        return True
+    if payload.get("is_available") is False:
+        return False
+    infos = payload.get("balance_infos")
+    if not isinstance(infos, list):
+        return True
+    total = 0.0
+    saw_usd = False
+    for item in infos:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("currency") or "").upper() != "USD":
+            # A non-USD balance cannot be compared to a USD floor; leave the
+            # decision to the search itself rather than guessing an FX rate.
+            continue
+        try:
+            total += float(item.get("total_balance") or 0)
+        except (TypeError, ValueError):
+            continue
+        saw_usd = True
+    if not saw_usd:
+        return True
+    return total >= DEEPSEEK_MIN_BALANCE_USD
+
+
+async def _refresh_deepseek_balance_verdict(key: str) -> None:
+    """Refresh the cached balance verdict for the NEXT search, off the hot path.
+
+    Uses its own short-lived client rather than the session's pooled one: this
+    task can outlive the search that spawned it (the tool's pooled client is
+    owned by the session, and a one-shot CLI caller closes its own), so borrowing
+    a client here would race the owner's ``aclose``.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            allowed = await _deepseek_balance_ok(client, key)
+    except Exception:  # noqa: BLE001 -- a refresh is best-effort by construction
+        return
+    _remember_deepseek_balance(allowed)
+
+
+def _spawn_deepseek_balance_refresh(key: str) -> None:
+    """Start the background balance refresh, keeping a handle on the task."""
+    task = asyncio.create_task(_refresh_deepseek_balance_verdict(key))
+    _DEEPSEEK_BALANCE_TASKS.add(task)
+    task.add_done_callback(_DEEPSEEK_BALANCE_TASKS.discard)
+
+
+async def _search_deepseek(
+    client: httpx.AsyncClient,
+    credentials: CredentialManager,
+    _settings: WebSearchSettings,
+    query: str,
+    limit: int,
+) -> SearchResponse:
+    key = await _resolve_deepseek_key(credentials)
+    if not key:
+        raise RuntimeError(
+            "DeepSeek search needs an API key; run `local-operator login deepseek`"
+        )
+
+    # The balance gate is a CACHED verdict, never a probe on this call's path.
+    # Measured, the probe costs 300-580 ms -- 7-13% of a ~4.5 s search -- and it
+    # is the only part of this provider's latency that is ours rather than
+    # DeepSeek's. A cached verdict still skips an account that is out of money on
+    # every search after the first, and the search itself fails loudly (and so
+    # triggers the fallback chain) if the account cannot pay after all.
+    if _cached_deepseek_balance_verdict() is False:
+        raise RuntimeError(
+            f"DeepSeek balance is below ${DEEPSEEK_MIN_BALANCE_USD:.2f}; "
+            "top up or disable the deepseek search provider"
+        )
+    if _cached_deepseek_balance_verdict() is None:
+        _spawn_deepseek_balance_refresh(key)
+
+    response = await client.post(
+        DEEPSEEK_SEARCH_ENDPOINT,
+        headers={
+            # Official DeepSeek accepts `x-api-key`; an Anthropic-compatible proxy
+            # may expect `Authorization: Bearer`. Sending both is the DeepSeek
+            # harness's own choice so either deployment resolves.
+            "x-api-key": key,
+            "authorization": f"Bearer {key}",
+            "anthropic-version": DEEPSEEK_API_VERSION,
+            "content-type": "application/json",
+            "accept": "application/json",
+        },
+        json={
+            "model": DEEPSEEK_SEARCH_MODEL,
+            "max_tokens": DEEPSEEK_SEARCH_MAX_TOKENS,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"Perform a web search for the query: {query}",
+                        }
+                    ],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": DEEPSEEK_SEARCH_MAX_USES,
+                }
+            ],
+        },
+    )
+    _ensure_success("DeepSeek", response)
+    sources, answer = parse_deepseek_search(response.json(), limit)
+    return SearchResponse(
+        provider="deepseek",
+        auth_mode="api-key",
+        sources=sources,
+        answer=answer,
+        request_id=str(response.headers.get("x-request-id") or "").strip() or None,
+    )
+
+
 async def _search_brave(
     client: httpx.AsyncClient,
     credentials: CredentialManager,
@@ -567,6 +926,17 @@ PROVIDERS: dict[SearchProviderId, ProviderDefinition] = {
         ("TAVILY_API_KEY",),
         _search_tavily,
     ),
+    "deepseek": ProviderDefinition(
+        "deepseek",
+        "DeepSeek",
+        "model API key",
+        (
+            "Native search via the Anthropic-format Messages API; reuses the "
+            "DeepSeek model key, bills one model turn per search"
+        ),
+        ("DEEPSEEK_API_KEY",),
+        _search_deepseek,
+    ),
     "perplexity": ProviderDefinition(
         "perplexity",
         "Perplexity",
@@ -618,6 +988,13 @@ def provider_available(
     """Whether the provider can make a request with current local configuration."""
     if provider_id in ("duckduckgo", "tavily", "perplexity"):
         return True
+    if provider_id == "deepseek":
+        # The search key IS the model key, and ``login`` writes it to the auth
+        # store rather than to ``credentials.env``. Both tiers are checked, or
+        # `search list` would report "setup needed" for a provider whose calls
+        # would in fact succeed -- and, worse, the reverse for a keyless branch
+        # that has no key at all.
+        return bool(_credential(credentials, "DEEPSEEK_API_KEY")) or _deepseek_login_present()
     if provider_id == "searxng":
         return settings.searxng_endpoint.startswith(("http://", "https://"))
     definition = PROVIDERS[provider_id]
