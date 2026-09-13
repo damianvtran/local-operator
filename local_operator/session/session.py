@@ -2177,6 +2177,20 @@ class Session:
         self._last_usage: Usage | None = _last_reported_usage(
             [_parsed_usage(payload) for payload in transcript.usages_since_compaction()]
         )
+        # Web-search spend the transcript already recorded, in the ``web_search``
+        # tool rows' own ``search_cost`` details. Read here for the same reason
+        # ``_last_usage`` is: a resumed conversation's searches were paid for
+        # before this process existed, and the search ledger the tool writes is
+        # process-wide, so a fresh process would report a search-heavy
+        # conversation as free. Held rather than recorded because the ledger is
+        # the TOOL's, and this layer keeps its web-search imports lazy -- the
+        # host that owns the ledger replays these (see ``restored_search_spend``).
+        #
+        # Costs one pass over the in-memory entries at construction, on the same
+        # replay that already builds ``_last_usage``.
+        self._restored_search_spend: tuple[dict[str, Any], ...] = tuple(
+            transcript.search_spend_rows()
+        )
         # The per-conversation prompt-cache TTL hint (see
         # ``ChatRequest.context_tokens_hint``): the provider-reported context
         # size of THIS session's last turn call, excluding isolated errands
@@ -6001,6 +6015,28 @@ class Session:
         replayed history, so a front end may call it on the paint path.
         """
         return self._last_usage
+
+    def restored_search_spend(self) -> tuple[dict[str, Any], ...]:
+        """Search spend this conversation's transcript carries, oldest first.
+
+        The search twin of :meth:`restored_usage`, for the same reported defect:
+        a front end's search total is fed by searches that run while IT is
+        running, so a resumed session opened reporting no search spend at all
+        for a conversation with real retrieval money behind it -- while the
+        transcript on disk carried every figure.
+
+        A bare tuple of the recorded detail mappings, not priced objects: the
+        search cost model belongs to :mod:`local_operator.web_search`, and this
+        layer already keeps every web-search import lazy (see
+        ``_build_tool_context``). The caller records them into the ledger.
+
+        Empty means "nothing recorded", which is a real and distinct state: a
+        new session, a conversation that never searched, or -- the lossy case --
+        a transcript whose tool rows a compaction dropped. It is NOT the same as
+        a conversation that searched for free, which carries rows whose
+        ``usd`` is ``0.0`` with a basis saying which free tier served them.
+        """
+        return self._restored_search_spend
 
     async def measure_preloaded_context(self) -> int:
         """Tokens the NEXT request carries before the user has typed anything.

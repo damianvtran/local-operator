@@ -1213,6 +1213,45 @@ class Transcript:
             if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict)
         ]
 
+    def search_spend_rows(self) -> list[dict[str, Any]]:
+        """Every ``web_search`` cost this conversation recorded, oldest first.
+
+        The search twin of :meth:`usages_since_compaction`, and deliberately NOT
+        bounded by the newest compaction the way that one is. That boundary
+        exists because a context SIZE reading taken before a pass describes a
+        context that no longer exists; money already spent is not invalidated by
+        a later rewrite of the context, so a figure from before the marker is a
+        fact rather than a stale reading. Copying the boundary here would
+        silently drop a resumed conversation's earlier search spend and make the
+        restored total a floor for no reason -- and the whole point of restoring
+        it is that the search ledger is process-wide and starts empty in a new
+        process (see ``local_operator.web_search.cost``).
+
+        Read off ``provider_payload["details"]["search_cost"]``, the harness's
+        own tool-result bookkeeping. PRUNING KEEPS IT: ``_pruned_entry`` copies
+        the payload and adds a flag, because it blanks content rather than
+        details, so a blanked tool result still yields its cost. A compaction
+        that drops rows out of the file is the remaining lossy path, which is
+        why the caller treats this as best-effort and never as a guarantee.
+
+        Returns the recorded mappings plus the serving ``provider``, raw: this
+        module owns persistence and not the search cost model, so parsing stays
+        with the caller -- the same split :meth:`usages_since_compaction` makes
+        for ``Usage``.
+        """
+        rows: list[dict[str, Any]] = []
+        for entry in self._entries:
+            if entry.type != ENTRY_MESSAGE:
+                continue
+            details = (entry.payload.get("provider_payload") or {}).get("details")
+            if not isinstance(details, dict):
+                continue
+            cost = details.get("search_cost")
+            if not isinstance(cost, dict):
+                continue
+            rows.append({**cost, "provider": str(details.get("provider") or "")})
+        return rows
+
     def pending_prunes(self) -> dict[str, str]:
         """``{target entry id: notice}`` for every un-folded prune entry.
 
