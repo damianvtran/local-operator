@@ -65,6 +65,33 @@ SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
 WATCH_TTL = 45.0
 
+#: Pace of the lease-driven warm, in three parts, because a warm that cannot
+#: succeed must not become a spawn per heartbeat.
+#:
+#: A heartbeat is 15 s and a lease is 45 s, so an attempt left on that cadence
+#: is a child spawn every beat for a session whose runtime cannot start
+#: (provider credential gone, an MCP hang, an unwritable config dir). That is
+#: not a latency optimisation any more, it is an unattended loop, so a FAILED
+#: attempt — one that really did try to spawn and left the viewer cold — waits
+#: out ``_LEASE_WARM_BACKOFF_S`` and doubles from there to the ceiling. The
+#: honest cost of the doubling is that a transient failure is not retried for
+#: 30 s; the fallback is the cold bind that shipped before this feature, while
+#: the alternative is a machine running out of RAM because a window is open.
+#: The ceiling is not a give-up point: the loop keeps re-asking at 120 s for as
+#: long as the lease lives, because that is the same intent the beat expressed,
+#: at 1/120 of the rate — and it is logged, since a bind that cannot start has
+#: no other surface on this path.
+#:
+#: An attempt that did NO WORK (the facade was in owner recovery, or an engage
+#: was already in flight) is explicitly not a failure and does not spend the
+#: backoff: it is retried at ``_LEASE_WARM_POLL_S``, which is what carries the
+#: intent across the ~8 s recovery window that used to swallow a warm until the
+#: next beat. Keep it well under a heartbeat: a click inside that window pays
+#: the cold bind this feature exists to remove.
+_LEASE_WARM_BACKOFF_S = 30.0
+_LEASE_WARM_BACKOFF_CAP_S = 120.0
+_LEASE_WARM_POLL_S = 1.0
+
 #: The completion kinds the DESKTOP BRIDGE may put on the wire as a
 #: ``notification`` frame. Narrower than ``NotificationKind`` on purpose.
 #:
@@ -136,6 +163,18 @@ class DesktopSessionBridge:
         #: possible failure for a latency optimisation, because the slow path
         #: it leaves behind is the correct one.
         self.warm_task: asyncio.Task[None] | None = None
+        #: The lease-driven warm's retry loop (see :meth:`_lease_warm_loop`).
+        #: Separate from ``warm_task`` because it outlives one engage: it holds
+        #: the LEASE's intent across attempts, while ``warm_task`` is the single
+        #: engage it (or the ``/warm`` route) has in flight at any moment.
+        self.lease_warm_task: asyncio.Task[None] | None = None
+        #: Pace for the next lease-driven attempt, valid only between an attempt
+        #: that failed and the retry it earned; ``warm_not_before`` is the
+        #: monotonic deadline, ``warm_backoff_s`` the value it was set from so
+        #: the next failure can double it. Both reset when the intent is served
+        #: or the bridge detaches, so a fresh intent starts from the base.
+        self.warm_backoff_s = 0.0
+        self.warm_not_before = 0.0
         self.attention_task: asyncio.Task[None] | None = None
         self.attention: dict[str, Any] = {}
         self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
@@ -187,6 +226,23 @@ class DesktopSessionBridge:
             with contextlib.suppress(asyncio.CancelledError):
                 await self.watch_task
             self.watch_task = None
+        # THE LOOP GOES FIRST, before the engage it may be awaiting. Cancelling
+        # the engage alone would resume the loop on a cancellation it did not
+        # ask for and leave it to interpret that; cancelling the observer first
+        # removes the question. `BaseException` rather than `CancelledError`
+        # because awaiting a task that already died re-raises its exception, and
+        # neither shape may abort teardown midway.
+        #
+        # Its backoff is forgotten here too: the facade it was armed against is
+        # being disposed, so the next life of this bridge starts a fresh intent
+        # from the base pace rather than inheriting a dead viewer's.
+        if self.lease_warm_task is not None:
+            self.lease_warm_task.cancel()
+            with contextlib.suppress(BaseException):
+                await self.lease_warm_task
+            self.lease_warm_task = None
+        self.warm_backoff_s = 0.0
+        self.warm_not_before = 0.0
         # BEFORE `dispose()`, and suppressing the task's own failure as well as
         # the cancellation: an engage that lands after the facade is gone would
         # otherwise hold a freshly spawned runtime resident with no viewer to
@@ -567,6 +623,17 @@ class DesktopSessionBridge:
         if self.watch_task is None or self.watch_task.done():
             self.watch_task = asyncio.create_task(self._expire_watches())
 
+    def _live_leases(self) -> list[DesktopSubscription]:
+        """The subscriptions holding a LIVE lease. Caller holds ``watch_lock``.
+
+        Extracted rather than inlined into :meth:`refresh_watch`, because the
+        lease-driven warm's retry loop has to re-ask exactly this question on
+        every pass — a second copy of the filter is how the trigger and its
+        retry would come to disagree about what "a live visible lease" means.
+        """
+        now = time.monotonic()
+        return [s for s in self.subscribers.values() if not s.overflow and s.expires > now]
+
     async def refresh_watch(self) -> None:
         """Recompute the aggregate watch lease, and warm for a VISIBLE one.
 
@@ -574,85 +641,224 @@ class DesktopSessionBridge:
         presence, and — for a live VISIBLE lease on a viewer with no runtime
         yet — that a runtime is created for it, off the request path. The
         second is the change argued in the branch below; the first is the
-        existing contract.
+        existing contract, and the record is written on EVERY beat rather than
+        only on the way into a warm (see the comment at the write).
         """
         async with self.watch_lock:
-            live = [
-                s
-                for s in self.subscribers.values()
-                if not s.overflow and s.expires > time.monotonic()
-            ]
+            live = self._live_leases()
             remote = self.remote
             if remote is None:
                 return
             visible = any(s.visible for s in live)
             can_notify = any(s.can_notify for s in live)
+            # RECORDED ON EVERY BEAT, COLD OR NOT, and gating only the WARM on
+            # `visible` is what makes the record correct rather than sloppy.
+            # `_dial` re-asserts whatever was recorded last (TTL-bounded), so a
+            # cold facade that skipped the write leaves the PREVIOUS pair
+            # standing: hide the window during the ~1 s a spawn takes and the
+            # runtime this warm creates counts a viewer who has gone, until the
+            # next beat corrects it (≤15 s) or the runtime-side lease expires
+            # (≤45 s, then the 3 s drain) — one idle runtime (~82 MB) held for
+            # an absent viewer. Against that, the write is a field assignment
+            # while cold (its RPC half is guarded by a connected client), and it
+            # keeps `_desktop_seen` fresh as well as truthful.
+            await remote.update_desktop_watch(visible=visible, can_notify=can_notify)
+            if not remote.is_cold or not visible:
+                return
+            # A VISIBLE LEASED VIEWER CREATES RESIDENCY, it no longer only
+            # preserves it, and that is the whole policy change here.
+            #
+            # Term 3 of `process._should_exit` already argues from "a user
+            # looking at the session is about to type", and a desktop
+            # viewer counts as one only while this lease is live AND the
+            # window says visible (`server.py::attach_clients`). That
+            # premise used to reach only a runtime that ALREADY existed, so
+            # the first session-scoped action after one exited paid the
+            # whole child spawn + handshake inline inside the user's click
+            # (measured 1415 ms median against 119 ms warm). Warming on the
+            # same lease closes that gap with the policy's own signal
+            # rather than a new one: the viewer the reaper would have kept
+            # alive now also causes one.
+            #
+            # PRESENCE IS RECORDED BEFORE THE WARM IS ARMED, and that is
+            # correctness, not bookkeeping. `_ensure_bound`'s dial
+            # re-asserts whatever `update_desktop_watch` last recorded, so
+            # recording it here is what makes the runtime this warm is
+            # about to create count the viewer from its FIRST tick.
+            # `update_desktop_watch` needs no client to record it (the RPC
+            # half is skipped while cold). Without it, the new runtime's
+            # `attach_clients()` is 0 for the whole handshake, the 3 s idle
+            # drain (`DEFAULT_GRACE_S`) runs against a viewer nothing ever
+            # asserted, and the runtime exits moments after the bind
+            # returns — whereupon the renderer's next 15 s heartbeat starts
+            # another. A spawn/exit cycle per heartbeat is strictly worse
+            # than the stall this removes, and the RAM it costs is the part
+            # that actually shows up.
+            #
+            # BOUNDS, because "create a runtime for anyone watching" is a
+            # residency change and unbounded residency is the failure mode.
+            # The first two are the existing ones; the third is this trigger's
+            # own, and the fourth is what keeps a failure from becoming a loop.
+            #
+            # * ONE RUNTIME PER SESSION, held by the EXISTING lock. Every
+            #   attempt is `warm()` — the single engage path that is
+            #   `_ensure_bound`, the only place a viewer creates a process — so
+            #   a command arriving mid-warm and two attempts contending all
+            #   serialise on `_bind_lock` and the loser returns at its own
+            #   `is_cold` check. No second spawn path, and no per-subscriber
+            #   multiplication: the bridge is per-session and one task per
+            #   bridge is `warm()`'s own rule.
+            # * THE LEASE IS THE LIFETIME, and the constant that decides it is
+            #   the RUNTIME-side `DESKTOP_WATCH_LEASE_S`
+            #   (`session/runtime/types.py`) — the same value as `WATCH_TTL`
+            #   (45 s) by agreement today rather than by construction, read a
+            #   third time by the dial (`attached.py::_dial`). `WATCH_TTL` here
+            #   is the BRIDGE's subscription lease, which is what the renderer
+            #   renews. Stop heartbeating — window closed, killed, navigated
+            #   away — and the lease expires, the runtime falls out of term 3,
+            #   and the existing drain reaps it exactly as it reaps one this
+            #   change did not start; nothing here holds a process past the
+            #   lease.
+            # * THE AGGREGATE IS THE FOCUSED WINDOW, NOT ONE RUNTIME. One
+            #   runtime per session says nothing about how many SESSIONS can be
+            #   warm at once: `BRIDGE_COUNT` (64) sessions can hold a bridge
+            #   while their event stream is open, and only eviction at
+            #   `users == 0` bounds them. What makes "no cap" safe is that
+            #   `visible` is `visibilityState === "visible" && hasFocus()` and
+            #   the app mounts ONE lease-bearing chat view per focused window,
+            #   so the warm is one runtime at a time — measured here at ~82 MB
+            #   idle for the runtime, against the ~283 MB `process.py` budgets
+            #   for one. A future that mounts several lease-bearing views at
+            #   once (a split pane, a per-pane lease, a "watching" surface that
+            #   asserts `visible` without focus) multiplies that by the number
+            #   of panes and NEEDS a real cap; the cap today is this gate, and
+            #   it is a consequence of the UI rather than of this code.
+            # * AN ATTEMPT THAT FAILED IS PACED. The retry loop (see
+            #   `_lease_warm_loop`) keeps a live lease's intent across attempts,
+            #   but a bind that could not start — the failing-spawn shape — waits
+            #   out a doubling backoff rather than re-engaging on every beat,
+            #   and an attempt that was refused before doing any work is retried
+            #   at the poll pace instead. Both numbers are argued on their
+            #   constants.
+            # * NOTHING ELSE CREATES ANYTHING. A hidden or notify-only
+            #   viewer is the `not visible` return above: `can_notify` is
+            #   delivery reachability, not attention, and a window nobody
+            #   is looking at is not about to type. Deliberately NARROWER
+            #   than term 3, which still counts `visible or can_notify` to
+            #   preserve an existing runtime — that policy is untouched.
+            #
+            # OFF THE REQUEST PATH: `_arm_lease_warm` schedules a task and
+            # returns, so `/watch` answers in the ~10 ms it always did and the
+            # heartbeat never pays the engage it triggers.
+            self._arm_lease_warm(remote)
+
+    def _arm_lease_warm(self, remote: AttachedSession) -> None:
+        """Start the lease-driven warm's retry loop, unless it is already running.
+
+        Called by :meth:`refresh_watch` while it holds ``watch_lock``. The
+        ``create_task`` has no ``await`` in front of it, which is what keeps the
+        heartbeat off the engage it triggers; the loop's first step engages.
+
+        ONE TASK PER BRIDGE, AND IT OUTLIVES THE BEAT THAT ARMED IT: the intent
+        it holds is the LEASE's, not the request's, so a heartbeat arriving
+        while an attempt is in flight — or inside a failure's backoff — must
+        leave the running task alone rather than start a second one. The
+        freshness of the lease is not sampled here for the same reason: the loop
+        re-asks it every pass, which is what lets a withdrawn lease end the
+        retries instead of being noticed only at the next beat.
+        """
+        if self.lease_warm_task is not None and not self.lease_warm_task.done():
+            return
+        self.lease_warm_task = asyncio.create_task(self._lease_warm_loop(remote))
+
+    def _clear_warm_backoff(self) -> None:
+        """Forget a previous failure's pace: the live intent was served.
+
+        Cleared rather than left to expire so the NEXT cold period — a fresh
+        intent, on the same or a new runtime — starts from the base backoff
+        instead of from whatever the last one had grown to.
+        """
+        self.warm_backoff_s = 0.0
+        self.warm_not_before = 0.0
+
+    async def _lease_warm_loop(self, remote: AttachedSession) -> None:
+        """Keep a live VISIBLE lease's warm until it is served or withdrawn.
+
+        WHY A LOOP RATHER THAN ONE ATTEMPT PER BEAT, which is how this started.
+        Two ways one attempt is silently lost, both ending in the cold bind the
+        warm exists to remove:
+
+        * **The facade cannot engage yet.** `_ensure_bound` returns at its own
+          ``_recovering`` guard — no error, and no task to report it — and a
+          viewer that has just lost its runtime sits there for up to
+          ``COLD_FALLBACK_S`` (8 s; ~9.4 s measured end to end on this path,
+          because the loop pays dial pacing on the way out). An attempt landing
+          in that window does NOTHING, and the renderer's next beat is 15 s
+          away while the user usually clicks first. What marks this as not a
+          failure is exactly that it did no work.
+        * **An engage is already in flight** (`engage_in_flight`) — the lock
+          held by another subscriber's `attach_existing`, say — so `warm()`
+          starts no task and, again, nothing retries for a whole beat.
+
+        A FAILED attempt is the third case and is handled differently, because
+        it DID work: it spawned. Retrying that on the beat is the spawn loop a
+        heartbeat alone could drive, so it waits out a doubling backoff (base
+        and ceiling argued on the constants) and is logged, since a bind that
+        keeps failing has no other surface on this path.
+
+        NOT A SECOND SPAWN PATH: every attempt is `warm()`, the ordinary
+        background engage through `_ensure_bound` and the one `_bind_lock`. This
+        loop decides only WHEN to ask, never how.
+
+        BOUNDED BY THE LEASE, WHICH IS THE POINT. It exits the moment the viewer
+        is bound, the facade is replaced, or no live visible lease remains — and
+        it re-asks all three on every pass rather than trusting the state at arm
+        time, which is also why a backoff is waited out in slices rather than in
+        one long sleep: a lease withdrawn during the wait ends the retries
+        within one slice instead of after up to two minutes of them.
+        """
+        while True:
+            if self.remote is not remote:
+                return
             if not remote.is_cold:
-                await remote.update_desktop_watch(visible=visible, can_notify=can_notify)
-            elif visible:
-                # A VISIBLE LEASED VIEWER CREATES RESIDENCY, it no longer only
-                # preserves it, and that is the whole policy change here.
-                #
-                # Term 3 of `process._should_exit` already argues from "a user
-                # looking at the session is about to type", and a desktop
-                # viewer counts as one only while this lease is live AND the
-                # window says visible (`server.py::attach_clients`). That
-                # premise used to reach only a runtime that ALREADY existed, so
-                # the first session-scoped action after one exited paid the
-                # whole child spawn + handshake inline inside the user's click
-                # (measured 1415 ms median against 119 ms warm). Warming on the
-                # same lease closes that gap with the policy's own signal
-                # rather than a new one: the viewer the reaper would have kept
-                # alive now also causes one.
-                #
-                # PRESENCE IS RECORDED BEFORE THE SPAWN, and that is
-                # correctness, not bookkeeping. `_ensure_bound`'s dial
-                # re-asserts whatever `update_desktop_watch` last recorded, so
-                # recording it here is what makes the runtime this warm is
-                # about to create count the viewer from its FIRST tick.
-                # `update_desktop_watch` needs no client to record it (the RPC
-                # half is skipped while cold). Without it, the new runtime's
-                # `attach_clients()` is 0 for the whole handshake, the 3 s idle
-                # drain (`DEFAULT_GRACE_S`) runs against a viewer nothing ever
-                # asserted, and the runtime exits moments after the bind
-                # returns — whereupon the renderer's next 15 s heartbeat starts
-                # another. A spawn/exit cycle per heartbeat is strictly worse
-                # than the stall this removes, and the RAM it costs is the part
-                # that actually shows up.
-                #
-                # BOUNDS, because "create a runtime for anyone watching" is a
-                # residency change and unbounded residency is the failure mode:
-                #
-                # * ONE RUNTIME PER SESSION, held by the EXISTING lock.
-                #   `warm()` reuses `_ensure_bound` — the only place a viewer
-                #   creates a process — so a command arriving mid-warm and two
-                #   warms contending all serialise on `_bind_lock` and the
-                #   loser returns at its own `is_cold` check. No second spawn
-                #   path, and no per-subscriber multiplication: the bridge is
-                #   per-session and one task per bridge is `warm()`'s own
-                #   rule.
-                # * THE LEASE IS THE LIFETIME, and it is the EXISTING one.
-                #   `WATCH_TTL` (45 s) renewed by the renderer's visibility
-                #   heartbeat. Stop heartbeating — window closed, killed,
-                #   navigated away — and the lease expires, the runtime falls
-                #   out of term 3, and the existing drain reaps it exactly as
-                #   it reaps one this change did not start; nothing here holds
-                #   a process past the lease. So the only NEW residency is a
-                #   session a visible window is sitting on, which is the state
-                #   term 3 already prices: `process.py` budgets ~283 MB per
-                #   runtime, and an idle warmed one measured 82 MB RSS here.
-                # * NOTHING ELSE CREATES ANYTHING. A hidden or notify-only
-                #   viewer is this `elif`'s other branch: `can_notify` is
-                #   delivery reachability, not attention, and a window nobody
-                #   is looking at is not about to type. Deliberately NARROWER
-                #   than term 3, which still counts `visible or can_notify` to
-                #   preserve an existing runtime — that policy is untouched.
-                #
-                # OFF THE REQUEST PATH: `warm()` schedules a task and returns,
-                # so `/watch` answers in the ~10 ms it always did and the
-                # heartbeat never pays the engage it triggers.
-                await remote.update_desktop_watch(visible=True, can_notify=can_notify)
-                await self.warm()
+                self._clear_warm_backoff()
+                return
+            async with self.watch_lock:
+                visible = any(s.visible for s in self._live_leases())
+            if not visible:
+                return
+            remaining = self.warm_not_before - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(remaining, _LEASE_WARM_POLL_S))
+                continue
+            if remote.recovering or remote.engage_in_flight:
+                # REFUSED, NOT FAILED. No task was created (or one is already
+                # running that an attempt would only join) and no process was
+                # started, so this does not spend the failure backoff: the poll
+                # is what carries the intent across a recovery window.
+                await asyncio.sleep(_LEASE_WARM_POLL_S)
+                continue
+            await self.warm()
+            task = self.warm_task
+            if task is not None:
+                # Cancellation is deliberately NOT suppressed: `_detach` cancels
+                # this loop and the engage under it, and a cancelled engage must
+                # end this loop rather than be read as a settled failure.
+                with contextlib.suppress(Exception):
+                    await task
+            if not remote.is_cold:
+                self._clear_warm_backoff()
+                return
+            self.warm_backoff_s = min(
+                self.warm_backoff_s * 2 if self.warm_backoff_s else _LEASE_WARM_BACKOFF_S,
+                _LEASE_WARM_BACKOFF_CAP_S,
+            )
+            self.warm_not_before = time.monotonic() + self.warm_backoff_s
+            logger.debug(
+                "lease-driven warm for %s left the viewer cold; next attempt in %.0fs",
+                self.session_id,
+                self.warm_backoff_s,
+            )
 
     async def warm(self) -> str:
         """Start a runtime for this session without submitting any work.
@@ -690,12 +896,17 @@ class DesktopSessionBridge:
         subscription open, gets a warm that does nothing and a send that still
         pays the full cold engage.
 
-        TWO CALLERS, ONE SPAWN PATH. The renderer asks for it explicitly
-        (``POST /warm``, first keystroke) and :meth:`refresh_watch` starts it on
-        a LIVE VISIBLE watch lease, so a session being looked at is warm before
-        the first click rather than after it. Both go through the guards below
-        and through ``_ensure_bound``; a third one is how two answers to "is a
-        runtime needed" would drift apart.
+        TWO CALLERS, ONE SPAWN PATH, AND ONE RETRY RULE. The renderer asks for
+        it explicitly (``POST /warm``, first keystroke — a user action, so this
+        path is never paced) and the lease-driven retry loop
+        (:meth:`_lease_warm_loop`, armed by :meth:`refresh_watch`) asks on
+        behalf of a live VISIBLE watch lease, so a session being looked at is
+        warm before the first click rather than after it. Both go through the
+        guards below and through ``_ensure_bound``; a third one is how two
+        answers to "is a runtime needed" would drift apart. The ``done()``
+        clause below is what lets the loop tell a settled attempt from a live
+        one, and it is deliberately NOT where the pacing lives: a retry that
+        no user is behind belongs to the loop, which owns the backoff.
 
         THERE IS NO ``retire_if_unused`` COUNTERPART HERE, and its absence is a
         decision rather than an oversight. The TUI offers its runtime back
