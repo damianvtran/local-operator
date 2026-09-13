@@ -228,6 +228,23 @@ test("E2: role standby hands back every debugger session and surface", async () 
   }
 });
 
+test("E3: an UNPAIRED standby lands on the pairing form, not the standby card", async () => {
+  // A second install's first dial is exactly this: paired: false and standby,
+  // because the first install holds the wheel. Reporting "standby" there showed
+  // the user a card claiming a pairing that did not exist yet, with no way to
+  // enter the code — and pairing is the only thing that link can still do.
+  const worker = await loadWorker();
+  try {
+    await worker.deliver({ event: "hello_ack", proto: 1, paired: false, role: "standby" });
+    assert.equal(worker.connState(), "pairing");
+    // ... and once it IS paired, the same role reads as standby.
+    await worker.deliver({ event: "hello_ack", proto: 1, paired: true, role: "standby" });
+    assert.equal(worker.connState(), "standby");
+  } finally {
+    await worker.close();
+  }
+});
+
 test("E3: a live promotion re-arms the worker without a reconnect", async () => {
   const worker = await loadWorker();
   try {
