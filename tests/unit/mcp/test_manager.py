@@ -2459,6 +2459,155 @@ class TestChallengeIsBoundToTheTerminalRequest:
         assert await manager.server_supports_oauth_login(cfg) is True
 
 
+class TestTheStartupNetworkSubsetFollowsEveryClear:
+    """R1-2: the network subset is cleared wherever the failure itself is.
+
+    ``_startup_network`` is documented as a subset of ``_startup_failures`` "by
+    construction", and one site wrote ``_startup_failures`` directly instead of
+    going through ``_clear_startup_failure`` — so a server that healed kept its
+    name in the network set, and ``network_failures <= set(failures)`` (the
+    invariant ``mcp_status.all_failures_are_network`` reads) was False for any
+    caller that trusts it. Latent rather than user-visible today: both wiring
+    reads filter by ``name in failures``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_healed_server_leaves_neither_set(self, tmp_path: Path) -> None:
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url="https://srv.example/mcp")
+        manager._configs["remote"] = cfg
+        manager._note_startup_failure("remote", "network: cannot reach srv.example", network=True)
+        assert manager.startup_network_failures() == {"remote"}
+
+        # A real loop: ``_register_connection`` arms the connection watchdog.
+        manager._register_connection(_make_conn("remote", cfg))
+
+        assert manager.startup_failures() == {}
+        assert manager.startup_network_failures() == set()
+        assert manager.startup_network_failures() <= set(manager.startup_failures())
+        await manager.disconnect_all()
+
+
+class TestAnObservedChallengeOutranksTheTransportLabel:
+    """Q1-1: a peer that ANSWERED must not be reported as the network failing.
+
+    QA measured a reachable, answering 401 peer rendering as ``network: no
+    response from <host> (timed out)`` in the majority of 29 runs while the
+    stub's own request log showed the initialize POST had received its 401: the
+    SDK's initialize died inside its own task group, the transport gave up as a
+    bare cancellation, and the watcher's ``begin`` hook had already cleared the
+    challenge the retry never answered. The contract this change carries ("a
+    reachable 401 must not be called a network failure") therefore held only in
+    the minority of runs.
+
+    The transport-failure arm is the only caller that reads the LATENT
+    observation (:attr:`_AuthChallengeWatcher.saw_challenge`); every other
+    classifier keeps F5's last-request rule, which the test below pins on the
+    same watcher state.
+    """
+
+    URL = "https://srv.example/mcp"
+
+    def _response(self, status: int) -> Any:
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=self.URL))
+
+    async def _challenged_then_dark(self) -> Any:
+        """A watcher whose peer answered 401 and whose retry never answered."""
+        from local_operator.mcp.manager import _AuthChallengeWatcher
+
+        watcher = _AuthChallengeWatcher(self.URL)
+        await watcher.begin(SimpleNamespace(url=self.URL))
+        await watcher.observe(self._response(401))  # the initialize POST answered
+        await watcher.begin(SimpleNamespace(url=self.URL))  # the retry starts ...
+        return watcher
+
+    def _oauth_capable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make the eligibility gate and discovery answer without the network."""
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod.OAUTH_CHALLENGES.clear()
+        auth_mod.record_oauth_challenge(self.URL, oauth_available=True)
+
+        async def discovery(url: str) -> object:
+            return object()
+
+        monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", discovery)
+        monkeypatch.setattr(auth_mod, "server_has_stored_grant", lambda url, store=None: False)
+
+    @pytest.mark.asyncio
+    async def test_the_latent_observation_is_only_read_when_asked_for_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default stays F5's; the transport arm opts in explicitly."""
+        from local_operator.mcp.config import MCPHttpServerConfig
+
+        self._oauth_capable(monkeypatch)
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        watcher = await self._challenged_then_dark()
+        assert watcher.status_code is None, "F5: the retry that never answered clears it"
+        assert watcher.saw_challenge == 401
+
+        assert await manager._challenge_error(cfg, watcher) is None
+        exc = await manager._challenge_error(cfg, watcher, prefer_observed=True)
+        assert exc is not None
+        assert exc.status_code == 401
+        assert exc.oauth_available is True
+
+    @pytest.mark.asyncio
+    async def test_the_connect_records_the_auth_failure_not_the_network(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the race QA measured, asserted on the recorded outcome.
+
+        The transport seam is stubbed with the deterministic sequence the real
+        SDK produces (answer 401, retry, die with no second response), so the
+        assertion is about the CLASSIFICATION and needs no socket.
+        """
+        from local_operator.mcp.config import MCPHttpServerConfig
+        from local_operator.mcp.manager import NETWORK_FAILURE_MARKER
+
+        self._oauth_capable(monkeypatch)
+        monkeypatch.setattr("local_operator.mcp.manager.STARTUP_GATE_MS", 1)
+
+        manager = McpManager(str(tmp_path))
+        cfg = MCPHttpServerConfig(url=self.URL)
+        settled = asyncio.Event()
+        manager.on_startup_settled = settled.set
+
+        async def answering_then_dying(
+            stack: Any,
+            name: str,
+            cfg_: Any,
+            timeout_s: float | None,
+            stderr_log: Any,
+            *,
+            interactive: bool = False,
+            challenge_watcher: Any = None,
+        ) -> ServerConnection:
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            await challenge_watcher.observe(self._response(401))
+            await challenge_watcher.begin(SimpleNamespace(url=self.URL))
+            # Past the gate, so the failure lands on the deferred path.
+            await asyncio.sleep(0.05)
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(manager, "_open_transport_and_session", answering_then_dying)
+        monkeypatch.setattr(manager, "_ensure_oauth_fresh", lambda *a, **k: asyncio.sleep(0))
+
+        await manager._connect_round({"remote": cfg}, {})
+        await asyncio.wait_for(settled.wait(), timeout=10)
+
+        failures = manager.startup_failures()
+        assert set(failures) == {"remote"}, failures
+        assert failures["remote"] == "/mcp login remote to authorize"
+        assert NETWORK_FAILURE_MARKER not in failures["remote"]
+        assert manager.startup_network_failures() == set()
+        await manager.disconnect_all()
+
+
 class TestMcpAuthRecoveryHint:
     """The remedy an MCP auth failure earns, and the one it must never get.
 

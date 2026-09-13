@@ -75,6 +75,17 @@ URL = "https://mcp.example.com/mcp"
 HOST = "mcp.example.com"
 
 
+def _dispatcher_message(code: int) -> str:
+    """The client dispatcher's own sentence for one transport code.
+
+    Held as literals next to :data:`_TRANSPORT_RPC_MESSAGE` on purpose: a test
+    that read the manager's own bounds back would pass through any wrong value
+    they acquired together. ``initialize`` is the method the connect actually
+    issues, so it is the wording a real failure carries.
+    """
+    return {-32000: "Connection closed", -32001: "Request 'initialize' timed out"}[code]
+
+
 class TestTheClassifierNamesTheLayer:
     """The real exception types, classified — not a hand-built stand-in.
 
@@ -196,16 +207,50 @@ class TestTheClassifierNamesTheLayer:
     def test_the_sdk_transport_codes_render_as_network_failures(
         self, code: int, expected: str
     ) -> None:
-        """``-32000``/``-32001`` are the CLIENT dispatcher's own transport codes.
+        """``-32000``/``-32001`` in the dispatcher's OWN wording are transport.
 
         They are what a request that died on a live-but-breaking transport comes
         back as (``Connection closed``, ``Request 'initialize' timed out``), and
         rendering their sentence verbatim is defect 2.
+
+        The code alone is NOT sufficient and the message is half the match: both
+        numbers sit in JSON-RPC's implementation-defined SERVER range, and the
+        SDK raises the same ``MCPError`` for a peer's own error response (agent
+        review R1-1 — see
+        :meth:`test_a_peer_reusing_the_transport_code_is_not_a_network_failure`).
         """
-        exc = MCPError(code, "whatever the SDK said")
+        assert _m()._TRANSPORT_RPC_MESSAGE[code] is not None
+        exc = MCPError(code, _dispatcher_message(code))
         text = _m()._transport_failure_text(exc, URL)
         assert text is not None and text.startswith(expected), text
         assert HOST in text
+
+    @pytest.mark.parametrize(
+        ("code", "message"),
+        [
+            (-32000, "Internal error"),
+            (-32000, "Connection reset by peer"),
+            (-32001, "Internal error"),
+            (-32001, "upstream request failed"),
+        ],
+    )
+    def test_a_peer_reusing_the_transport_code_is_not_a_network_failure(
+        self, code: int, message: str
+    ) -> None:
+        """A peer's error response is not the wire failing, even at those codes.
+
+        ``jsonrpc_dispatcher`` re-raises an error response's ``ErrorData``
+        verbatim as the SAME ``MCPError`` the client mints for its own transport
+        contract, so a server answering ``-32000``/``-32001`` with its own text
+        used to render as ``network: the connection to <host> closed`` AND be
+        recorded in ``network_failures`` — several such servers made the toast
+        claim ``failed (network)`` over a healthy link. Reproduced before the
+        fix with ``MCPError.from_error_data(ErrorData(code=-32000, message=
+        "Internal error"))`` (agent review R1-1).
+        """
+        exc = MCPError(code, message)
+        assert _m()._transport_failure_text(exc, URL) is None
+        assert _m()._is_network_failure(exc, URL) is False
 
     def test_the_two_transport_codes_are_pinned_against_the_installed_sdk(self) -> None:
         """Pin the NUMBERS, not just our copy of them.
@@ -264,9 +309,7 @@ class TestTheCopyContract:
         exactly the shape that reports nothing useful.
         """
         exc = httpx.ConnectError("All connection attempts failed")
-        assert _m()._transport_failure_text(exc) == (
-            "the transport failed before the server answered (unreachable)"
-        )
+        assert _m()._transport_failure_text(exc) == ("transport failed before the server answered")
         assert _m()._is_network_failure(exc) is False
         assert _m()._transport_failure_text(exc, URL) == "network: cannot reach " + HOST
         assert _m()._is_network_failure(exc, URL) is True
@@ -287,7 +330,7 @@ class TestTheCopyContract:
         """
         exc = _m().McpTransportError(None, "closed")
         text = _m()._transport_failure_text(exc)
-        assert text == "the transport failed before the server answered (closed)"
+        assert text == "transport closed before the server answered"
         assert _m().NETWORK_FAILURE_MARKER not in text
         assert _m()._is_network_failure(exc) is False
 
