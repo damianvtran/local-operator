@@ -404,7 +404,17 @@ async def test_secret_ask_projects_a_free_text_card_without_leaking_the_value() 
             assert pending.secret is True
             wire = handle._fold.projection.to_json()
             assert wire["pending"]["secret"] is True
-            assert "sk-" not in json.dumps(wire)
+            # Scoped to the PENDING PAYLOAD, not the whole serialised
+            # projection. The projection also carries `cwd`, so the whole-dict
+            # form matched the checkout's own path and failed in any worktree
+            # whose name happened to contain "sk-" — which is how it failed in
+            # `lo-mobile-a`sk-`collapse`, reporting a credential leak that was
+            # really the directory name. Narrowing it does not weaken what it
+            # protects: the secret only ever reaches the projection through
+            # `pending`, so that is the surface where a leak would appear, and
+            # the assertion still fails if the value lands in the title, the
+            # detail, the options, or any field added to the payload later.
+            assert "sk-" not in json.dumps(wire["pending"])
             request_id = pending.request_id
 
             reply = await control.send("ask_answer", request_id=request_id, value="sk-supersecret")

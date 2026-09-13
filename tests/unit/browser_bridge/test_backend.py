@@ -209,3 +209,36 @@ def test_origin_not_allowed_error_teaches_the_access_flow() -> None:
     # The agent is the PRIMARY notification channel: Chrome's banner is
     # best-effort on macOS, so the instruction to notify must be explicit.
     assert "NOTIFY THE USER" in text
+
+
+def test_a_replaced_wire_is_not_reported_as_an_absent_browser() -> None:
+    """Design D3-3: the CODE is ambiguous here, the daemon's `phase` is not.
+
+    Both A1 fence answers (send deadline, lost answer) report
+    `extension_disconnected`, whose copy tells the reader no browser is attached
+    and to ask the user to open one — false when the extension has just
+    re-dialled, and it resolves in about a second, so the copy names an action
+    that does not apply. The sibling answers carry `phase: send|response` and
+    render the honest unresponsive copy; these two must route by their own
+    phase, and the same code WITHOUT it keeps the absent-browser copy.
+    """
+    replaced = BridgeError(
+        ErrorCode.EXTENSION_DISCONNECTED,
+        "read was not delivered: the extension replaced its connection while the "
+        "command was being written",
+        {"phase": "replaced"},
+    )
+
+    text = format_error(replaced, action="read")
+
+    assert "replaced its connection" in text
+    assert "retry the action" in text
+    assert "no user action is needed" in text
+    assert "no browser is attached" not in text
+    assert "open their browser" not in text
+    assert "lop browser install" not in text
+
+    # The control: the same code and message without the phase is still the
+    # absent-browser answer, which is what a genuinely closed browser gets.
+    plain = BridgeError(ErrorCode.EXTENSION_DISCONNECTED, "extension not connected")
+    assert "no browser is attached" in format_error(plain)

@@ -481,7 +481,7 @@ async def test_an_engage_that_lands_after_dispose_does_not_bind(
         parked.set()
         await release.wait()
 
-    def fake_find(config_dir, session_id):  # noqa: ANN001
+    def fake_find(config_dir, session_id, **_probe):  # noqa: ANN001
         nonlocal looked_for_record
         looked_for_record = True
         return None, None

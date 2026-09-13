@@ -57,6 +57,17 @@ systems rather than defensiveness:
   *backend* runs on, which is not necessarily where the user is. This module is
   imported only from ``tui/`` for that reason, and :class:`Notifier` still
   refuses to construct without a live driver sink.
+
+  The server now *composes* notification content for that UI, which is a
+  different verb and does not weaken the rule. ``local_operator/notifications/
+  compose.py`` renders ``{title, status, body}`` from this module's vocabulary
+  and puts it on the desktop wire as a ``notification`` frame; the Electron
+  main process decides whether to raise a banner and raises it. Only the
+  backend can read ``display.notification_session_name``, so only the backend
+  can decide whether a banner may carry a session's name or a line of its
+  content — but nothing outside ``tui/`` writes an escape sequence, spawns
+  ``notify-send`` or constructs an OS notification. Composition lives in its
+  own module rather than here precisely so that this import rule stays a rule.
 - **Only when unfocused** (:attr:`Notifier.set_focused`). A toast for a session
   the user is already staring at is pure interruption; Textual reports focus
   through ``AppFocus``/``AppBlur``, which every terminal here supports.
@@ -1044,7 +1055,7 @@ class Notifier:
         """Record terminal focus, from ``AppFocus``/``AppBlur``."""
         self._focused = focused
 
-    def notify_turn_complete(self, *, running_children: int) -> bool:
+    def notify_turn_complete(self, *, running_children: int, body: str = "") -> bool:
         """The parent finished a turn. Returns whether a toast was delivered.
 
         ``running_children`` is the count of live ``task`` jobs, and it is the
@@ -1065,9 +1076,9 @@ class Notifier:
         """
         if running_children > 0:
             return False
-        return self.send("complete")
+        return self.send("complete", body=body)
 
-    def notify_waiting(self, kind: Literal["approval", "ask"]) -> bool:
+    def notify_waiting(self, kind: Literal["approval", "ask"], *, body: str = "") -> bool:
         """The turn is parked on the user. Returns whether a toast was delivered.
 
         Unconditional on subagents, unlike completion: an unanswered approval
@@ -1075,19 +1086,28 @@ class Notifier:
         where a missed notification costs the most — the session sits parked
         indefinitely, which is exactly how an agent run gets abandoned.
         """
-        return self.send(kind)
+        return self.send(kind, body=body)
 
-    def notify_error(self) -> bool:
+    def notify_error(self, *, body: str = "") -> bool:
         """The turn stopped with an error. Returns whether a toast was delivered."""
-        return self.send("error")
+        return self.send("error", body=body)
 
-    def send(self, kind: NotifyKind) -> bool:
+    def send(self, kind: NotifyKind, *, body: str = "") -> bool:
         """Deliver one notification of ``kind``; return whether anything was sent.
 
         The gates, in order of cheapness: disabled, focused (nothing to tell a
         user who is looking at the session), then delivery. cmux is checked
         before the in-band write because cmux hosts Ghostty — both paths would
         otherwise fire and the user would be told twice about one event.
+
+        ``body`` overrides the house sentence from :data:`BODIES` when supplied.
+        It arrives already composed and sanitised by ``notifications.compose``,
+        and this method does NOT re-derive the privacy gate for it: the composer
+        read the flag at the same instant it read the text, and a second read
+        here could disagree with the very text it is gating. It closes an
+        asymmetry the app had — the background OBSERVER path already sent a
+        transcript snippet, so a user got a richer banner for a session they
+        were not in than for the one they were.
         """
         if not self._enabled:
             return False
@@ -1099,17 +1119,32 @@ class Notifier:
         # name for the rest of a session that had just turned it off.
         title = (self._label if session_names_in_notifications() else "") or APP_NAME
         subtitle = CONTEXTS.get(kind, CONTEXT_COMPLETE)
-        body = BODIES.get(kind, BODY_COMPLETE)
+        #: The HOUSE sentence, and the only body the in-band leg below is ever
+        #: allowed to carry. Kept in its own name so the two cannot be confused
+        #: by a later edit.
+        house = BODIES.get(kind, BODY_COMPLETE)
+        composed = body or house
 
         surface = cmux_surface_id(self._env)
         if surface is not None:
-            _spawn_detached(cmux_command(surface, title, subtitle, body))
+            _spawn_detached(cmux_command(surface, title, subtitle, composed))
             return True
 
+        # THE OSC LEG KEEPS THE HOUSE SENTENCE, deliberately, and this is the
+        # one place in this method where the composed body must not be
+        # substituted. `notification_writes` builds an in-band escape sequence,
+        # and an escape sequence is the one wire here where model-written text
+        # could close the sequence early and leave the remainder executing as
+        # terminal commands. `sanitize_text` already strips ESC and BEL, so this
+        # is defence in depth rather than the only guard — but "model text never
+        # reaches an OSC string" is an invariant worth keeping structurally
+        # instead of resting on one regex. The cmux leg above and the D-Bus leg
+        # below take the composed body because both pass it as an argv element,
+        # where the escaping is the OS's and the risk is different.
         for chunk in notification_writes(
             self._protocol,
             title,
-            body,
+            house,
             in_tmux=is_inside_tmux(self._env),
             in_zellij=is_inside_zellij(self._env),
         ):
@@ -1118,5 +1153,5 @@ class Notifier:
         if should_use_desktop_fallback(self._protocol, self._platform, self._env):
             notifier = shutil.which("notify-send")
             if notifier:
-                _spawn_detached(desktop_notify_command(notifier, title, body, URGENCY))
+                _spawn_detached(desktop_notify_command(notifier, title, composed, URGENCY))
         return True

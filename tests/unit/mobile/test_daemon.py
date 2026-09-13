@@ -341,6 +341,104 @@ def test_subagent_summary_detail_and_child_history_are_isolated(tmp_path, monkey
     assert client.get("/api/sessions/root-session/agents/not-related").status_code == 404
 
 
+def test_runtime_hosted_roster_routes_the_child_history_end_to_end(tmp_path, monkeypatch) -> None:
+    """A runtime-hosted session must publish its children's session dirs.
+
+    ``/agents/{job}/history`` resolves a child through the folded roster's
+    ``session_id``, and the ONLY writer of that field is
+    ``ProjectionFold.set_subagent_details``. Since the viewer/runtime split the
+    phone's sessions are hosted by ``ServingSessionHandle``, which mirrored the
+    TUI handle's state push but not its roster push -- and the event path can
+    never learn a child's session dir (``SubagentStartEvent`` carries no session
+    id), so every runtime-hosted session published ``session_id: null`` for
+    every child and the route 404'd for all of them. The summary/detail test
+    above HAND-BUILDS that row, which is why nothing caught it; this drives the
+    real producer and walks it out to the HTTP route.
+    """
+    from local_operator.harness.comms import SubagentComms
+    from local_operator.harness.types import Message, SubagentStartEvent
+    from local_operator.mobile.daemon import _projection_frame
+    from local_operator.mobile.types import _projection_from_json
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.transcript import Transcript
+    from tests.unit.harness.test_comms import FakeChild, FakeJobs, FakeParent
+    from tests.unit.session.runtime.test_serving import FakeSession
+
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    child_dir = cfg / "sessions" / "child-session"
+    grandchild_dir = cfg / "sessions" / "grandchild-session"
+    for directory, text, row_id in (
+        (child_dir, "child-only", "child-row"),
+        (grandchild_dir, "grandchild-only", "grandchild-row"),
+    ):
+        directory.mkdir(parents=True)
+        asyncio.run(Transcript(directory).append_message(Message.user(text, id=row_id)))
+
+    jobs = FakeJobs()
+    jobs.add("child-job", status="running")
+    jobs.add("grandchild-job", status="running")
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    comms.record_launch("child-job", "child", prompt="Inspect it.")
+    comms.attach("child-job", FakeChild(), child_dir)  # type: ignore[arg-type]
+    comms.record_launch("grandchild-job", "grandchild", parent_job_id="child-job")
+    comms.attach("grandchild-job", FakeChild(), grandchild_dir)  # type: ignore[arg-type]
+
+    async def build() -> tuple[SessionProjection, FakeSession]:
+        session = FakeSession()
+        session.session_id = "root-session"
+        session._subagent_comms = comms  # type: ignore[attr-defined]
+        handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+        handle.subscribe(lambda: None)
+        # The attach seed alone must publish the roster: a settled child sends
+        # no further event, so an event-only push leaves it unroutable for as
+        # long as the session stays quiet.
+        return handle.session_projection_seed, session
+
+    projection, session = asyncio.run(build())
+    rows = {row.job_id: row.session_id for row in projection.subagents}
+    # Nested children live only in the shared registry, so the walk must reach
+    # them too -- the phone opens a grandchild from the roster's Children.
+    assert rows == {"child-job": "child-session", "grandchild-job": "grandchild-session"}
+
+    record = SessionRecord(
+        pid=9,
+        kind="daemon",
+        session_id="root-session",
+        conversation_name="root",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=1,
+        control_key="k",
+        started_at=0.0,
+        heartbeat_at=0.0,
+    )
+    # The same boundary the daemon's dial loop crosses: the registrant
+    # serializes the frame and the daemon rebuilds it before capturing.
+    incoming = _projection_from_json(json.loads(json.dumps(_projection_frame(projection))), record)
+    daemon = MobileDaemon(port=0, password="pw123")
+    daemon.capture_subagent_details(incoming, record=record)
+
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+    history = client.get(
+        "/api/sessions/root-session/agents/child-job/history", params={"limit": 10}
+    )
+    assert history.status_code == 200
+    assert [entry["text"] for entry in history.json()["entries"]] == ["child-only"]
+    nested = client.get(
+        "/api/sessions/root-session/agents/grandchild-job/history", params={"limit": 10}
+    )
+    assert nested.status_code == 200
+    assert [entry["text"] for entry in nested.json()["entries"]] == ["grandchild-only"]
+
+    # A live child announcing itself through the root event stream must keep
+    # the same row (the event path rebuilds it without a session id).
+    session.emit(SubagentStartEvent(job_id="child-job", label="child"))
+    assert {row.job_id: row.session_id for row in projection.subagents} == rows
+
+
 def test_retained_summary_recapture_preserves_rich_detail_and_monotonic_version() -> None:
     """Wake/reconnect may recapture only the already-stripped retained summary."""
     daemon = MobileDaemon(port=0, password="pw123")

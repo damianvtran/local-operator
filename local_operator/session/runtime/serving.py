@@ -388,6 +388,12 @@ class ServingSessionHandle(SessionHandle):
         self._command_reservations = CommandReservations(session)
         self._unsubscribe_admitted_commands = self._command_reservations.subscribe_durable()
         self._disposing = False
+        #: Set once this handle has COMMITTED to retiring, by
+        #: :meth:`begin_retire`. Non-empty means the admission paths refuse (see
+        #: that method) — a runtime that is leaving must not start a turn it
+        #: will abort one await later. Deliberately never cleared: a retirement
+        #: is a one-way door for the process.
+        self._retiring_cause: str = ""
         #: Installed by the runtime process (``process.amain``): fires the
         #: process's stop event so a socket ``stop`` op exits the way SIGTERM
         #: does. ``None`` under a host that has no process to exit.
@@ -811,6 +817,17 @@ class ServingSessionHandle(SessionHandle):
         to ``self._session`` so the ordering (deny gates first) stays in one
         place and hosts cannot forget the claim release."""
         self._disposing = True
+        # The dispose rung of EVERY exit that is not a viewer-driven retirement:
+        # SIGTERM/SIGINT in ``amain``, the reaper's ``_clean_exit``, and a host
+        # that disposes in place. Recorded BEFORE the abort below so the turn's
+        # end event carries it (``_classify_cut_off`` reads it from the emitted
+        # event), and suppressed when a deliberate stop was already noted for
+        # this turn — the graceful ``stop`` op reaches here too, and relabelling
+        # a user's own cancel as an error is the worse mistake.
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause or "runtime-shutdown")
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1061,6 +1078,44 @@ class ServingSessionHandle(SessionHandle):
             return False
         return True
 
+    def begin_retire(self, cause: str, detail: str = "") -> bool:
+        """Commit this runtime to retiring, iff it is idle RIGHT NOW.
+
+        Sets ``_retiring_cause`` in the SAME synchronous step that asks
+        :meth:`may_refresh`, and from that instant the admission paths
+        (:meth:`prompt`, :meth:`receive_peer_message`) REFUSE rather than queue.
+        That is the whole point: both retire paths sample the predicate and then
+        act across an ``await`` — the reaper's stagger plus ``announce_retiring``
+        (which drains each viewer's writer), and ``dispose`` is async — so the
+        "idle" claim was only ever true at ONE instant, and a ``prompt`` or a
+        ``peer_message`` arriving in the gap opened a turn the dispose then
+        aborted (design §5.1). The latch makes the claim true by construction
+        rather than by timing.
+
+        ``cause`` names the retirement for the refusal and the log; the session
+        is told as well, so a turn aborted while retiring is labelled with the
+        retirement rather than a generic shutdown.
+        """
+        try:
+            reason = str(self.may_refresh() or "")
+        except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+            reason = "busy probe failed"
+        if reason:
+            return False
+        self._retiring_cause = cause or "retiring"
+        session = getattr(self, "_session", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(self._retiring_cause, detail)
+        return True
+
+    def _retiring_refusal(self) -> str:
+        """The refusal an admission gets once this runtime has committed to leaving."""
+        return (
+            f"the session runtime is retiring ({self._retiring_cause}); the message "
+            "was not admitted — send it again and the next engage runs the new build"
+        )
+
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
         ``""`` when it may.
@@ -1145,7 +1200,15 @@ class ServingSessionHandle(SessionHandle):
 
         Sync and non-raising by contract (see SessionHandle): called on the
         runtime loop from the ``stop`` dispatch, which acks right after.
+
+        DELIBERATE STOP vs PLANNED RETIREMENT, told apart HERE because both
+        reach this one rung. A retirement is driven by the runtime itself and
+        has already latched the handle (``begin_retire``) before calling this;
+        an un-latched call is therefore the user's own ``/stop`` or
+        ``lop stop``, and it must be recorded as such or the taxonomy (which
+        now requires positive evidence for ``interrupted``) would have to guess.
         """
+        self._note_deliberate_stop()
         self._deny_pending_gates()
         trigger = self.on_stop_requested
         if trigger is not None:
@@ -1162,6 +1225,31 @@ class ServingSessionHandle(SessionHandle):
                 logger.warning("session runtime: stop-path dispose failed", exc_info=True)
 
         self._loop.create_task(_dispose_in_place())
+
+    def _note_deliberate_stop(self) -> None:
+        """Record that the USER ended this turn, before anything tears it down.
+
+        ONE place for the three deliberate rungs of this handle (``stop``,
+        ``abort``, ``cancel``), because the verdict has to be written while the
+        act is still knowable: ``Session.dispose()`` notes ``disposed``
+        unconditionally, and an un-noted dispose therefore publishes the user's
+        own cancel as ``kind=error`` / ``cause=disposed`` (review round 1,
+        BLOCKER-1). ``abort`` is the phone's stop button and ``cancel`` its
+        supervised sibling; both are a person or a supervisor saying "stop",
+        and each was one teardown away from being reported as a failure.
+
+        Refused while a retirement is latched, matching ``request_stop``: the
+        runtime is already ending that turn for its own reason (a build flip)
+        and the cut-off verdict for it belongs to the retire path, which
+        recorded it when it latched. Non-raising by contract — it runs inside a
+        stop, and a stop must not fail because a host session has no say in its
+        own taxonomy.
+        """
+        if self._retiring_cause:
+            return
+        note = getattr(self._session, "note_deliberate_stop", None)
+        if callable(note):
+            note()
 
     def _deny_pending_gates(self) -> None:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -1304,6 +1392,19 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the state (and with it the child roster) ONCE at attach. Until
+        # the next event arrives this push is all a freshly attached phone
+        # renders, and a settled turn never sends another: without this an
+        # already-finished child stays unroutable (``session_id=None``) for as
+        # long as the session is quiet. Seeding cannot clobber the identity
+        # fields the projection already carries, but not because of
+        # ``set_state``'s None-skipping — ``set_subagent_details`` assigns every
+        # roster field unconditionally, ``row.session_id`` included, and bumps
+        # the version. It is safe because both sides read the SAME registry: the
+        # fold's rows and the seed's nodes each describe one child from
+        # ``SubagentComms``, so the republish writes the values the row already
+        # held.
+        self._refresh_state()
         return unsubscribe
 
     async def prompt(
@@ -1386,6 +1487,12 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        if self._retiring_cause:
+            # Refused, not queued: a turn admitted here is aborted one await
+            # later by the dispose that is already on its way, after the
+            # provider has been paid for whatever it managed to stream.
+            self._command_reservations.reject(command_id)
+            raise RuntimeError(self._retiring_refusal())
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
             self._command_reservations.reject(command_id)
             raise RuntimeError(
@@ -1775,6 +1882,12 @@ class ServingSessionHandle(SessionHandle):
         # steer() does, so an attached phone paints the peer card immediately
         # rather than waiting for the next MessageStartEvent.
         self._check_loop_thread()
+        # A retiring runtime must not START a turn it will abort one await
+        # later. The QUIET record-only delivery (``mailbox``, no wake) is
+        # deliberately still admitted: it opens no turn, and refusing it would
+        # drop a durable note the sender was promised it had delivered.
+        if self._retiring_cause and (wake or mode != "mailbox"):
+            raise RuntimeError(self._retiring_refusal())
         detail = await self._session.receive_peer_message(
             text, mode=mode, wake=wake, sender=sender or {}
         )
@@ -1817,6 +1930,11 @@ class ServingSessionHandle(SessionHandle):
         started it), so they are named too rather than implied stopped.
         """
         self._check_loop_thread()
+        # The phone's stop button is the user's own act, so the verdict is
+        # recorded before the turn is cut (see `_note_deliberate_stop`): the
+        # turn ends aborted either way, and what this decides is whether that
+        # abort reads as the user's stop or as a failure.
+        self._note_deliberate_stop()
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
         # THE PARENT FIRST, THEN THE CHILDREN. A child settling hands its
@@ -1959,6 +2077,11 @@ class ServingSessionHandle(SessionHandle):
         request = getattr(self._session, "request_graceful_cancel", None)
         if not callable(request):
             raise ValueError("this session cannot cancel at a tool boundary")
+        # A supervisor's cancel is deliberate too, and it ends the turn the same
+        # way (`harness/loop.py` ends it aborted) — so it records the same
+        # verdict as the user's own stop rather than letting a later teardown
+        # publish it as a cut-off failure (review round 1, BLOCKER-1).
+        self._note_deliberate_stop()
         request(reason)
         return "cancelling at the next tool boundary"
 
@@ -2299,7 +2422,6 @@ class ServingSessionHandle(SessionHandle):
         try:
             from local_operator.tui.notify import (
                 APP_NAME,
-                BODIES,
                 CONTEXTS,
                 detached_notify,
                 sanitize_text,
@@ -2330,22 +2452,17 @@ class ServingSessionHandle(SessionHandle):
             # render as the bare word "question" with no hint it was a
             # question rather than an approval.
             #
-            # NOT `f"{title}: {detail}"`. A tool's `describe_approval` already
-            # leads with its own action word (`_describe_path_approval` emits
-            # "write: /path"), and the title IS the tool name, so prefixing
-            # rendered every approval toast as "write: write: /path" — on the
-            # release's headline surface, every time (round 4, Q3).
-            subject = (detail or "").strip()
-            if not subject:
-                # No description at all: the tool name alone ("write") says
-                # less than the shared vocabulary below, so leave it empty and
-                # let BODIES answer.
-                subject = ""
-            elif title and not subject.lower().startswith(title.lower()):
-                subject = f"{title}: {subject}".strip().rstrip(":").strip()
+            # Composed by `notifications.compose.gate_body` rather than inline,
+            # so this leg and every other gate surface cannot drift: the rule it
+            # carries (never `f"{title}: {detail}"`, because a tool's
+            # `describe_approval` already leads with its own action word and the
+            # title IS the tool name — round 4, Q3) is one that was fixed here
+            # once and would have to be re-fixed in each new surface otherwise.
+            from local_operator.notifications import gate_body
+
             detached_notify(
                 name,
-                subject or BODIES.get(kind, ""),
+                gate_body(kind, title, detail),
                 session_id=self._session_id_for_resume(),
                 subtitle=CONTEXTS.get(kind, ""),
             )
@@ -2393,9 +2510,45 @@ class ServingSessionHandle(SessionHandle):
             # into the queue, so both surfaces can never disagree about which
             # card is current.
             front = self._projection.pending
-            store.mutate(pending_gate=front.to_json() if front is not None else None)
+            payload = front.to_json() if front is not None else None
+            if payload is not None:
+                # The card gains the session's name so a DESKTOP banner for it
+                # can be triaged: "Waiting for approval" with three sessions
+                # open names none of them (design round 1, D3). Stamped here
+                # rather than inside `PendingRequest` because the name is a
+                # property of the SESSION, not of the question, and because the
+                # privacy gate belongs on the publication boundary where every
+                # other notification fact is decided.
+                payload["session_name"] = self._notifiable_session_name()
+            store.mutate(pending_gate=payload)
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
+
+    def _notifiable_session_name(self) -> str:
+        """This conversation's name, or ``""`` when banners may not carry it.
+
+        One helper for both gate-publication sites, because the privacy rule
+        must not be able to hold on one and not the other — that asymmetry is
+        exactly the defect ``notify.py``'s own flag documentation records
+        (review round 1, M2: a flag that governed only some banners made its
+        settings copy false).
+
+        Sanitised on the way out for the same reason every other name-bearing
+        path sanitises: it is model-written and reaches argv and an AppleScript
+        literal on the surfaces that render it.
+        """
+        try:
+            from local_operator.tui.notify import (
+                sanitize_text,
+                session_names_in_notifications,
+            )
+
+            if not session_names_in_notifications():
+                return ""
+            return sanitize_text(getattr(self._session, "conversation_name", "") or "")
+        except Exception:  # noqa: BLE001 — a name is chrome; the gate is not
+            logger.debug("could not resolve the gate's session name", exc_info=True)
+            return ""
 
     async def fork_snapshot(self, message: str) -> dict[str, Any]:
         """Snapshot THIS authenticated owner, never a client-supplied path/id."""
@@ -4093,6 +4246,21 @@ class ServingSessionHandle(SessionHandle):
             # lifecycle events are authoritative; ``_reconcile_streaming``
             # covers attach and command boundaries.
         )
+        # Publish the child roster beside the session state, the way the TUI
+        # host does (``mobile/tui_handle.py::_refresh_state``). The folded
+        # projection's per-child ``session_id`` is the ONLY route to
+        # ``/api/sessions/{sid}/agents/{job}/history``: the event path cannot
+        # learn a child's session directory (``SubagentStartEvent`` carries no
+        # session id, so those rows are born with ``session_id=None``), and the
+        # registry in ``SubagentComms`` is the only place that knows it. Both
+        # hosts must therefore agree about the same row, or a runtime-hosted
+        # session 404s every child transcript while a TUI-hosted one serves it.
+        # The cost is the one the TUI already pays per folded event (one
+        # registry walk plus a bounded copy); no child transcript ever leaves
+        # with it.
+        comms = getattr(self._session, "_subagent_comms", None)
+        if comms is not None:
+            self._fold.set_subagent_details(comms)
 
     def _reconcile_streaming(self) -> None:
         """Seed/align ``streaming`` from the session flag at attach and command

@@ -42,7 +42,7 @@ from local_operator.compaction.cutpoint import (
     elision_notice_text,
     extract_preserved_user_turns,
 )
-from local_operator.harness.types import Message, ModelSpec, TextContent
+from local_operator.harness.types import CustomMessage, Message, ModelSpec, TextContent
 from local_operator.session.session import Session, _default_convert_to_llm
 from local_operator.session.transcript import Transcript
 
@@ -57,6 +57,15 @@ CONSTRAINT = "NEVER touch billing.py"
 #: Stands in for the repeated system/team brief that dominated the real
 #: session's preserved block (79 of 171 turns, 1.27 MB of 1.45 MB).
 STATE_TEXT = "[session-state]\n## Available tools\nbash, read, write"
+
+#: The legacy shape QA measured on the operator's own session: a switch notice
+#: written before the ``harness_injected`` stamp existed, so it is a plain
+#: ``role="user"`` row with NO ``provider_payload`` at all — and a compaction
+#: pass harvested eight copies of it into its marker.
+LEGACY_NOTICE_TEXT = (
+    "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+    "Reason: provider failure"
+)
 
 
 class ScriptedStream:
@@ -193,17 +202,20 @@ async def test_a_session_state_delivery_is_not_preserved_on_the_second_pass(tmp_
 
     The ORDERING here is the whole test, and getting it wrong makes the test
     vacuous. The injection must land in pass 1's KEPT window — i.e. be the last
-    thing before pass 1 — so that pass 1's commit rebuilds the context from the
-    RENDERED history and bakes it in as a plain ``Message(role="user")``. Only
-    then does pass 2 see the generational state the bug lives in, where the
-    injection's id is genuinely inside ``genuine_user_ids``.
+    thing before pass 1 — so that pass 1's commit runs over it at all. Pass 1
+    now RESTORES its identity (see ``_restore_custom_sources``), which the first
+    assertion checks; the second stages the state an older build left behind
+    (the same delivery as a plain stamped row) because that is the generational
+    shape pass 2 must refuse, and the delivery's id is genuinely inside
+    ``genuine_user_ids`` there, so the id-set test alone cannot exclude it.
 
     An earlier version of this test injected AFTER pass 1. The delivery was
     therefore still a ``CustomMessage`` when pass 2 built its id set, the id-set
     test excluded it for the wrong reason, and the test passed against a mutant
     with the provenance stamp removed — asserting the implementation back to
     itself. Verified under mutation: with ``_injected_user_message``'s stamp
-    deleted this now fails, and the pre-fix tree leaks the brief here.
+    deleted this fails on the staged plain copy, and the pre-fix tree leaks the
+    brief here.
     """
     session = make_session(tmp_path, ScriptedStream(["reply"] * 40))
     await session.prompt(f"{CONSTRAINT} " + "detail " * 30)
@@ -214,14 +226,40 @@ async def test_a_session_state_delivery_is_not_preserved_on_the_second_pass(tmp_
     await _inject_session_state(session)
     assert (await session.compact_now()).ran is True
 
-    # Pass 1 has now rewritten it into a plain user Message — the state the
-    # defeated discriminator could not see. Assert that rather than trust it.
-    baked = [
+    # Pass 1 no longer rewrites it into a plain user Message: the commit
+    # re-seats the delivery onto its SOURCE (``_restore_custom_sources``), so the
+    # live context holds the ``CustomMessage`` again and a fold keeps painting
+    # the receipt a resume paints. Assert that, because it is the newer half of
+    # the contract and the older half is staged below.
+    state_custom = next(
+        (
+            message
+            for message in session._context.messages
+            if isinstance(message, CustomMessage)
+            and STATE_TEXT in str((message.details or {}).get("text") or "")
+        ),
+        None,
+    )
+    assert state_custom is not None, "the delivery lost its identity across pass 1"
+    assert not [
         message
         for message in session._context.messages
         if isinstance(message, Message) and STATE_TEXT in (message.text or "")
-    ]
-    assert baked, "test premise void: the injection is not a plain Message after pass 1"
+    ], "pass 1 baked the delivery into the context as a plain user Message"
+
+    # Now stage the state an OLDER build left in a live context — the same
+    # delivery as a plain STAMPED row — because that generational shape is what
+    # pass 2 has to refuse, and identity preservation is precisely why a modern
+    # session never reaches it on its own. Substituting the rendered copy keeps
+    # the guard exercised against the shape it exists for (and keeps the id in
+    # ``genuine_user_ids``, so the id set alone cannot exclude it).
+    stamped = next(
+        message
+        for message in session._render_history(session._context.messages)
+        if isinstance(message, Message) and STATE_TEXT in (message.text or "")
+    )
+    session._context.messages[session._context.messages.index(state_custom)] = stamped
+    baked = [stamped]
     live_user_ids = {
         message.id
         for message in session._context.messages
@@ -407,6 +445,28 @@ def test_an_injection_is_shed_before_any_genuine_turn_is_evicted():
     notice = elision_notice_text(capped.genuine_dropped, capped.injections_dropped)
     assert notice is not None
     assert "harness-injected" in notice and "you wrote" not in notice
+
+
+def test_a_stored_legacy_notice_is_shed_as_an_injection():
+    """The read-path heal for a block an older build poisoned (QA Q1).
+
+    A notice written before the ``harness_injected`` stamp existed has no
+    provenance to look up — no stamp, and its journal row is an ordinary user
+    message — so a stored copy of one is shed on its TEXT. The count is an
+    injection drop, the bucket whose notice says "these were not authored by
+    the user", because the alternative (calling it a genuine drop) would tell
+    the model the operator's own words had left the context.
+    """
+    turns = [
+        {"id": "legacy-notice", "text": LEGACY_NOTICE_TEXT},
+        {"id": "mine", "text": CONSTRAINT},
+    ]
+
+    capped = cap_preserved_user_turns(turns, cap=1_000_000)
+
+    assert [t["id"] for t in capped.turns] == ["mine"]
+    assert capped.injections_dropped == 1
+    assert capped.genuine_dropped == 0
 
 
 def test_the_cap_is_a_token_budget_not_a_turn_count():

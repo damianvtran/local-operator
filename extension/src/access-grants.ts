@@ -11,11 +11,24 @@ import {
   validHostGrantSchema,
   validSiteGrantSchema,
 } from "./origin-policy";
+import { CHROME_API_DEADLINE_MS, deadline } from "./settle";
 import { withSessionMutation } from "./state";
 
 /** Persistent grants and the session approval queue share one worker-owned
  * mutation chain. The `Locked` helpers exist for approval-store, which already
- * owns that chain while committing the durable grant before queue receipts. */
+ * owns that chain while committing the durable grant before queue receipts.
+ *
+ * EVERY `chrome.storage.local.*` await below is wrapped in `deadline`, and that
+ * is load-bearing rather than defensive: `withSessionMutation` IS
+ * `withStore` (state.ts), i.e. these run on the SAME module-global lane as
+ * `putSurface`/`getSurfaces`/`touchSurface`, so every command of every session
+ * queues behind them. They are also command-reachable — the popup's Allow path
+ * goes `worker.ts` dispatch → `origins.ts` `resolveOrigin` →
+ * `approval-store.ts` `decideAccess` (inside `withSessionMutation`) →
+ * `grantExactOriginLocked`/`grantSiteLocked` here. One hung
+ * `chrome.storage.local.get` therefore parks the whole lane forever, which is
+ * the incident's exact shape on a path a user reaches by clicking a button.
+ * A new `await chrome.` added to this file without a `deadline` re-opens it. */
 
 function validGrant(value: unknown): value is HostGrant {
   return !!value && typeof value === "object" && !Array.isArray(value) &&
@@ -88,16 +101,24 @@ export function normalizedSiteGrants(value: unknown): SiteGrantsState | null {
 
 export async function grantExactOriginLocked(origin: string): Promise<boolean> {
   const url = new URL(origin);
-  const { origins = {}, hostGrants, siteGrants } = await chrome.storage.local.get([
-    "origins",
-    "hostGrants",
-    "siteGrants",
-  ]);
+  const { origins = {}, hostGrants, siteGrants } = (await deadline(
+    chrome.storage.local.get(["origins", "hostGrants", "siteGrants"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.get(origins, hostGrants, siteGrants)",
+  )) as {
+    origins?: Record<string, string>;
+    hostGrants?: unknown;
+    siteGrants?: unknown;
+  };
   // A broad grant already covers this exact origin. Do not recreate a hidden
   // redundant row after the broad approval compacted it away.
   const covering = matchingGrantScope({}, hostGrants, url, siteGrants);
   if (covering === "loopback_all_ports" || covering === "domain" || covering === "host") return true;
-  await chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } });
+  await deadline(
+    chrome.storage.local.set({ origins: { ...origins, [origin]: "allow" } }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.set(origins)",
+  );
   return true;
 }
 
@@ -107,10 +128,18 @@ export function grantExactOrigin(origin: string): Promise<boolean> {
 
 export function revokeExactOrigin(origin: string): Promise<boolean> {
   return withSessionMutation(async () => {
-    const { origins = {} } = await chrome.storage.local.get(["origins"]);
+    const { origins = {} } = (await deadline(
+      chrome.storage.local.get(["origins"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.get(origins)",
+    )) as { origins?: Record<string, string> };
     const next = { ...origins };
     delete next[origin];
-    await chrome.storage.local.set({ origins: next });
+    await deadline(
+      chrome.storage.local.set({ origins: next }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.set(origins)",
+    );
     return true;
   });
 }
@@ -126,7 +155,11 @@ export async function grantSiteLocked(url: URL): Promise<boolean> {
   // stored key that no longer derives is tolerated (A2); a NEW one that does
   // not derive would be a bug in broadGrantFor, and is refused here.
   if (!validSiteGrantKey(broad.key, broad.scope)) return false;
-  const { siteGrants, origins = {} } = await chrome.storage.local.get(["siteGrants", "origins"]);
+  const { siteGrants, origins = {} } = (await deadline(
+    chrome.storage.local.get(["siteGrants", "origins"]),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.get(siteGrants, origins)",
+  )) as { siteGrants?: unknown; origins?: Record<string, string> };
   if (siteGrants !== undefined && !normalizedSiteGrants(siteGrants)) return false;
   const current = normalizedSiteGrants(siteGrants) ?? { version: 1 as const, grants: {} };
   const remainingOrigins = Object.fromEntries(
@@ -145,13 +178,17 @@ export async function grantSiteLocked(url: URL): Promise<boolean> {
   );
   // One multi-key storage write is the durable transaction: failure cannot
   // report success after cleaning exact grants without storing the broad one.
-  await chrome.storage.local.set({
-    origins: remainingOrigins,
-    siteGrants: {
-      version: 1,
-      grants: { ...current.grants, [broad.key]: { scope: broad.scope, createdAt: Date.now() } },
-    },
-  });
+  await deadline(
+    chrome.storage.local.set({
+      origins: remainingOrigins,
+      siteGrants: {
+        version: 1,
+        grants: { ...current.grants, [broad.key]: { scope: broad.scope, createdAt: Date.now() } },
+      },
+    }),
+    CHROME_API_DEADLINE_MS,
+    "chrome.storage.local.set(origins, siteGrants)",
+  );
   return true;
 }
 
@@ -161,7 +198,11 @@ export function grantSite(url: URL): Promise<boolean> {
 
 export function revokeSiteGrant(key: string): Promise<boolean> {
   return withSessionMutation(async () => {
-    const { siteGrants } = await chrome.storage.local.get(["siteGrants"]);
+    const { siteGrants } = (await deadline(
+      chrome.storage.local.get(["siteGrants"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.get(siteGrants)",
+    )) as { siteGrants?: unknown };
     const current = normalizedSiteGrants(siteGrants);
     if (!current) return false;
     // Report failure rather than a false "Removed …" for a key that was never
@@ -169,7 +210,11 @@ export function revokeSiteGrant(key: string): Promise<boolean> {
     if (!(key in current.grants)) return false;
     const grants = { ...current.grants };
     delete grants[key];
-    await chrome.storage.local.set({ siteGrants: { version: 1, grants } });
+    await deadline(
+      chrome.storage.local.set({ siteGrants: { version: 1, grants } }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.set(siteGrants)",
+    );
     return true;
   });
 }
@@ -179,12 +224,20 @@ export function revokeSiteGrant(key: string): Promise<boolean> {
  * existing one can still be removed. */
 export function revokeLoopbackHost(canonicalKey: string): Promise<boolean> {
   return withSessionMutation(async () => {
-    const { hostGrants } = await chrome.storage.local.get(["hostGrants"]);
+    const { hostGrants } = (await deadline(
+      chrome.storage.local.get(["hostGrants"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.get(hostGrants)",
+    )) as { hostGrants?: unknown };
     const current = normalizedHostGrants(hostGrants);
     if (!current) return false;
     const grants = { ...current.grants };
     delete grants[canonicalKey];
-    await chrome.storage.local.set({ hostGrants: { version: 1, grants } });
+    await deadline(
+      chrome.storage.local.set({ hostGrants: { version: 1, grants } }),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.set(hostGrants)",
+    );
     return true;
   });
 }
@@ -193,7 +246,11 @@ export function clearAllAccessGrants(): Promise<boolean> {
   return withSessionMutation(async () => {
     // Unpairing also drops the all-sites bypass: a browser that is no longer
     // trusted must not come back pre-opened when it is paired again.
-    await chrome.storage.local.remove(["token", "origins", "hostGrants", "siteGrants", "allowAllSites"]);
+    await deadline(
+      chrome.storage.local.remove(["token", "origins", "hostGrants", "siteGrants", "allowAllSites"]),
+      CHROME_API_DEADLINE_MS,
+      "chrome.storage.local.remove(grants)",
+    );
     return true;
   });
 }

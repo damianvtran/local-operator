@@ -1413,7 +1413,7 @@ class ProviderController:
         return entries
 
     def initial_catalogue(self, *, cache_dir: Any = None) -> list[CatalogueEntry]:
-        """First frame catalogue: shipped models layered with cached aggregator listings.
+        """First frame catalogue: shipped models and authoritative cached listings.
 
         Synchronous, non-blocking, and network-free. While direct providers have
         stable shipped static models in the registry, aggregator providers
@@ -1421,13 +1421,16 @@ class ProviderController:
         dynamic catalogues. When a previous live listing exists on disk, reading it
         via :func:`cached_available_models` allows hundreds of available models to
         paint on the very first frame rather than appearing only after a network
-        round trip.
+        round trip. DeepSeek's native inventory also owns its selectable set:
+        using the shipped rows here would flash retired ids even when the live
+        catalogue was already cached. Its cache reader supplies the ordinary
+        static fallback when no trustworthy native listing exists.
         """
         entries: list[CatalogueEntry] = []
         usable = self.usable_providers()
         for definition in PROVIDER_REGISTRY:
             connected = usable is None or definition.id in usable
-            if definition.id in AGGREGATOR_PROVIDERS:
+            if definition.id in AGGREGATOR_PROVIDERS or definition.id == "deepseek":
                 models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
                 for model in models:
                     entries.append(
@@ -1441,7 +1444,7 @@ class ProviderController:
                             input_price=_price(model.input_price, definition, free=model.free),
                             output_price=_price(model.output_price, definition, free=model.free),
                             connected=connected,
-                            aggregated=True,
+                            aggregated=definition.id in AGGREGATOR_PROVIDERS,
                             routed=model.routed,
                         )
                     )
