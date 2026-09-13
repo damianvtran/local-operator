@@ -246,7 +246,7 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 //   connected card      207.16px  ->  86px
 //   pairing form        339.52px  -> 219px
-//   standby card        317.3px  -> 193px
+//   standby card        314.27px  -> 193px
 //
 // The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
 // cards, i.e. sub-pixel rounding on one shared value), so `card = pin + 121`.
@@ -254,13 +254,15 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // reading the card back; that invariant is what makes the sweep a solve rather
 // than a guess. Re-measure the same way if either card's copy or controls
 // change: an eyeballed pin IS the reflow this block exists to prevent.//
-// THE STANDBY CARD IS DURABLE TOO, and it is the reason this branch exists at
-// all: an install that is paired while ANOTHER install drives stays exactly that
-// way across every open — the roles do not flicker between popup opens the way
-// a wedge does — so the bet the pin makes pays there as much as it does for
-// `connected`. Its height is measured with the driver line FILLED, because
-// render() always fills it (the daemon's label or the generic sentence) and both
-// spellings stay on one line at 300px.
+// THE STANDBY CARD IS DURABLE TOO, and it is the reason this whole change
+// exists: an install paired while ANOTHER install drives stays exactly that way
+// across every open — the roles do not flicker between opens the way a wedge
+// does — so the bet the pin makes pays there as much as it does for `connected`.
+// Its height is measured with the driver line FILLED, because render() always
+// fills it (the daemon's label or the generic sentence) and both spellings stay
+// on one line at 300px. Measured the same way as the two above and in the same
+// run: `node scripts/popup-states-shot.mjs dist <out>`, which is the harness the
+// numbers in this table come from.
 //
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and

@@ -289,6 +289,25 @@ def _identities(root) -> list[dict]:
 - `daemon.py:1100-1103` becomes "close 4004 unless `extension_id` appears in
   `_identities()`" — still refusing before `attach()`, so the unbounded-close
   rule stated at `daemon.py:1078-1085` is preserved unchanged.
+  **IMPLEMENTATION NOTE (coder, 2026-09-12): read literally, this sentence
+  reproduces the transcript §1.2 records as the reported defect — its row 4 is
+  "unpacked id, store paired → closed 4004" — and it contradicts §0 ("can two
+  identities be authorised at once? Yes"), §3.4 ("two unpaired installs racing to
+  pair"), §8.1 (a code per waiting install) and §9.3's happy cell ("both paired
+  through the real popup form"). Once the store build is paired, every later
+  install IS unlisted, so a literal gate leaves it with no code to enter and it
+  can never be added. Measured on the isolated rig before the change below: 97
+  `/extension` accepts while the second install dialled and was refused, no
+  pending code for it, `/health` authorised list unchanged.**
+  As implemented, 4004 refuses an unlisted identity that **presents a token** —
+  a peer claiming a pairing it does not have, i.e. a revoked install dialling
+  back with its old secret, which is the case the gate is actually for — and
+  admits one that presents **none**, because that peer is unambiguously asking to
+  pair. It is still refused before `attach()` (the unbounded-close rule is
+  untouched) and still told `paired: false`, so it holds no authority: an
+  unpaired link answers `not_paired` to every RPC. Both halves are pinned
+  (`test_u4_*`: token → 4004; no token → admitted, gets its own code, gains
+  authority only through the code dance).
 - `_valid_saved_token()` (`daemon.py:1018-1023`) selects the entry by ID and
   `compare_digest`s that entry's hash. Keep `secrets.compare_digest`; keep
   returning `False` on an empty token.
