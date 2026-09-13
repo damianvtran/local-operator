@@ -39,7 +39,7 @@ const IDS = [
   "retry-incompatible", "retry-unresponsive", "reload-extension",
   "origin-wedge", "origin-wedge-reload", "unresponsive-outcome",
   "connected-all-sites", "connected-all-sites-off",
-  "pair-form",
+  "pair-form", "pair-unpaired",
   "pair-code", "pair-error", "port", "port-row",
 ];
 
@@ -1757,6 +1757,177 @@ test("review R2-2 control: the DRIVER's own popup still gets the wedge card", as
     await tick(20);
 
     assert.deepEqual(visibleState(nodes), ["unresponsive"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/**
+ * Round 3 (design D2 / UX U1, review R3-1): the wedge card belongs to the
+ * install that DRIVES. The round-2 gate excluded only `selfAuthorized === false`
+ * — the never-paired install — so a PAIRED standby, the operator's actual shape,
+ * read the driver's diagnosis as its own: "the extension has stopped answering"
+ * about a worker that was answering, with a Reload that would reload the install
+ * currently serving commands, and the standby card it should have shown was
+ * unreachable because this branch returns first.
+ */
+test("R3-1: a healthy authorised STANDBY is not shown the driver's wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome extension 0.1.13",
+    driver_short_id: STORE_ID.slice(0, 8),
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["standby"],
+      "a standby must read the standby card, never the driver's wedge diagnosis",
+    );
+    // ...and the card names the driver with a handle the user can act on.
+    assert.equal(
+      nodes.get("standby-driver").textContent,
+      `Chrome extension 0.1.13 (${STORE_ID.slice(0, 8)}…) is driving right now.`,
+      "the card must name the driver, with the id prefix that resolves in `drive`",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R3-1 control: the install that DRIVES is still shown the wedge card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["unresponsive"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("R3-1 control: nobody drives (empty driver field) is not a wedge either", async () => {
+  // The empty field means "no driver attached" — the mid-handoff state. A wedged
+  // *other* install must not be painted on this one when nobody holds the wheel.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+    driver_extension_id: "",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["paired"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/**
+ * Round 3 (UX U5): a revoke was silent in the revoked install's own popup. The
+ * worker now records the 4003 close as a sticky `revoked` flag, so the form can
+ * say what happened rather than looking like a fresh install — and so the
+ * destructive-feeling transition of this flow has a signal where the user is
+ * looking.
+ */
+test("U5: a revoked install's form says it was unpaired", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "dead");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    areas.session.set("revoked", true);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+    assert.equal(
+      nodes.get("pair-unpaired").classList.contains("hidden"),
+      false,
+      "the revoked form must name the revoke",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("U5 control: a never-paired install's form says nothing about a revoke", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: false,
+    extension_connected: false,
+    protocol_version: 1,
+    authorized_extension_ids: [],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+    assert.equal(nodes.get("pair-unpaired").classList.contains("hidden"), true);
   } finally {
     await bundle.close();
   }

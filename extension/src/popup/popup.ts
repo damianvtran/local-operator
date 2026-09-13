@@ -143,6 +143,16 @@ interface Health {
    * is still a driver, which is why the standby card words itself either way. */
   driver_extension_id?: string;
   driver_label?: string;
+  /** The driver's SHORT id, for the one case `driver_label` cannot cover: two
+   * installs running the same build share a label byte for byte, and then the
+   * card whose whole job is to answer "which browser is it driving?" answers
+   * with a string this popup prints about itself. The id prefix always resolves
+   * in `lop browser drive`. Optional — a daemon predating it sends none, and the
+   * card then renders the label alone. */
+  driver_short_id?: string;
+  /** Labels of the installs standing by, so a reader can act on a property of the
+   * standby instead of asking the operator to evaluate it. */
+  standby_labels?: string[];
   /** Identities the daemon has ACCEPTED but is not routing commands to. */
   standby_extension_ids?: string[];
   /** Every identity the daemon currently authorises. The popup compares this
@@ -652,9 +662,12 @@ async function renderOnce(): Promise<void> {
 
   // The worker records the last close reason so a protocol mismatch renders
   // "Update needed" rather than sending the user back to code entry (D2).
-  const { connState } = (await chrome.storage.session.get(["connState"])) as {
-    connState?: string;
-  };
+  // `revoked` is the same channel's second fact: the worker saw 4003, i.e. this
+  // install was UNPAIRED rather than never paired (UX round 3, U5).
+  const { connState, revoked } = (await chrome.storage.session.get([
+    "connState",
+    "revoked",
+  ])) as { connState?: string; revoked?: boolean };
   if (!health) {
     show(connState === "incompatible" ? "incompatible" : "disconnected");
     return;
@@ -726,7 +739,6 @@ async function renderOnce(): Promise<void> {
   // drives, and this install is not standing by for anyone either: it will take
   // the wheel on its next dial), or it NAMES an id.
   const driverFieldPresent = typeof health.driver_extension_id === "string";
-  const driverNamed = driverFieldPresent && health.driver_extension_id !== "";
   const drivesThis = driverFieldPresent ? health.driver_extension_id === selfId : true;
   // The daemon's LIVE answer on whether this install is standing by. Belt and
   // braces for the same class as QA R2-2: a stale `connState: "standby"` — the
@@ -752,7 +764,22 @@ async function renderOnce(): Promise<void> {
   // driver was the wedged one. Skipped only when the daemon explicitly says this
   // id is not authorised (`false`); a daemon with no list (`null`) keeps the
   // pre-multi-identity reading, where the driver IS the only install.
-  if (health.extension_unresponsive === true && selfAuthorized !== false) {
+  // Gated on this install DRIVING (design D2 / UX U1 / review R3-1). The wedge
+  // latch is the DRIVER's: `extension_unresponsive` is built from `self.link`,
+  // so an authorised, healthy STANDBY was reading the driver's diagnosis as its
+  // own and being offered a Reload that would reload the install currently
+  // serving commands (measured: red card on a standby whose own worker was
+  // answering, while the daemon listed it as a standby, and it outlived the
+  // state by ~30s). `selfAuthorized !== false` did not exclude it — a paired
+  // standby is authorised — and the standby card below was never reached because
+  // this branch returns first.
+  //
+  // `drivesThis` is the exact predicate: it is false for a paired standby, false
+  // for an unpaired dial (which then falls through to the pairing form, R2-2),
+  // false for the empty-field "nobody drives" state, and true for a single-
+  // identity daemon whose driver field is absent — so nothing that SHOULD reach
+  // the wedge card loses it.
+  if (health.extension_unresponsive === true && drivesThis) {
     show("unresponsive");
     return;
   }
@@ -773,8 +800,14 @@ async function renderOnce(): Promise<void> {
       const other = document.getElementById("standby-driver");
       if (other) {
         const label = health.driver_label;
+        // The short id rides along when the daemon sends one (UX U2 / design
+        // D3): with two installs of the SAME build the label alone is a string
+        // this popup prints about itself, and the id prefix is the token the
+        // user can paste into `lop browser drive`. Rendered in parentheses so a
+        // missing id degrades to exactly the previous sentence.
+        const handle = health.driver_short_id ? ` (${health.driver_short_id}…)` : "";
         other.textContent = label
-          ? `${label} is driving right now.`
+          ? `${label}${handle} is driving right now.`
           : "The other install is driving right now.";
       }
       // Handoff complete IN THIS ROLE TOO. The latch exists only for the window
@@ -832,6 +865,15 @@ async function renderOnce(): Promise<void> {
   // latch case, which is why the fall-through still passes `locallyPaired`).
   // Either way the CODE FIELD is what this install needs, and it is now reached
   // whenever THIS install is unpaired, whatever the driver is doing.
+  //
+  // The revoked line accompanies the form only when the worker saw a 4003
+  // (UX U5): without it, the install's own popup is indistinguishable from a
+  // fresh one, so the one destructive-feeling transition in this flow had no
+  // signal where the user was looking. Cleared by a successful pair in the
+  // worker, so it cannot survive into a working install.
+  document
+    .getElementById("pair-unpaired")
+    ?.classList.toggle("hidden", revoked !== true);
   show(viewForHealth(false, locallyPaired));
 }
 
@@ -896,6 +938,12 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
   error.classList.add("hidden");
   setPairBusy(true);
   const { token, port = DEFAULT_PORT } = await getLocal();
+  // Whether the daemon ANSWERED this dial. Declared outside the try because the
+  // failure branch is what needs it: a close after an answer is not
+  // unreachability, and saying so was the last lie of the revoked-install dead
+  // end (design D1 / UX U3) — a popup that was fetching /health from the daemon
+  // the whole time told the user it could not reach it.
+  let answered = false;
   try {
     const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
     // ONE shared rejection wired to error AND close for every await below: a
@@ -935,6 +983,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       }),
     );
     await nextMessage();
+    answered = true;
     wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
     const verdict = await nextMessage();
     const outcome = pairVerdict(JSON.parse(String(verdict.data)));
@@ -980,7 +1029,17 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       input.select();
     }
   } catch {
-    error.textContent = "Could not reach Local Operator on this machine.";
+    // Two different failures, two different sentences. The old single string
+    // blamed reachability even when the daemon had answered and then closed the
+    // socket — the exact shape of the revoked-install dead end (design D1), and
+    // a claim the popup's own /health polls were disproving. Kept to two lines
+    // at the card's width on purpose: `#pair-error`'s reserved slot is sized to
+    // the longest string that can land in it, so a longer one would resize the
+    // card at the moment of failure, which is what the reservation exists to
+    // prevent.
+    error.textContent = answered
+      ? "Local Operator closed the connection. Reopen the popup to try again."
+      : "Could not reach Local Operator on this machine.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
     // Unlock BEFORE selecting, for the same reason as the rejected-code branch

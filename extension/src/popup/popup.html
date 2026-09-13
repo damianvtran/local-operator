@@ -79,6 +79,16 @@
 
         <section id="pairing" class="state hidden">
           <h1 class="title">Pair with Local Operator</h1>
+          <!-- Shown when the worker was told this browser was UNPAIRED (a
+               per-identity revoke, close code 4003), and hidden otherwise. The
+               form alone is indistinguishable from a fresh install, which left
+               the one destructive-feeling transition in this flow with no
+               signal in the surface that shows it (UX round 3, U5). A separate
+               line rather than rewritten sub-copy, so the never-paired case
+               keeps the exact wording it was reviewed with. -->
+          <p class="sub hidden" id="pair-unpaired">
+            This browser was unpaired from Local Operator.
+          </p>
           <p class="sub">Enter the code shown in Local Operator.</p>
           <form id="pair-form">
             <label class="field-label" for="pair-code">Pairing code</label>
@@ -229,20 +239,30 @@
              card, which would claim the agent can drive a browser it is
              receiving no commands for.
 
+             The copy states the arrangement, the failover, and the COST in the
+             reader's terms (copy review round 1, C2). The previous wording —
+             "another Local Operator install is driving the agent … because a tab
+             handle belongs to the install that opened it" — inverted the subject
+             (the agent drives the browser, not the reverse), spent the word
+             "driving" in the opposite sense to the Connected card's "Driving"
+             label, and explained the cost with an internal noun ("handle") that
+             its reader has no way to look up; the em dash joining the two
+             clauses was the surface's one AI-ism tell. What a user actually
+             needs to know is that the tab they were on stays put and a new one
+             appears, which is what it now says.
+
              The second line names the other install when /health reports a
-             label for it, because "so which browser IS it driving?" is the
-             question this card exists to answer and with two installs loaded it
-             is not guessable from here. It also states the failover COST rather
-             than hiding it: the session loses the tab it was using, because a
-             surface handle is minted by the install that opened it and cannot
-             be transferred (design §5.3), so a new tab appears after a
-             handover. Users otherwise file that as a bug. -->
+             label for it — plus its id prefix, because with two installs of the
+             SAME build the label is a string this popup also prints about itself
+             and the prefix is the token `lop browser drive` accepts (UX U2 /
+             design D3). Where the label or the id is unknown the line degrades
+             to "The other install is driving right now." -->
         <section id="standby" class="state hidden" role="status">
           <h1 class="title">Standing by.</h1>
           <p class="sub">
-            This browser is paired, but another Local Operator install is driving the agent right
-            now. This one takes over if that one disconnects — and the agent opens a fresh tab when
-            it does, because a tab handle belongs to the install that opened it.
+            This browser is paired, but the agent is driving another browser right now.
+            If that one disconnects, this browser takes over and the agent opens a new
+            tab; the tab it was using stays open where it is.
           </p>
           <p class="sub" id="standby-driver"></p>
         </section>

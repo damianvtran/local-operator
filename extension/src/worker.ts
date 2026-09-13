@@ -296,6 +296,11 @@ function applyRole(role: "driver" | "standby", pairedNow: boolean): void {
       // that true — and a second install is always in exactly that state when it
       // first dials.
       connState: !pairedNow ? "pairing" : standby ? "standby" : "connected",
+      // A successful pairing clears the revoke notice (see the 4003 branch
+      // above): from here on the popup's own state is the truth, and a stale
+      // "this browser was unpaired" line on a working install would be a new
+      // lie in place of the old silence.
+      ...(pairedNow ? { revoked: false } : {}),
     }),
     "connState write",
   );
@@ -535,7 +540,16 @@ async function connect(): Promise<void> {
     // (4001 — "update needed", which pairing cannot fix) from an ordinary
     // disconnect (finding D2). 4003 is an unpair/revoke.
     if (event?.code === 4001) fireAndForget(chrome.storage.session.set({ connState: "incompatible" }), "connState write");
-    else if (event?.code === 4003) fireAndForget(chrome.storage.session.set({ connState: "pairing" }), "connState write");
+    // 4003 is an unpair/revoke, and it is recorded as TWO facts, not one. The
+    // connState says "this install is not paired" (as before), and the sticky
+    // `revoked` flag says WHY — which the form cannot otherwise distinguish from
+    // a fresh install (UX round 3, U5: the destructive-feeling transition was
+    // the only one with no signal in the surface showing it). Sticky rather than
+    // momentary because `connState` is rewritten "pairing" by every re-dial's
+    // ack, so a flag derived from it would vanish within a second; it is cleared
+    // when this install is genuinely paired again (see the ack path above).
+    else if (event?.code === 4003)
+      fireAndForget(chrome.storage.session.set({ connState: "pairing", revoked: true }), "connState write");
     // 4000 is the daemon's later-connection-wins eviction (daemon.py), which the
     // POPUP's own pairing socket triggers on every pair attempt. It is not a
     // loss of connectivity, so publishing "disconnected" here drove the popup's
