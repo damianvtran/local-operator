@@ -343,6 +343,49 @@ def _parse_perplexity_sse(body: str) -> dict[str, Any]:
     return merged
 
 
+def _perplexity_authwall(payload: dict[str, Any]) -> str | None:
+    """The sign-in wall this payload is, or ``None`` when it is not one.
+
+    The anonymous endpoint refuses with a NORMALLY COMPLETED stream: HTTP 200,
+    ``status: COMPLETED``, ``final: true``, ``text`` carrying a short invitation
+    to sign in. Nothing in the transport says "refused", so the payload's own
+    ``upsell_information`` is the only marker (observed live:
+    ``{'name': 'fraud_authwall_upsell', 'upsell_type': 'LOGIN'}``).
+
+    It matters because the refusal is otherwise indistinguishable from a RESULT:
+    the chain accepts a response with an empty source list when its answer is
+    non-empty -- correct in general, since a provider may legitimately answer
+    without citations -- so this sentence was served to the model as the search
+    it asked for. Reported from a real session: five searches in one
+    conversation came back with no sources and ``Sign up and repeat your
+    request.`` as the answer, after DuckDuckGo matched nothing and Tavily's
+    keyless tier hit its daily cap. The model had to notice the sentence was not
+    an answer and fall back to fetching pages itself.
+
+    Returns the reason to record, or ``None``. Structural only: no wording is
+    matched, so a change to the sentence cannot silently un-fix this.
+    """
+    upsell = payload.get("upsell_information")
+    if isinstance(upsell, str):
+        # The SSE carries it as a JSON string in some responses and as a nested
+        # object in others; the parser folds events, so both shapes reach here.
+        try:
+            upsell = json.loads(upsell)
+        except json.JSONDecodeError:
+            upsell = None
+    if not isinstance(upsell, dict):
+        return None
+    name = str(upsell.get("name") or upsell.get("upsell_type") or "").strip()
+    if not name:
+        return None
+    kind = str(upsell.get("upsell_type") or "").strip()
+    detail = f"{name}/{kind}" if kind else name
+    return (
+        f"anonymous tier walled this request ({detail}); set PERPLEXITY_API_KEY "
+        "for keyed Sonar, enable another provider, or fetch a page directly"
+    )
+
+
 async def _search_perplexity(
     client: httpx.AsyncClient,
     credentials: CredentialManager,
@@ -404,10 +447,19 @@ async def _search_perplexity(
     )
     _ensure_success("Perplexity", response)
     payload = _parse_perplexity_sse(response.text)
+    sources = _perplexity_sources(payload, limit)
+    # A wall with sources alongside it is still a result: never discard pages
+    # that were actually returned. A wall with nothing is a REFUSAL, and it is
+    # raised rather than returned empty so the chain records this reason and
+    # moves on -- and so a search whose every provider came back empty fails
+    # loudly instead of handing the model a sentence to disbelieve.
+    wall = _perplexity_authwall(payload)
+    if wall is not None and not sources:
+        raise RuntimeError(wall)
     return SearchResponse(
         provider="perplexity",
         auth_mode="anonymous",
-        sources=_perplexity_sources(payload, limit),
+        sources=sources,
         answer=_perplexity_answer(payload),
         request_id=str(payload.get("uuid") or request_id),
         # Anonymous mode is free; the Sonar key path (below) is token-billed and
