@@ -9372,11 +9372,15 @@ async def execute_browser(
                     # tab, so both verbs become LOCAL record writes and the copy
                     # says so plainly. Issuing the RPC anyway is a guaranteed
                     # failure on a link that otherwise works — the class of
-                    # dead-end this change removes. The record is still written,
-                    # because it is the honest local statement (cleanup reads
-                    # `retention` to fence the row) and because a user who
-                    # updates the extension mid-session then gets enforcement
-                    # back with the retention intent still recorded.
+                    # dead-end this change removes.
+                    #
+                    # The record is still written, but as a STATEMENT OF INTENT
+                    # rather than an obligation: the extension never accepted it
+                    # and cannot enforce it, which is exactly what the copy says.
+                    # `finish_degraded` clears it the moment the scope settles, so
+                    # a closed tab can never keep reading as "retained: the owning
+                    # session must release it" — a row that is neither cleanable
+                    # nor true (review R1-4).
                     resource.record["retention"] = reason if action == "retain" else ""
                     if action == "release" and resource.record.get("terminal"):
                         # A release that also settles a terminal scope must still
@@ -9404,7 +9408,8 @@ async def execute_browser(
                         (
                             "Retention recorded locally only: this browser extension runs "
                             "without the ownership lifecycle, so it cannot enforce that this "
-                            "tab stays open past your turn."
+                            "tab stays open past your turn. The intent is cleared when this "
+                            "scope finishes."
                             if action == "retain"
                             else "Retention cleared locally only; this extension cannot "
                             "enforce retention."

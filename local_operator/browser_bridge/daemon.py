@@ -46,6 +46,7 @@ from local_operator.browser_bridge.protocol import (
     Request,
     Response,
     extension_older,
+    proto_supported,
 )
 from local_operator.paths import config_dir
 
@@ -2223,7 +2224,7 @@ class BridgeService:
         except (asyncio.TimeoutError, ValidationError, ValueError):
             await websocket.close(code=4001)
             return
-        if not (MIN_SUPPORTED_PROTO <= hello.proto <= PROTO_VERSION):
+        if not proto_supported(hello.proto, low=MIN_SUPPORTED_PROTO, high=PROTO_VERSION):
             # A WINDOW, not an equality (see MIN_SUPPORTED_PROTO). The two
             # release lines move independently and the extension's half sits in
             # store review, so requiring an exact match means a daemon release

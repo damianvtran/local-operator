@@ -45,8 +45,9 @@ _OWNERSHIP_REQUIRES_UPDATE_MESSAGE = (
 #: bare `internal` shape. That shape has two producers and the version tells them
 #: apart: below the ownership floor it is a pre-ownership release, and above it
 #: the worker has stopped answering. Telling the second one to update was the
-#: defect — the live 0.1.10 ships `owner_*` and the store had nothing newer to
-#: offer — so the remedy named here is the one that actually clears a wedge.
+#: defect — the live 0.1.10 ships `owner_*` (as does the 0.1.9 tree) and the
+#: store had nothing newer to offer — so the remedy named here is the one that
+#: actually clears a wedge.
 _EXTENSION_STOPPED_ANSWERING_MESSAGE = (
     "the browser extension stopped answering while this session's tab ownership was "
     "being recovered. Ask the user to toggle the Local Operator extension OFF then ON "
@@ -399,7 +400,7 @@ class BrowserResource:
             #     extension is otherwise perfectly usable — so with NO durable
             #     obligation in flight we degrade to the capability-only path
             #     and keep working.
-            #   * a CURRENT release (>= 0.1.10, which DOES ship `owner_*`) gets
+            #   * a CURRENT release (>= 0.1.9, which DOES ship `owner_*`) gets
             #     here only when something inside the handler threw a bare
             #     error — the wedged worker. It must be reported as a wedge,
             #     naming the one remedy that clears it, NOT as a version skew.
@@ -586,10 +587,25 @@ class BrowserResource:
 
         The close names the RECORDED surface capability, never a numeric tab id
         and never the unresolved-evidence slot (both of those are the
-        "never adopt by tab id" stance). Nothing is renamed away either: the
-        obligation verbs are forked, the identity params are not, because a
-        command that stopped carrying them would break the mid-version cases the
-        fallback exists to protect.
+        "never adopt by tab id" stance) — and it carries the IDENTITY PARAMS,
+        which is not decoration: a released extension refuses a `close` on a
+        surface that carries an ``allocationId`` when ``owner_proof`` is absent
+        (``owner_refused`` / "owner-aware client required"). Sending the tab
+        capability alone therefore made this fallback exactly the thing it
+        exists to prevent — a degradation path that strands the tab it cannot
+        reconcile (review R1-2) — on any peer the classification guessed wrong
+        about. So the obligation verbs are forked; the identity params are not,
+        which is what this docstring claimed before the code did it.
+
+        ONE retention decision, stated here because the record has to agree with
+        the copy: a pre-ownership extension cannot enforce a retention, so a
+        retention recorded by the degraded `retain` is a STATEMENT OF INTENT the
+        extension never accepted. Once this method has closed the tab, that
+        intent must not outlive the tab it described — leaving it set made
+        `cleanup_disposition` refuse a settled row as "retained: … the owning
+        session must release it", i.e. a row that is neither cleanable nor true
+        (review R1-4). It is cleared only on a SETTLED close; a failed close
+        keeps it, because there the tab really is still out there.
         """
         if self.record.get("unresolved_surface_id") and not self.record.get("surface_id"):
             return BrowserCleanupResult(
@@ -599,7 +615,10 @@ class BrowserResource:
         surface = str(self.record.get("surface_id", ""))
         if surface:
             try:
-                await BridgeClient().call("close", {"tab": surface})
+                # `{"tab": …, **identity}` matches the shape `builtin.py`'s own
+                # bridge `close` already sends, so there is one spelling of an
+                # owner-bearing close in the codebase rather than two.
+                await BridgeClient().call("close", {"tab": surface, **self.params()})
             except BridgeError as exc:
                 # A failed close is a result here for the same reason it is in
                 # `finish`: the tab is genuinely still out there and the record
@@ -610,6 +629,9 @@ class BrowserResource:
         self.assert_current()
         self.record["surface_id"] = ""
         self.record["state"] = "closed"
+        # See the docstring: an unenforceable retention must not outlive the tab
+        # it described, or the settled row reads as "retained".
+        self.record["retention"] = ""
         self._save()
         return BrowserCleanupResult("closed")
 

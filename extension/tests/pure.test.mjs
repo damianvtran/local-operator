@@ -1017,12 +1017,19 @@ test("the popup renders the shared advisory template", async () => {
 // The reserved slot is load-bearing (it is what stops the popup window resizing
 // when the advisory appears), so it needs a reserve AND the invisible-not-hidden
 // treatment: `display: none` would collapse the space this exists to hold.
+//
+// SCOPE, stated because an earlier revision of popup.css overclaimed it (R1-5):
+// this asserts the RESERVE only — that the declared min-height is three
+// line-boxes at the declared line-height. It cannot see the rendered wrap (there
+// is no layout engine here), so it passes unchanged if the sentence grows to a
+// fourth line. The wrap itself, and the "the card does not resize" invariant,
+// are asserted by `scripts/popup-states-shot.mjs`, which measures both.
 test("the advisory slot is reserved, not collapsed", async () => {
   const css = await readFile(new URL("../src/popup/popup.css", import.meta.url), "utf8");
   const reserve = css.match(/#connected-advisory\s*\{[^}]*min-height:\s*(\d+)px/);
   assert.ok(reserve, "#connected-advisory must reserve a min-height");
   const lines = Number(reserve[1]) / 18; // 12px at line-height 1.5
-  assert.equal(lines, 3, "the reserve must be the three lines the sentence wraps to at 300px");
+  assert.equal(lines, 3, "the reserve must be three line-boxes at the advisory's own metrics");
   assert.match(
     css,
     /#connected-advisory\.hidden\s*\{[^}]*display:\s*block\s*!important[^}]*visibility:\s*hidden/,
