@@ -493,17 +493,47 @@ def test_bookkeeping_predicate_matches_append_custom_rows(tmp_path: Path) -> Non
 
 
 def test_record_mtime_does_not_move_the_activity_clock(tmp_path: Path) -> None:
-    """The bookkeeping exemption actually holds on the write path."""
+    """The bookkeeping exemption holds through the PRODUCTION call site.
+
+    Driven through ``_write_spend_record`` and not through ``append_custom``
+    directly, and that is not incidental: the first version of this test called
+    the transcript API itself, so deleting ``preserve_mtime=True`` from
+    ``session._write_spend_record`` left it green (found by the mutation pass).
+    A test that exercises the helper instead of the caller pins the helper.
+    """
+    session = make_session(tmp_path)
+
+    async def write() -> None:
+        await session._transcript.append_message(Message.user("hello"))
+        before = session._transcript.path.stat().st_mtime
+        await asyncio.sleep(0.02)
+        session.accrue_spend(1_000, {"provider": "openrouter", "model_id": "x"})
+        await session._write_spend_record()
+        assert session._transcript.path.stat().st_mtime == pytest.approx(before, abs=1e-6)
+        # The row IS there: the exemption must not be achieved by not writing.
+        assert session._transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE) is not None
+
+    asyncio.run(write())
+
+
+def test_the_transcript_honours_the_bookkeeping_flag(tmp_path: Path) -> None:
+    """...and the flag the production site passes actually does something."""
     transcript = Transcript(tmp_path / "sess")
 
     async def write() -> None:
         await transcript.append_message(Message.user("hello"))
         before = transcript.path.stat().st_mtime
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.02)
+        # Without the flag the clock moves, which is what makes the assertion in
+        # the test above a measurement rather than a coincidence.
+        await transcript.append_custom(SESSION_SPEND_CUSTOM_TYPE, {"version": 1})
+        assert transcript.path.stat().st_mtime > before
+        moved = transcript.path.stat().st_mtime
+        await asyncio.sleep(0.02)
         await transcript.append_custom(
-            SESSION_SPEND_CUSTOM_TYPE, {"version": 1}, preserve_mtime=True
+            SESSION_SPEND_CUSTOM_TYPE, {"version": 2}, preserve_mtime=True
         )
-        assert transcript.path.stat().st_mtime == pytest.approx(before, abs=1e-6)
+        assert transcript.path.stat().st_mtime == pytest.approx(moved, abs=1e-6)
 
     asyncio.run(write())
 
