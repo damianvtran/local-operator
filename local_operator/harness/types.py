@@ -2203,10 +2203,13 @@ class ChatRequest(BaseModel):
     #:    ``get_api_key`` → ``AuthStore._resolve``: no ``block_credential``, no
     #:    ``_set_sticky`` write and none cleared.
     #:
-    #: So an isolated request gets at most TWO attempts on the model it
+    #: So an isolated request gets at most TWO AUTH attempts on the model it
     #: names, and the second only in one case: the bearer it was handed was
     #: rejected outright (401/403) and a read-only re-resolve that hides that
-    #: bearer produces a different one. Deployment reality widened the original
+    #: rejected ROW produces a different bearer. (Auth attempts, because the
+    #: pre-existing fast-mode-refusal re-ask is not gated on the retry budget
+    #: and can add one same-key attempt at standard speed ahead of this one.)
+    #: Deployment reality widened the original
     #: one-attempt rule: pools contain stale keys, the pick is a hash of the
     #: session id, and the turn beside the errand rotates past the dead row on
     #: its own — so without the re-resolve, every naming call for such a

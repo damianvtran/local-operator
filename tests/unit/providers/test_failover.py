@@ -2979,6 +2979,165 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert used_keys == ["bad-key"], "re-sent the rejected bearer"
         assert auth.rotations == []
 
+    async def test_an_oauth_row_whose_refresh_would_succeed_still_yields_to_the_sibling(
+        self,
+    ) -> None:
+        """The refresh-same-account leg is SKIPPED for an isolated re-resolve.
+
+        ``resolve_next_key`` ordinarily force-refreshes the current account
+        before rotating, and ``_accept`` takes any bearer string it has not
+        tried — so a refresh that SUCCEEDS returns a new string for the same
+        rejected row and consumes the errand's one extra attempt on the
+        credential least likely to work, leaving the healthy sibling unasked.
+        That is not a hypothetical: it is the shape of an OAuth pool (the
+        anthropic rows), where the provisional opener therefore stuck forever
+        even with this fix in place.
+
+        Asserted two ways, because either alone would pass for the wrong
+        reason: the second WIRE bearer is the sibling's, and no refresh was
+        requested for this errand at all.
+        """
+        refreshes: list[bool] = []
+        used_keys: list[str | None] = []
+
+        class OAuthStore:
+            """Row 1 rejects at the wire but refreshes happily; row 2 is healthy."""
+
+            def __init__(self) -> None:
+                self.row_one = "oauth-bad"
+
+            async def get_oauth_access(
+                self,
+                provider: str,
+                session_id: str | None = None,
+                *,
+                force_refresh: bool = False,
+                read_only: bool = False,
+                model_id: str = "",
+                exclude_keys: Any = None,
+                exclude_credential_ids: Any = None,
+            ) -> Any:
+                from local_operator.providers.auth_store import OAuthAccess
+
+                refreshes.append(force_refresh)
+                excluded_ids = set(exclude_credential_ids or ())
+                excluded_keys = set(exclude_keys or ())
+                if force_refresh:
+                    # The token rotates, which is exactly why a bearer-only
+                    # exclusion cannot identify this row.
+                    self.row_one = "oauth-bad-refreshed"
+                if 1 not in excluded_ids and self.row_one not in excluded_keys:
+                    return OAuthAccess(self.row_one, 1, kind="oauth")
+                if 2 not in excluded_ids:
+                    return OAuthAccess("oauth-good", 2, kind="oauth")
+                return None
+
+            async def get_api_key(
+                self, provider: str, session_id: str | None = None, **kwargs: Any
+            ) -> str | None:
+                record = await self.get_oauth_access(provider, session_id, **kwargs)
+                return record.access_token if record is not None else None
+
+            def rotate_sibling(self, *args: Any, **kwargs: Any) -> bool:
+                raise AssertionError("an isolated errand must never rotate")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                if api_key == "oauth-good":
+                    return ScriptedClient(
+                        [
+                            StreamTextDelta(delta="<title>x</title>"),
+                            StreamEndEvent(stop_reason="stop"),
+                        ]
+                    ).stream(request, api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid credentials", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        got = [
+            event
+            async for event in stream_with_failover(
+                self._isolated(), OAuthStore(), {"retry": {"baseDelayMs": 1}}, client_for
+            )
+        ]
+        assert used_keys == ["oauth-bad", "oauth-good"], (
+            "the errand spent its one retry re-presenting the rejected account "
+            "instead of asking the healthy sibling"
+        )
+        assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+        assert not any(refreshes), "an isolated errand forced a token refresh"
+
+    async def test_a_store_on_the_protocols_exact_signature_keeps_one_attempt(self) -> None:
+        """A store implementing ``FailoverAuthStore`` as declared, and nothing
+        more, must DEGRADE rather than break.
+
+        The Protocol now names the exclusion kwargs as optional, but a host or
+        a test double written against an older copy does not accept them: the
+        call raises ``TypeError`` inside the resolver, which the existing
+        ``except Exception`` reports as "no sibling". The errand then keeps its
+        single attempt. Asserted because the graceful-degradation claim in the
+        resolver's comment is otherwise only an assertion about code nobody
+        runs."""
+        used_keys: list[str | None] = []
+
+        class StrictStore:
+            """Exactly the pre-exclusion signature — extra kwargs raise."""
+
+            async def get_api_key(
+                self,
+                provider: str,
+                session_id: str | None = None,
+                *,
+                force_refresh: bool = False,
+                read_only: bool = False,
+                model_id: str = "",
+            ) -> str | None:
+                return "only-key"
+
+            def rotate_sibling(
+                self,
+                provider: str,
+                session_id: str | None,
+                error: Any,
+                api_key: str | None = None,
+                *,
+                model_id: str = "",
+            ) -> bool:
+                raise AssertionError("an isolated errand must never rotate")
+
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                used_keys.append(api_key)
+                return ScriptedClient(
+                    ProviderError(401, "invalid api key", auth_error=True)
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        with pytest.raises(ProviderError):
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(),
+                    # `type: ignore` is the POINT of this test, not a wart:
+                    # `StrictStore` deliberately does NOT satisfy the widened
+                    # Protocol, which is precisely the shape whose runtime
+                    # degradation is under test. A store that type-checks here
+                    # would be exercising the supported path instead.
+                    StrictStore(),  # type: ignore[arg-type]
+                    {"retry": {"baseDelayMs": 1}},
+                    client_for,
+                )
+            ]
+        assert used_keys == ["only-key"], "a strict-signature store did not degrade to one attempt"
+
     @pytest.mark.parametrize("status", [429, 500])
     async def test_non_auth_failures_still_make_exactly_one_attempt_and_never_sleep(
         self, status: int

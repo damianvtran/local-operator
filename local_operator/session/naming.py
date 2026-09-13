@@ -670,6 +670,16 @@ CALL_FAILED = object()
 #: nobody is holding is worse than no answer. Both collapse to "no title".
 CALL_CANCELLED = object()
 
+#: How much of a provider's error message reaches the log line in
+#: :func:`_ask_for_title`. Every provider puts the actual reason first (a status
+#: and a sentence), so a few hundred characters carries the whole diagnosis;
+#: the cap exists because a provider that echoes the offending REQUEST in its
+#: error body would otherwise write the naming prompt into the log file on
+#: every failure. Bounded excerpt rather than suppression: dropping the message
+#: entirely would leave the line saying only that something failed, which is
+#: the state this logging was added to fix.
+_LOGGED_ERROR_CHARS = 300
+
 
 async def _ask_for_title(
     system: str, prompt: str, complete_fn, timeout: float
@@ -678,19 +688,21 @@ async def _ask_for_title(
 
     Shared by :func:`generate_title`, :func:`generate_retitle` and
     :func:`refresh_title` so they have exactly one error policy between them.
-    There is no retry here, and the only one underneath is the failover
-    driver's single auth-class re-resolve (see
-    :attr:`~local_operator.harness.types.ChatRequest.isolated`), so the timeout
-    covers the whole budget either way.
+    There is no retry here. Underneath there is the failover driver's single
+    auth-class re-resolve, and the pre-existing fast-mode-refusal re-ask (see
+    :attr:`~local_operator.harness.types.ChatRequest.isolated`); the timeout
+    spans all of them, so it remains the entire budget either way.
 
     The two automatic callers collapse :data:`CALL_FAILED` back onto ``None``,
     which is what they have always done and still correct: a failed check and an
     unchanged subject are the same instruction to them. Only ``refresh_title``
     keeps the distinction, because only it has a user waiting for an answer.
 
-    A failure is swallowed — never into silence: it is logged (type and message,
-    never prompt content), because the module's contract is that its failures go
-    to the log file. A cancellation is not a failure and stays silent.
+    A failure is swallowed — never into silence: it is logged (the exception
+    type and a bounded excerpt of the PROVIDER's own message; this module adds
+    no prompt text of its own), because the module's contract is that its
+    failures go to the log file. A cancellation is not a failure and stays
+    silent.
     """
     try:
         raw = await asyncio.wait_for(complete_fn(system, prompt), timeout)
@@ -718,11 +730,22 @@ async def _ask_for_title(
         # this call and must never learn it happened; the request is `isolated`
         # so the failure cannot have moved the turn's route or credential
         # either. See ``ChatRequest.isolated``. What the failure MUST leave
-        # behind is a log line — type and message only, never the prompt or any
-        # user content — because "sessions don't get named" is otherwise
+        # behind is a log line, because "sessions don't get named" is otherwise
         # diagnosable only by analytics archaeology: a swallowed 401 from a
         # stale pool row looks identical on screen to a declined rename.
-        logger.warning("conversation naming call failed: %s: %s", type(exc).__name__, exc)
+        #
+        # What is logged is the exception TYPE and the PROVIDER's own message.
+        # We add no prompt, opener or transcript text of our own — but the
+        # guarantee stops there and is deliberately not overstated: a provider
+        # that echoes the offending request in its error body puts that text in
+        # its message, and suppressing the message entirely would throw away
+        # the diagnosis this line exists to carry. Hence the cap: a bounded
+        # excerpt keeps a verbose echo from filling the log file, while the
+        # leading text (where every provider puts the actual reason) survives.
+        message = str(exc)
+        if len(message) > _LOGGED_ERROR_CHARS:
+            message = message[:_LOGGED_ERROR_CHARS] + "…"
+        logger.warning("conversation naming call failed: %s: %s", type(exc).__name__, message)
         return CALL_FAILED
     return parse_title(str(raw or ""))
 
@@ -912,11 +935,12 @@ async def generate_retitle(
     leave the title alone.
 
     Same cost and the same isolation as :func:`generate_title` — one bounded,
-    single-attempt, tools-free call. What keeps it cheap in aggregate is the
-    CALLER's growth-gated schedule (:func:`should_refresh_theme`), not this
-    function. ``turns`` defaults to ``None`` for callers with no history handy;
-    the newest ``text`` alone is then the whole trajectory, which is the old
-    behaviour and still correct for a two-message session.
+    tools-free call (with the same small auth-retry allowance). What keeps it
+    cheap in aggregate is the CALLER's growth-gated schedule
+    (:func:`should_refresh_theme`), not this function. ``turns`` defaults to
+    ``None`` for callers with no history handy; the newest ``text`` alone is
+    then the whole trajectory, which is the old behaviour and still correct for
+    a two-message session.
     """
     if not current or is_low_signal(text):
         return None
