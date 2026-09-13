@@ -560,7 +560,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 111 public members and a POSITIVE
+    than stylistic. This protocol carries 112 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -572,8 +572,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     must not be reconciled. It read 84 for some time while the protocol grew
     past it (106 before the warm members were added, 108 with them, 109 once
     ``restored_search_spend`` joined ``restored_usage``, 111 once
-    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract),
-    so recompute it rather than adjusting it by the size of your own change.
+    ``can_ever_bind`` and ``session_was_stopped`` joined the viewer contract,
+    112 once the lease-warm retry needed ``recovering``), so recompute it rather
+    than adjusting it by the size of your own change.
 
     ====================================================  ==================
     ``isinstance(viewer, AttachedSession)`` (what it was)    0.014-0.015 us
@@ -1084,6 +1085,21 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         because the desktop bridge reads it to decide whether a speculative
         warm needs starting at all; correctness under a missed sample belongs
         to the bind lock, not to this predicate.
+        """
+        ...
+
+    @property
+    def recovering(self) -> bool:
+        """Whether owner recovery owns this viewer's dial right now.
+
+        Declared for the same reason as :attr:`engage_in_flight` beside it, and
+        it answers the question that predicate cannot: an engage attempted while
+        recovery owns the dial does NO WORK at all — ``_ensure_bound`` returns at
+        its own guard, with no task to report and no process to account for — so
+        the desktop bridge's lease-driven warm reads this to tell a REFUSED
+        attempt (retried on a short poll) from a FAILED one (which it paces,
+        because that attempt really did spawn). Unlike the lock sample above,
+        this is a state read: there is no window between asking and acting.
         """
         ...
 
