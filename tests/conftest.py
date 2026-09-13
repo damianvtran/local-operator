@@ -574,9 +574,9 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
 def _broker_is_still_up(candidate: Path) -> bool:
     """Is ``candidate``'s broker still answering, after a stop was attempted?
 
-    This is the post-SIGTERM probe inside `_stop_brokers_in`'s wait loop, and it
-    is that loop's only caller: a False answer here is what puts the candidate
-    into the set `_stop_brokers_in` returns. The session-end net does not call
+    This is the post-SIGTERM probe inside `_stop_brokers_in`'s wait loop, which
+    is its only caller: a False answer here is what puts the candidate into the
+    set `_stop_brokers_in` returns. The session-end net does not call
     this helper — it counts the set that function returns, and reports that.
 
     Conservative in the only direction that is honest: any failure to get an
