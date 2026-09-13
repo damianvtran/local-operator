@@ -1558,8 +1558,10 @@ SETTINGS: tuple[Setting, ...] = (
         # stored value — the resting state of the row claimed the picker was
         # open. Length matters twice: the detail line sheds the WHOLE help once
         # the key path stops fitting beside it (settings_view._detail_clause),
-        # so this is 65 cells against a 69-cell budget at 100 columns, and the
-        # key path keeps its place beside it.
+        # so this is 66 cells against a 69-cell budget at 100 columns, and the
+        # key path keeps its place beside it (66 + 3 + 22 = 91 of the row's 94).
+        # The rewrite is length-NEUTRAL: the sentence it replaced also measured
+        # 66, so the 80-column rung behaves identically on both sides.
         #
         # It also carries the operator's own route to a deliberate pin, which is
         # the half this row was missing: the model-side pin is refused on
@@ -1614,6 +1616,11 @@ SETTINGS: tuple[Setting, ...] = (
         # of help. An earlier version measured 73 and shed the key path, which
         # the comment beside it wrongly claimed it did not; this is 71 and was
         # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row
@@ -1643,6 +1650,11 @@ SETTINGS: tuple[Setting, ...] = (
         # of help. An earlier version measured 73 and shed the key path, which
         # the comment beside it wrongly claimed it did not; this is 71 and was
         # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row
@@ -1672,6 +1684,11 @@ SETTINGS: tuple[Setting, ...] = (
         # of help. An earlier version measured 73 and shed the key path, which
         # the comment beside it wrongly claimed it did not; this is 71 and was
         # re-measured on a rendered frame at 80/100/140 rather than estimated.
+        # At 80 the key path RENDERS (the row is 74 cells there and the rung
+        # paints `help · clause · key`), so the earlier note that it was "still
+        # shed" at that width was wrong in the safe direction — the frame is the
+        # only thing that settles it, which is why the bounds below are measured
+        # rather than derived.
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row

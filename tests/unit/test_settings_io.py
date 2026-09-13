@@ -1564,4 +1564,10 @@ class TestTheSubagentModelChoiceRow:
         # line sheds the WHOLE help once it and the key no longer fit
         # (``settings_view``'s shed ladder), so an edit that buys words here
         # loses the billing fact in exactly the state the row is read in.
-        assert cell_len(setting.help) <= 74, setting.help
+        #
+        # 72 is the frame-derived budget, not a round number: the row is 94
+        # cells, `subagents.models.hi` is 19 and the separator 3, leaving 72 for
+        # the help — and 73 is precisely the width the review caught shedding
+        # the key path (95 cells against 94), so a bound of 74 would admit the
+        # string this assertion exists to prevent.
+        assert cell_len(setting.help) <= 72, setting.help

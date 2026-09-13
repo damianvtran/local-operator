@@ -9935,21 +9935,25 @@ def _operator_choice_task_rejection(tier: str) -> str:
     rendered frame at 100 columns, the visible window inside the message is ~69
     cells, and three facts compete for it: the remedy, who owns the field, and
     the key that names it. The wording below puts the remedy and the ownership
-    inside the window and lets the KEY be the part that trails — it is the one
-    of the three the operator can also read off the `/settings` row's own detail
-    line, and the delegating model, this message's first reader, receives it
-    whole either way. Two earlier orders were measured and rejected: fact first
-    put the remedy at cell 73 (one word past the cut), remedy first with the key
-    inline put the ownership past it.
+    inside the window; the KEY clause comes last, after the sentence that
+    explains the swap, so whatever the cut falls on is prose rather than half a
+    key — a partly-drawn `(subagents.` is the one rendering a reader can
+    mis-transcribe, and it was what the previous order painted at 100 columns.
+    The key is still the fact that gives way first, which is affordable: the
+    operator can read it off the `/settings` row's own detail line, and the
+    delegating model — this message's first reader — receives it whole either
+    way. Two earlier orders were measured and rejected: fact first put the
+    remedy at cell 73 (one word past the cut), and remedy-first with the key
+    inline cut the key mid-token.
     """
     selector = configured_effort_tiers().get(tier)
     where = (
         f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
     )
     return (
-        "Relaunch without 'effort': it is the operator's to choose "
-        f"(subagents.model_choice=operator), and it swaps the child's MODEL, not its "
-        f"reasoning level{where}."
+        "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
+        f"child's MODEL, not its reasoning level{where}. That switch is "
+        "subagents.model_choice."
     )
 
 
@@ -9958,18 +9962,33 @@ def _operator_choice_pin_rejection(tier: str) -> str:
 
     This one carries the OPERATOR's remedy as well as the model's, because
     refusing a model-side pin would otherwise leave the person who wants one
-    strong reviewer with no route at all: the copy names both the row that
-    hands the picker back and the place a pin properly lives (the role's own
-    profile, which the desktop editor writes today). The model still gets its
-    instruction first — omit the field, or pass ``inherit`` to clear a pin.
+    strong reviewer with no route at all.
+
+    The ORDER is load-bearing for the same reason as the ``task`` refusal, and
+    measured on the same frame: the card spends 23 cells on
+    ``- effort: Value error, `` and then truncates the message at cell 68, so the
+    copy leads with the ownership AND the operator's next step — the two things
+    the person reading the card can act on — and puts the model's own
+    instruction (omit the field, or pass ``inherit``) after them. Two routes
+    ride here, deliberately: the setting, which is in the TUI, and the role's own
+    profile, which the desktop editor writes today. Before this order the route
+    sentence began at cell ~260 of a ~356-cell message and was invisible even
+    expanded.
+
+    The lead ends at cell 64 of the 68-cell window with the key COMPLETE, so the
+    cut falls in the prose that follows rather than inside
+    ``subagents.model_choice`` — a half-drawn key is the one rendering a reader
+    can mis-transcribe (R-9), and ``=model``, which reads better, measured 70 and
+    would have put the ellipsis inside it.
     """
     selector = configured_effort_tiers().get(tier)
     where = f" ('{tier}' → {selector})" if selector else ""
     return (
-        "effort is the operator's to choose here (subagents.model_choice=operator): a "
-        f"pin runs that role on a different MODEL{where}, not at a different reasoning "
-        "level. Omit 'effort', or pass 'inherit' to clear a pin. To pin a role, the "
-        "operator sets subagents.model_choice='model' or pins it in the role's profile."
+        "effort is the operator's; pin a role via subagents.model_choice. "
+        f"Setting it to 'model' hands the choice over, and a role's own profile can "
+        f"carry the pin instead. A pin runs that role on a different MODEL{where}, "
+        "not at a different reasoning level. Omit 'effort', or pass 'inherit' to "
+        "clear a pin."
     )
 
 
@@ -10242,8 +10261,8 @@ def _task_tool_description(model_choice: bool) -> str:
             )
         else:
             effort = (
-                "No effort tiers are configured (values.subagents.models), so every "
-                "child inherits this session's model and reasoning effort; do not pass "
+                "No effort tiers are configured (subagents.models), so every child "
+                "inherits this session's model and reasoning effort; do not pass "
                 "'effort'."
             )
     return (
@@ -10293,20 +10312,21 @@ class TaskItem(BaseModel):
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
-    # configured under ``values.subagents.models`` at CALL time, and a Literal
-    # would freeze one guess at import. The schema the model sees is rewritten
-    # to the configured tiers by ``_advertise_effort_tiers`` — and REMOVED
-    # entirely when the operator owns the choice
-    # (``values.subagents.model_choice``), which is the shipped default —
-    # while validation below is what refuses anything else. This description is
-    # the pre-patch fallback, so it states the condition rather than the menu.
-    effort: str | None = Field(
-        default=None,
-        description=(
-            "Model tier for this subagent, only where the operator has set "
-            "values.subagents.model_choice=model."
-        ),
-    )
+    # configured under ``subagents.models`` at CALL time, and a Literal would
+    # freeze one guess at import. The schema the model sees is rewritten to the
+    # configured tiers by ``_advertise_effort_tiers`` — and REMOVED entirely
+    # when the operator owns the choice (``subagents.model_choice``), which is
+    # the shipped default — while validation below is what refuses anything
+    # else.
+    #
+    # NO field description, deliberately. There is no path that renders this
+    # field without the patch: the patcher either replaces the description or
+    # deletes the property, in the top-level form and in ``$defs`` alike, so a
+    # fallback string here was text nobody could read — and it carried a second
+    # spelling of the key (`values.`-prefixed) that the `/settings` page never
+    # shows and `lop config edit` does not take. Two spellings for one key in
+    # one file is how the next reader learns the wrong one.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10335,16 +10355,10 @@ class TaskParams(BaseModel):
         default=None,
         description="Single-task form: role for the subagent (see 'tasks[].agent').",
     )
-    effort: str | None = Field(
-        default=None,
-        # Same reason as ``TaskItem.effort`` above: the rendered description
-        # replaces this one, so it describes the CONDITION under which the
-        # field exists rather than a menu the operator may not have opened.
-        description=(
-            "Single-task form: model tier for the subagent, only where the "
-            "operator has set values.subagents.model_choice=model."
-        ),
-    )
+    # Same reason as ``TaskItem.effort`` above, including the missing
+    # description: the rendered one replaces it on every build path, and the
+    # fallback it used to carry spelled the key a second way.
+    effort: str | None = Field(default=None)
 
     @field_validator("effort")
     @classmethod
@@ -10858,8 +10872,16 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     session_model = str(getattr(context, "session_model_label", "") or "")
     if not model:
         return f"- {label} ({agent}): job {job_id}"
+    # `owns is not True` rather than `owns is False`: the inherited wording needs
+    # the label comparison BESIDE it, never instead of it. A `False` stamp means a
+    # tier or pin chose this child but its label has since moved away from the
+    # session's (a restored fallback rewrites ``model_label`` and never
+    # ``owns_model``), and asserting "on this session's model (<a model it is not
+    # on>)" there would be the same class of lie this stamp was added to fix
+    # (R-1). Today's only call site renders at launch, where the two agree — this
+    # keeps the next one honest.
     owns = _job_owns_model(context, job_id)
-    if owns is False or (owns is None and model == session_model):
+    if owns is not True and model == session_model:
         return f"- {label} ({agent}) on this session's model ({model}): job {job_id}"
     return f"- {label} ({agent}) on {model}: job {job_id}"
 

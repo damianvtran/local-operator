@@ -418,7 +418,7 @@ def effort_tier_rejection(tier: str) -> str | None:
     if not tiers:
         return (
             f"effort tier {tier!r} is unavailable: no tiers are configured under "
-            f"values.subagents.models; {inherit}"
+            f"subagents.models; {inherit}"
         )
     try:
         raw = read_effort_tier_selectors().get(tier)
