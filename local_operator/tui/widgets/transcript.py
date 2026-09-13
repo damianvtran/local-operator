@@ -533,16 +533,43 @@ class TranscriptBlock(Static):
             return width
         return self.fold_width(0)
 
+    def authored_width(self, lane: int) -> int:
+        """The width to re-author this block at, given the container's lane.
+
+        The container publishes ONE lane per lane change — the transcript's own
+        reconciled ``scrollable_content_region`` — and for a block whose box IS
+        the row it fills, that lane is its box, so the base answers the lane
+        unchanged. Publishing the container's number rather than letting every
+        block re-derive one is what makes the walk a guarantee instead of a
+        second opinion — :meth:`fit_width` is the ledger rows' half of the same
+        question ("the width to build at, given the lane the container
+        published"), and this is the authored blocks' half.
+
+        The exception is deliberately one case wide, and it is a block that
+        PINS ITS OWN BOX: its box is not the lane and the lane cannot name it,
+        so the lane is the wrong rebuild width for it. Publishing the lane to
+        such a block authors its rows wider than the box they are painted in,
+        which is a wrap — and, for a notice, the loss of the single text column
+        ``NoticeBlock._build`` maintains — rather than the harmless no-op the
+        lane is for a block that fills its row. Such a block overrides this and
+        answers with the width it is pinned to; nothing else changes, because
+        ``refit_width`` keeps the one guard and the one rebuild, and the same
+        number then arrives from the block's own ``on_resize`` too.
+        """
+        return lane
+
     def refit_width(self, width: int) -> None:
         """Re-author this block's rows if the LANE it was built at has moved.
 
         The counterpart of :meth:`fit_width` for a block that AUTHORS its rows —
         it wraps or truncates text itself, so a stale width is baked into its
         content rather than re-folded at paint time. Called by
-        :meth:`TranscriptView._refit_authored_blocks` with the lane the container
-        just reconciled, and by the block's own ``on_resize`` with the width its
-        layout pass reports, so the two triggers share one guard and one rebuild
-        and cannot disagree about what "stale" means.
+        :meth:`TranscriptView._refit_authored_blocks` with the width that block
+        answers for the lane the container just reconciled
+        (:meth:`authored_width` — the lane itself, unless the block pins its own
+        box), and by the block's own ``on_resize`` with the width its layout
+        pass reports, so the two triggers share one guard and one rebuild and
+        cannot disagree about what "stale" means.
 
         It has to exist because the notification such a block would rely on —
         ``Resize`` — is not delivered in one specific frame; :meth:`
@@ -556,8 +583,14 @@ class TranscriptBlock(Static):
         it is closed here rather than left as a second tear to rediscover.
 
         The default is a NO-OP: most blocks hand a renderable to Rich and fold it
-        at PAINT time, so they have no width baked in and nothing to re-fit.
-        ``UserBlock``/``NoticeBlock``/``WorkingBlock`` override it. Ledger rows
+        at PAINT time, so they have no width baked in and nothing to re-fit. The
+        rule for the overriders is "a block that wraps or truncates its own text
+        rather than handing Rich a renderable" — today ``UserBlock``,
+        ``NoticeBlock``, ``WorkingBlock``, ``AssistantBlock``, ``ImageBlock``,
+        ``ApprovalBlock`` and ``KeyPromptBlock``, with ``InstructionBlock``
+        inheriting ``UserBlock``'s (R2, review round 2: this sentence named
+        three of the seven, which is the map a maintainer reads to decide
+        whether a new block needs an override). Ledger rows
         are deliberately not part of this walk — they thread the lane into their
         rebuild through :meth:`_repaint_ledger_rows`, which has to know which row
         type it is holding.
@@ -1612,18 +1645,58 @@ class NoticeBlock(TranscriptBlock):
         """
         self.refit_width(self.fold_width(80))
 
+    def authored_width(self, lane: int) -> int:
+        """The width this notice authors at, given the lane the container publishes.
+
+        Most notices fill their row, so the lane IS their box and the inherited
+        answer is right. A BOOT-COLUMN notice does not: while the boot card is
+        up, ``OperatorApp._sync_boot_column_width`` pins its width to the card
+        and centres it on the card's column, so its box is the card — 75 cells
+        at 100 columns — while the transcript's lane is 96. Handed that lane,
+        the walk re-authored the notice 21 cells wider than the box it is
+        painted in (measured on the pre-fix head at 100x30: ``built=96
+        outer=75``), which is a wrap of content the block thought it had
+        already folded: the block's own ``Resize`` then handed it 75, so one
+        lane change rebuilt it TWICE and the width finally held was decided by
+        whichever trigger landed last (R1, review round 2 / Q-R2-1, QA round
+        2 — the row that left the single text column ``_build`` maintains,
+        painting at the box's left edge instead of the hanging column).
+
+        The width is read back from the style the app pinned it to rather than
+        from a reconciled ``size``/``outer_size``, because the pin is what the
+        box is arranged FROM: it is written in the same statement that sets the
+        class, so it is already the card the row will be given, where a
+        reconciled size can still hold the previous card in the frame the walk
+        runs in (measured at 190x36: the walk's frame had ``size=98`` with the
+        pin already re-resolved to 100). This is the same read the app itself
+        makes of a resolved layout input when it debits the sidebar
+        (``_sync_boot_column_width``).
+
+        Answers the lane when the block is not pinned — as a ``1fr`` notice is
+        not — so the ordinary notice keeps the container's number verbatim.
+        """
+        if self.has_class(BOOT_COLUMN_CLASS):
+            pinned = self.styles.width
+            if pinned is not None and not pinned.is_fraction:
+                width = int(pinned.value or 0)
+                if width > 0:
+                    return width
+        return lane
+
     def refit_width(self, width: int) -> None:
         """Re-wrap the notice if ``width`` is not the width it holds.
 
-        ``width`` is either the lane the container published
-        (:meth:`TranscriptView._refit_authored_blocks`) or the width this block's
-        own layout pass reported, and it is used as the REBUILD width rather
-        than only as the trigger — the rows are a pure function of the text and
-        this width, so a rebuild has to author at exactly the width the guard
-        compared against. Most notices are single-row and unaffected by a lane
-        change; the ones that wrap are the ``/stop all`` listings and refusals,
-        and those were reaching :meth:`on_resize` — the notification this funnel
-        exists because the compositor can drop.
+        ``width`` is either the width the container published for this block
+        (:meth:`TranscriptView._refit_authored_blocks`, through
+        :meth:`authored_width`, so a pinned notice is handed its own box rather
+        than the lane) or the width this block's own layout pass reported, and
+        it is used as the REBUILD width rather than only as the trigger — the
+        rows are a pure function of the text and this width, so a rebuild has to
+        author at exactly the width the guard compared against. Most notices are
+        single-row and unaffected by a lane change; the ones that wrap are the
+        ``/stop all`` listings and refusals, and those were reaching
+        :meth:`on_resize` — the notification this funnel exists because the
+        compositor can drop.
         """
         lane = width if width > 0 else self.fold_width(80)
         was_finalized = self._finalized
@@ -4312,7 +4385,22 @@ class TranscriptView(ScrollableContainer):
           ``_on_timer_update`` directly, not through the queue), so a live
           terminal is not *provably* unable to paint inside that window. What it
           cannot do is keep the tear, which is what was actually reported: a
-          stale row that survived settles and needed a hover to heal. Accepted.
+          stale row that survived settles and needed a hover to heal. Round 2
+          measured it directly with a display probe (every ``App._display`` of
+          the sequence): the clean toggle path paints ZERO torn frames where
+          the previous head painted one (D1's prose tear), and the raced path —
+          a manual ``_refresh_layout(scroll=True)`` in the toggle's own tick —
+          hands the display exactly ONE, self-correcting on the next pass
+          (D2, design round 2, rated MINOR for being measured rather than
+          assumed). Deliberately NOT suppressed by
+          ``_suppress_intermediate_paint``: that idiom stands in for
+          ``_compositor_refresh`` around an app-initiated, synchronous
+          ``_refresh_layout()`` (the ``/resume`` switch), and this frame comes
+          out of Textual's OWN scroll-triggered timer pass, which no call site
+          here owns — using it here would mean suppressing paints for an
+          unbounded window until an event this code cannot see, which is a
+          worse failure than one intermediate frame. Recorded as a bounded
+          residual on the thread rather than fixed.
 
         The ``scrollable_content_region`` read below is a compositor-map lookup,
         and with ``_full_map_invalidated`` still set in this frame it re-arranges
@@ -4379,6 +4467,30 @@ class TranscriptView(ScrollableContainer):
         that is not a child of this container is not on screen to be torn and
         derives on its own first layout, and one being re-parented mid-pass must
         not be re-authored from a stale position.
+
+        Each block is asked for the width it should be fitted to
+        (:meth:`TranscriptBlock.authored_width`) rather than handed the lane
+        directly, because the lane is only the box of a block that fills its
+        row. A block that pins its own box answers with that box: publishing
+        the lane to a boot-column notice authored it wider than the box it is
+        painted in, and made the walk and the block's own ``Resize`` name two
+        different widths for one lane change (R1, review round 2 / Q-R2-1, QA
+        round 2). The base answers the lane unchanged, so every other block
+        still receives the container's number verbatim.
+
+        Two limits are recorded rather than papered over. The walk is cheap by
+        INHERITANCE, not by construction (R3, review round 2): ``ImageBlock``,
+        ``ApprovalBlock`` and ``KeyPromptBlock`` re-author on every lane change
+        whether or not their own width moved, each for a reason its own
+        docstring gives (no cheaper staleness test for a grid or a receipt row),
+        so a lane change costs those two builds of one-row blocks and the cost
+        is linear in lane changes rather than multiplicative. And the walk sees
+        ``self._blocks`` only, so a width-authoring child mounted around
+        ``append_block`` — the boot ``welcome`` splash
+        (``app.py`` mounts it ``before=0``) — is outside it by construction (R4,
+        review round 2, recorded and not measured: the splash re-fits in its own
+        ``on_resize``); a second walk over ``children`` would have to answer for
+        every non-block widget the container ever holds.
         """
         for block in self._blocks:
             if getattr(block, "LEDGER_ROW", False):
@@ -4387,7 +4499,7 @@ class TranscriptView(ScrollableContainer):
                 continue
             if block.parent is not self:
                 continue
-            block.refit_width(width)
+            block.refit_width(block.authored_width(width))
 
     def _settle_gaps(self, blocks: list[TranscriptBlock]) -> None:
         """Re-decide the gaps a batch changed, touching each boundary once.
