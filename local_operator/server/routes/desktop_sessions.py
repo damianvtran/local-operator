@@ -47,6 +47,7 @@ from local_operator.server.utils.desktop_receipts import (
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import (
+    CHILD_PAGE_LIMIT,
     DesktopSessionBridge,
     DesktopSessions,
     SubagentChildUnavailable,
@@ -465,7 +466,7 @@ async def child_transcript(
     child_id: str,
     request: Request,
     before_id: str | None = Query(default=None, max_length=128),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=CHILD_PAGE_LIMIT),
 ):
     """One page of a subagent's own transcript, read through its parent.
 
