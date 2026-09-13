@@ -120,7 +120,7 @@ async function loadWorker() {
     windows: { get: async () => ({ id: 1 }), getCurrent: async () => ({ id: 1 }) },
     runtime: {
       getURL: (p) => `chrome-extension://test/${p}`,
-      getManifest: () => ({ version: "0.1.11" }),
+      getManifest: () => ({ version: "0.1.12" }),
       onStartup: { addListener: () => {} },
       onInstalled: { addListener: () => {} },
       onMessage: { addListener: () => {} },

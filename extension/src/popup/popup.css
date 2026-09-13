@@ -59,7 +59,27 @@ body {
 
 /* A card, by the system's Card/panel reading: 10px radius, ONE hairline, and
  * NO shadow. Elevation is the --surface-on---paper step plus the hairline. */
+/* Bounded to the viewport, and a column, so a tall card SCROLLS ITS BODY
+ * instead of running off the bottom of the popup.
+ *
+ * Chrome applies the browser's default zoom to extension popups and caps the
+ * popup at 600 device px, so zoom shrinks the CSS viewport (600 -> 480 at 125%,
+ * 400 at 150%). With the card free-flowing, the tallest state lost its last
+ * element off-screen: the `unresponsive` card's manual chrome://extensions
+ * fallback — by this card's own reasoning the CERTAIN remedy, the one that
+ * worked on 2026-09-11 when a reload did not — was clipped 63px at 125% and
+ * 143px at 150% (design D2). The whole page scrolled, so the header and footer
+ * left too and nothing on screen indicated more content below.
+ *
+ * Scrolling the BODY rather than the page keeps the wordmark and the Settings
+ * link pinned, which is what makes the scroll legible as "there is more card"
+ * instead of "the popup is cut off". `min-height: 0` on the body is load-bearing
+ * — a flex child's default `min-height: auto` refuses to shrink below its
+ * content, so without it the body never scrolls and the overflow is unchanged. */
 .card {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 20px);
   background: var(--surface);
   border: 1px solid var(--hairline-strong);
   border-radius: 10px;
@@ -107,6 +127,14 @@ body {
 
 .body {
   padding: 18px 16px 16px;
+  /* See .card: the scrolling region. `min-height: 0` overrides the flex
+   * default that would otherwise refuse to shrink below the content height. */
+  min-height: 0;
+  overflow-y: auto;
+}
+.head,
+.foot {
+  flex: none;
 }
 
 /* State titles in the old-style serif display, sized for a 300px popup
@@ -332,6 +360,30 @@ input:disabled {
 .actions {
   margin-top: 16px;
 }
+/* Leaving the actions group costs what entering it costs. `.btn.block`'s 8px
+ * margin was doing double duty as both intra-group (button to button) and
+ * post-group spacing, so a paragraph after the buttons read as a caption
+ * hanging off the last one rather than as the card's next idea \u2014 16px in, 8px
+ * out (design D5). Matching the two restores the rhythm the other cards use. */
+.actions + .sub,
+.actions + .recheck,
+.sub + .recheck {
+  margin-top: 16px;
+}
+/* The "Check again" verdict. Quiet on purpose: it reports that nothing changed,
+ * which is information, not an alarm \u2014 the card's danger rule already carries
+ * the severity. Sized with `.again`'s well so a status line in the body reads
+ * consistently wherever it appears. */
+.recheck {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--sunken);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-muted);
+}
 /* The repeat-ask line. Deliberately NOT the danger register: nothing has gone
  * wrong and the previous decision was honoured, so this is information the
  * user needs to read the card correctly, not an alarm. It takes the --sunken
@@ -360,6 +412,68 @@ input:disabled {
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
   color: var(--ink);
+}
+/* The wedged-worker banner on the CONSENT card. It borrows `.all-sites`'s
+ * treatment on purpose: both say "the gate you are looking at is not behaving
+ * the way the rest of this card implies", and inventing a second danger
+ * register beside an established one is how a design system drifts. It sits
+ * directly under the title — above the prose it qualifies — because it changes
+ * what the whole card means, and 12px/13px so a banner cannot outweigh the
+ * question it annotates. */
+/* Spacing is deliberately tighter than `.all-sites`' 12px/8px. The banner is
+ * the only element that grows the CONSENT card, which is already the tallest
+ * state, and at the default 300x600 its 74.53px pushed Allow/Deny 4.3px below
+ * the bounded body — the decision itself clipped, on the one card that carries
+ * the incident (design D8 / UX U9). 10px above (it follows a title that brings
+ * its own spacing) and 6px/9px of padding buy back exactly the overflow without
+ * touching any shared rule, so no other card's rhythm moves. */
+.wedge {
+  margin: 10px 0 0;
+  padding: 6px 9px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+}
+/* SCOPED to a consent card that is carrying the banner, via :has() — the wedged
+ * prompt is the only card that does not fit (580px against the 600px bound),
+ * and it does not fit because the banner is on it. Reclaiming the difference
+ * from the card's own vertical rhythm keeps every OTHER card's spacing exactly
+ * as designed: the healthy prompt at 513.84px is untouched, which is what makes
+ * this a fix for D8/U9 rather than a global retune nobody asked for. The
+ * elements chosen are the ones whose spacing is least load-bearing — the
+ * queue head/nav and the scope label — never the trough that quarantines the
+ * host or the action row itself. */
+#origin:has(#origin-wedge:not(.hidden)) .queue-head {
+  margin-top: 8px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .queue-nav {
+  margin-top: 6px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .label {
+  margin-top: 10px;
+}
+/* The generic consent prose is DROPPED on the wedged card, not merely tightened.
+ * "The agent wants to open a page on this site with your current login…" is
+ * orientation for a decision that is about to take effect; on this card the
+ * banner immediately above has just said the decision will not be applied, so
+ * the paragraph is both redundant and slightly contradictory — and it is the
+ * 43px that stops Allow/Deny fitting. The load-bearing content (the host in its
+ * trough, the scope picker and what it grants, the queue position) all stays. */
+#origin:has(#origin-wedge:not(.hidden)) #origin-body {
+  display: none;
+}
+
+/* The manual remedy inside the banner. A separate block, one step quieter than
+ * the sentence above it, because it is the SECOND thing to try — it must be
+ * findable without competing with the reload for the first read. */
+.wedge-manual {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--ink-muted);
 }
 .linkish {
   appearance: none;
@@ -425,14 +539,16 @@ input:disabled {
  * The pin is therefore chosen per state, from a synchronous localStorage hint
  * holding the pin show() recorded for the card it last rendered:
  *
- *   86px  -> the connected card (211.2px)
- *   219px -> the pairing form (344.0px)
- *   254px -> the unresponsive card (378.8px)
+ *   86px  -> the connected card (207.2px)
+ *   219px -> the pairing form (340.2px)
  *
- * Three values rather than a paired/unpaired boolean (design D3-1): a boolean
- * cannot name the third state, and the one it has to collapse — the wedged but
- * paired worker this popup exists for — is the one a user reopens from the
- * recovery copy, where a wrong pin cost a measured 167.8px reflow.
+ * A value per state rather than a paired/unpaired boolean (design D3-1), and
+ * ONLY for states that are durable properties of the browser. A pin is a bet
+ * that the next open repeats this state: paired stays paired, unpaired stays
+ * unpaired, but the wedged card is acted on and its own copy asks the user to
+ * reopen — so pinning it optimised a reopen nobody makes and taxed the recovery
+ * open everybody makes, measured at 315.84px of collapse (design D1). The full
+ * reasoning and the measurements live in popup.ts's PIN_BY_STATE block.
  *
  * That choice is applied by first-paint.js, a CLASSIC script in <head>, NOT by
  * popup.ts. popup.js is a deferred module, so an inline style it sets arrives
@@ -443,7 +559,7 @@ input:disabled {
  *
  * All four numbers are measured at 300x600 and move together — the card's
  * height depends on the pairing form, which depends on the reserved error slot
- * below. Re-measure ALL THREE pins if any of them changes; a stale pin is a
+ * below. Re-measure BOTH pins if any of them changes; a stale pin is a
  * resize, which is the defect this whole block exists to prevent. */
 #pending {
   min-height: 219px;

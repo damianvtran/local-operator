@@ -121,6 +121,31 @@ function fireAndForget(op: Promise<unknown> | undefined | void, what: string): v
   void Promise.resolve(op).catch((error) => console.warn(`${what} failed`, error));
 }
 
+/**
+ * Fire-and-forget an async function whose SYNCHRONOUS throw is as fatal as its
+ * rejection.
+ *
+ * `fireAndForget` above takes a promise, so the call that produces it has
+ * already run by the time containment is applied: an `async function` that
+ * throws before its first `await` still rejects (safe), but a plain function
+ * that throws synchronously escapes into the caller. That caller here is always
+ * a Chrome event handler — an alarm tick, a runtime lifecycle event, the socket
+ * `onmessage` — and an exception thrown out of one of those is an uncaught
+ * error in the worker, which is the state this PR exists to eliminate: Chrome's
+ * MV3 worker is poisoned by exactly that, and the operator's dead toolbar
+ * clicks (2026-09-11 20:23) coincided with a worker that never dialled again.
+ *
+ * Taking a THUNK rather than a promise is what closes that window — the call
+ * itself happens inside the try.
+ */
+function guarded(op: () => Promise<unknown> | unknown, what: string): void {
+  try {
+    fireAndForget(Promise.resolve(op()), what);
+  } catch (error) {
+    console.warn(`${what} failed`, error);
+  }
+}
+
 // Raise a system notification when a site decision is pending (finding U2).
 // BEST-EFFORT ONLY: on macOS this banner frequently never reaches the user —
 // Chrome needs its own Notification Center authorization (System Settings →
@@ -338,7 +363,21 @@ async function connect(): Promise<void> {
     return;
   }
 
-  const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+  // `new WebSocket()` THROWS synchronously on a malformed or blocked URL — and
+  // `port` comes from chrome.storage, so a corrupted value reaches this line as
+  // a constructor argument. Every caller of connect() is `void connect()` from
+  // an event handler, so an escape here is an uncaught worker error rather than
+  // a failed dial. Contain it and let the ordinary backoff retry: a bad stored
+  // port is fixed by re-pairing, not by crashing the worker in between.
+  let wire: WebSocket;
+  try {
+    wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+  } catch (error) {
+    console.warn("extension dial failed to open a socket", error);
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   socket = wire;
   // This dial's identity. Everything asynchronous that belongs to it — the
   // handshake writes, the frames it carries, and every response a handler it
@@ -392,9 +431,41 @@ async function connect(): Promise<void> {
   };
   wire.onmessage = (message) => {
     if (socket !== wire) return; // a superseded socket's frames are not ours
-    const frame = JSON.parse(String(message.data)) as DaemonMessage;
-    if ("method" in frame) void dispatch(frame, generation);
-    else if (frame.event === "ping") wire.send(JSON.stringify({ event: "pong" }));
+    // A frame that does not parse is a DAEMON-side defect (a truncated write, a
+    // future protocol version, a proxy injecting something), and it used to
+    // throw straight out of this handler — an uncaught error in the worker for
+    // one bad byte on the wire, with every later frame on a healthy socket
+    // still pending. Drop the frame, keep the socket: the daemon retries or the
+    // dial deadline reaps it, and the console says which one it was.
+    let frame: DaemonMessage;
+    try {
+      const parsed: unknown = JSON.parse(String(message.data));
+      // PARSING IS ONLY HALF THE GUARD. `null`, `2`, `"x"`, `true` and `[]` are
+      // all VALID JSON, so they clear `JSON.parse` and then reach the `"method"
+      // in frame` test below — and `in` throws `TypeError` on any non-object.
+      // That is the same uncaught-throw-in-an-event-handler this whole block
+      // exists to remove, reached by the same class of input (a truncated or
+      // garbled daemon write) that motivated the parse guard, so the shape
+      // check has to live inside the same guard rather than trusting the cast.
+      // Arrays are rejected too: `"method" in []` is legal but an array is not
+      // a frame, and letting one through would hand `dispatch` a bad request.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        console.warn("dropped an unparseable frame from the daemon", parsed);
+        return;
+      }
+      frame = parsed as DaemonMessage;
+    } catch (error) {
+      console.warn("dropped an unparseable frame from the daemon", error);
+      return;
+    }
+    // `dispatch` already answers its own failures through `respond`, but the
+    // guard covers the path where dispatch itself cannot start (a throw before
+    // its first await), which would otherwise land as an uncaught rejection.
+    if ("method" in frame) guarded(() => dispatch(frame as { id: string; method: string; params: Record<string, unknown> }, generation), `dispatch ${String((frame as { method: string }).method)}`);
+    // `send` on a socket that raced into CLOSING throws InvalidStateError. The
+    // pong is the daemon's liveness probe, so losing one costs a link teardown
+    // — but throwing here costs the whole worker.
+    else if (frame.event === "ping") guarded(() => wire.send(JSON.stringify({ event: "pong" })), "pong");
     else if (frame.event === "hello_ack") {
       paired = frame.paired;
       fireAndForget(
@@ -462,7 +533,7 @@ function scheduleReconnect(): void {
   attempt += 1;
   fastPathTimer = setTimeout(() => {
     fastPathTimer = undefined;
-    void connect();
+    guarded(connect, "fast-path dial");
   }, delay);
 }
 
@@ -477,22 +548,28 @@ function ensureReconnectAlarm(): void {
   chrome.alarms.create(RECONNECT_ALARM_NAME, { periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES });
 }
 ensureReconnectAlarm();
+// Every dial below is `guarded` rather than `void`d. These are the RECOVERY
+// paths — the alarm floor is the only thing that rewakes a suspended worker —
+// so a rejection escaping one of them is both an uncaught worker error and the
+// loss of the tick that was meant to heal the connection.
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) void connect();
+  if (alarm.name === RECONNECT_ALARM_NAME && shouldDialOnAlarm({ connected, connecting })) {
+    guarded(connect, "alarm dial");
+  }
   // The sweep persists receipts, resolves in-command waiters through the queue
   // observer, and centrally re-arms the earliest remaining queue/result/grant
   // deadline. No caller owns this alarm independently.
-  if (alarm.name === ACCESS_EXPIRY_ALARM) void expireAccessRequest();
+  if (alarm.name === ACCESS_EXPIRY_ALARM) guarded(expireAccessRequest, "access expiry sweep");
 });
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
   ensureReconnectAlarm();
-  void connect();
+  guarded(connect, "startup dial");
 });
 chrome.runtime.onInstalled.addListener(() => {
   alive = true;
   ensureReconnectAlarm();
-  void connect();
+  guarded(connect, "install dial");
 });
 // Cold-start convergence: on every worker start (including a rewake from
 // suspension, when the globals have reset to their false initializers) the
@@ -506,7 +583,7 @@ alive = true;
 // contain failure so MV3 never reports an unhandled top-level rejection.
 void restoreAccessQueue()
   .catch((error) => console.warn("approval queue restore failed", error))
-  .finally(() => void connect());
+  .finally(() => guarded(connect, "cold-start dial"));
 
 // TOP-LEVEL REGISTRATION IS LOAD-BEARING (MV3): a service worker is torn down
 // when idle and re-instantiated by an event, and only listeners registered

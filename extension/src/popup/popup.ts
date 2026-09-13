@@ -9,7 +9,9 @@ import { DEFAULT_PORT, getLocal, getSession, getSurfaces } from "../state";
 import { pairVerdict, viewForHealth } from "./pair-flow";
 import {
   ackForDecision,
+  ackInFlight,
   noticeForRejectedDecision,
+  noticeForUnreachableWorker,
   originPromptView,
   repeatAskNotice,
   preselectedScope,
@@ -172,6 +174,20 @@ let pairingShown = false;
 // because renders are serialised — see daemonHealth().
 const HEALTH_TIMEOUT_MS = 3000;
 
+// How long a decision may wait on the WORKER before the popup concludes it is
+// not answering. Generous next to a healthy round-trip (single-digit ms over
+// chrome.runtime), because overshooting costs only a slower honest message
+// while undershooting would accuse a merely-busy worker of being wedged. The
+// bound exists at all because a stale MV3 worker answers a sendMessage with
+// silence rather than a rejection, and an unbounded await there is what left
+// Allow/Deny permanently disabled — see decide().
+const DECISION_TIMEOUT_MS = 5000;
+
+// How long a notice is held before render() paints over it. Same value the
+// pairing success hold uses: long enough to read a two-line card, short enough
+// that the popup is not lying about the current state for long.
+const NOTICE_HOLD_MS = 1500;
+
 // The pinned #pending height this browser last settled on, mirrored into
 // localStorage so the FIRST PAINT can size itself.
 //
@@ -185,13 +201,11 @@ const HEALTH_TIMEOUT_MS = 3000;
 // as a LAYOUT HINT.
 //
 // It records the PIN rather than a boolean derived from /health (design D3-1).
-// A boolean could only ever name two of the three measured states, so a browser
-// in the third — the wedged-but-paired worker this PR exists for — opened at
-// whichever of the two the boolean happened to collapse to and then grew the
-// difference: measured 86px → 378.8px, a 167.8px reflow in the state whose copy
-// sends the user to "Check again". The pin is written by show(), i.e. for the
-// card that was actually rendered, so a repeated open reproduces the height
-// already on screen.
+// A boolean could only name two states, so a browser in any third one opened at
+// whichever of the two the boolean collapsed to and then grew the difference.
+// The pin is written by show(), i.e. for the card that was actually rendered,
+// so a repeated open reproduces the height already on screen — for the states
+// it is worth betting on (see PIN_BY_STATE).
 //
 // It is a hint and nothing else: it never gates behaviour, and render() paints
 // whatever /health actually reports. A stale or absent pin costs one resize,
@@ -211,35 +225,72 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // (padding, the driven-URL trough, the actions row) is the constant between
 // them, so a pin is the state's total card height minus that chrome:
 //
-//   connected card      211.2px  ->  86px
-//   pairing form        344.0px  -> 219px
-//   unresponsive card   378.8px  -> 254px
+//   connected card      207.16px  ->  86px
+//   pairing form        339.52px  -> 219px
 //
-// A state with no entry keeps the last hint. That is deliberate: only these
-// three were measured in a real render, and a pin for the rest would be a pixel
-// guess no frame backs — while an unmeasured state costs exactly the one
-// resize a browser with no hint at all gets. Re-measure all three together when
-// any of them moves: a stale pin IS the resize this whole block exists to
-// prevent (popup.css carries the same numbers).
+// The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
+// cards, i.e. sub-pixel rounding on one shared value), so `card = pin + 121`.
+// Measured by sweeping the pin in a real headless Chrome at 300x600 dpr=2 and
+// reading the card back; that invariant is what makes the sweep a solve rather
+// than a guess. Re-measure the same way if either card's copy or controls
+// change: an eyeballed pin IS the reflow this block exists to prevent.
 //
-// The `connected` figure is the card with an EMPTY driven-URL trough. The same
-// state is taller once a URL is in it — a settled 257.3px (and 292.1px for the
-// long-URL variant) against this table's 211.2px, +47.3px / +82.1px of reopen
-// growth. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and it
-// was measured identical across the pre-PR base and both remediation heads: the
-// hint records the height the browser last SETTLED on, so a card whose text
-// changes between opens pays one resize either way, and a per-state constant
-// cannot express a height that depends on the URL. Do not add one here; the
-// provenance lives in PR #996's D3-1 note. Re-measuring `connected` with a URL
-// present will therefore read ~257px and is not a contradiction of this table.
+// ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
+// A pin is a BET that the next open repeats this state. `connected` and
+// `pairing` are durable properties of the browser — a paired browser is still
+// paired next time, an unpaired one still unpaired — so the bet pays.
+// `unresponsive` is transient BY CONSTRUCTION: the card exists to be acted on,
+// and its copy tells the user to reload and open it again, so the next open is
+// precisely the one most likely to be a DIFFERENT card.
+//
+// THIS IS A TRADE, AND THESE ARE ITS NUMBERS. Measured from the seed a real
+// browser carries (`86px` — paired for weeks), two consecutive opens per
+// sequence, /health delayed so #pending is genuinely the first frame:
+//
+//   recovery open (wedged -> connected)   167.84px -> 0.16px   <- instructed
+//   arrival (working browser wedges)      168.77px -> 257.77px
+//   failed reload (2026-09-11, 2nd wedge)   0.77px -> 257.77px
+//
+// The win is on the transition the card's copy INSTRUCTS ("open it again to
+// check"): a ~168px lurch becomes nothing. The cost is on the arrival and
+// reopen paths, which are ~89px and ~257px worse than base. The worst single
+// motion is 257.77px, not 132.84px — an earlier revision of this comment and
+// of the PR claimed the worst case was back to base, and it is not.
+//
+// THE TRANSITION OUT is the one the pin cannot help and does not need to: the
+// wedge card writes no hint, so the recovery open reads the `connected` pin
+// this browser has carried all along and lands on it exactly (0.16px). That is
+// why the durable pin must survive the wedge rather than be overwritten by it.
+//
+// A CONDITIONAL WEDGE PIN WAS PROPOSED AND MEASURED, AND IT IS WORSE. Pinning
+// the wedge only when the stored durable pin is `connected` was expected to
+// retire the arrival cost. Driven on a real build with a 343.77px wedge pin:
+// arrival stayed 257.77px (show() writes the pin AFTER the card renders, so
+// the open that first meets the wedge can never be helped by it), and the
+// instructed recovery open REGRESSED 0.16px -> 257.61px, because the wedge pin
+// it left behind then mis-sized the connected card. It buys nothing and sells
+// the one win. Do not re-derive it from the idea alone.
+//
+// THE `connected` FIGURE IS THE CARD WITH AN EMPTY DRIVEN-URL TROUGH (PR #996,
+// finding D3-1, kept across this branch's rebase because it describes a
+// different quantity from the trade above and still holds). The same state is
+// taller once a URL is in it — a settled 257.3px, and 292.1px for the long-URL
+// variant. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and
+// #996 measured it identical across the pre-PR base and both of its
+// remediation heads: the hint records the height the browser last SETTLED on,
+// so a card whose text changes between opens pays one resize either way, and a
+// per-state constant cannot express a height that depends on the URL. Do not
+// add one here; the provenance is #996's D3-1 note. Re-measuring `connected`
+// with a URL present will therefore read ~257px and is not a contradiction of
+// this table. (#996 quoted its own empty-trough figure as 211.2px; this table
+// carries the re-measured 207.2px for the same card, so the ~4px is a
+// measurement correction on this branch, not a second card.)
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
-const PIN_UNRESPONSIVE = "254px";
-const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_UNRESPONSIVE];
+const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
   pairing: PIN_PAIRING,
-  unresponsive: PIN_UNRESPONSIVE,
 };
 
 /** The pinned height this browser last settled on, or null for "no hint". */
@@ -493,12 +544,65 @@ async function renderOnce(): Promise<void> {
     setOriginBusy(false);
     renderQueueControls(queue, selected);
     show("origin");
+    // The wedged-worker banner, from the SAME signal #unresponsive renders
+    // from. This card returns before that branch is ever reached, so without it
+    // the popup shows a live Allow/Deny against a worker that cannot apply
+    // either, with the neutral tone and no route to the remedy — measured as a
+    // loop: optimistic ack, honest notice, identical prompt, indefinitely
+    // (U1/Q5/D3). Read from /health rather than from `connState`, because a
+    // dead worker's last `connState` write reads "connected" forever.
+    // BOTH halves, because they answer different questions. `#unresponsive`
+    // describes the daemon↔extension LINK and correctly renders on
+    // `extension_unresponsive` alone. This banner makes a narrower claim — that
+    // THIS DECISION cannot be delivered — and a decision travels over
+    // `chrome.runtime.sendMessage`, a channel that does not touch that socket.
+    //
+    // `extension_unresponsive` is true for two distinct reasons (daemon.py):
+    // the socket is attached but mute, OR `dropped_unproven()` — a 60s latch
+    // after the daemon severed the link. In that second window the worker is
+    // usually alive and re-dialling, so the banner claimed the decision could
+    // not be applied while Allow applied it and painted the confirmed success
+    // card (review M1). That is the same class of lie as U2's false success,
+    // pointed the other way, and it steers the user at a reload that destroys
+    // the very pending decision they opened the popup to answer.
+    //
+    // `link_attached` is what separates them: attached-and-mute is the case
+    // where `sendMessage` genuinely is unlikely to land.
+    const wedged = health?.extension_unresponsive === true && health?.link_attached === true;
+    const wedge = document.getElementById("origin-wedge");
+    // Guarded like `origin-again` above: a role="status" region rewritten on
+    // every render re-announces the same sentence to a screen reader (D10).
+    if (wedge) wedge.classList.toggle("hidden", !wedged);
+    // Tell the truth with the status rule too. show() has just set the origin
+    // card's neutral hairline; a card whose decision cannot land is a state the
+    // user must recover from, which is what danger is reserved for here.
+    if (wedged) document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
     // The prompt is an alertdialog demanding a decision, so give the keyboard
     // a landing point on the first meaningful control. Deliberately NOT Allow:
     // a focused primary on a consent dialog invites an accidental Space/Enter
     // approval (U5). Only on a newly-shown prompt, so a re-render cannot steal
     // focus back from a user who has tabbed onward.
-    if (freshPrompt) document.getElementById("origin-scope")?.focus();
+    //
+    // `preventScroll` is load-bearing, not a nicety. `.body` became a scroll
+    // container when the card was bounded to the viewport, and focusing an
+    // element inside one scrolls it into view — so on the tallest card this
+    // scrolled to the bottom on open, putting the title AND the whole danger
+    // banner above the fold at ≥125% zoom (design D7 / UX U8, measured
+    // scrollTop 139 at 125%, 219 at 150%). Overlay scrollbars are 0px wide and
+    // the header stays pinned, so a zoomed user saw an ordinary consent prompt
+    // with live Allow/Deny and no sign their answer could not land — round-1
+    // U1, reintroduced by the round-1 D2 fix through a control neither
+    // mentions. The keyboard landing point is unchanged.
+    if (freshPrompt) {
+      document.getElementById("origin-scope")?.focus({ preventScroll: true });
+      // Belt and braces: a fresh prompt always opens at the TOP of its card.
+      // preventScroll stops focus() from scrolling, but any other future call
+      // that reveals an element would reintroduce the same defect, and the
+      // first thing the user must read is the question (and the banner that
+      // qualifies it), never the middle of the card.
+      const body = document.querySelector(".body");
+      if (body) body.scrollTop = 0;
+    }
     return;
   }
 
@@ -518,11 +622,11 @@ async function renderOnce(): Promise<void> {
   // /health is the authority on whether this browser is paired, and the two
   // cards below are what decide which pin show() records for the next open.
   // Nothing is mirrored from /health here: the previous revision derived a
-  // BOOLEAN from `paired || extension_unresponsive` and the wedge state — which
-  // renders the honest card below, not the pairing form — is precisely the one
-  // the boolean could not express, so every reopen of it started at the
-  // connected card's height and grew 167.8px into this card (design D3-1,
-  // measured 86px → 378.8px). show() records the pin per card instead.
+  // BOOLEAN from `paired || extension_unresponsive`, which could not express
+  // the wedge state — it renders the honest card below, not the pairing form —
+  // so every reopen of it started at the wrong height and grew into this card
+  // (design D3-1). show() records the pin per card instead, for the durable
+  // states only.
   // The worker is wedgeable in a way the socket does not show: attached, paired,
   // and answering nothing. Say so instead of painting the green "Connected."
   // card over a browser the agent cannot drive — that card is exactly what the
@@ -753,7 +857,81 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
 
 document.getElementById("retry")?.addEventListener("click", () => void render());
 document.getElementById("retry-incompatible")?.addEventListener("click", () => void render());
-document.getElementById("retry-unresponsive")?.addEventListener("click", () => void render());
+
+// "Check again" has to LOOK like it checked. Re-entering render() re-probes
+// /health, but when the answer is unchanged the DOM is byte-identical — a
+// MutationObserver over the whole body recorded ZERO mutations for 2.5s after
+// the click, and HEALTH_TIMEOUT_MS is 3000, so a user could click, wait three
+// seconds and see nothing at all. That is the dead-click perception this PR
+// exists to remove, reappearing on the recovery card itself (UX U4).
+//
+// So the click owns the button for the length of the probe (disabled +
+// "Checking…", with aria-busy for AT), and the outcome is stated even when the
+// outcome is "no change" — the one case the DOM cannot express on its own.
+const RECHECK_SETTLE_MS = 400;
+async function recheckUnresponsive(): Promise<void> {
+  const button = document.getElementById("retry-unresponsive") as HTMLButtonElement | null;
+  const outcome = document.getElementById("unresponsive-outcome");
+  if (!button) {
+    await render();
+    return;
+  }
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Checking…";
+  button.setAttribute("aria-busy", "true");
+  outcome?.classList.add("hidden");
+  try {
+    await render();
+    // A minimum visible duration, because the honest failure here is a probe
+    // that answers in 8ms: without it the in-flight state exists for less than
+    // a frame and the user sees the same nothing they reported.
+    await new Promise((resolve) => setTimeout(resolve, RECHECK_SETTLE_MS));
+  } finally {
+    button.disabled = false;
+    button.textContent = label ?? "Check again";
+    button.removeAttribute("aria-busy");
+    // If render() moved us off this card the check succeeded and the new card
+    // IS the outcome; saying "still not answering" under it would contradict
+    // the screen. Only an unchanged verdict needs words.
+    const stillWedged = !document.getElementById("unresponsive")?.classList.contains("hidden");
+    if (outcome && stillWedged) {
+      // Hours and minutes only. The default `toLocaleTimeString()` prints
+      // seconds and an AM/PM in a 12-hour locale, which is a lot of digits for
+      // a 12px well whose whole job is to prove the probe ran (design N2).
+      const checkedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      outcome.textContent = `Still not answering (checked ${checkedAt}).`;
+      outcome.classList.remove("hidden");
+    }
+  }
+}
+document.getElementById("retry-unresponsive")?.addEventListener("click", () => void recheckUnresponsive());
+
+// The one-click remedy for a wedged worker. Both of its surfaces are painted
+// from the daemon's `extension_unresponsive` and never from the worker's own
+// `connState` (a dead worker's last write reads "connected" forever), so a
+// healthy worker is never offered a reload: on the `unresponsive` card the
+// button sits in a section that stays `hidden`, and on the origin card the
+// banner carrying it is unhidden only by the same signal.
+//
+// chrome.runtime.reload() is allowed from an extension page and needs no
+// permission. It tears down this very extension, so THE POPUP CLOSES as a side
+// effect — there is no post-reload state to render here, which is why the card
+// warns the user up front that it will vanish and tells them to reopen (D6).
+function reloadExtension(): void {
+  try {
+    chrome.runtime.reload();
+  } catch (error) {
+    // Nothing to fall back TO in the UI: the manual chrome://extensions
+    // instruction is already on the card as the certain remedy, and this popup
+    // is about to be gone if the call did work.
+    console.warn("extension reload failed", error);
+  }
+}
+document.getElementById("reload-extension")?.addEventListener("click", reloadExtension);
+// Same remedy, reached from the consent card's inline banner (U1/Q5/D3). One
+// handler for both so the two surfaces cannot drift apart.
+document.getElementById("origin-wedge-reload")?.addEventListener("click", reloadExtension);
 // Allow sends whatever scope the select holds; the select's value set is
 // exactly scopeOptions' values, so no other decision can be minted here.
 document.getElementById("origin-allow")?.addEventListener("click", () => {
@@ -772,11 +950,31 @@ document.getElementById("connected-all-sites-off")?.addEventListener("click", ()
 document.getElementById("origin-previous")?.addEventListener("click", () => void moveQueue(-1));
 document.getElementById("origin-next")?.addEventListener("click", () => void moveQueue(1));
 
-// Lock the three consent buttons the moment one is clicked: the session-storage
+// The controls a DECISION owns, and the only ones a decision may re-enable.
+//
+// Previous/Next are deliberately NOT here. Their enabled state is DERIVED from
+// queue length by renderQueueControls (`disabled = queue.length < 2`), and a
+// decision that empties the queue down to one entry runs its cleanup AFTER the
+// trailing render() — so re-enabling them here overwrote the renderer's answer
+// and put two inert stops back on a single-request prompt, which is the U4
+// defect the base branch fixed (review F2, reproduced A/B: base `true true`,
+// this head `false false` with one entry left). Ownership of queue navigation
+// stays with the renderer; a decision only ever owns its own three controls.
+const DECISION_CONTROLS = ["origin-scope", "origin-allow", "origin-deny"] as const;
+
+// Lock the consent controls the moment one is clicked: the session-storage
 // read below is async, and a second click in that window would double-send the
 // decision. render()'s prompt path unlocks for the next genuine prompt.
+//
+// `busy` disables queue navigation too — while a decision is in flight, moving
+// to another entry would rewrite the module state the in-flight click is
+// judged against. Re-enabling is the asymmetric half: it is scoped to the
+// decision's own controls, per DECISION_CONTROLS above.
 function setOriginBusy(busy: boolean): void {
-  for (const id of ["origin-scope", "origin-allow", "origin-deny", "origin-previous", "origin-next"]) {
+  const ids = busy
+    ? [...DECISION_CONTROLS, "origin-previous", "origin-next"]
+    : [...DECISION_CONTROLS];
+  for (const id of ids) {
     const control = document.getElementById(id) as HTMLButtonElement | HTMLSelectElement | null;
     if (control) control.disabled = busy;
   }
@@ -882,8 +1080,12 @@ async function moveQueue(delta: -1 | 1): Promise<void> {
   await render();
 }
 
-function showOriginAck(decision: OriginDecision): void {
-  const ack = ackForDecision(decision, shownBroadScope);
+/** @param confirmed whether the WORKER has answered. Until it has, the ack
+ * reports receipt only (UX U2): the success tone, the check and the granted
+ * trough are the three things a user reads as "this landed", and none of them
+ * may appear over a decision whose fate the popup does not yet know. */
+function showOriginAck(decision: OriginDecision, confirmed: boolean): void {
+  const ack = confirmed ? ackForDecision(decision, shownBroadScope) : ackInFlight(decision);
   const title = document.getElementById("origin-ack-title");
   const sub = document.getElementById("origin-ack-sub");
   if (title) title.textContent = ack.title;
@@ -891,9 +1093,14 @@ function showOriginAck(decision: OriginDecision): void {
   // Print the value that was granted, in the prompt's own monospace trough.
   // The prompt pane is gone by now, so "this domain" would have no referent on
   // screen — and the broader the grant, the vaguer that reading gets (D2).
+  // Only once CONFIRMED: this trough is the element that means "this is what
+  // you granted", so printing it while the round-trip is outstanding claims
+  // the grant the title is careful not to claim.
   const granted = document.getElementById("origin-ack-granted");
   if (granted) {
-    const value = grantedValueFor(decision, shownBroadScope, shownBroadKey, shownPromptOrigin);
+    const value = confirmed
+      ? grantedValueFor(decision, shownBroadScope, shownBroadKey, shownPromptOrigin)
+      : undefined;
     granted.textContent = value ?? "";
     granted.classList.toggle("hidden", !value);
   }
@@ -912,6 +1119,22 @@ function showOriginAck(decision: OriginDecision): void {
 
 async function decide(decision: OriginDecision): Promise<void> {
   setOriginBusy(true);
+  try {
+    await decideOnce(decision);
+  } finally {
+    // The controls are re-enabled on EVERY exit, including one nobody
+    // predicted. The branches inside clear it at the point they know what to
+    // say, but `setOriginBusy(true)` fires before any of them and the failure
+    // this PR is about is precisely a path that never reaches its re-enable:
+    // an unhandled throw here (a render() failure, a DOM shape this popup did
+    // not expect) would otherwise leave Allow and Deny dead for the life of
+    // the popup, which reads as "I clicked and nothing happened". Clearing a
+    // flag twice is free; leaving it set is the bug.
+    setOriginBusy(false);
+  }
+}
+
+async function decideOnce(decision: OriginDecision): Promise<void> {
   // The click answers what the user SAW — shownPromptOrigin/shownPromptId
   // captured at render — never a re-read of current state: re-reading was
   // round-2 B1's consent hole, where a prompt replaced after render made the
@@ -931,14 +1154,69 @@ async function decide(decision: OriginDecision): Promise<void> {
     // holds the ack through stale echoes; render() takes over to Connected
     // once the echo clears.
     decidedOrigin = { origin, decision, entryId: promptId, decidedAt: Date.now() };
-    showOriginAck(decision);
-    const response = (await chrome.runtime.sendMessage({
-      event: "origin_decision",
-      origin,
-      decision,
-      entryId: promptId,
-    })) as { applied?: boolean } | undefined;
-    if (!response?.applied) {
+    // RECEIPT, not outcome. The latch above suppresses the prompt's echo, so
+    // every render during the round-trip keeps whatever is painted here — which
+    // is why this may not be the success card: against a mute worker it sat
+    // there for 4.9s claiming a grant that was never applied (UX U2). The
+    // confirmed ack is painted below, once the worker has actually answered.
+    showOriginAck(decision, false);
+    // The worker round-trip is BOUNDED and its failure is contained, because a
+    // wedged worker turns this click into the user's "I clicked and nothing
+    // happened": `setOriginBusy(true)` above disabled Allow/Deny, and before
+    // this every path out of a rejected or never-answered sendMessage skipped
+    // the re-enable, leaving the controls dead for the life of the popup. A
+    // stale MV3 worker produces both halves — it rejects immediately ("Could
+    // not establish connection") when it is gone, and answers nothing at all
+    // when it is loaded but mute, which is the state the operator hit.
+    //
+    // `chrome.runtime.sendMessage` has no timeout option, so the bound is a
+    // race. The loser is not cancellable, which is harmless: an answer arriving
+    // late resolves a promise nobody reads, and render() below re-reads the
+    // real state from storage and /health either way.
+    //
+    // A SECOND click after the bound fires is also safe, and that is a property
+    // of the worker rather than of this popup: `decideAccess` (approval-store)
+    // resolves by `entryId`, so the re-send finds no live entry and returns
+    // `applied: false` \u2014 the user sees a notice, never a double grant, and the
+    // `once` grant is keyed requester+origin so it cannot be spent twice
+    // either (review F3). Not guarded here on purpose: blocking the retry would
+    // cost a user whose FIRST send was genuinely lost their only way to retry.
+    let response: { applied?: boolean } | undefined;
+    let reachedWorker = true;
+    try {
+      response = (await Promise.race([
+        chrome.runtime.sendMessage({
+          event: "origin_decision",
+          origin,
+          decision,
+          entryId: promptId,
+        }),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), DECISION_TIMEOUT_MS)).then(
+          () => {
+            reachedWorker = false;
+            return undefined;
+          },
+        ),
+      ])) as { applied?: boolean } | undefined;
+    } catch {
+      // The send itself rejected: no receiver, or the worker died mid-flight.
+      // Not rethrown — the click handler is `() => void decide(...)`, so a
+      // rejection here would be an uncaught rejection on the popup page for a
+      // failure the user is about to be told about honestly.
+      reachedWorker = false;
+    }
+    if (!reachedWorker) {
+      // Nothing answered, so the decision's fate is unknown to this popup: do
+      // NOT leave the optimistic ack latched claiming it was applied.
+      decidedOrigin = null;
+      setOriginBusy(false);
+      const notice = noticeForUnreachableWorker();
+      showOriginNotice(notice.title, notice.sub);
+      // The same read-hold the other notices take, then fall through to
+      // render(), which re-probes /health — and paints the unresponsive card
+      // when the daemon confirms the worker is the thing that is wedged.
+      await new Promise((resolve) => setTimeout(resolve, NOTICE_HOLD_MS));
+    } else if (!response?.applied) {
       decidedOrigin = null;
       // A rejection with an EMPTY prompt id came from a /health-fallback
       // render (no generation to aim at) — the request was not replaced, and
@@ -958,8 +1236,16 @@ async function decide(decision: OriginDecision): Promise<void> {
         // Hold the notice long enough to read (same shape as the pairing
         // success hold), then fall through to render(), which draws the
         // CURRENT prompt with live buttons.
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, NOTICE_HOLD_MS));
       }
+    } else {
+      // CONFIRMED: the worker applied it. Only now may the success tone, the
+      // check and the granted trough appear — the in-flight ack above is
+      // deliberately none of those, so this is the single transition from
+      // "received" to "done" (UX U2). The latch is left in place: the queue
+      // write and /health both still echo this generation, and render()'s ack
+      // branch keeps this card up until the echo clears.
+      showOriginAck(decision, true);
     }
   }
   // A successful decision removes this generation; FIFO becomes current. A
@@ -977,6 +1263,16 @@ function showOriginNotice(title: string, sub: string): void {
   if (titleEl) titleEl.textContent = title;
   if (subEl) subEl.textContent = sub;
   document.getElementById("origin-ack-check")?.classList.add("hidden");
+  // The granted trough must go with the check. It is filled by a CONFIRMED
+  // ack, and this card is shown when a decision could not be applied — so
+  // leaving it up printed the origin directly under "may not have been
+  // applied", i.e. the one element that reads as "this is what you granted"
+  // surviving onto the card that says nothing may have been granted (UX U3).
+  const granted = document.getElementById("origin-ack-granted");
+  if (granted) {
+    granted.textContent = "";
+    granted.classList.add("hidden");
+  }
   show("origin-ack");
   document.getElementById("card")?.style.setProperty("--tone", "var(--hairline-strong)");
 }

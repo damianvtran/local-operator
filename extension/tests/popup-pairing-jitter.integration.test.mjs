@@ -567,10 +567,16 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   const owned = Object.fromEntries(
     [...popup.matchAll(/const PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
   );
+  // Only the DURABLE states carry a pin. A pin is a bet that the next open
+  // repeats this state, and the wedged card is transient by construction — its
+  // own copy asks the user to act and reopen — so pinning it optimised a reopen
+  // nobody makes and cost the recovery open everybody makes a measured 315.84px
+  // collapse (design D1). Asserting the exact SET, not a subset: adding a pin
+  // for a transient state is the regression this encodes.
   assert.deepEqual(
     Object.keys(owned).sort(),
-    ["CONNECTED", "PAIRING", "UNRESPONSIVE"],
-    "popup.ts must own the three measured pins (design D3-1) — a state with no pin of its own reopens at the wrong height",
+    ["CONNECTED", "PAIRING"],
+    "popup.ts must pin the durable states and only those (design D1) — pinning a transient card taxes the next open",
   );
   const early = Object.fromEntries(
     [...source.matchAll(/var PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
@@ -659,10 +665,16 @@ test("the pin follows the card that was rendered, in both directions (D1/D3-1)",
       false,
       "precondition: the wedge state really does render the unresponsive card",
     );
+    // The wedge card must NOT overwrite the hint. It is transient by
+    // construction, so recording it would pin the next open — which its own
+    // copy asks the user to make — to a height that open will not have: with
+    // this card pinned, the recovery open collapsed a measured 315.84px against
+    // base's 167.84px (design D1). Leaving the durable pin in place means the
+    // wedged open grows into the tall card once and the recovery open is exact.
     assert.equal(
       globalThis.localStorage.getItem("lop:pin-hint"),
-      "254px",
-      "the wedge card must record ITS OWN pin, or every reopen grows into it (D3-1)",
+      "219px",
+      "the transient wedge card must leave the durable pin alone (design D1)",
     );
   } finally {
     await bundle.close();
