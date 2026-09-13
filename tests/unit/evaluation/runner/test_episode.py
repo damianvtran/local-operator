@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.adapters.api import Requirement, ScopedInfraValue
+from local_operator.evaluation.adapters.rpc import WITHHELD
 from local_operator.evaluation.adapters.supervisor import SupervisionError
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
@@ -33,6 +34,7 @@ from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
 from local_operator.evaluation.runner.episode import (
     DISCLOSED_INFRA_METADATA_KEYS,
+    MAX_STDERR_TAIL_CHARS,
     EpisodeRunner,
 )
 from tests.unit.evaluation.runner.conftest import (
@@ -66,6 +68,7 @@ def _runner(
     model: ScriptedModel,
     responder: Any = None,
     max_steps: int = 4,
+    redactions: RedactionSet | None = None,
 ) -> EpisodeRunner:
     return EpisodeRunner(
         build_spec(episode_id),
@@ -75,6 +78,7 @@ def _runner(
         responder=responder,
         launch=lambda _: adapter,
         rescue=_rescue_ok,
+        redactions=redactions,
     )
 
 
@@ -695,6 +699,71 @@ async def test_a_waiting_model_runs_to_the_step_cap_under_default_guards(
 
 
 @pytest.mark.asyncio
+async def test_a_bounded_episode_is_not_cut_by_the_cost_rate_ratio(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The regression this guards: an episode with a stated step budget AND an
+    explicit cost cap is judged by those caps, so a per-cycle cost jump (a
+    prompt-cache miss) no longer truncates it at the ratio's first full
+    windows -- it reaches the step budget instead."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # Ten cheap cycles then a ten-cycle jump: a 3x ratio guard fires on this.
+    model = ScriptedModel(["step"] * 40, cost_micros=[7] * 20 + [70] * 4)
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_steps=24),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 24
+    assert [step.truncation_reason for step in steps] == [None] * 23 + ["max-steps"]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_episode_still_stops_a_cycle_over_its_remaining_pace(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The caps are the authority, and the prorated ceiling is part of them: a
+    cycle costing more than the remaining budget affords per remaining step is
+    still truncated, and before the ratio could fire (two cycles in)."""
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    # 300_000 micro-USD per cycle against a 1_000_000 cap over 8 steps: inside
+    # the pace at step 1 (400_000), over it at step 2 (266_666).
+    model = ScriptedModel(["step"] * 20, cost_micros=300_000)
+    runner = EpisodeRunner(
+        build_spec(episode_id, caps={"provider_usd_micros": 1_000_000}),
+        build_config(tmp_path, max_steps=8),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed"
+    root = outcome.bundle_root
+    assert root is not None
+    assert verify_bundle(root).valid
+    steps = payloads(root, EnvironmentStepPayload)
+    assert len(steps) == 2
+    assert steps[-1].truncated is True
+    assert steps[-1].truncation_reason == "cost-spike"
+
+
+@pytest.mark.asyncio
 async def test_max_steps_truncation_names_its_reason(tmp_path: Path, episode_id: str) -> None:
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = _runner(
@@ -715,11 +784,14 @@ async def test_budget_cap_truncates_not_cancels(tmp_path: Path, episode_id: str)
     """A reached provider-cost cap is enforced as a scored truncation, where
     before it was only reported as an overrun after the fact."""
 
-    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap.
+    # ScriptedModel bills 7 micro-USD per cycle: two cycles reach the cap. The
+    # step budget is sized so the CAP is what binds -- a cost guard that
+    # prorates a tiny 14-micro-USD allowance over ten steps would stop the
+    # episode as over-pace on its first cycle, which is a different test.
     adapter = FakeAdapter(tmp_path, episode_id)
     runner = EpisodeRunner(
         build_spec(episode_id, caps={"provider_usd_micros": 14}),
-        build_config(tmp_path, max_steps=10),
+        build_config(tmp_path, max_steps=4),
         selector=selector(tmp_path),
         model=ScriptedModel(["step"] * 8),
         launch=lambda _: adapter,
@@ -993,9 +1065,12 @@ async def test_a_rejection_without_a_captured_reply_records_the_diagnostic_alone
     from local_operator.evaluation.runner.episode import _rejection_detail
     from local_operator.evaluation.runner.model import DecisionRejected
 
-    assert _rejection_detail(DecisionRejected("refused")) == "refused"
-    assert _rejection_detail(DecisionRejected("refused", reply="")) == "refused"
-    assert "--- rejected reply ---" in _rejection_detail(DecisionRejected("refused", reply="{}"))
+    # ``None`` is the explicit "in-process rendering, never evidence" case the
+    # signature requires a caller to state (``_diagnostic``'s rule).
+    assert _rejection_detail(DecisionRejected("refused"), None) == "refused"
+    assert _rejection_detail(DecisionRejected("refused", reply=""), None) == "refused"
+    detail = _rejection_detail(DecisionRejected("refused", reply="{}"), None)
+    assert "--- rejected reply ---" in detail
 
 
 @pytest.mark.asyncio
@@ -1735,3 +1810,204 @@ async def test_host_refusal_does_not_publish_supplied_answer(
     assert outcome.bundle_root is not None
     assert "user_simulator_exchange" not in _kinds(outcome.bundle_root)
     assert "execute" not in adapter.calls and "score" not in adapter.calls
+
+
+# ---------------------------------------------------------------------------
+# The adapter worker's stderr tail on the failure path
+# ---------------------------------------------------------------------------
+
+
+class _StubTail:
+    """Stands in for ``AdapterSupervisor.stderr_tail``.
+
+    The real one is a bounded, thread-fed buffer with an idle signal; this is
+    the same surface -- ``settled()`` for the failure path and ``bytes()`` for
+    a snapshot -- so a test can hand the runner a tail without spawning a
+    worker. ``with_settle=False`` models a launch seam whose tail object offers
+    no settle at all, which the failure path must tolerate rather than raise
+    on. The spawned path is covered in ``test_episode_subprocess``.
+    """
+
+    def __init__(self, data: bytes, *, with_settle: bool = True) -> None:
+        self._data = data
+        if with_settle:
+            self.settled = lambda: self._data
+
+    def bytes(self) -> bytes:
+        return self._data
+
+
+_TAIL_HEADER = "--- adapter stderr tail ---"
+
+
+def _fatal_detail_text(root: Path) -> str:
+    fatal = [error for error in payloads(root, ErrorPayload) if not error.retryable]
+    assert len(fatal) == 1
+    detail = fatal[0].detail_artifact
+    assert detail is not None
+    return (root / "artifacts" / detail.sha256).read_bytes().decode()
+
+
+async def _fatal_run(
+    tmp_path: Path,
+    episode_id: str,
+    adapter: FakeAdapter,
+    *,
+    redactions: RedactionSet | None = None,
+) -> Any:
+    outcome = await _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "step", "finish"]),
+        redactions=redactions,
+    ).run()
+    assert outcome.status == "failed", outcome.diagnostic
+    assert outcome.bundle_root is not None
+    assert verify_bundle(outcome.bundle_root).valid
+    return outcome
+
+
+def _fatal_adapter(tmp_path: Path, episode_id: str) -> FakeAdapter:
+    return FakeAdapter(
+        tmp_path,
+        episode_id,
+        failures={"execute": SupervisionError("worker died mid-observe")},
+        fail_after={"execute": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_worker_stderr_tail_rides_the_fatal_detail(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Upstream's own explanation must reach the bundle, not be discarded.
+
+    The supervisor drained the worker's stderr into a bounded tail and nothing
+    read it, so the two canary episodes whose only recorded fact was
+    "environment returned no screenshot frame" left no way to tell a full disk
+    from a dead server.
+    """
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(
+        b"desktopenv.pycontroller: Failed to get screenshot. Status code: 502\n"
+    )
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    # The summary is unchanged and still first: the tail is ADDITIONAL evidence.
+    assert text.startswith("SupervisionError: worker died mid-observe")
+    assert _TAIL_HEADER in text
+    assert "Failed to get screenshot. Status code: 502" in text
+
+
+@pytest.mark.asyncio
+async def test_no_stderr_tail_leaves_the_detail_byte_identical(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """An absent tail adds nothing at all, down to the byte."""
+
+    untailed = _fatal_adapter(tmp_path, episode_id)
+    outcome = await _fatal_run(tmp_path, episode_id, untailed)
+    # The pre-change assertion from `test_fatal_error_records_a_bounded_diagnostic_detail`,
+    # restated for the tail-free case: a launch handle with no tail, and an
+    # empty one, must not even add a header.
+    assert _fatal_detail_text(outcome.bundle_root) == "SupervisionError: worker died mid-observe"
+
+    # A second run needs its own roots and its own episode id: the evidence
+    # terminal is immutable and the lifecycle lineage is per episode id.
+    second = tmp_path / "empty-tail"
+    second.mkdir()
+    empty = _fatal_adapter(second, f"{episode_id}-empty")
+    empty.stderr_tail = _StubTail(b"")
+    outcome = await _fatal_run(second, f"{episode_id}-empty", empty)
+    assert _fatal_detail_text(outcome.bundle_root) == "SupervisionError: worker died mid-observe"
+
+
+@pytest.mark.asyncio
+async def test_a_tail_that_can_only_be_snapshotted_still_surfaces(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A launch seam's own tail object may offer no settle; it must not raise.
+
+    The failure path is the last place that may turn a handled failure into a
+    crash, so the narrower surface degrades to a snapshot rather than failing.
+    """
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(b"snapshot-only tail\n", with_settle=False)
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+    assert "snapshot-only tail" in _fatal_detail_text(outcome.bundle_root)
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.asyncio
+async def test_a_secret_in_the_stderr_tail_withholds_the_tail_whole(
+    tmp_path: Path, episode_id: str, encoded: bool
+) -> None:
+    """The newly surfaced text is canary-checked, and the check is escape-aware.
+
+    ``RedactionSet`` derives base64, percent-encoded and hex canaries from every
+    resolved secret, so a plain substring check on the literal would miss the
+    encoded form a library or a URL might carry. The tail is withheld WHOLE
+    rather than masked, and only the tail: the diagnostic line is still
+    published, so the failure stays bucketed.
+    """
+
+    from urllib.parse import quote
+
+    secret = "AKIA-STDERR-CANARY-0123456789"
+    carried = quote(secret, safe="") if encoded else secret
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(f"upstream said {carried} while fetching\n".encode())
+    outcome = await _fatal_run(
+        tmp_path, episode_id, adapter, redactions=RedactionSet.from_resolved_values((secret,))
+    )
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert secret not in text
+    assert "upstream said" not in text
+    assert _TAIL_HEADER in text and WITHHELD in text
+    assert text.startswith("SupervisionError: worker died mid-observe")
+
+
+@pytest.mark.asyncio
+async def test_the_tail_is_scanned_before_it_is_bounded(tmp_path: Path, episode_id: str) -> None:
+    """A secret outside the retained window is still found, because the scan
+    sees the whole buffer before the bound is applied.
+
+    Bounding first is the ordering that leaks: a canary straddling the cut no
+    longer matches, and ``publish_artifact`` applies the same substring
+    semantics to whatever bytes it receives, so it would publish the surviving
+    fragment as clean.
+    """
+
+    secret = "AKIA-OUTSIDE-WINDOW-CANARY-0123456789"
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    padding = b"x" * 20_000
+    adapter.stderr_tail = _StubTail(secret.encode() + padding)
+    outcome = await _fatal_run(
+        tmp_path, episode_id, adapter, redactions=RedactionSet.from_resolved_values((secret,))
+    )
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    assert secret not in text
+    assert WITHHELD in text
+
+
+@pytest.mark.asyncio
+async def test_the_tail_section_is_bounded_and_keeps_its_end(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A chatty worker cannot inflate a bundle, and the END is what is kept."""
+
+    adapter = _fatal_adapter(tmp_path, episode_id)
+    adapter.stderr_tail = _StubTail(b"a" * 10_000 + b"TAIL-END-MARKER\n")
+    outcome = await _fatal_run(tmp_path, episode_id, adapter)
+
+    text = _fatal_detail_text(outcome.bundle_root)
+    section = text.split(_TAIL_HEADER, 1)[1]
+    assert section.endswith("TAIL-END-MARKER\n")
+    assert len(section) <= MAX_STDERR_TAIL_CHARS + 64
+    assert section.count("a") < 10_000

@@ -57,11 +57,18 @@ class GuardInput(ProtocolModel):
     the model chose for it; ``recent_costs_micros`` are the per-cycle provider
     costs in the same order (one per model cycle, so they may outnumber the
     turns kept). ``usage_totals`` mirrors what the runner will reconcile.
+
+    ``max_steps`` is the episode's own step budget when the caller states one
+    (``EpisodeConfig.max_steps``), and ``None`` when it does not -- which is
+    what lets a guard tell a bounded episode, whose remaining steps are known,
+    from one that is bounded only by cost. A guard that reads it must treat
+    ``None`` as "no step budget", never as zero steps.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=False, validate_default=True)
 
     steps_taken: SafeCount
+    max_steps: SafeCount | None = None
     model_cycles: SafeCount
     provider_cost_micros: SafeCount
     elapsed_ms: SafeCount
@@ -85,6 +92,24 @@ class GuardVerdict(ProtocolModel):
 
 
 CONTINUE = GuardVerdict(kind="continue", code="ok", detail="no guard fired")
+
+
+def _capped_usd_cap(snapshot: GuardInput) -> int | None:
+    """The episode's explicit provider-cost cap in micro-USD, if it declared one.
+
+    Only a CAPPED allowance is an explicit cap -- the same rule
+    :class:`BudgetCapGuard` enforces -- because an uncapped allowance is the
+    *absence* of one (a named person removed it, and ``scripts/run_episode.py``
+    leaves the resources it cannot size up front uncapped for the same reason).
+    An episode without an explicit cost cap keeps the ratio check as its only
+    cost authority.
+    """
+
+    for allowance in snapshot.budget.allowances:
+        if allowance.resource == "provider_usd_micros" and isinstance(allowance, CappedAllowance):
+            return int(allowance.value)
+    return None
+
 
 #: How many of the newest turns the runner snapshots into
 #: ``GuardInput.recent_turns``. A guard that needs to see more turns than
@@ -171,6 +196,28 @@ class CostRateGuard:
     continue, the guard says so in its verdict (``code="cost-unreported"``)
     so a reader of the guard's decisions can see the ratio check was skipped,
     and only ``max_cycle_cost_micros`` remains in force.
+
+    **The ratio is inapplicable to a doubly-capped episode.** When the episode
+    declares BOTH an explicit step budget and an explicit provider-cost cap,
+    those caps are the authority and the ratio is not judged at all -- it is
+    replaced by a per-cycle ceiling prorated from what is actually left
+    (``remaining cost budget / remaining steps * bounded_cycle_margin``). Two
+    things make the ratio the wrong instrument there: it cannot tell a
+    legitimate expensive cycle from a runaway one, and it is blind to how much
+    of the budget remains. Its dominant false positive in practice is a
+    PROMPT-CACHE MISS, which multiplies the input price of one cycle while the
+    context is unchanged -- measured on an OSWorld batch, cycles at 2744/1686/
+    1908 micro-USD against a ~1000-1400 baseline cut episodes at a median of 11
+    of a 500-step budget, so the guard, not the benchmark, was being measured.
+    The bounded ceiling is instead anchored to the episode's own budget: it
+    fires only on a cycle that costs more than the remaining budget can afford
+    per remaining step, and it tightens as the budget is spent.
+
+    A bounded-but-spent episode (no steps left) has no allowance to derive;
+    the step budget is already the binding authority, so the guard continues
+    without judging the ratio. An episode missing either cap -- including every
+    caller that snapshots no step budget at all -- keeps the ratio check
+    exactly as it was.
     """
 
     def __init__(
@@ -179,14 +226,18 @@ class CostRateGuard:
         window: int = 10,
         ratio: float = 3.0,
         max_cycle_cost_micros: int | None = None,
+        bounded_cycle_margin: float = 4.0,
     ) -> None:
         if window < 1:
             raise ValueError("window must be positive")
         if ratio <= 1.0:
             raise ValueError("ratio must exceed 1.0")
+        if bounded_cycle_margin <= 0:
+            raise ValueError("bounded_cycle_margin must be positive")
         self._window = window
         self._ratio = ratio
         self._max_cycle = max_cycle_cost_micros
+        self._bounded_margin = bounded_cycle_margin
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         costs = snapshot.recent_costs_micros
@@ -195,6 +246,31 @@ class CostRateGuard:
                 kind="truncate",
                 code="cost-spike",
                 detail=f"one model cycle cost {costs[-1]} micro-USD (cap {self._max_cycle})",
+            )
+        bounded, ceiling = self._bounded_ceiling(snapshot)
+        if bounded:
+            if ceiling is not None and costs and costs[-1] > ceiling:
+                return GuardVerdict(
+                    kind="truncate",
+                    code="cost-spike",
+                    detail=(
+                        f"one model cycle cost {costs[-1]} micro-USD against the {ceiling} "
+                        "the episode's remaining cost budget allows per remaining step"
+                    ),
+                )
+            return GuardVerdict(
+                kind="continue",
+                code="cost-bounded",
+                detail=(
+                    "the episode's step budget is spent, so no per-cycle allowance is "
+                    "derived and the cost-rate ratio is not judged"
+                    if ceiling is None
+                    else (
+                        "the episode declares an explicit step budget and an explicit cost "
+                        f"cap, so the caps are the authority and the cost-rate ratio is not "
+                        f"judged; {ceiling} micro-USD per remaining step is affordable"
+                    )
+                ),
             )
         if len(costs) < 2 * self._window:
             return CONTINUE
@@ -219,6 +295,41 @@ class CostRateGuard:
                 ),
             )
         return CONTINUE
+
+    def _bounded_ceiling(self, snapshot: GuardInput) -> tuple[bool, int | None]:
+        """The per-cycle ceiling a doubly-capped episode is judged by.
+
+        ``(False, None)`` -- the episode lacks an explicit step budget or an
+        explicit provider-cost cap, so the ratio check applies as before.
+        ``(True, None)`` -- it is bounded, but its step budget is spent, so
+        there is no allowance to prorate and the step budget itself is the
+        binding authority.
+        ``(True, ceiling)`` -- the episode is bounded and still has steps to
+        spend: the ceiling is the FLOOR of the remaining cost budget divided by
+        the remaining steps, times the margin.
+
+        ``bounded_cycle_margin`` default (4.0) is sized from the runner's own
+        budget model: ``scripts/run_episode.py`` allows up to TWO model cycles
+        per step (``model_cycles = max_steps * 2``), so a per-cycle ceiling
+        prorated from a per-step allowance is unreachable below 2x, and the
+        second 2x absorbs a legitimately expensive cycle (a large frame set on
+        a long turn) without turning the ceiling into a proxy for the ratio it
+        replaced. A remaining budget already at or below zero yields a ceiling
+        at or below zero: the episode is at its cap, and ``BudgetCapGuard``
+        (which runs ahead of this guard in ``default_guards``) fires on that
+        same snapshot. Firing here too is deliberate -- this guard must bound a
+        runaway when it is used on its own.
+        """
+
+        usd_cap = _capped_usd_cap(snapshot)
+        if usd_cap is None or snapshot.max_steps is None:
+            return False, None
+        remaining_steps = snapshot.max_steps - snapshot.steps_taken
+        if remaining_steps <= 0:
+            return True, None
+        remaining_usd = usd_cap - snapshot.provider_cost_micros
+        ceiling = remaining_usd * self._bounded_margin // remaining_steps
+        return True, int(ceiling)
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +531,9 @@ def default_guards(config: Any) -> tuple[EpisodeGuard, ...]:
     read) so this module does not import ``episode`` and ``episode`` can
     import it. Every guard here is on by default because each one converts a
     reported-after-the-fact failure into a scored stop; the cost-rate cap is
-    the one that needs a configured number.
+    the one that needs a configured number, and its ratio check is judged only
+    for an episode that does not declare BOTH a step budget and a cost cap
+    (see :class:`CostRateGuard`).
     """
 
     max_cycle = getattr(config, "max_cycle_cost_micros", None)

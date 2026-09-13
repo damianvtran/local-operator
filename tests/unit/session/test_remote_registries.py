@@ -184,6 +184,11 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         "preflight_usage",
         "refresh_frontend_usage",
         "wears_inherited_title",
+        # A viewer never owns a session to dispose, so there is no in-process
+        # teardown for it to mark deliberate: its `/stop` is a control op, and
+        # the owner records the verdict on that rung. `_stop_local_session` (the
+        # only reader) returns early unless the session owns its runtime.
+        "note_deliberate_stop",
         # The attached team OBJECT. The viewer reports the attached roster by
         # name through `active_team_name` (which it does provide) and cannot
         # hold the Team itself without the attach seam above.

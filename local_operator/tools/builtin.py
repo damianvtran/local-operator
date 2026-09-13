@@ -8187,6 +8187,46 @@ def _bridge_liveness() -> tuple[Any, Any]:
         return None, None
 
 
+def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
+    """The demotion diagnostic for a bridge that is UP with no browser attached.
+
+    Reached only when the discovery file shows a daemon whose pid is alive and
+    which remembers an extension from a real handshake (`extension_id`), i.e. the
+    bridge IS installed and was paired — the opposite of the state the generic
+    "set up the bridge" copy describes. Two shapes, because they need different
+    actions from the reader:
+
+    - the daemon has LATCHED a silent link (the incident's window). The worker is
+      mute and only a reload of the extension clears it, so this renders the same
+      copy `format_error` gives for the wire code, with the same typed
+      `error_code`, and the agent can branch on it.
+    - otherwise the browser is simply not attached right now (closed, or the
+      worker idle-suspended and is re-dialling). "install" and "open your
+      browser" are both wrong there; "check the state, then retry" is right, and
+      `lop browser status` is where the difference is visible.
+
+    A separate function rather than inline so both copies are reachable from a
+    unit test without standing up cmux, a daemon or a socket.
+    """
+    from local_operator.browser_bridge.backend import ERROR_MESSAGES
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    if bool(getattr(current, "extension_unresponsive", False)):
+        problem = _error(tool_call_id, "browser", ERROR_MESSAGES[ErrorCode.EXTENSION_UNRESPONSIVE])
+        problem.details = {"error_code": ErrorCode.EXTENSION_UNRESPONSIVE.value}
+        return problem
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"browser extension not attached: the bridge daemon (pid {current.pid}) is running and "
+        "remembers this browser, but nothing is connected to it right now. The extension "
+        "reconnects on its own when the browser is open — run 'lop browser status' to see the "
+        "current state, then retry this action.",
+    )
+    problem.details = {"error_code": ErrorCode.EXTENSION_DISCONNECTED.value}
+    return problem
+
+
 def _bridge_demotion_hint(classified: tuple[Any, Any] | None = None) -> str:
     """Why the extension is not being used, when it looked like it should be.
 
@@ -8535,6 +8575,32 @@ def _browser_identity_params(context: ToolContext | None, tool_call_id: str) -> 
     if resource is not None and resource.generation:
         identity.update(resource.params())
     return identity
+
+
+def _bridge_failure_result(tool_call_id: str, exc: BaseException, *, action: str) -> ToolResult:
+    """Render one bridge failure so every site answers with the same voice.
+
+    `str(exc)` on a `BridgeError` is the RAW daemon message. For a recovery
+    timeout that is literally `owner_recover timed out`: an internal verb, no
+    remedy, and no typed code for the agent to branch on — while the identical
+    wedge in a session that had already recovered got `format_error`'s full copy
+    ("…ask the user to toggle the Local Operator extension OFF then ON in
+    chrome://extensions (pairing is preserved)"). The recovery command is the
+    one that must never be the useless one (design D5/D2-1, review R2-2).
+
+    `BridgeUnreachable` and `BrowserOwnershipError` already carry complete
+    human sentences written for exactly this audience, so they keep `str(exc)`;
+    only the typed wire error is re-rendered.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+
+    if isinstance(exc, BridgeError):
+        problem = _error(tool_call_id, "browser", format_error(exc, action=action))
+        # The same typed code `_bridge_call` carries, so callers can branch on
+        # `extension_unresponsive` rather than substring-matching prose.
+        problem.details = {"error_code": exc.code.value}
+        return problem
+    return _error(tool_call_id, "browser", str(exc))
 
 
 async def _bridge_call(
@@ -9217,7 +9283,14 @@ async def execute_browser(
                 await resource.recover()
                 state.surface_id = str(resource.record.get("surface_id", ""))
         except (BrowserOwnershipError, BridgeError, BridgeUnreachable) as exc:
-            return _error(tool_call_id, "browser", str(exc))
+            # A HUMAN phrase for the recovery, never the wire verb. `str(exc)`
+            # here used to render a recovery timeout as the bare daemon message
+            # `owner_recover timed out` — an internal verb name, no remedy, and
+            # no typed code — while the SAME wedge in an already-recovered
+            # session got `format_error`'s full, actionable copy. Two qualities
+            # of answer for one fault, on the command whose whole job is
+            # recovery (design D2-1, mechanism added by review R2-2).
+            return _bridge_failure_result(tool_call_id, exc, action="the browser tab recovery")
         action = str(args.get("action", "")).strip().lower()
         try:
             if action == "recover":
@@ -9267,7 +9340,16 @@ async def execute_browser(
             # Same containment the initialize/recover block above already has:
             # an expected ownership or bridge refusal is a sentence, never a
             # stack trace spent in the model's context.
-            return _error(tool_call_id, "browser", str(exc))
+            #
+            # `format_error` for the bridge errors, with the tool's own action
+            # name — except for `recover`, which is phrased the same way as the
+            # preamble above so the two render sites cannot drift into naming
+            # the wire verb (design D2-1).
+            return _bridge_failure_result(
+                tool_call_id,
+                exc,
+                action="the browser tab recovery" if action == "recover" else action,
+            )
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
@@ -9337,6 +9419,19 @@ async def _execute_browser(
     # cmux. It costs a round-trip only in the stale-but-alive case.
     bridge_available = await bridge_browser_reachable(classified=bridge_liveness)
     if not cmux_available and not bridge_available:
+        # A bridge daemon that is UP but has no browser attached is not an
+        # unconfigured host: "run 'lop browser status' and 'lop browser install'
+        # to set up the bridge" sends a user with an installed, paired bridge to
+        # repair something that is not broken, which is what a session already
+        # recovered into the wedge window was told (design D3-2).
+        #
+        # The file separates the two without a socket: `liveness` answers ABSENT
+        # for both, but only the daemon case carries the extension id it
+        # remembers from a real handshake — and, while a drop for silence is
+        # still latched, the daemon publishes that latch too (see `state.py`).
+        current = bridge_liveness[1] if bridge_liveness is not None else None
+        if current is not None and current.extension_id:
+            return _bridge_absent_result(tool_call_id, current)
         return _error(
             tool_call_id,
             "browser",

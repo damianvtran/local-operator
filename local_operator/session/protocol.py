@@ -814,6 +814,48 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
+    def live_tool_start_epochs(self) -> dict[str, float]:
+        """Wall-clock start instant per call executing RIGHT NOW, keyed by id.
+
+        The timestamped sibling of :meth:`executing_display_tool_ids`, and the
+        one thing that makes a live row's elapsed clock survive a change of
+        viewer. Both surfaces answer it off the SAME folded fact — the
+        ``tool_execution_start`` epochs the producer stamped (see
+        ``ToolExecutionStartEvent.started_at_epoch``) — so a sidebar switch
+        seeds the replayed row and the band's phase from one anchor rather
+        than from whenever each of them was painted.
+
+        Declared here beside the id accessors it accompanies, and implemented
+        by BOTH session shapes: a local owner answers from its own fold (it is
+        the producer, so the instants are its own), and an attached viewer
+        answers from the same fold applied to the events it received. A call
+        whose start carried no epoch — a legacy producer, an older runtime —
+        is deliberately ABSENT from the map rather than present with a
+        guessed value, so consumers withhold the clock instead of printing an
+        age nobody measured. An empty map is therefore a valid, supported
+        answer and not an error.
+        """
+        ...
+
+    def activity_phase_clock(self) -> tuple[str, float | None]:
+        """The folded working-line phase, and the instant that phase began.
+
+        The companion :meth:`live_tool_start_epochs` cannot supply, and the
+        reason the operator's report names TWO clocks rather than one: the
+        thinking indicator has no tool call behind it, so there is no id to key
+        an epoch by and nothing for a per-call map to answer with. The phase is
+        what the band's number is anchored to, so the phase's own start is what
+        has to survive a switch.
+
+        Read together on purpose. The consumer's rule is "use this instant only
+        when this phase is the phase I just derived", and two independent reads
+        could pair one phase with the previous phase's zero — a wrong age that
+        would look perfectly plausible. A facade with no fold answers
+        ``("", None)``, which matches nothing and therefore withholds the
+        clock rather than inventing one.
+        """
+        ...
+
     async def ensure_display_anchor(self, anchor: str) -> bool:
         """Load whichever page contains ``anchor``; False when it is gone."""
         ...
@@ -1017,6 +1059,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """The recall twin of :meth:`set_cancel_resolution`."""
+        ...
+
+    def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
+        """Called with the id of a queued steer whose bind was refused.
+
+        The third asynchronous refusal, and the only one with no sender to
+        report it: ``steer_message`` spawns a task nobody awaits, so a message
+        the app has already echoed as sent can fail without the user ever
+        learning. See ``AttachedSession._send_steer_when_ready``.
+        """
         ...
 
     # --- engine state a viewer host renders --------------------------------

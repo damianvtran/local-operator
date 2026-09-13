@@ -9,6 +9,18 @@
  * viewport shrinks and the root element is re-pinned to its height. This
  * works around iOS Safari's habit of scrolling the page instead of
  * shrinking the layout when `interactive-widget` is not honoured.
+ *
+ * That pin is also why the column publishes `--lo-vvh`. Every bounded region
+ * inside it (the ask card, the todos and subagent panels) has to be measured
+ * against THIS column, and `dvh` is not that column: a virtual keyboard is an
+ * overlay, so it shrinks `visualViewport.height` and leaves the dynamic
+ * viewport untouched (index.html sets no `interactive-widget`, so the default
+ * `resizes-visual` applies). A `60dvh` cap therefore stayed at 468px while the
+ * column it lived in fell to 480px — measured on a 360x780 phone with a 300px
+ * keyboard, which put `send`, the only way to submit a free-text answer, below
+ * the column's clipped foot with no gesture that recovered it. Publishing the
+ * pinned height as a custom property gives those caps the same unit as the
+ * box they are bounded by, so they tighten exactly when the space does.
  */
 import { useEffect, useRef, useState } from "react";
 import { ModelSheet } from "../components/model-sheet";
@@ -18,6 +30,7 @@ import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
+import { COLUMN_HEIGHT_VAR } from "../lib/column";
 import { navigate } from "../router";
 import { useCompletionView } from "../use-completion-view";
 import { AgentScreen } from "./agent-view";
@@ -78,6 +91,15 @@ export function SessionScreen({
 			   sheets (slash, model, effort) and clips them to a sliver. */
 			el.style.height = `${vv.height}px`;
 			el.style.top = `${vv.offsetTop}px`;
+			/* Same number, published as a length the children's caps can be
+			   written in. Written from THIS handler on purpose: a cap fed by a
+			   second source of truth would drift from the pin the moment one
+			   of them changed, which is the `dvh`-vs-`visualViewport`
+			   divergence this property exists to end. Consumers read it as
+			   `var(--lo-vvh, 100dvh)`, so a surface outside this column — or a
+			   browser without `visualViewport` — still gets the viewport-
+			   relative bound it had before. */
+			el.style.setProperty(COLUMN_HEIGHT_VAR, `${vv.height}px`);
 		};
 		sync();
 		vv.addEventListener("resize", sync);
@@ -87,6 +109,7 @@ export function SessionScreen({
 			vv.removeEventListener("scroll", sync);
 			el.style.height = "";
 			el.style.top = "";
+			el.style.removeProperty(COLUMN_HEIGHT_VAR);
 		};
 	}, []);
 
@@ -157,11 +180,39 @@ export function SessionScreen({
 				/>
 			) : null}
 
+			{/* The panel budget (D1). These two panels and the pending card are
+			    unshrinkable-ish siblings in a column that is `overflow-hidden`, so
+			    what they claim together comes off the bottom and is CLIPPED, not
+			    scrolled. Measured with both panels expanded beside an approval at
+			    390x844: the column reported `clientH 844 / scrollH 1427`, approve
+			    and deny were 120px below the fold with the card's own scroller
+			    already at its end, and at 360x780 the card's top landed at y=781 in
+			    a 780px viewport — entirely off screen. Real touch drags over the
+			    panels and over the card moved nothing (`colScrollTop=0` throughout);
+			    only a script assigning `scrollTop` to an `overflow:hidden` element
+			    appeared to recover it, which a finger cannot do.
+
+			    So while a request is pending the panels render COLLAPSED and hold
+			    shut. A question outranks a task list and a roster (branding §7):
+			    the card is the only thing on screen that needs a decision, and the
+			    panels are the only things that can push it off. This is a budget
+			    rather than a cap because caps compose badly — three individually
+			    bounded regions still sum past the column, which is how 40%+40%+60%
+			    overran it. Their own open state is kept, so answering restores what
+			    the user had open. With `min-h-0` on both panels (see each) the
+			    column can also always fit its children rather than clipping them. */}
 			{projection.todos.some((p) => p.items.length > 0) ? (
-				<TodosPanel todos={projection.todos} />
+				<TodosPanel
+					todos={projection.todos}
+					forceCollapsed={Boolean(projection.pending)}
+				/>
 			) : null}
 			{projection.subagents.length > 0 ? (
-				<SubagentsPanel pid={sessionId} subagents={projection.subagents} />
+				<SubagentsPanel
+					pid={sessionId}
+					subagents={projection.subagents}
+					forceCollapsed={Boolean(projection.pending)}
+				/>
 			) : null}
 
 			{projection.pending ? (

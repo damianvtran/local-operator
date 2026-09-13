@@ -25,9 +25,14 @@ import pytest
 
 from local_operator import resume as resume_mod
 from local_operator import session_factory
+from local_operator.compaction.cutpoint import (
+    PRESERVED_USER_TURN_KEY,
+    RENDERED_INJECTION_KEY,
+)
 from local_operator.harness.types import TextContent
 from local_operator.session.session import Session
 from local_operator.session_factory import (
+    _latest_user_query,
     _transcript_dir_and_agent_id,
     attach_mcp_dispose,
     build_initial_blocks,
@@ -1043,7 +1048,7 @@ async def test_settling_boot_snapshot_is_provisional_and_re_reported_on_settle(
         configured=["notion", "linear"],
         connected=["linear"],
         settling=True,
-        startup_failures={"notion": "run /mcp login notion to authorize"},
+        startup_failures={"notion": "/mcp login notion to authorize"},
     )
 
     async def fake_discover(cwd, auth_store=None):
@@ -3785,3 +3790,107 @@ async def test_a_raising_revalidation_never_kills_the_poller(monkeypatch) -> Non
             break
     assert calls["n"] >= 3, "the poller stopped after a raising tick"
     await session.dispose()
+
+
+# --- The configured birth-default effort (model_effort) -----------------------
+
+
+async def _prepare_effort_plan(config_manager, tmp_config_dir: Path, **arg_overrides):
+    """Drive the real ``_prepare`` for a model whose ladder is the shipped one.
+
+    ``_prepare`` is the ONE funnel every launch path shares — TUI boot, /new,
+    /reload, /resume, ``lop exec``, the server and the scheduler — so the
+    configured effort is read there rather than mutated post-hoc by each
+    caller. Anthropic's `claude-opus-5` is used because its ladder is a real
+    one (low/medium/high/xhigh/max) and resolves offline from the registry.
+    """
+    from local_operator.session_factory import _prepare
+
+    registry = FakeRegistry(tmp_config_dir)
+    credential_manager = MagicMock()
+    credential_manager.get_credential.return_value = None
+    args = _args(**{"hosting": "anthropic", "model": "claude-opus-5", **arg_overrides})
+    return await _prepare(
+        args,
+        cast("ConfigManager", config_manager),
+        credential_manager,
+        cast("AgentRegistry", registry),
+        has_ui=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_picked_by_the_flag(
+    tmp_config_dir: Path,
+) -> None:
+    """Carried unconditionally on ``model_source``: a ``--model`` flag chooses a
+    MODEL, not an effort, so the standing configured level rides across it — and
+    the clamp in ``configure_model`` is what makes that safe for a weaker ladder."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "low"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    assert plan.session_kwargs["model"].reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_a_configured_effort_reaches_the_spec_taken_from_config(
+    tmp_config_dir: Path,
+) -> None:
+    """The same read serves the no-flag path, so a plain launch gets the level
+    without the operator re-running `/effort` every time."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": "medium"}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir, hosting=None, model=None)
+    assert plan.session_kwargs["model"].reasoning_effort == "medium"
+
+
+@pytest.mark.asyncio
+async def test_no_configured_effort_leaves_the_builders_seed(tmp_config_dir: Path) -> None:
+    """``""`` is "no opinion", so the spec builder's own seeding must survive —
+    for a direct Anthropic route that is the documented ``high``. A regression
+    that read the empty string as a level would blank or move it."""
+    config_manager = FakeConfigManager(
+        {"hosting": "anthropic", "model_name": "claude-opus-5", "model_effort": ""}
+    )
+    plan = await _prepare_effort_plan(config_manager, tmp_config_dir)
+    spec = plan.session_kwargs["model"]
+    assert spec.reasoning_effort == "high"
+    assert spec.reasoning_default_effort == "high"
+
+
+def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
+    """Reviewer m2: a harness notice must not become the selection query.
+
+    ``_latest_user_query`` reads the newest ``role="user"`` row, and a notice is
+    stored as one — so selection searched the skills index for "[model switch]
+    You are now running as …" and froze the block's ``task_id`` against it. Both
+    shapes are refused: the stamped render, and the legacy notice a compaction
+    block carried forward with no stamp at all.
+    """
+    notice = (
+        "[model switch] You are now running as zai/glm-5.3 (was anthropic/claude-opus-5).\n"
+        "Reason: provider failure"
+    )
+
+    def entry(entry_id: str, text: str, payload: dict[str, Any] | None = None) -> SimpleNamespace:
+        body: dict[str, Any] = {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+        if payload:
+            body["provider_payload"] = payload
+        return SimpleNamespace(id=entry_id, type="message", payload=body)
+
+    transcript = SimpleNamespace(
+        latest_entry=lambda _type: None,
+        latest_user_entry=lambda: entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        entries=lambda: [
+            entry("mine", "fix the login redirect loop"),
+            entry("stamped", notice, {RENDERED_INJECTION_KEY: True}),
+            entry("carried", notice, {PRESERVED_USER_TURN_KEY: True}),
+        ],
+    )
+
+    assert _latest_user_query(transcript) == "fix the login redirect loop"
