@@ -200,85 +200,86 @@ def test_cost_rate_absolute_cap_fires_on_one_expensive_cycle() -> None:
 _COST_SPIKE = (1,) * 10 + (9,) * 10
 
 
-def test_the_cost_rate_ratio_is_inapplicable_to_a_doubly_capped_episode() -> None:
-    """An episode that declares BOTH a step budget and a provider-cost cap is
-    judged by its caps: the ratio is not looked at, and the guard names the
-    skip rather than claiming to have judged it."""
+def test_the_ratio_is_not_judged_when_the_episode_states_a_step_budget() -> None:
+    """A step budget is an authority the operator set: a bounded episode is
+    judged by it, so the ratio is not looked at and the guard names the skip
+    rather than claiming to have judged anything."""
 
     guard = CostRateGuard()
     verdict = guard.evaluate(_snapshot(recent_costs_micros=_COST_SPIKE, max_steps=500))
     assert verdict.kind == "continue" and verdict.code == "cost-bounded"
-    assert "caps are the authority" in verdict.detail
+    assert "not judged" in verdict.detail
     # The very same series is a spike without the step budget...
     assert guard.evaluate(_snapshot(recent_costs_micros=_COST_SPIKE)).kind == "truncate"
-    # ...and for a step-budgeted episode with no declared cost cap.
+    # ...and stays unwatched even with NO cost cap declared: the gate is the
+    # step budget, not the pair of caps the deleted ceiling needed.
     assert (
         guard.evaluate(
             _snapshot(recent_costs_micros=_COST_SPIKE, max_steps=500, budget=_uncapped_budget())
         ).kind
-        == "truncate"
+        == "continue"
     )
 
 
-def test_a_doubly_capped_episode_keeps_an_absolute_ceiling_prorated_from_its_budget() -> None:
-    """The ceiling is remaining budget / remaining steps x margin: a cycle
-    inside that pace continues, one past it truncates."""
+def test_a_long_horizon_cycle_is_not_a_spike_in_a_step_budgeted_episode() -> None:
+    """The defect this replaces, at its own numbers.
 
-    guard = CostRateGuard()  # margin 4.0
-    snapshot = {
-        "provider_cost_micros": 1_000_000,
-        "max_steps": 110,
-        "steps_taken": 10,
-        "budget": _budget(provider_usd_micros=5_000_000),
-    }
-    # 4_000_000 micro-USD left over 100 remaining steps, x4 -> a 160_000 ceiling.
-    assert guard.evaluate(_snapshot(recent_costs_micros=(160_000,), **snapshot)).kind == "continue"
-    verdict = guard.evaluate(_snapshot(recent_costs_micros=(160_001,), **snapshot))
+    63k micro-USD is an ordinary cycle in a 40-65k-token context: a 500-step
+    episode under a 6 USD cap spends 12-24k micro-USD per STEP, and a step may
+    bill two cycles. The deleted ceiling prorated that per-step allowance over
+    the 490 remaining steps (a ~40k ceiling), so it cut a lane that FINISHED
+    AND SCORED 50.00% on its eleventh cycle and called context growth a
+    runaway. With a step budget stated, price decides nothing here.
+    """
+
+    guard = CostRateGuard()
+    verdict = guard.evaluate(
+        _snapshot(
+            recent_costs_micros=(7_000, 63_000),
+            provider_cost_micros=1_000_000,
+            max_steps=500,
+            steps_taken=10,
+            budget=_budget(provider_usd_micros=6_000_000),
+        )
+    )
+    assert verdict.kind == "continue" and verdict.code == "cost-bounded"
+
+
+def test_the_same_series_truncates_once_the_step_budget_is_absent() -> None:
+    """Without a step budget the ratio is the only cost signal there is, and a
+    9x jump in cycle price is exactly what it exists to catch."""
+
+    verdict = CostRateGuard().evaluate(
+        _snapshot(
+            recent_costs_micros=(7_000,) * 10 + (63_000,) * 10,
+            provider_cost_micros=700_000,
+            budget=_budget(provider_usd_micros=6_000_000),
+        )
+    )
     assert verdict.kind == "truncate" and verdict.code == "cost-spike"
-    assert "160000" in verdict.detail and "per remaining step" in verdict.detail
-    # Spending tightens the ceiling: 1_000_000 micro-USD left over 50 remaining
-    # steps is an 80_000 ceiling, so the same cycle now truncates.
-    spent = dict(snapshot, provider_cost_micros=4_000_000, steps_taken=60)
-    assert guard.evaluate(_snapshot(recent_costs_micros=(160_000,), **spent)).kind == "truncate"
 
 
-def test_the_bounded_episode_rule_leaves_the_configured_cycle_cap_in_force() -> None:
-    """``--max-cycle-usd`` only ADDS an absolute cap; the bounded-episode rule
-    must not swallow it."""
+def test_the_operators_cycle_cap_truncates_regardless_of_the_step_budget() -> None:
+    """``--max-cycle-usd`` is the operator's own number rather than a
+    diagnosis, so it fires with or without a step budget: it is the only
+    price-based stop a bounded episode has left."""
 
     guard = CostRateGuard(max_cycle_cost_micros=100)
     verdict = guard.evaluate(_snapshot(recent_costs_micros=(101,), max_steps=500, steps_taken=20))
     assert verdict.kind == "truncate" and verdict.code == "cost-spike"
     assert "cap 100" in verdict.detail
+    assert guard.evaluate(_snapshot(recent_costs_micros=(101,))).kind == "truncate"
 
 
-def test_a_spent_step_budget_leaves_no_ceiling_to_derive() -> None:
-    """With no steps left there is no per-step allowance to prorate, and the
-    step budget -- not this guard -- is the authority about to fire."""
+def test_a_spent_step_budget_is_left_to_the_step_cap() -> None:
+    """With no steps left the step cap, not this guard, is the authority about
+    to fire: even a cycle that dwarfs the whole budget is not its to call."""
 
     verdict = CostRateGuard().evaluate(
         _snapshot(recent_costs_micros=(10**9,), max_steps=4, steps_taken=4)
     )
     assert verdict.kind == "continue" and verdict.code == "cost-bounded"
-    assert "step budget is spent" in verdict.detail
-
-
-def test_a_bounded_runaway_is_stopped_before_the_ratio_could_ever_fire() -> None:
-    """A genuine runaway inside a bounded episode is still truncated, and by
-    the ceiling rather than the ratio: the ratio needs twenty cycles, a 2 USD
-    cycle against a 60 USD budget over 500 steps is over pace on the second."""
-
-    verdict = CostRateGuard().evaluate(
-        _snapshot(
-            recent_costs_micros=(1_000, 2_000_000),
-            provider_cost_micros=2_001_000,
-            max_steps=500,
-            steps_taken=2,
-            budget=_budget(provider_usd_micros=60_000_000),
-        )
-    )
-    assert verdict.kind == "truncate" and verdict.code == "cost-spike"
-    assert "per remaining step" in verdict.detail
+    assert "step cap is the authority" in verdict.detail
 
 
 def test_repeated_batch_ignores_observation_ids_but_requires_unchanged_state() -> None:
@@ -463,7 +464,6 @@ def test_default_guards_composition_and_config_knob() -> None:
     [
         lambda: CostRateGuard(window=0),
         lambda: CostRateGuard(ratio=1.0),
-        lambda: CostRateGuard(bounded_cycle_margin=0),
         lambda: RepeatedBatchGuard(repeats=1),
         lambda: NoChangeGuard(repeats=1),
         lambda: AskLoopGuard(asks=0),

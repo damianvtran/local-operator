@@ -17,6 +17,15 @@ stopped for floundering is a *scored partial* an operator can compare
 unscored and a fabricated failure lies about what the environment saw. A
 budget cap is the same shape -- the budget was reported as overrun after the
 fact and never enforced; :class:`BudgetCapGuard` is what makes it real.
+
+**How much of a campaign these guards actually stop, measured.** Across 233
+scored episodes of the OSWorld campaign, this module produced 54 truncations
+(``budget-cap`` 21, ``cost-spike`` 21, ``repeated-batch`` 12) against 53 clean
+finishes and 125 failures -- and those failures are dominated by 475
+``decision-rejected`` errors, a model failing the action contract, which no
+guard can see or fix. The guards are therefore roughly a quarter of the
+campaign's stops: a guard change moves that quarter's composition, never the
+whole ceiling. Do not read a guard fix as "the truncation problem solved".
 """
 
 from __future__ import annotations
@@ -92,23 +101,6 @@ class GuardVerdict(ProtocolModel):
 
 
 CONTINUE = GuardVerdict(kind="continue", code="ok", detail="no guard fired")
-
-
-def _capped_usd_cap(snapshot: GuardInput) -> int | None:
-    """The episode's explicit provider-cost cap in micro-USD, if it declared one.
-
-    Only a CAPPED allowance is an explicit cap -- the same rule
-    :class:`BudgetCapGuard` enforces -- because an uncapped allowance is the
-    *absence* of one (a named person removed it, and ``scripts/run_episode.py``
-    leaves the resources it cannot size up front uncapped for the same reason).
-    An episode without an explicit cost cap keeps the ratio check as its only
-    cost authority.
-    """
-
-    for allowance in snapshot.budget.allowances:
-        if allowance.resource == "provider_usd_micros" and isinstance(allowance, CappedAllowance):
-            return int(allowance.value)
-    return None
 
 
 #: How many of the newest turns the runner snapshots into
@@ -199,27 +191,37 @@ class CostRateGuard:
     of the guard's decisions can see the ratio check was skipped, and only
     ``max_cycle_cost_micros`` remains in force.
 
-    **The ratio is inapplicable to a doubly-capped episode.** When the episode
-    declares BOTH an explicit step budget and an explicit provider-cost cap,
-    those caps are the authority and the ratio is not judged at all -- it is
-    replaced by a per-cycle ceiling prorated from what is actually left
-    (``remaining cost budget / remaining steps * bounded_cycle_margin``). Two
-    things make the ratio the wrong instrument there: it cannot tell a
-    legitimate expensive cycle from a runaway one, and it is blind to how much
-    of the budget remains. Its dominant false positive in practice is a
-    PROMPT-CACHE MISS, which multiplies the input price of one cycle while the
-    context is unchanged -- measured on an OSWorld batch, cycles at 2744/1686/
-    1908 micro-USD against a ~1000-1400 baseline cut episodes at a median of 11
-    of a 500-step budget, so the guard, not the benchmark, was being measured.
-    The bounded ceiling is instead anchored to the episode's own budget: it
-    fires only on a cycle that costs more than the remaining budget can afford
-    per remaining step, and it tightens as the budget is spent.
+    **A step-budgeted episode's ratio is never judged.** When the snapshot
+    states an explicit step budget, that budget is an authority the operator
+    set, so this guard judges no ratio at all and continues whatever the cycle
+    prices do. The one price-based stop left in that case is
+    ``max_cycle_cost_micros`` -- the operator's own absolute number, firing on
+    a number they chose rather than on this guard's diagnosis. An episode that
+    states no step budget keeps the ratio unchanged, because there it is the
+    only cost signal that exists.
 
-    A bounded-but-spent episode (no steps left) has no allowance to derive;
-    the step budget is already the binding authority, so the guard continues
-    without judging the ratio. An episode missing either cap -- including every
-    caller that snapshots no step budget at all -- keeps the ratio check
-    exactly as it was.
+    WHY, and this is a corrected defect rather than a preference. The ratio
+    was once replaced, for such an episode, by a per-cycle ceiling prorated
+    from the budget actually left (``remaining cost / remaining steps``).
+    Replaying the recorded cost series of a lane that FINISHED AND SCORED
+    50.00% -- a 500-step episode under that campaign's own $6.00 cap -- through
+    that ceiling fires ``cost-spike`` on its eleventh cycle (a 47,591
+    micro-USD allowance against a 63,487 cycle) and keeps firing. The shape
+    of the error is structural: the ceiling prorates a PER-STEP allowance
+    while a cycle's price is set by CONTEXT SIZE, which grows with horizon by
+    design (12-24k micro-USD per step against 16-90k micro-USD per cycle at a
+    40-65k-token context). It measured context growth and called it waste, and
+    it TIGHTENED as the episode ran, because ``remaining_steps`` falls faster
+    than the budget is spent -- penalising exactly the long-horizon episodes
+    this benchmark is made of. Its predecessor had the same disease in a
+    cheaper form (a prompt-cache miss multiplies one cycle's input price while
+    the context is unchanged).
+
+    THE RULE THIS ENCODES, and it is what any future truncating cost guard
+    must obey: such a guard may read an AUTHORITY (the operator's cap) or a
+    STATE signal (what the episode did); it may not read price and infer
+    intent from it. A prompt-cache miss and a genuine blow-up are
+    indistinguishable to a predicate that reads price alone.
     """
 
     def __init__(
@@ -228,50 +230,34 @@ class CostRateGuard:
         window: int = 10,
         ratio: float = 3.0,
         max_cycle_cost_micros: int | None = None,
-        bounded_cycle_margin: float = 4.0,
     ) -> None:
         if window < 1:
             raise ValueError("window must be positive")
         if ratio <= 1.0:
             raise ValueError("ratio must exceed 1.0")
-        if bounded_cycle_margin <= 0:
-            raise ValueError("bounded_cycle_margin must be positive")
         self._window = window
         self._ratio = ratio
         self._max_cycle = max_cycle_cost_micros
-        self._bounded_margin = bounded_cycle_margin
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         costs = snapshot.recent_costs_micros
+        # The operator's own number, and the only price-based stop this guard
+        # still makes: it fires on an authority the operator set, not on this
+        # guard's diagnosis of pace.
         if self._max_cycle is not None and costs and costs[-1] > self._max_cycle:
             return GuardVerdict(
                 kind="truncate",
                 code="cost-spike",
                 detail=f"one model cycle cost {costs[-1]} micro-USD (cap {self._max_cycle})",
             )
-        bounded, ceiling = self._bounded_ceiling(snapshot)
-        if bounded:
-            if ceiling is not None and costs and costs[-1] > ceiling:
-                return GuardVerdict(
-                    kind="truncate",
-                    code="cost-spike",
-                    detail=(
-                        f"one model cycle cost {costs[-1]} micro-USD against the {ceiling} "
-                        "the episode's remaining cost budget allows per remaining step"
-                    ),
-                )
+        if snapshot.max_steps is not None:
             return GuardVerdict(
                 kind="continue",
                 code="cost-bounded",
                 detail=(
-                    "the episode's step budget is spent, so no per-cycle allowance is "
-                    "derived and the cost-rate ratio is not judged"
-                    if ceiling is None
-                    else (
-                        "the episode declares an explicit step budget and an explicit cost "
-                        f"cap, so the caps are the authority and the cost-rate ratio is not "
-                        f"judged; {ceiling} micro-USD per remaining step is affordable"
-                    )
+                    "the episode declares an explicit step budget, so its own step cap is "
+                    "the authority about how long it runs and the cost-rate ratio is not "
+                    "judged"
                 ),
             )
         if len(costs) < 2 * self._window:
@@ -297,41 +283,6 @@ class CostRateGuard:
                 ),
             )
         return CONTINUE
-
-    def _bounded_ceiling(self, snapshot: GuardInput) -> tuple[bool, int | None]:
-        """The per-cycle ceiling a doubly-capped episode is judged by.
-
-        ``(False, None)`` -- the episode lacks an explicit step budget or an
-        explicit provider-cost cap, so the ratio check applies as before.
-        ``(True, None)`` -- it is bounded, but its step budget is spent, so
-        there is no allowance to prorate and the step budget itself is the
-        binding authority.
-        ``(True, ceiling)`` -- the episode is bounded and still has steps to
-        spend: the ceiling is the FLOOR of the remaining cost budget divided by
-        the remaining steps, times the margin.
-
-        ``bounded_cycle_margin`` default (4.0) is sized from the runner's own
-        budget model: ``scripts/run_episode.py`` allows up to TWO model cycles
-        per step (``model_cycles = max_steps * 2``), so a per-cycle ceiling
-        prorated from a per-step allowance is unreachable below 2x, and the
-        second 2x absorbs a legitimately expensive cycle (a large frame set on
-        a long turn) without turning the ceiling into a proxy for the ratio it
-        replaced. A remaining budget already at or below zero yields a ceiling
-        at or below zero: the episode is at its cap, and ``BudgetCapGuard``
-        (which runs ahead of this guard in ``default_guards``) fires on that
-        same snapshot. Firing here too is deliberate -- this guard must bound a
-        runaway when it is used on its own.
-        """
-
-        usd_cap = _capped_usd_cap(snapshot)
-        if usd_cap is None or snapshot.max_steps is None:
-            return False, None
-        remaining_steps = snapshot.max_steps - snapshot.steps_taken
-        if remaining_steps <= 0:
-            return True, None
-        remaining_usd = usd_cap - snapshot.provider_cost_micros
-        ceiling = remaining_usd * self._bounded_margin // remaining_steps
-        return True, int(ceiling)
 
 
 # ---------------------------------------------------------------------------
@@ -534,8 +485,8 @@ def default_guards(config: Any) -> tuple[EpisodeGuard, ...]:
     import it. Every guard here is on by default because each one converts a
     reported-after-the-fact failure into a scored stop; the cost-rate cap is
     the one that needs a configured number, and its ratio check is judged only
-    for an episode that does not declare BOTH a step budget and a cost cap
-    (see :class:`CostRateGuard`).
+    for an episode that states no step budget of its own (see
+    :class:`CostRateGuard`).
     """
 
     max_cycle = getattr(config, "max_cycle_cost_micros", None)
