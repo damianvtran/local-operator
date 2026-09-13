@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,23 @@ from local_operator.session.transcript import (
     TranscriptEntry,
     read_transcript_page,
 )
+
+
+async def _armed_warm(bridge: Any) -> asyncio.Task[None]:
+    """The engage task the lease-warm loop starts, after its first step.
+
+    The lease-driven warm is ARMED by `/watch` rather than started inside it,
+    because the retry and its backoff have to live in one place and that place
+    is the loop -- so the task appears one event-loop turn after the heartbeat
+    that armed it. Everything the ordering promises is unchanged: the presence
+    record still lands before the engage, and `/watch` still returns without
+    awaiting either.
+    """
+    for _ in range(64):
+        if bridge.warm_task is not None:
+            return bridge.warm_task
+        await asyncio.sleep(0)
+    raise AssertionError("a live visible lease did not start a warm")
 
 
 @pytest.mark.asyncio
@@ -2004,8 +2022,7 @@ async def test_a_visible_lease_warms_the_runtime_and_records_presence_first(tmp_
         monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
         watcher = bridge.subscribe()
         await bridge.watch(watcher.id, visible=True, can_notify=True)
-        task = bridge.warm_task
-        assert task is not None, "a live visible lease did not start a warm"
+        task = await _armed_warm(bridge)
         await asyncio.wait_for(task, timeout=10)
         assert order == [("presence", True, True), ("engage", False)], order
     await pool.close()
@@ -2034,13 +2051,14 @@ async def test_a_hidden_or_notify_only_lease_creates_no_runtime(tmp_path, monkey
         hidden = bridge.subscribe()
         await bridge.watch(hidden.id, visible=False, can_notify=True)
         assert bridge.warm_task is None, "a hidden notifiable lease created a runtime"
+        assert bridge.lease_warm_task is None, "a hidden lease armed the warm retry"
         never = bridge.subscribe()
         await bridge.watch(never.id, visible=False, can_notify=False)
         assert bridge.warm_task is None, "a lease with neither term created a runtime"
+        assert bridge.lease_warm_task is None, "a lease with neither term armed a retry"
         watcher = bridge.subscribe()
         await bridge.watch(watcher.id, visible=True, can_notify=False)
-        task = bridge.warm_task
-        assert task is not None, "a live visible lease created nothing"
+        task = await _armed_warm(bridge)
         await asyncio.wait_for(task, timeout=10)
     assert engages == [False]
     await pool.close()
@@ -2055,6 +2073,13 @@ async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, mo
     client, and the existing idle drain reaps it. What the bridge owes is the
     other end of that bargain -- after expiry nothing re-creates the process
     and nothing keeps asserting presence for it.
+
+    The lease is expired by moving ONE subscription's deadline into the past
+    rather than by replacing the module's `time` for the module under test: a
+    whole-module clock also freezes the retry loop's own comparisons, so the
+    next `loop.time()`-based one would silently escape it. The assertion that
+    matters is on the pair the facade was last recorded with, which is the same
+    thing the fake clock bought.
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
@@ -2067,38 +2092,40 @@ async def test_an_expired_lease_stops_warming_and_releases_presence(tmp_path, mo
     async def record_engage(*, foreground: bool = True) -> None:
         engages.append(foreground)
 
-    now = 100.0
-    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now))
     async with pool.session(sid) as bridge:
         assert bridge.remote is not None
         monkeypatch.setattr(bridge.remote, "update_desktop_watch", record_watch)
         monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
         watcher = bridge.subscribe()
         await bridge.watch(watcher.id, visible=True, can_notify=True)
-        task = bridge.warm_task
-        assert task is not None
+        task = await _armed_warm(bridge)
         await asyncio.wait_for(task, timeout=10)
         assert writes == [{"visible": True, "can_notify": True}], writes
 
         # The window stops heartbeating (closed, killed, navigated away) and the
         # expiry loop runs out. The COLD half of the bargain: nothing
         # re-creates the process this change started, and there is no runtime
-        # left holding a presence it no longer has.
-        now = 100.0 + module.WATCH_TTL + 1
+        # left holding a presence it no longer has -- including no STALE
+        # presence: a cold facade is told the live aggregate on every beat, so
+        # the `visible=True` this lease recorded is withdrawn here rather than
+        # re-asserted by the next dial (H1).
+        watcher.expires = time.monotonic() - 1.0
         await bridge._expire_watches()
         assert engages == [False], "the expired lease started a second engage"
-        assert bridge.warm_task is task, "the expired lease replaced the settled task"
-        assert writes == [
-            {"visible": True, "can_notify": True}
-        ], "a viewer with no runtime was asserted at anyway"
+        assert writes[-1] == {
+            "visible": False,
+            "can_notify": False,
+        }, "a viewer with no runtime was left asserted at after its lease expired"
 
         # A hidden notifiable subscriber on the same bridge, live and fresh,
         # re-warms nothing either -- which is the state the session was in
-        # before the visible lease ever arrived.
+        # before the visible lease ever arrived. It is still recorded: the pair
+        # is the DESIRED presence either way.
         hidden = bridge.subscribe()
-        hidden.can_notify, hidden.expires = True, now + 10
+        hidden.can_notify, hidden.expires = True, time.monotonic() + 10
         await bridge.refresh_watch()
         assert engages == [False], "a notify-only lease created a runtime"
+        assert writes[-1] == {"visible": False, "can_notify": True}, writes
     await pool.close()
 
 
@@ -2208,8 +2235,7 @@ async def test_repeated_visible_heartbeats_do_not_stack_warms(tmp_path):
         bridge.remote._bind_under_lock = parked_bind  # type: ignore[method-assign]
         watcher = bridge.subscribe()
         await bridge.watch(watcher.id, visible=True, can_notify=True)
-        first = bridge.warm_task
-        assert first is not None
+        first = await _armed_warm(bridge)
         await asyncio.wait_for(entered.wait(), timeout=10)
         for _ in range(3):
             await bridge.watch(watcher.id, visible=True, can_notify=True)
@@ -2280,4 +2306,213 @@ async def test_the_watch_route_returns_while_the_warm_is_still_binding(tmp_path,
             assert task is not None and not task.done()
             release.set()
             await task
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_facade_is_told_the_live_aggregate_not_the_last_heartbeat(
+    tmp_path, monkeypatch
+):
+    """H1: the pair a cold facade holds for its NEXT dial is the CURRENT one.
+
+    The record taken before a warm is what makes the runtime it starts count
+    its viewer from the first tick, and `_dial` re-asserts the same record when
+    that runtime comes up. So a cold facade must be told the live aggregate on
+    every beat: hide the window (or let the lease lapse) during the ~1 s a spawn
+    takes, and a facade that skipped the write leaves `visible=True` standing,
+    which the dial then asserts for a viewer who has gone -- one idle runtime
+    (~82 MB) held for up to the next beat (15 s) plus the runtime-side lease and
+    the 3 s drain.
+
+    The engage here is recorded rather than performed, so the facade stays cold
+    for the second half; what is under test is the write, not the bind.
+    """
+    writes: list[dict[str, Any]] = []
+    engages: list[bool] = []
+
+    async def record_watch(*, visible: bool, can_notify: bool) -> None:
+        writes.append({"visible": visible, "can_notify": can_notify})
+
+    async def record_engage(*, foreground: bool = True) -> None:
+        engages.append(foreground)
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "update_desktop_watch", record_watch)
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", record_engage)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        assert writes == [{"visible": True, "can_notify": True}], writes
+
+        # The window goes to the background while the engage it just armed is
+        # still in flight. The runtime it starts must not be told a viewer is
+        # looking when one is not.
+        await bridge.watch(watcher.id, visible=False, can_notify=True)
+        assert writes[-1] == {"visible": False, "can_notify": True}, writes
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_warm_is_paced_rather_than_retried_every_heartbeat(tmp_path, monkeypatch):
+    """MAJOR-1: an unattended retry must not spawn a child on every beat.
+
+    The renderer heartbeats `/watch` every 15 s for as long as a window is
+    focused, so a bind that cannot start (credential gone, an MCP hang, an
+    unwritable config dir) used to be re-attempted -- a real child spawn each
+    time -- once per beat, indefinitely, with no user behind it and nothing on
+    any surface to say so. The retry loop keeps the intent but charges a FAILED
+    attempt a doubling backoff.
+
+    The module clock is frozen so the assertion is about the rule (a heartbeat
+    inside the backoff re-engages nothing) rather than about how fast this
+    machine can sleep; the clock is then advanced by hand, which is the only
+    thing that stands in for 30 s of real time.
+    """
+    attempts: list[bool] = []
+
+    async def exploding_bind(*, foreground: bool = True) -> None:
+        attempts.append(foreground)
+        raise ConnectionError("no runtime")
+
+    now = 100.0
+
+    def clock() -> float:
+        return now
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=clock))
+    # `raising=False` so a tree without the knob reports the BEHAVIOUR this
+    # test is about rather than the missing attribute: the polling pace is
+    # what makes these tests fast, not what they assert.
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        monkeypatch.setattr(bridge.remote, "_ensure_bound", exploding_bind)
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        first = await _armed_warm(bridge)
+        await asyncio.wait_for(first, timeout=10)
+        assert attempts == [False], attempts
+
+        # Three heartbeats, all inside the backoff: the deadline cannot arrive
+        # on a frozen clock, so every one of them must be answered with nothing.
+        for _ in range(3):
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            await asyncio.sleep(0.05)
+        assert attempts == [False], "a heartbeat inside the backoff re-engaged"
+
+        for _ in range(200):
+            if bridge.warm_backoff_s:
+                break
+            await asyncio.sleep(0.01)
+        assert bridge.warm_backoff_s == module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
+
+        # The intent is still there when the backoff expires, with no user
+        # action and no heartbeat in between -- and the second failure grows the
+        # pace rather than resetting it.
+        now = 100.0 + module._LEASE_WARM_BACKOFF_S + 1
+        for _ in range(200):
+            if len(attempts) > 1:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == [False, False], "the backoff never re-engaged the intent"
+        assert bridge.warm_backoff_s == 2 * module._LEASE_WARM_BACKOFF_S, bridge.warm_backoff_s
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lease_driven_warm_survives_the_facades_recovery_window(tmp_path, monkeypatch):
+    """QA Q1: a lease's intent must outlive one refuted attempt.
+
+    A viewer that has just lost its runtime sits in owner recovery for up to
+    `COLD_FALLBACK_S` (~9.4 s measured end to end on this path), and
+    `_ensure_bound` returns at its own `_recovering` guard -- no error, no
+    engage, nothing started and nothing to report. The desktop panel's own shape
+    is `visible` -> reaped -> `visible` again a fraction of a second later, i.e.
+    INSIDE that window; with one attempt per `/watch` the attempt was simply
+    lost, and the user's next command paid the cold bind this feature exists to
+    remove while the renderer's next beat was 15 s away.
+
+    `_bind_under_lock` is the patch point rather than `_ensure_bound`, because
+    the guard under test IS the real `_ensure_bound`: a fake one would record an
+    engage the real recovery never makes, and the test would pass for the wrong
+    reason. Nothing binds, so the second half is about the loop re-asking on its
+    own, with no further heartbeat.
+    """
+    engages: list[bool] = []
+
+    async def record_bind(*, foreground: bool) -> None:
+        engages.append(foreground)
+
+    # `raising=False` so a tree without the knob reports the BEHAVIOUR this
+    # test is about rather than the missing attribute: the polling pace is
+    # what makes these tests fast, not what they assert.
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._bind_under_lock = record_bind  # type: ignore[method-assign]
+        bridge.remote._recovering = True
+        watcher = bridge.subscribe()
+        await bridge.watch(watcher.id, visible=True, can_notify=True)
+        await asyncio.sleep(0.2)
+        assert engages == [], "an attempt was made while recovery owned the dial"
+
+        # Recovery releases the facade -- what `_give_up_recovery` ends in, minus
+        # the flags this test does not exercise.
+        bridge.remote._recovering = False
+        for _ in range(200):
+            if engages:
+                break
+            await asyncio.sleep(0.01)
+        assert engages == [False], "the lease's intent did not survive the recovery window"
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_lease_driven_warm_survives_an_in_flight_bind(tmp_path, monkeypatch):
+    """H2: `engage_in_flight` is a reason to wait, not a reason to forget.
+
+    `warm()` answers "warming" and starts NOTHING when the facade's bind lock is
+    held -- right for the route caller, whose own send joins that bind, but the
+    lease-driven warm has no send behind it: before the retry loop, a beat
+    landing in a foreign holder's window (another subscriber's `attach_existing`
+    takes the same lock across a thread hop) warmed nothing, and a click in the
+    following 15 s paid the full cold spawn.
+
+    The lock is taken directly here, which is the narrowest way to produce the
+    state `warm()` samples, and released with no heartbeat in between.
+    """
+    engages: list[bool] = []
+
+    async def record_bind(*, foreground: bool) -> None:
+        engages.append(foreground)
+
+    # `raising=False` so a tree without the knob reports the BEHAVIOUR this
+    # test is about rather than the missing attribute: the polling pace is
+    # what makes these tests fast, not what they assert.
+    monkeypatch.setattr(module, "_LEASE_WARM_POLL_S", 0.01, raising=False)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+        bridge.remote._bind_under_lock = record_bind  # type: ignore[method-assign]
+        await bridge.remote._bind_lock.acquire()
+        try:
+            watcher = bridge.subscribe()
+            await bridge.watch(watcher.id, visible=True, can_notify=True)
+            await asyncio.sleep(0.2)
+            assert engages == [], "a warm engaged beside a bind already in flight"
+            assert bridge.warm_task is None
+        finally:
+            bridge.remote._bind_lock.release()
+        for _ in range(200):
+            if engages:
+                break
+            await asyncio.sleep(0.01)
+        assert engages == [False], "the lease's intent did not survive the wait"
     await pool.close()

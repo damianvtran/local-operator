@@ -2022,6 +2022,26 @@ class AttachedSession:
         """
         return self._can_go_cold and self._bind_lock.locked() and not self._recovering
 
+    @property
+    def recovering(self) -> bool:
+        """Whether owner recovery owns this facade's dial right now.
+
+        PUBLIC for the same reason :attr:`engage_in_flight` is — the desktop
+        bridge is the other consumer — and it answers the one question that
+        predicate cannot, which is what a caller retrying a COLD viewer needs:
+        telling a REFUSED engage from a FAILED one. Every attempt made while
+        recovery owns the dial does no work at all (``_ensure_bound`` returns at
+        its own ``_recovering`` guard, before the lock, with no task to report
+        and no process to account for), so a retry loop must not charge it
+        against the pace it keeps for failures that really did spawn.
+        ``engage_in_flight`` is False during recovery BY DESIGN, so it reads as
+        "nothing happened" exactly when this is True.
+
+        A STATE READ, not a lock sample, so unlike ``engage_in_flight`` there is
+        no window between asking and acting to be missed.
+        """
+        return self._recovering
+
     def _engage_in_flight(self) -> bool:
         """Deprecated spelling of :attr:`engage_in_flight`, kept for callers here.
 
