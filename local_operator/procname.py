@@ -170,6 +170,30 @@ LABEL_BROWSER = "{brand} [browser bridge] port={port}"
 LABEL_WAKES = "{brand} [wakes]"
 LABEL_TUNNEL = "{brand} [tunnel]"
 LABEL_SERVE = "{brand} [serve] port={port}"
+#: The secret broker, and the ONE field is a digest rather than the config dir
+#: itself. Which store a broker holds is exactly what an operator reading `ps`
+#: needs in order to tell a test's broker from their live one, but the config
+#: dir is an absolute path that can name a user, a project, or a customer — and
+#: argv is world-readable per the rule above. The digest is the SAME one
+#: `protocol._runtime_fallback_dir` already derives from the secrets directory,
+#: so a row here can be matched against the socket directory on disk without
+#: disclosing the path it came from.
+#:
+#: ORDER MATTERS HERE, because the readers this exists for truncate. `ps` with
+#: stdout not a tty falls back to an 80-column screen width on Linux and cuts the
+#: row (measured on CI: `... -m local_operator.secrets.brok` at exactly 80). The
+#: identity is therefore at the FRONT, so a cut row still says "secret broker"
+#: and still names its store; only the module, which a reader can infer, is lost.
+#: A reader that needs the whole line uses `ps -ww` or `/proc/<pid>/cmdline`.
+#:
+#: This label exists because of issue #958: every pre-#954 CI teardown listed a
+#: bare, unexplained `Local Operator` child. `_spawn_broker` launches
+#: `[sys.executable, "-m", ...]`, and once a parent has been through
+#: `reexec_branded`, `sys.executable` IS the branded hardlink — so the broker
+#: inherited the product name with nothing to say it was a broker, and on Linux
+#: `comm` truncates at 15 bytes, which made every branded child identical in
+#: that listing. A daemon that can outlive its starter has to say what it is.
+LABEL_BROKER = "{brand} [secret broker] store={digest}"
 
 
 def safe_field(value: object, limit: int = 24) -> str:
