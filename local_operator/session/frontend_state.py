@@ -193,6 +193,37 @@ JOB_ERROR_WIRE_CHARS = 2_000
 JOB_TEXT_FRAME_BUDGET_CHARS = 119_360
 JOB_TEXT_FLOOR_CHARS = 200
 
+#: Byte budget for the trajectory deltas one relayed ``frontend_update`` may carry,
+#: shared across the jobs that connection is watching.
+#:
+#: WHY THIS EXISTS. :data:`TRAJECTORY_CAP` bounds a job's retained trajectory by
+#: ROW COUNT and says nothing about bytes, so a burst of rows that are each
+#: individually reasonable — a tool result at the 8 KiB wire cap, one long
+#: streamed answer — adds up past the 1 MiB socket line limit. Measured on the
+#: operator's machine: 44,681 oversized ``frontend_update`` frames, median
+#: 1.29 MB, p90 3.02 MB, max 4.51 MB, each of which cost that viewer its live
+#: update (the relay substitutes a degraded placeholder and the viewer recovers
+#: through ``frontend_sync`` plus durable history). Re-measured against the real
+#: producer at 500 retained rows: 1,922,210 B for one streamed answer and
+#: 4,390,839 B for 500 tool results, both over the limit on ``job trajectory``
+#: alone. Bounding the delta is what keeps the live path live.
+#:
+#: A quarter of the line limit, not all of it: the same frame carries the roster
+#: rows, todos and usage, and :data:`JOB_TEXT_FRAME_BUDGET_CHARS` already claims
+#: ~119 KB of it for row text. Choosing a budget that ignored them would trade
+#: one overflow for another.
+#:
+#: Measured with :func:`_live_row_cost`, like the live-event budget, so a row
+#: whose payload rides a key this module has never heard of is still counted.
+JOB_TRAJECTORY_FRAME_BUDGET_BYTES = 262_144
+
+#: Smallest newest-row set worth shipping for one job. A deep roster divides the
+#: frame budget, and without a floor a job's share can fall below one row's cost,
+#: which would ship it an empty window while its own newest event is exactly what
+#: an operator opened the page for. The floor is a slice, not an entitlement: it
+#: still cannot let the frame exceed :data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES`.
+JOB_TRAJECTORY_ROW_FLOOR_BYTES = 8_192
+
 #: Fields :meth:`FrontendStateStore.read_field` may serve without the
 #: whole-state deep copy — see that method for the measurement that motivates
 #: it.
@@ -2434,10 +2465,144 @@ def oversized_frame_report(frame: dict[str, Any], cap_bytes: int) -> str | None:
     )
 
 
+#: The one delta field this filter replaces outright, excluded when measuring how
+#: much of the frame the rest of the payload already costs.
+#:
+#: Deliberately just this one. ``job_trajectory_replacements`` and
+#: ``job_todo_updates`` ride the same frame and nothing in this module bounds them,
+#: so both are measured: excluding them overstated the room by exactly the payload
+#: that ships — including the producer's own markers for watched jobs that have no
+#: rows in this delta, which no charge inside the bound would ever see.
+_APPENDS_FIELD = "job_trajectory_appends"
+
+#: Room reserved for the frame's own envelope — the ``{"op": "frontend_update",
+#: "data": …}`` wrapper — and for round-off, when the ceiling is derived from the
+#: socket's line limit. The wrapper plus the field name measure 111 B on a
+#: single-job frame (review measured that identity on this path, where the relay
+#: writes default JSON separators, so the row costs are exact rather than an
+#: over-estimate); the rest is round-off. It is NOT the accounting for the appends
+#: object's keys or the marker ids — those are charged explicitly against the room
+#: before any row spends it, because a reservation that silently absorbs them stops
+#: binding once a roster is deep enough.
+TRAJECTORY_FRAME_ENVELOPE_BYTES = 4_096
+
+
+def _bound_trajectory_appends_in_place(
+    appends: dict[str, list[dict[str, Any]]],
+    replacements: list[str],
+    *,
+    budget_bytes: int = JOB_TRAJECTORY_FRAME_BUDGET_BYTES,
+    floor_bytes: int = JOB_TRAJECTORY_ROW_FLOOR_BYTES,
+    ceiling_bytes: int | None = None,
+) -> bool:
+    """Trim one connection's trajectory deltas to a byte budget, newest rows kept.
+
+    Returns whether any row was dropped. See
+    :data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES` for the frames this exists to stop.
+
+    Rows are dropped OLDEST first, and a job that loses any row is added to
+    ``replacements``. That marker is not decoration: appends EXTEND the viewer's
+    local list, so shipping a short suffix would leave a hole in the middle of a
+    transcript the viewer believes is complete. A replacement resets the list to
+    exactly what rides here, which is the same signal the runtime already sends
+    when its retention rotated past a follower's copy — the viewer ends up with a
+    shorter, truthful window and can fetch the full one on demand through
+    ``load_job_trajectory``.
+
+    No row's text is clipped here, deliberately. The live-event bounds clip
+    because a stranded card is worse than a shortened result, but a trajectory
+    row is page detail with an on-demand fetch behind it, and an unmarked cut in
+    a transcript reads as the whole answer.
+
+    Two limits, and the second one is why the first can be conservative. The
+    budget is the SHARE the frame hands this connection's deltas, deliberately
+    well under the line limit so the roster, todos and usage still fit beside it.
+    ``ceiling_bytes`` is the measured room left under the real line limit once the
+    rest of this frame is counted, and it is the HARD one in both directions: when
+    it is smaller than the budget it caps the spend outright (a frame carrying a
+    near-limit roster leaves little room, and dropping rows entirely still beats
+    the degraded placeholder an overflow produces — measured: 800,014 B of
+    non-trajectory payload plus one 250 KB row shipped a 1,050,435-byte frame
+    under a 1,048,576-byte limit), and when it is larger it is what admits a job's
+    NEWEST row past its share (one 342 KB tool result fits a 1 MiB line, so
+    shipping that job an empty window would hide an event the socket could have
+    carried — the first cut of this bound did exactly that). A row larger than the
+    whole room has nowhere to ride; that job gets an empty window and the fetch
+    path.
+
+    The budget is spent newest-first per job, and unspent budget is offered back
+    to jobs that were cut short, so a child with a small delta cannot starve a
+    sibling's larger one by arriving first.
+    """
+    job_ids = [job_id for job_id, rows in appends.items() if rows]
+    if not job_ids:
+        return False
+    room = budget_bytes if ceiling_bytes is None else max(0, ceiling_bytes)
+    # The rows are not the only thing this object costs. Every job that keeps rows
+    # contributes its own KEY to the appends object and every job the trim marks
+    # contributes an id to the marker list, and both ride the same JSON; so do the
+    # separators between rows. Measured by QA on a 200-job roster: those keys and
+    # markers alone were 5,197 B, the difference between a frame that fit and one the
+    # wire pass repaired by EMPTYING the rows it had just kept — the silent cut this
+    # module exists to prevent. Review then measured the first version of this charge
+    # to be 8 B per job short at the runtime's 12-char ids, which is what the
+    # 2 * len(id) + 12 covers: `"<id>":[` for the key and `"<id>",` for the marker,
+    # with their punctuation, plus 2 B per row for its separator. Charged before any
+    # row spends room, so the reservation stays round-off rather than accounting.
+    overhead = sum(2 * len(str(job_id)) + 12 + 2 * len(appends[job_id]) for job_id in job_ids)
+    room = max(0, room - overhead)
+    costs = {job_id: [_live_row_cost(row) for row in appends[job_id]] for job_id in job_ids}
+    counts = {job_id: 0 for job_id in job_ids}
+    budget_left = min(budget_bytes, room)
+    spent = 0
+    jobs_left = len(job_ids)
+    for job_id in job_ids:
+        newest_first = list(reversed(costs[job_id]))
+        allowance = min(max(floor_bytes, budget_left // max(1, jobs_left)), budget_left)
+        used = 0
+        for cost in newest_first:
+            if used + cost <= allowance:
+                pass
+            elif used == 0 and spent + cost <= room:
+                # The newest row, past its slice but inside the frame's room.
+                allowance = cost
+            else:
+                break
+            used += cost
+            counts[job_id] += 1
+        budget_left = max(0, budget_left - used)
+        spent += used
+        jobs_left -= 1
+    if budget_left > 0:
+        for job_id in job_ids:
+            newest_first = list(reversed(costs[job_id]))
+            while counts[job_id] < len(newest_first):
+                cost = newest_first[counts[job_id]]
+                if cost > budget_left:
+                    break
+                budget_left -= cost
+                counts[job_id] += 1
+    dropped = False
+    for job_id in job_ids:
+        rows = appends[job_id]
+        keep = counts[job_id]
+        if keep == len(rows):
+            continue
+        appends[job_id] = rows[len(rows) - keep :]
+        if job_id not in replacements:
+            replacements.append(job_id)
+        dropped = True
+    return dropped
+
+
 def filter_update_trajectories(
-    payload: dict[str, Any], watched: Callable[[str], bool]
+    payload: dict[str, Any],
+    watched: Callable[[str], bool],
+    *,
+    line_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Drop trajectory deltas for jobs this connection has not subscribed to.
+    """Drop trajectory deltas for jobs this connection has not subscribed to, and
+    bound the ones it has to a byte budget.
 
     Same budget as :func:`sync_wire_payload` applied to the delta stream: a
     viewer that never opens a child's page must not pay for its events, and a
@@ -2445,6 +2610,13 @@ def filter_update_trajectories(
     line limit mid-turn. The row COUNT still rides along (``trajectory_length``
     on the job summary), so an unwatched page opened later fetches the whole
     window on demand rather than resuming from a hole.
+
+    Scope is only half of it, and the half that could not stop the measured
+    overflow: a WATCHED job's own burst is what produced the 44,681 oversized
+    frames (:data:`JOB_TRAJECTORY_FRAME_BUDGET_BYTES`), because the page a viewer
+    is reading is precisely the page whose deltas are allowed through. The kept
+    rows are therefore also bounded by measured size, newest kept, with a
+    replacement marker for any job that loses rows.
 
     Returns the input unchanged when nothing needs dropping, so the common
     no-trajectory delta costs one dict lookup and no copy.
@@ -2472,8 +2644,27 @@ def filter_update_trajectories(
         if isinstance(todos, dict)
         else {}
     )
+    # ...and what is left is bounded in BYTES as well as by scope. Watching a job
+    # is what lets its deltas through at all, and it is exactly the watched job
+    # whose burst of rows can overflow the line: the scope filter bounds how many
+    # jobs pay for their trajectory, never how much one job's trajectory costs.
+    #
+    # The ceiling is measured against this frame rather than assumed: the caller
+    # owns the socket limit, and what is left of it after the roster, todos and
+    # usage is the honest room for rows — which is what lets a job whose newest
+    # row exceeds the soft budget still ship it when the line can carry it.
+    ceiling: int | None = None
+    if line_limit_bytes is not None:
+        others = _live_row_cost(
+            {key: value for key, value in payload.items() if key != _APPENDS_FIELD}
+        )
+        ceiling = line_limit_bytes - others - TRAJECTORY_FRAME_ENVELOPE_BYTES
+    dropped = _bound_trajectory_appends_in_place(
+        kept_appends, kept_replacements, ceiling_bytes=ceiling
+    )
     if (
-        len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0)
+        not dropped
+        and len(kept_appends) == (len(appends) if isinstance(appends, dict) else 0)
         and len(kept_replacements) == (len(replacements) if isinstance(replacements, list) else 0)
         and len(kept_todos) == (len(todos) if isinstance(todos, dict) else 0)
     ):

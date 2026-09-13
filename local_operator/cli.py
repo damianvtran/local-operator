@@ -435,9 +435,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "logs", help="Tail the daemon's and the runtimes' logs"
     )
     logs_parser.add_argument(
-        "--lines", type=int, default=100, help="Lines per file (both files are read)"
+        "--lines", type=int, default=100, help="Lines per file (up to two are read)"
     )
-    logs_parser.add_argument("--follow", "-f", action="store_true")
+    logs_parser.add_argument(
+        "--follow",
+        "-f",
+        action="store_true",
+        help=(
+            "Follow by name, so a log created or rotated while you watch is seen "
+            "(a descriptor-bound follow misses both)"
+        ),
+    )
     mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
     uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
     uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
