@@ -935,6 +935,12 @@ async def _search_deepseek(
     payload = response.json()
     sources, answer = parse_deepseek_search(payload, limit)
     usage = _deepseek_usage(payload)
+    #: Evidence rows keyed by URL. Bound BEFORE the try, not inside it: pyright
+    #: reads a name assigned only in a ``try``/``except`` pair as possibly
+    #: unbound at the ``_apply_deepseek_evidence`` call below, and the type
+    #: checker is right that the invariant is non-obvious here even though both
+    #: arms assign it. An explicit empty default states it once.
+    evidence: dict[str, dict[str, Any]] = {}
     if settings.deepseek_evidence:
         # Enrichment only. A failed, truncated or unparseable evidence pass must
         # leave the sources exactly as the search returned them, because the
