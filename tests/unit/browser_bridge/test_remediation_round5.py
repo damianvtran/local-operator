@@ -332,6 +332,49 @@ async def test_r5_4b_an_unpaired_WHEEL_HOLDER_still_latches(tmp_path: Path) -> N
     await _shutdown(task)
 
 
+@pytest.mark.asyncio
+async def test_r5_7_a_paired_standbys_1012_latches(tmp_path: Path) -> None:
+    """Review round 6, MINOR 1 — the `link.paired` half of the latch predicate.
+
+    `r5_4` pins "an UNPAIRED stranger is inert" and `r5_4b` pins "an unpaired
+    WHEEL-HOLDER still latches"; no row let a PAIRED NON-DRIVER (a standby) close
+    with 1012, so collapsing the predicate to `link.generation ==
+    self.driver_generation` kept every row green. A non-driver retirement can
+    neither promote nor persist today (the promotion and record paths both read
+    the retiring link's generation against the wheel), so this half is defence in
+    depth rather than load-bearing — which is exactly why it is pinned instead of
+    assumed: a retiring link that CAN move the durable record must not find the
+    predicate already narrowed away, silently.
+    """
+    add_identity(tmp_path, STORE_ID, _digest(STORE_TOKEN), label="Chrome extension 0.1.13")
+    add_identity(tmp_path, UNPACKED_ID, _digest(UNPACKED_TOKEN), label="Chrome extension 0.1.13")
+    service = BridgeService(root=tmp_path)
+    store = _Peer(STORE_ID)
+    standby = _Peer(UNPACKED_ID, close_code=1012)
+    store.push(_hello(STORE_TOKEN))
+    standby.push(_hello(UNPACKED_TOKEN))
+    tasks = [
+        asyncio.create_task(service.extension(store)),  # type: ignore[arg-type]
+        asyncio.create_task(service.extension(standby)),  # type: ignore[arg-type]
+    ]
+    assert await _settles(lambda: len(service.links) == 3)
+    assert service.link.extension_id == STORE_ID, "precondition: the first install keeps the wheel"
+    standby_generation = stranger_id(service, standby)
+    # Both halves of the precondition, because the row is only about the paired
+    # NON-driver case: an unpaired standby would be r5_4 again, and a standby that
+    # had somehow taken the wheel would be r5_4b again.
+    assert service.links[standby_generation].paired is True
+    assert standby_generation != service.driver_generation
+
+    standby.push(None)  # a PAIRED, NON-DRIVING link closing with 1012
+    assert await _settles(lambda: service.links.get(standby_generation) is None)
+    assert service._daemon_leaving() is True, (  # type: ignore[attr-defined]
+        "the paired non-driver half of the predicate is gone: a retiring link that "
+        "can move the durable record no longer latches the guard"
+    )
+    await _shutdown(*tasks)
+
+
 # --- UX round 3, U9: which of the two cases is the user in -------------------
 
 
@@ -400,15 +443,43 @@ def _args(target: str) -> Any:
 
 
 @pytest.mark.parametrize(
-    ("matches", "expected"),
+    ("matches", "pin_driver_error", "expected"),
     [
-        (0, "no connected extension matches 'zzzz'."),
-        (2, "no single connected extension matches 'zzzz'."),
-        (None, "no single connected extension matches 'zzzz'."),
+        # Each row hands the CLI the sentence the OTHER branch prints, so the row
+        # asserts the BRANCH rather than agreeing with its own fixture. Review
+        # round 6, NIT 1: the fixture used to supply the exact sentence the
+        # `matches == 2` row expected, and `install.py` emits those words for BOTH
+        # 404 shapes — so that row passed with the `matches` branch deleted, and it
+        # was only the `matches == 0` row that discriminated.
+        (
+            0,
+            "no single connected extension matches 'zzzz'.",
+            "no connected extension matches 'zzzz'.",
+        ),
+        # The pre-C8 generic sentence, i.e. what `pin_driver` put in `error` before
+        # C8 split the two refusals apart. Deliberately a DIFFERENT sentence from
+        # this row's expectation, so the row goes red if the branch is removed.
+        (
+            2,
+            "no connected extension matches 'zzzz'.",
+            "no single connected extension matches 'zzzz'.",
+        ),
+        # No `matches` at all: an older daemon sends no such field, so the sentence
+        # `install.py` built stands. Insensitive to the branch BY CONSTRUCTION —
+        # that the default survives is exactly this row's claim.
+        (
+            None,
+            "no single connected extension matches 'zzzz'.",
+            "no single connected extension matches 'zzzz'.",
+        ),
     ],
 )
 def test_r5_6_the_refusals_are_asserted(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any, matches: int | None, expected: str
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    matches: int | None,
+    pin_driver_error: str,
+    expected: str,
 ) -> None:
     """Review round 5, finding 3: the branch this delta added had no assertion.
 
@@ -419,7 +490,7 @@ def test_r5_6_the_refusals_are_asserted(
     """
     result: dict[str, Any] = {
         "ok": False,
-        "error": "no single connected extension matches 'zzzz'.",
+        "error": pin_driver_error,
         "authorized_extension_ids": [STORE_ID],
         "_target": "zzzz",
     }
@@ -429,6 +500,36 @@ def test_r5_6_the_refusals_are_asserted(
     assert expected in out
     assert "authorised installs:" in out
     assert "omibaecb\u2026" in out, "the candidate rows must be pasteable handles"
+
+
+def test_r5_8_the_target_is_echoed_as_typed(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
+    """Review round 6, MINOR 2 — the round-5 "echo the target AS TYPED" fix, pinned.
+
+    Every other `drive` row drives `'zzzz'`, and `normalise_target('zzzz') ==
+    'zzzz'`, so reverting the sentence to `normalise_target(args.target)` — the
+    pre-fix head — left them all green. The regression the fix removed was
+    `drive 'ohcmfhja…'` answering "…matches 'ohcmfhja'.", i.e. it only shows up on
+    a target whose printed form carries the display ellipsis, which is precisely
+    the handle the user copies off `status`. The daemon must normalise it for the
+    LOOKUP and must not normalise it in the ECHO.
+    """
+    out = _drive_output(
+        monkeypatch,
+        {
+            "ok": False,
+            "error": "no connected extension matches 'omibaecb\u2026'.",
+            "authorized_extension_ids": [STORE_ID],
+            "matches": 2,
+            "_target": "omibaecb\u2026",
+        },
+        capsys,
+    )
+    # The whole line, escapes included, rather than a substring: "…'omibaecb'."
+    # (the normalised echo) does not contain this, and neither does a bare
+    # "omibaecb" with the ellipsis dropped anywhere else in the refusal.
+    assert (
+        "\x1b[1;31mno single connected extension matches 'omibaecb\u2026'.\x1b[0m" in out
+    ), "the refusal must echo the target as typed, display ellipsis included"
 
 
 @pytest.mark.parametrize(
