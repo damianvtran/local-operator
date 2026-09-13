@@ -276,6 +276,41 @@ class ModelInfo(BaseModel):
         return value
 
 
+def _hosting_qualified_bare_id(hosting: str, model: str) -> Optional[str]:
+    """``model`` with a single leading ``<hosting>/`` removed, or ``None``.
+
+    ONLY the hosting the caller NAMED is stripped, and that is the whole safety
+    argument. Under ``hosting="openrouter"`` an id like
+    ``deepseek/deepseek-v4.1-flash`` IS the API's own model id — an aggregator
+    namespaces what it routes — so its prefix does not match the hosting and
+    nothing is rewritten. A rule that stripped any ``vendor/`` prefix would
+    answer for a DIFFERENT provider's model, silently enough to look like a
+    working resolve: ``deepseek/deepseek-flash`` under ``openrouter`` would come
+    back wearing DeepSeek's direct-route window and prices.
+
+    The trailing id must be non-empty: a bare ``"deepseek/"`` is a malformed id,
+    not a qualified one, and it must fall through to the unknown sentinel rather
+    than resolving to something by accident.
+    """
+    prefix = f"{hosting}/"
+    if model.startswith(prefix) and len(model) > len(prefix):
+        return model[len(prefix) :]
+    return None
+
+
+def _has_shipped_row(hosting: str, model: str) -> bool:
+    """Whether this module SHIPS a row for exactly ``(hosting, model)``.
+
+    Read off :data:`_STATIC_MODEL_MAPS` — the table :func:`static_models`
+    exposes — instead of calling the lookup: the aggregators and local runtimes
+    answer EVERY id with a placeholder (they ship no rows by design, the live
+    listing is authoritative), and an answer that exists is not evidence of a
+    row. This is the predicate that bounds the qualified-id retry in
+    :func:`get_model_info` to resolutions that do not already work.
+    """
+    return model in _STATIC_MODEL_MAPS.get(hosting, {})
+
+
 def get_model_info(hosting: str, model: str) -> ModelInfo:
     """
     Retrieves the model information based on the hosting provider and model name.
@@ -285,6 +320,25 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
     pricing, context window, and image support. If the hosting provider is not
     supported, a ValueError is raised. If the model is not found for a supported
     hosting provider, a default `unknown_model_info` is returned.
+
+    A provider-QUALIFIED id (``deepseek/deepseek-flash`` under
+    ``hosting="deepseek"``) resolves to the SAME row as its bare id, because one
+    string is the ``provider/model`` spelling of a model NAME and the routes that
+    carry it — a user-supplied ``model_name``, ``--model``, a fallback-chain hop,
+    a session's own saved selection — hand it straight to this lookup. Before the
+    retry below it missed exactly, fell to :data:`unknown_model_info`, and was
+    normalised by ``configure.build_model_spec`` into the 128k unknown default: a
+    1M-context model resuming as 128k, which is not a cosmetic mis-report but a
+    compaction threshold eight times too small (and ``max_output_tokens`` dropping
+    393216 to 8192). See :func:`_hosting_qualified_bare_id` for why the retry is
+    keyed on the caller's OWN hosting, which is what keeps an aggregator's real
+    vendor-namespaced ids untouched.
+
+    Order: the exact spelling first, then ONE retry with a leading ``<hosting>/``
+    removed, then the provider's own fallback. The retry runs only where the
+    exact spelling found no SHIPPED row (see :func:`_has_shipped_row`), so every
+    resolution that succeeds today — including an aggregator's placeholder and a
+    local runtime's own row — is returned unchanged.
 
     Args:
         hosting (str): The hosting provider name (e.g., "openai", "google").
@@ -297,6 +351,28 @@ def get_model_info(hosting: str, model: str) -> ModelInfo:
 
     Raises:
         ValueError: If the hosting provider is unsupported.
+    """
+    bare_id = _hosting_qualified_bare_id(hosting, model)
+    if bare_id is None or _has_shipped_row(hosting, model):
+        return _dispatch_model_info(hosting, model)
+    if _has_shipped_row(hosting, bare_id):
+        return _dispatch_model_info(hosting, bare_id)
+    # Neither spelling is a row we ship (or the hosting has no table at all, as
+    # the aggregators and local runtimes do not): the exact spelling's own
+    # answer stands, so `unknown_model_info` for a genuinely unknown id and an
+    # aggregator's placeholder are both exactly what they were before.
+    return _dispatch_model_info(hosting, model)
+
+
+def _dispatch_model_info(hosting: str, model: str) -> ModelInfo:
+    """The per-provider lookup chain behind :func:`get_model_info`.
+
+    Split out so the qualified-id retry can ask the same question twice without
+    a second copy of the chain; it answers for one exact spelling only, and every
+    branch behaves exactly as it did when it was :func:`get_model_info`'s whole
+    body. ``openai`` is the one branch that indexes its map directly, so an
+    unshipped id still arrives as a ``KeyError`` — ``configure._registry_fallback``
+    catches that today, and the retry above must not turn it into an answer.
     """
     model_info = unknown_model_info
 
