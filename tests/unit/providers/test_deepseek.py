@@ -617,14 +617,18 @@ async def test_other_compat_routes_keep_terminal_tolerance():
 # The thinking-mode reasoning echo (ModelSpec.requires_reasoning_echo)
 # ---------------------------------------------------------------------------
 #
-# DeepSeek's thinking mode answers 400 -- "The `reasoning_content` in the
-# thinking mode must be passed back to the API" -- when ANY assistant turn in
-# the request carries no reasoning back, whatever the turn is (tool call, plain
-# text, truncated, imported). The harness cannot always supply it: the model
-# reasons on some turns and not others, and a dropped native payload leaves a
-# turn with nothing recorded. These tests pin the wire contract rather than the
-# failure, because the live 400 needs a real key and real money (the manual
-# recipe is in ``docs/evidence/deepseek-reasoning-echo``).
+# DeepSeek's thinking mode refuses requests that do not carry the reasoning
+# back -- "The `reasoning_content` in the thinking mode must be passed back to the
+# API" -- and the refusal is recorded in the operator's sessions. What is
+# MEASURED is the failure and its repair on the shapes the app sends: the
+# request rebuilt from a failing transcript is refused, and the same body with a
+# non-blank echo on every assistant turn is accepted, while the exact
+# server-side rule is not fully characterised (see the field's own comment on
+# ``ModelSpec.requires_reasoning_echo``, including the shapes that are accepted
+# WITHOUT the echo). These tests pin the harness-side policy -- every blank
+# assistant turn gets the echo -- rather than a claimed rule of the API, because
+# the live 400 needs a real key and real money (the manual recipe lives in
+# ``scripts/deepseek_reasoning_echo_probe.py``).
 
 
 def test_thinking_route_echoes_reasoning_on_every_assistant_turn():
@@ -778,6 +782,40 @@ def test_thinking_off_still_echoes_and_needs_no_special_case():
 
     assert body["thinking"] == {"type": "disabled"}
     assert assistant_entries(body)[0]["reasoning_content"] == REASONING_ECHO_PLACEHOLDER
+
+
+def test_the_compat_reasoning_key_is_echoed_as_the_real_thing():
+    """A reply whose thought arrived under the compat ``reasoning`` key echoes
+    THAT text, not the placeholder.
+
+    Some OpenAI-shaped proxies return reasoning under ``reasoning`` instead of
+    ``reasoning_content``, and the harness stores whichever key the wire used, so
+    a fill that only looked at ``reasoning_content`` would answer "the harness
+    lost this" over a thought it is holding.
+    """
+    client = OpenAICompatClient("https://api.deepseek.com/v1")
+    scope = credential_scope("fixture")
+    # Built the way the wire parser stores a compat reply: the item carries
+    # ``reasoning`` and no ``reasoning_content`` at all.
+    compat = Message.assistant(
+        "considered it",
+        provider_payload=native_payload(
+            echo_spec(),
+            DEEPSEEK_ENDPOINT,
+            "openai-chat",
+            [{"reasoning": "compat recorded thought"}],
+            "considered it",
+            [],
+            scope,
+        ),
+    )
+
+    body = client._build_body(
+        ChatRequest(model=echo_spec(), messages=[Message.user("go"), compat], system_blocks=["S"]),
+        scope=scope,
+    )
+
+    assert assistant_entries(body)[0]["reasoning_content"] == "compat recorded thought"
 
 
 def test_a_blank_echo_is_treated_as_missing():

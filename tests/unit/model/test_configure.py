@@ -4862,6 +4862,10 @@ class TestTheConfiguredEffortClamp:
         ("deepseek", "deepseek-v4-flash", True),
         ("deepseek", "deepseek-v4-pro", True),
         ("deepseek", "deepseek-v4-flash-0731", True),
+        # A DOTTED id, which the vendor ships beside the hyphenated ones: a
+        # separator rule that only accepted "-" would silently send this one a
+        # key-less request, which is the 400 the capability exists to prevent.
+        ("deepseek", "deepseek-v4.1-flash", True),
         ("deepseek", "deepseek-v4-flash-vision-exp", True),
         # A future snapshot of the same family is covered by the family rule
         # rather than by a list someone has to remember to extend.
@@ -4871,6 +4875,7 @@ class TestTheConfiguredEffortClamp:
         # ``reasoning_content`` outright, so a placeholder there would be the
         # very 400 this capability prevents.
         ("deepseek", "deepseek-chat", False),
+        ("deepseek", "deepseek-v3.2-chat", False),
         ("deepseek", "deepseek-reasoner", False),
         # The same weights behind an aggregator keep it off: measured, an
         # OpenRouter request without the echo answers 200, so the requirement is

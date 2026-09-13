@@ -1774,23 +1774,27 @@ def _deepseek_tool_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]
 def _echo_reasoning_content(entry: dict[str, Any]) -> bool:
     """Give one rendered assistant turn the reasoning echo its route requires.
 
-    Called only for a model whose ``requires_reasoning_echo`` is set, whose wire
-    validator reads the echo on EVERY assistant turn of the request. Returns
-    whether this turn took the PLACEHOLDER, which is what the caller counts for
-    context calibration -- a turn that already carries real reasoning, or that
-    has some recorded thought to echo instead, costs nothing extra here.
+    Called only for a model whose ``requires_reasoning_echo`` is set: the route
+    whose validator refuses a request missing that echo (see the field for what
+    is measured, and for the shapes that are accepted without it). Filling every
+    blank assistant turn is a superset of what the refused shapes need, chosen
+    because it is measured-safe in both directions.
 
-    The role check is load-bearing rather than defensive: the validator reads
-    ``reasoning_content`` on ASSISTANT turns, and the key is meaningless (or
-    rejected) on a user or tool entry, so a helper that filled every entry it
-    was handed would put the field on messages that never had reasoning at all.
+    Returns whether this turn took the PLACEHOLDER, which is what the caller
+    counts for context calibration -- a turn that already carries real reasoning,
+    or that has some recorded thought to echo instead, costs nothing extra here.
+
+    The role check is load-bearing rather than defensive: the echo belongs on
+    ASSISTANT turns, and the key is meaningless (or rejected) on a user or tool
+    entry, so a helper that filled every entry it was handed would put the field
+    on messages that never had reasoning at all.
 
     The recorded-text preference is not decoration: a reply whose reasoning was
     stored under the compat ``reasoning`` key (some routes emit both) must still
     be echoed as the real thing rather than replaced by a placeholder that says
     the harness lost it. Only when there is nothing at all to echo does the
-    placeholder go in, because the alternative -- leaving it blank -- is an HTTP
-    400 for the whole request, not for this turn.
+    placeholder go in, because the alternative -- leaving it blank -- is what the
+    refused requests have in common.
     """
     if entry.get("role") != "assistant":
         return False
@@ -2279,11 +2283,11 @@ class OpenAICompatClient:
         endpoint = f"{self._base_url}/chat/completions"
         direct_deepseek = request.model.provider == "deepseek"
         messages = self._system_messages(request)
-        # DeepSeek's thinking mode fails the WHOLE request when any assistant
-        # turn carries no reasoning back (see
-        # ``ModelSpec.requires_reasoning_echo``), so the echo is applied here,
-        # at the one boundary where the wire history is rendered, and real
-        # recorded reasoning always wins over the placeholder.
+        # DeepSeek's thinking mode refuses the shape this builds when the echo is
+        # missing (see ``ModelSpec.requires_reasoning_echo`` for what is measured
+        # and what its counter-shapes are), so the fill is applied here, at the
+        # one boundary where the wire history is rendered, and real recorded
+        # reasoning always wins over the placeholder.
         echo_turns = 0
         for message in request.messages:
             entry = self._replay_chat_message(message, request.model, endpoint, scope)

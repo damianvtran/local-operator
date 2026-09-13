@@ -1436,12 +1436,14 @@ class AgentLoop:
             if inspect.isawaitable(converted):
                 converted = await converted
             if effort_ceiling is not None:
-                # An empty-truncation retreat is in force. The host's resolver
-                # returns ITS model, so clamp the RESOLVED spec or the retry goes
-                # back out at the rung that just produced silence. This belongs
-                # here rather than in the resolver because the ceiling is loop
-                # state, and ``effort_ceiling`` on the request only covers hosts
-                # that re-impose an override downstream.
+                # A retreat is in force -- an empty-truncation step-down, or the
+                # reasoning-echo recovery's switch to thinking off. The host's
+                # resolver returns ITS model, so clamp the RESOLVED spec or the
+                # retry goes back out at the rung that just produced silence (or
+                # with thinking on, for a request the provider just refused for
+                # exactly that). This belongs here rather than in the resolver
+                # because the ceiling is loop state, and ``effort_ceiling`` on the
+                # request only covers hosts that re-impose an override downstream.
                 ladder = model.reasoning_efforts
                 current = model.reasoning_effort
                 if (

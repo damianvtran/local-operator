@@ -18,24 +18,24 @@ from local_operator.harness.types import Message, ModelSpec
 
 #: What a model that REQUIRES a reasoning echo is sent for an assistant turn the
 #: harness has no reasoning for. See ``ModelSpec.requires_reasoning_echo`` for
-#: why the requirement is on the request rather than on a turn, and for the live
-#: measurements.
+#: what is measured about the requirement (and for what is deliberately not
+#: claimed about it).
 #:
-#: Deliberately a visible sentence rather than an empty string or a space. The
-#: corpus on what the validator reads is thin and contradictory -- measured
-#: 2026-09-12, one all-blank body answered 200 where the same body with the keys
-#: ABSENT answered 400, which says the key's presence is what is checked, and an
-#: earlier shape of the same history answered 400 for both. A blank therefore
-#: relies on leniency no replica has promised, and it is also a value an
-#: intermediary could normalise away; text cannot be normalised into absence.
-#: It is deliberately not a harness bookkeeping word either -- the API
-#: concatenates the echo into the model's context, so this text is READ by the
-#: model and BILLED as input, and a phrase like "payload" or "details" would
-#: collide with the names the harness uses for its own provider state
-#: (``provider_payload["details"]`` and friends, which are never shipped). The
-#: cost is real but small: 23 characters on each assistant turn that lacked
-#: reasoning (66 of 230 turns in the session that reported this), counted by
-#: ``bind_native_context`` on the same ruler it uses for replayed reasoning.
+#: THIS TEXT IS MODEL-VISIBLE AND BILLED. The API concatenates the echo into the
+#: context it reads, so the model sees the sentence and the provider charges the
+#: input: measured on the wire at +330 input tokens for one real request (66
+#: placeholders x 5, exactly what :func:`reasoning_echo_placeholder_tokens`
+#: estimates). Deliberately a visible sentence rather than an empty string or a
+#: space, because the corpus on what the validator reads is thin and
+#: contradictory -- on one shape an all-blank body answered 200 where the same
+#: body with the keys ABSENT answered 400 -- so a blank relies on leniency no
+#: replica has promised, and it is also a value an intermediary could normalise
+#: away. Text cannot be normalised into absence.
+#:
+#: It is deliberately not a harness bookkeeping word either: a phrase like
+#: "payload" or "details" would collide with the names the harness uses for its
+#: own provider state (``provider_payload["details"]`` and friends, which are
+#: never shipped), and the model reads this line as part of its own conversation.
 REASONING_ECHO_PLACEHOLDER = "[thinking not recorded]"
 
 

@@ -1927,32 +1927,45 @@ class ModelSpec(BaseModel):
     # guess: compatibility providers may serve the same model id while exposing
     # only chat/completions.
     supports_responses_api: bool = False
-    # DeepSeek's THINKING MODE refuses a request that does not carry back the
-    # reasoning the conversation already produced: EVERY assistant turn in the
-    # request must have a non-blank ``reasoning_content``, and one blank turn
-    # fails the whole request with HTTP 400 -- "The `reasoning_content` in the
-    # thinking mode must be passed back to the API."
+    # DeepSeek's THINKING MODE refuses requests that do not carry the
+    # conversation's reasoning back. The provider answers HTTP 400 "The
+    # `reasoning_content` in the thinking mode must be passed back to the API",
+    # the operator's sessions record it as
+    # ``[session incident (deepseek/deepseek-flash)]``, and it kills a turn
+    # hundreds of messages deep.
     #
-    # This is a property of the REQUEST, not of a single turn, and it is not
-    # something the harness can satisfy out of its own history. Measured live
-    # against ``api.deepseek.com/v1`` (2026-09-12, ``deepseek-flash``, thinking
-    # on): a tool-loop history whose assistant turns carry no
-    # ``reasoning_content`` key 400s 8/8, the same body with the key on every
-    # assistant turn answers 200, and filling only SOME of them 400s. What the
-    # validator reads is the key's PRESENCE rather than its text -- a body whose
-    # assistant turns all carry ``reasoning_content: ""`` answered 200 on one
-    # shape where the same body with the keys absent 400ed -- so the harness
-    # sends a real sentence rather than a blank, which is leniency no replica
-    # has promised (see ``replay.REASONING_ECHO_PLACEHOLDER``).
+    # What is MEASURED, live against ``api.deepseek.com/v1`` (2026-09-12,
+    # ``deepseek-flash``, thinking on): the request rebuilt from the transcript
+    # at the point of failure (491 messages, 230 assistant turns, 66 of them
+    # with no ``reasoning_content``) is REFUSED, and the same body with a
+    # non-blank ``reasoning_content`` on every assistant turn is ACCEPTED --
+    # repeatedly, for both that session and a minimal synthetic tool loop. A
+    # body whose assistant turns all carry a blank value is accepted on one
+    # shape where the same body with the keys absent is refused, so what the
+    # validator reads is the key's presence rather than its text; the harness
+    # still sends a real sentence, because a blank is leniency no replica has
+    # promised (see ``replay.REASONING_ECHO_PLACEHOLDER``).
     #
-    # The turns with nothing to carry back are ordinary: the model produced no
-    # reasoning at all (no ``usage.reasoning_tokens``) on ~29% of the assistant
-    # turns in the session that reported this (``9daa47ece7ad``, 66 of 230 turns
-    # in the request built at the point of failure), and a turn whose native
-    # payload was dropped -- by an edit, a truncation/abort, or a model,
+    # The exact server-side rule is NOT fully characterised, and this field does
+    # not claim to encode it. Requests that omit the echo are accepted in other
+    # shapes -- adding a trailing user turn to the failing body answered 200,
+    # and tool-call ids copied from a reply the endpoint itself generated
+    # answered 200 where the same ids with one character changed answered 400 --
+    # which reads like server-side state (leniency for its own ids, or a prefix
+    # effect) rather than a syntactic property of the body. Filling every blank
+    # assistant turn is therefore a SUPERSET of what the failing shapes need: it
+    # is measured-safe on the shapes that are refused, and on the shapes that
+    # are accepted it changes nothing but those turns.
+    #
+    # The turns with nothing to carry back are ordinary, which is what makes the
+    # harness unable to satisfy the demand out of its own history: the model
+    # produced no reasoning at all (no ``usage.reasoning_tokens``) on ~29% of the
+    # assistant turns in the session that reported this (``9daa47ece7ad``, 66 of
+    # 230 turns in the request built at the point of failure), and a turn whose
+    # native payload was dropped -- by an edit, a truncation/abort, or a model,
     # endpoint or credential-scope change (see ``providers.replay``) -- has none
-    # either. DeepSeek accepts a placeholder for those, so the fix is compliance
-    # at the wire layer rather than better capture.
+    # either. So the fix is compliance at the wire layer rather than better
+    # capture.
     #
     # Derived in ``build_model_spec`` like every other capability here, so no
     # wire client has to recognise a model name: it is set for the
