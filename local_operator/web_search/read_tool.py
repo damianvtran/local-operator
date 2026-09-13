@@ -59,7 +59,6 @@ from local_operator.credentials import CredentialManager
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
-    AgentToolUpdate,
     TextContent,
     ToolContext,
     ToolResult,
@@ -113,8 +112,7 @@ class WebReadParams(BaseModel):
     search: str | None = Field(
         default=None,
         description=(
-            "Optional query to run first when this session has no recent search "
-            "pages to read."
+            "Optional query to run first when this session has no recent search " "pages to read."
         ),
     )
     urls: list[str] = Field(
@@ -160,7 +158,10 @@ def _build_messages(context: PageContext, params: WebReadParams) -> list[dict[st
         # Verbatim: the opaque encrypted_content in these blocks is what makes
         # DeepSeek restore the pages. Rewriting them invalidates the request.
         {"role": "assistant", "content": context.blocks},
-        {"role": "user", "content": [{"type": "text", "text": f"{question}\n\n{_READ_INSTRUCTION}"}]},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": f"{question}\n\n{_READ_INSTRUCTION}"}],
+        },
     ]
 
 
@@ -289,6 +290,7 @@ async def execute_web_read(
         )
 
     async with _client(context) as client:
+
         async def call() -> tuple[int, dict[str, Any]]:
             response = await client.post(
                 DEEPSEEK_SEARCH_ENDPOINT,
@@ -337,9 +339,7 @@ async def execute_web_read(
     # A read is spend, and it is not a search: it is recorded under its own
     # provider key so the counts stay truthful while the money still lands in the
     # session's search-spend total.
-    entry = SEARCH_SPEND.record(
-        session_id, "deepseek:read", cost, searches=1
-    )
+    entry = SEARCH_SPEND.record(session_id, "deepseek:read", cost, searches=1)
     session_totals = SEARCH_SPEND.session(session_id)
 
     refused = answer.strip().upper().startswith(NOT_IN_PAGES)
@@ -347,7 +347,9 @@ async def execute_web_read(
     cited = [url for url in urls if url in known] if known else urls
     unknown = [url for url in urls if known and url not in known]
 
-    header = f"Read {len(page_context.sources)} retrieved pages from a {page_context.provider} search."
+    header = (
+        f"Read {len(page_context.sources)} retrieved pages from a {page_context.provider} search."
+    )
     body = answer or "(the model returned no text)"
     sections = [header, body]
     if refused:

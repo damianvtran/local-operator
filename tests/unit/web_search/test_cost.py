@@ -75,7 +75,7 @@ def test_free_tiers_are_zero_and_paid_paths_use_published_rates() -> None:
 
 
 def test_an_unknown_provider_is_unpriced_not_free() -> None:
-    """"No published rate" must never render as $0.00."""
+    """ "No published rate" must never render as $0.00."""
     cost = estimate_search_cost("some-future-provider")
 
     assert cost.usd is None

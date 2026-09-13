@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
 
-from local_operator.harness.types import TextContent, ToolContext
+from local_operator.harness.types import ToolContext
 from local_operator.web_search import read_tool
 from local_operator.web_search.cost import SEARCH_SPEND
 from local_operator.web_search.models import SearchResponse, SearchSource, SearchUsage
-from local_operator.web_search.pages import PAGE_CONTEXTS, PageContextStore, PageContext
+from local_operator.web_search.pages import PAGE_CONTEXTS, PageContextStore
 
 BLOCKS: list[dict[str, Any]] = [
     {"type": "thinking", "thinking": "…", "signature": "sig"},
@@ -222,9 +221,7 @@ async def test_read_detects_the_refusal_marker_and_says_so(monkeypatch) -> None:
     assert ctx is not None
     PAGE_CONTEXTS.attach("s1", ctx.context_id)
     stub = _StubClient(
-        await _answer_payload(
-            "NOT IN PAGES These pages describe screening, not pricing.\nSOURCES:"
-        )
+        await _answer_payload("NOT IN PAGES These pages describe screening, not pricing.\nSOURCES:")
     )
     _patch_client(monkeypatch, stub)
 
@@ -329,9 +326,7 @@ async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(read_tool, "WebSearchService", StubService)
-    monkeypatch.setattr(
-        read_tool, "provider_available", lambda *_args, **_kwargs: True
-    )
+    monkeypatch.setattr(read_tool, "provider_available", lambda *_args, **_kwargs: True)
     _patch_client(monkeypatch, _StubClient(await _answer_payload("Answer.\nSOURCES:")))
 
     async def fake_key(_credentials):
@@ -348,14 +343,19 @@ async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
 
 
 def test_read_tool_is_absent_when_search_or_reading_is_disabled() -> None:
-    assert read_tool.build_web_read_tool(ToolContext(cwd=".", web_search_settings={"enabled": False})) is None
+    assert (
+        read_tool.build_web_read_tool(ToolContext(cwd=".", web_search_settings={"enabled": False}))
+        is None
+    )
     assert (
         read_tool.build_web_read_tool(
             ToolContext(cwd=".", web_search_settings={"enabled": True, "read_enabled": False})
         )
         is None
     )
-    tool = read_tool.build_web_read_tool(ToolContext(cwd=".", web_search_settings={"enabled": True}))
+    tool = read_tool.build_web_read_tool(
+        ToolContext(cwd=".", web_search_settings={"enabled": True})
+    )
     assert tool is not None
     assert tool.name == "web_read"
     assert tool.approval_tier == "read"
