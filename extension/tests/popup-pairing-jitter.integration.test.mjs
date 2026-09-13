@@ -575,9 +575,8 @@ test("the pin is applied BEFORE the first paint, not by the deferred module (Q4)
   // for a transient state is the regression this encodes.
   assert.deepEqual(
     Object.keys(owned).sort(),
-    ["CONNECTED", "PAIRING"],
-    "popup.ts must pin the durable states and only those (design D1) — pinning a transient card taxes the next open",
-  );
+    ["CONNECTED", "PAIRING", "STANDBY"],
+    "popup.ts must pin the durable states and only those (design D1) — pinning a transient card taxes the next open, and the standby card is durable: two installed builds keep their roles across every open",  );
   const early = Object.fromEntries(
     [...source.matchAll(/var PIN_(\w+) = "(\d+)px"/g)].map((m) => [m[1], m[2]]),
   );

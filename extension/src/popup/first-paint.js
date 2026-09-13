@@ -27,7 +27,7 @@
  * the duplication of both is the price of running before the module system.
  */
 (function () {
-  // Keep in sync with PIN_HINT_KEY, PIN_CONNECTED/PIN_PAIRING and show() in
+  // Keep in sync with PIN_HINT_KEY, the three PIN_* constants and show() in
   // popup.ts.
   //
   // A PIN PER STATE, not a boolean: popup.ts writes the pin for the card it
@@ -43,8 +43,10 @@
   var PIN_CONNECTED = "86px";
   var PIN_PAIRING = "219px";
   // Only the DURABLE states are pinned — see popup.ts's PIN_BY_STATE for why
-  // the transient wedged card is deliberately absent.
-  var PINS = [PIN_CONNECTED, PIN_PAIRING];
+  // the transient wedged card is deliberately absent, and why the standby card
+  // (a durable role between two installed builds) is present.
+  var PIN_STANDBY = "193px";
+  var PINS = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
   var pin = null;
   try {
     var stored = localStorage.getItem(KEY);

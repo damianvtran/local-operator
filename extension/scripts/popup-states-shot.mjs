@@ -19,9 +19,9 @@
  *
  * Usage: node scripts/popup-states-shot.mjs <dist-dir> <out-dir>
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -137,7 +137,117 @@ const STATES = {
     pending_origin: "https://contested.example",
     protocol_version: 1,
   },
+  // Paired, and deliberately receiving no commands because ANOTHER authorised
+  // install holds the wheel. The secondary install's card, and the reason this
+  // repo can have two builds installed at once; the shape is the store build's
+  // when a locally loaded build is driving.
+  //
+  // The two fields below are the HEALTHY values as the real wire carries them
+  // (silence measured at 1.6 ms against a 20 s ping interval), so this frame is
+  // the reference the two qualified frames underneath must NOT be confused with:
+  // it is the frame the earlier design and UX rounds approved byte-for-byte, and
+  // `standby-promise` is rewritten per render, so it is the one most at risk
+  // from U9.
+  standby: {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+    link_attached: true,
+    link_silent_s: 0.0016,
+    takeover_within_s: null,
+  },
+  // U9, the EARLY window: the wheel is attached and merely silent. 41.2 s is
+  // UX's own measurement at t+35.3 s of their run, where `takeover_within_s` is
+  // still null and the card used to make the unqualified promise.
+  "standby-silent": {
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+    link_attached: true,
+    link_silent_s: 41.2,
+    takeover_within_s: null,
+  },
+  // U9, COMMITTED: silence past the deadline, so the daemon is counting down to
+  // the severance (UX's t+44.3 s capture — the frame that was byte-identical to
+  // `standby` before this change).
+  "standby-countdown": {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    protocol_version: 1,
+    driver_extension_id: "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+    ],
+    standby_extension_ids: ["jbadjeaodkoboanppmpjiifpconegdcj"],
+    link_attached: true,
+    link_silent_s: 50.3,
+    takeover_within_s: 19.7,
+  },
+  // U10: the wheel was severed and NOBODY took it — QA's §6.2 payload, verbatim.
+  // Both installs are authorised, neither is named as driving, and the wedge
+  // latch is up, so no surface can say WHICH worker went mute.
+  severed: {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: false,
+    protocol_version: 1,
+    driver_extension_id: "",
+    takeover_within_s: null,
+    standby_extension_ids: [],
+    authorized_extension_ids: [
+      "jbadjeaodkoboanppmpjiifpconegdcj",
+      "omibaecbjdhgbbcedbnnnmjpmopfheof",
+    ],
+  },
 };
+
+/** Session-storage fixtures, keyed like STATES.
+ *
+ * `connState` is what the worker writes from the daemon's role statement, and it
+ * lives in `chrome.storage.session` — so unlike /health it cannot be stubbed
+ * before the page loads. It is set and the page reloaded, which is also what a
+ * real user's second open looks like for a durable role.
+ */
+const SESSION_FIXTURES = {
+  standby: { connState: "standby" },
+  "standby-silent": { connState: "standby" },
+  "standby-countdown": { connState: "standby" },
+};
+
+/** The id the fixtures above were WRITTEN with, as the popup's OWN identity.
+ *
+ * It is a placeholder, not a fact about this build: `manifest.dev.json` pins a
+ * dev build's id to a keypair, and the keypair's id is what
+ * `Extensions.loadUnpacked` reports. A fixture that names a different id than
+ * the popup is running under makes EVERY self-scoped state unreachable —
+ * `selfAuthorized` is false, so the popup falls through to the pairing form and
+ * captures a PAIRING CODE CARD for `standby`, `standby-silent`,
+ * `standby-countdown` and `severed` alike, all byte-identical. That is not a
+ * hypothetical: it is what this script did before the substitution below, and
+ * the frames looked plausible enough to file. So the loaded id is substituted
+ * into every payload, and the report repeats it, rather than the fixtures
+ * assuming a literal. */
+const SELF_ID_PLACEHOLDER = "jbadjeaodkoboanppmpjiifpconegdcj";
+/** Set once the extension is loaded; used by openPage's stub. */
+let SELF_ID = SELF_ID_PLACEHOLDER;
 
 async function main() {
   await mkdir(OUT, { recursive: true });
@@ -184,10 +294,16 @@ async function main() {
 
     const loaded = await browser.send("Extensions.loadUnpacked", { path: DIST });
     const id = loaded.id;
+    SELF_ID = id;
     const report = { chrome: version.Browser, extensionId: id, states: {} };
 
     for (const [name, health] of Object.entries(STATES)) {
-      const page = await openPage(browser, `chrome-extension://${id}/popup/popup.html`, health);
+      const page = await openPage(
+        browser,
+        `chrome-extension://${id}/popup/popup.html`,
+        health,
+        SESSION_FIXTURES[name],
+      );
       // 300x600 is the popup's real geometry, and it MUST come from the CDP
       // override: --window-size clamps to a 500px floor on Chrome 152, so a
       // frame sized by the flag is not evidence of anything.
@@ -237,13 +353,41 @@ async function main() {
   } finally {
     teardown();
     await sleep(2000);
+    sweepProfile(profile);
     console.error(`profile=${profile}`);
   }
 }
 
+/** Kill whatever still holds this capture's profile, then remove the directory.
+ *
+ * SIGTERM to the process group is not enough on its own: AGENTS.md §6 measured
+ * 0-5 helpers surviving it across 11 runs on Chrome 152 with no stable pattern by
+ * timing, which is exactly why one run "looks" clean. So the sweep is
+ * `pkill -f <this run's mktemp prefix>` followed by a pgrep ASSERTION, and the
+ * directory is only removed once the count is 0 — scoped to that unique prefix,
+ * so it can never touch another session's Chrome or the operator's.
+ *
+ * The assertion is the load-bearing half. Without it this harness leaked one
+ * profile per run (measured: four from this session's four captures, among ten
+ * others under /tmp from earlier ones), and a `rm -rf` under a live helper is the
+ * kind of failure that reports success: the directory reappears as soon as that
+ * helper writes again.
+ */
+function sweepProfile(profile) {
+  spawnSync("pkill", ["-f", profile], { stdio: "ignore" });
+  const survivors = spawnSync("pgrep", ["-f", profile], { encoding: "utf8" });
+  const count = (survivors.stdout ?? "").trim().split("\n").filter(Boolean).length;
+  if (count > 0) {
+    console.error(`NOT removed, ${count} process(es) still hold it: ${profile}`);
+    return false;
+  }
+  rmSync(profile, { recursive: true, force: true });
+  return true;
+}
+
 /** Open the popup as a page with /health stubbed BEFORE any script runs, so the
  * first render already sees the state under test. */
-async function openPage(browser, url, health) {
+async function openPage(browser, url, health, session) {
   const { targetId } = await browser.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
   const page = browser.session(sessionId, targetId);
@@ -252,7 +396,11 @@ async function openPage(browser, url, health) {
   const stub =
     health === null
       ? `window.fetch = () => Promise.reject(new TypeError("Failed to fetch"));`
-      : `window.fetch = () => Promise.resolve({ ok: true, json: async () => (${JSON.stringify(health)}) });`;
+      : `window.fetch = () => Promise.resolve({ ok: true, json: async () => (${JSON.stringify(
+          health,
+        )
+          .split(SELF_ID_PLACEHOLDER)
+          .join(SELF_ID)}) });`;
   // addScriptToEvaluateOnNewDocument runs before the page's own scripts, which
   // is what makes this the state of the FIRST paint rather than a later render.
   await page.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -260,6 +408,11 @@ async function openPage(browser, url, health) {
   });
   await page.send("Page.navigate", { url });
   await sleep(800);
+  if (session) {
+    await page.eval(`chrome.storage.session.set(${JSON.stringify(session)}).then(() => "ok")`);
+    await page.send("Page.reload");
+    await sleep(800);
+  }
   return page;
 }
 
