@@ -225,15 +225,15 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // (padding, the driven-URL trough, the actions row) is the constant between
 // them, so a pin is the state's total card height minus that chrome:
 //
-//   connected card      207.2px  ->  86px
-//   pairing form        340.2px  -> 219px
+//   connected card      207.16px  ->  86px
+//   pairing form        339.52px  -> 219px
 //
+// The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
+// cards, i.e. sub-pixel rounding on one shared value), so `card = pin + 121`.
 // Measured by sweeping the pin in a real headless Chrome at 300x600 dpr=2 and
-// reading the card back; the `card = pin + 121` invariant is what makes the
-// sweep a solve rather than a guess. Re-measure the same way if either card's
-// copy or controls change: an eyeballed pin IS the reflow this block exists to
-// prevent (on this build, reverting the unresponsive pin alone measured a
-// 148.27px jump before that state stopped being pinned at all).
+// reading the card back; that invariant is what makes the sweep a solve rather
+// than a guess. Re-measure the same way if either card's copy or controls
+// change: an eyeballed pin IS the reflow this block exists to prevent.
 //
 // ONLY DURABLE STATES ARE PINNED, and that is the whole design (design D1).
 // A pin is a BET that the next open repeats this state. `connected` and
@@ -241,32 +241,50 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // paired next time, an unpaired one still unpaired — so the bet pays.
 // `unresponsive` is transient BY CONSTRUCTION: the card exists to be acted on,
 // and its copy tells the user to reload and open it again, so the next open is
-// precisely the one most likely to be a DIFFERENT card. Pinning it optimised
-// the reopen nobody makes (0.27px) and taxed the recovery open everybody makes
-// — measured 315.84px of collapse against base's 167.84px, i.e. it nearly
-// doubled the worst visible reflow on the path this feature creates.
+// precisely the one most likely to be a DIFFERENT card.
 //
-// Leaving it unpinned means the wedged open keeps whatever the browser's
-// durable pin is and grows into the tall card once, while the recovery open —
-// the one the card's own copy asks for — lands on a pin that is already right.
-// An unmeasured state keeping the last hint is the same rule the two pinned
-// states rely on, not a special case for this one.
+// THIS IS A TRADE, AND THESE ARE ITS NUMBERS. Measured from the seed a real
+// browser carries (`86px` — paired for weeks), two consecutive opens per
+// sequence, /health delayed so #pending is genuinely the first frame:
+//
+//   recovery open (wedged -> connected)   167.84px -> 0.16px   <- instructed
+//   arrival (working browser wedges)      168.77px -> 257.77px
+//   failed reload (2026-09-11, 2nd wedge)   0.77px -> 257.77px
+//
+// The win is on the transition the card's copy INSTRUCTS ("open it again to
+// check"): a ~168px lurch becomes nothing. The cost is on the arrival and
+// reopen paths, which are ~89px and ~257px worse than base. The worst single
+// motion is 257.77px, not 132.84px — an earlier revision of this comment and
+// of the PR claimed the worst case was back to base, and it is not.
+//
+// THE TRANSITION OUT is the one the pin cannot help and does not need to: the
+// wedge card writes no hint, so the recovery open reads the `connected` pin
+// this browser has carried all along and lands on it exactly (0.16px). That is
+// why the durable pin must survive the wedge rather than be overwritten by it.
+//
+// A CONDITIONAL WEDGE PIN WAS PROPOSED AND MEASURED, AND IT IS WORSE. Pinning
+// the wedge only when the stored durable pin is `connected` was expected to
+// retire the arrival cost. Driven on a real build with a 343.77px wedge pin:
+// arrival stayed 257.77px (show() writes the pin AFTER the card renders, so
+// the open that first meets the wedge can never be helped by it), and the
+// instructed recovery open REGRESSED 0.16px -> 257.61px, because the wedge pin
+// it left behind then mis-sized the connected card. It buys nothing and sells
+// the one win. Do not re-derive it from the idea alone.
 //
 // THE `connected` FIGURE IS THE CARD WITH AN EMPTY DRIVEN-URL TROUGH (PR #996,
-// finding D3-1, kept across this branch's rebase because it still holds). The
-// same state is taller once a URL is in it — a settled 257.3px, and 292.1px for
-// the long-URL variant, against an empty-trough card. That residual is a KNOWN,
-// RECORDED DEFERRAL, not an oversight, and #996 measured it identical across
-// the pre-PR base and both of its remediation heads: the hint records the
-// height the browser last SETTLED on, so a card whose text changes between
-// opens pays one resize either way, and a per-state constant cannot express a
-// height that depends on the URL. Do not add one here; the provenance is #996's
-// D3-1 note. Re-measuring `connected` with a URL present will therefore read
-// ~257px and is not a contradiction of this table.
-//
-// #996 quoted its own empty-trough figure as 211.2px; this table carries the
-// re-measured 207.2px for the same card, so the ~4px is a measurement
-// correction on this branch, not a second card.
+// finding D3-1, kept across this branch's rebase because it describes a
+// different quantity from the trade above and still holds). The same state is
+// taller once a URL is in it — a settled 257.3px, and 292.1px for the long-URL
+// variant. That residual is a KNOWN, RECORDED DEFERRAL, not an oversight, and
+// #996 measured it identical across the pre-PR base and both of its
+// remediation heads: the hint records the height the browser last SETTLED on,
+// so a card whose text changes between opens pays one resize either way, and a
+// per-state constant cannot express a height that depends on the URL. Do not
+// add one here; the provenance is #996's D3-1 note. Re-measuring `connected`
+// with a URL present will therefore read ~257px and is not a contradiction of
+// this table. (#996 quoted its own empty-trough figure as 211.2px; this table
+// carries the re-measured 207.2px for the same card, so the ~4px is a
+// measurement correction on this branch, not a second card.)
 const PIN_CONNECTED = "86px";
 const PIN_PAIRING = "219px";
 const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING];
@@ -533,7 +551,24 @@ async function renderOnce(): Promise<void> {
     // loop: optimistic ack, honest notice, identical prompt, indefinitely
     // (U1/Q5/D3). Read from /health rather than from `connState`, because a
     // dead worker's last `connState` write reads "connected" forever.
-    const wedged = health?.extension_unresponsive === true;
+    // BOTH halves, because they answer different questions. `#unresponsive`
+    // describes the daemon↔extension LINK and correctly renders on
+    // `extension_unresponsive` alone. This banner makes a narrower claim — that
+    // THIS DECISION cannot be delivered — and a decision travels over
+    // `chrome.runtime.sendMessage`, a channel that does not touch that socket.
+    //
+    // `extension_unresponsive` is true for two distinct reasons (daemon.py):
+    // the socket is attached but mute, OR `dropped_unproven()` — a 60s latch
+    // after the daemon severed the link. In that second window the worker is
+    // usually alive and re-dialling, so the banner claimed the decision could
+    // not be applied while Allow applied it and painted the confirmed success
+    // card (review M1). That is the same class of lie as U2's false success,
+    // pointed the other way, and it steers the user at a reload that destroys
+    // the very pending decision they opened the popup to answer.
+    //
+    // `link_attached` is what separates them: attached-and-mute is the case
+    // where `sendMessage` genuinely is unlikely to land.
+    const wedged = health?.extension_unresponsive === true && health?.link_attached === true;
     const wedge = document.getElementById("origin-wedge");
     // Guarded like `origin-again` above: a role="status" region rewritten on
     // every render re-announces the same sentence to a screen reader (D10).
@@ -547,7 +582,27 @@ async function renderOnce(): Promise<void> {
     // a focused primary on a consent dialog invites an accidental Space/Enter
     // approval (U5). Only on a newly-shown prompt, so a re-render cannot steal
     // focus back from a user who has tabbed onward.
-    if (freshPrompt) document.getElementById("origin-scope")?.focus();
+    //
+    // `preventScroll` is load-bearing, not a nicety. `.body` became a scroll
+    // container when the card was bounded to the viewport, and focusing an
+    // element inside one scrolls it into view — so on the tallest card this
+    // scrolled to the bottom on open, putting the title AND the whole danger
+    // banner above the fold at ≥125% zoom (design D7 / UX U8, measured
+    // scrollTop 139 at 125%, 219 at 150%). Overlay scrollbars are 0px wide and
+    // the header stays pinned, so a zoomed user saw an ordinary consent prompt
+    // with live Allow/Deny and no sign their answer could not land — round-1
+    // U1, reintroduced by the round-1 D2 fix through a control neither
+    // mentions. The keyboard landing point is unchanged.
+    if (freshPrompt) {
+      document.getElementById("origin-scope")?.focus({ preventScroll: true });
+      // Belt and braces: a fresh prompt always opens at the TOP of its card.
+      // preventScroll stops focus() from scrolling, but any other future call
+      // that reveals an element would reintroduce the same defect, and the
+      // first thing the user must read is the question (and the banner that
+      // qualifies it), never the middle of the card.
+      const body = document.querySelector(".body");
+      if (body) body.scrollTop = 0;
+    }
     return;
   }
 
@@ -841,7 +896,11 @@ async function recheckUnresponsive(): Promise<void> {
     // the screen. Only an unchanged verdict needs words.
     const stillWedged = !document.getElementById("unresponsive")?.classList.contains("hidden");
     if (outcome && stillWedged) {
-      outcome.textContent = `Still not answering (checked ${new Date().toLocaleTimeString()}).`;
+      // Hours and minutes only. The default `toLocaleTimeString()` prints
+      // seconds and an AM/PM in a 12-hour locale, which is a lot of digits for
+      // a 12px well whose whole job is to prove the probe ran (design N2).
+      const checkedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      outcome.textContent = `Still not answering (checked ${checkedAt}).`;
       outcome.classList.remove("hidden");
     }
   }
