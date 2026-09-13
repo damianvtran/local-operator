@@ -479,7 +479,12 @@ class TestUnreachableServersEndToEnd:
         failures = manager.startup_failures()
         assert set(failures) == {"refused", "nxdomain"}, failures
         for name, host in (("refused", "127.0.0.1:9"), ("nxdomain", "nope.invalid")):
-            assert failures[name].startswith(_m().NETWORK_FAILURE_MARKER), failures[name]
+            # The marker is spelled out here rather than read from
+            # ``NETWORK_FAILURE_MARKER`` so this assertion fails as a FAILED
+            # ASSERTION on the pre-fix tree (which has no such constant, and no
+            # network copy at all) instead of erroring on a missing attribute.
+            # The constant itself is pinned by the copy-contract test.
+            assert failures[name].startswith("network: "), failures[name]
             assert host in failures[name], failures[name]
         assert manager.startup_network_failures() == {"refused", "nxdomain"}
         await manager.disconnect_all()
