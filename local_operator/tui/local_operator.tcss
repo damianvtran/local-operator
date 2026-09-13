@@ -1986,6 +1986,59 @@ SessionPickerScreen .session-picker {
     layout: vertical;
     background: $lo-overlay;
     color: $lo-fg;
+    /* THE OUTER INSET, and the only declaration of it in this sheet.
+     *
+     * `Screen`'s own `padding: 1` (line 141) is the app's edge for every screen;
+     * this adds the picker's own row and two cells on top of it, so THE PICKER'S
+     * CONTENT sits 2 rows and 3 cells inside the terminal on every side.
+     *
+     * CONTENT, NOT GROUND. What the inset moves is the text, the selected row's
+     * band and the panes' divider rules; the panel's own `$lo-overlay` ground
+     * still fills the whole box `Screen` gives it — measured at 100x30, that
+     * ground spans x1..x98 and y1..y28 on both the old frame and this one, and
+     * only the ink moves (x1..x98 y1..y28 -> x3..x96 y2..27). So the inset is a
+     * margin INSIDE the surface, not a strip of sunken ground showing behind a
+     * floating panel: under a 1-cell `$lo-sunken` screen ring that reads as
+     * breathing room with no seam and no hole, which is the point, but the
+     * difference matters to anyone reading this sheet for a later change.
+     * The frame guard is a CHARACTER assertion too — it compares non-space
+     * cells — so a background-only regression is invisible to it, which is why
+     * the ground is described here rather than pinned there.
+     *
+     * The horizontal figure is the app's EXISTING unit for a floating read
+     * surface rather than a new one: `CopyPickerScreen .copy-picker` above
+     * carries `padding: 1 2` on this same overlay ground, and so does `/move`,
+     * this picker's declared twin. What the three share is the 2-CELL PADDING
+     * UNIT — not a distance from the terminal's edge, because the two cards are
+     * centred and content-sized: at 100x30 `/move`'s text sits at col 10 / row 7
+     * while this one's sits at col 3 / row 2, and where a card does fill the
+     * width it can hold (a narrow terminal) their edges coincide at 3 cells.
+     *
+     * These two numbers are MIRRORED IN PYTHON as `PICKER_INSET_ROWS` /
+     * `PICKER_INSET_COLS` in `widgets/session_picker.py`, and that is
+     * load-bearing rather than tidy: `plan_layout` subtracts the same inset from
+     * the row and column budgets, and Textual clips silently when the two
+     * disagree — the row that falls off the bottom is simply not drawn and
+     * nothing reads back that it happened. Change one and change the other;
+     * `test_the_inset_matches_the_painted_frame` paints a frame at several sizes
+     * and fails on the drift, in BOTH directions (constants larger than the
+     * sheet, and constants smaller, which the frame's own arithmetic cancels and
+     * only a measurement against the terminal catches).
+     *
+     * WHAT PAYS FOR IT: the panes. The row is charged to their budget in
+     * `plan_layout` (`FILTER_ROWS` is subtracted separately), so the filter row —
+     * the only row that states how to leave — is never what the inset spends.
+     *
+     * AND AT THE SHORTEST HEIGHTS IT IS THE PANE THAT PAYS, not just a list row:
+     * the plan draws the preview only from `LIST_MIN + PREVIEW_DRAW_MIN` content
+     * rows, so two rows is the difference between a pane and no pane at 40x15 —
+     * measured, where the frame drops from 6 list rows + a 6-row preview to 10
+     * list rows and the filter row. That is the deliberate trade rather than an
+     * oversight (the plan's own U5 rule: a pane without room for a header and a
+     * line of conversation is not drawn at all), it is the row this inset was
+     * asked for, and it is the thing to look at first in the before/after frames
+     * at a terminal below about 16 rows. */
+    padding: 1 2;
 }
 
 /* The two panes. `LIST_FR`/`PREVIEW_FR` are applied from Python on every
@@ -2035,7 +2088,21 @@ SessionPickerScreen .session-picker {
  * PICKER_MAX_WIDTH and truncates the path from the LEFT, which is the one
  * column that can give up cells. Content-sized in both axes like `/resume`,
  * because the row budget is computed in Python (`_page_rows`) and a second
- * cap in the sheet is how a card loses its footer to a clip from the outside. */
+ * cap in the sheet is how a card loses its footer to a clip from the outside.
+ *
+ * THE PAIR NOW SHARE THE 2-CELL UNIT, AND ONLY THAT, and `/move` is
+ * deliberately UNCHANGED by the `/resume` inset: this one is a CARD
+ * (`width: auto`, `max-height: 80%`) that already carries `padding: 1 2`
+ * itself, so where the card fills the width it can hold — a narrow terminal,
+ * which is the case a reader notices — its text starts at the same 3 cells from
+ * the terminal's left edge that `/resume` was just given. The horizontal half
+ * is the whole of the correspondence: a content-sized, vertically centred card
+ * cannot share a distance from the BOTTOM edge, and at 40x20 its text sits at
+ * row 4 while `/resume`'s sits at row 2 (at 100x30 the card is centred inside
+ * its 84 cells and its text starts at col 10). The twins stay identical without
+ * either being touched, which is the answer the sheet's own "the two are
+ * deliberately identical" note asks for: the inset belongs to the READ SURFACE,
+ * and on a card the surface is the card. */
 MovePickerScreen {
     align: center middle;
     background: $lo-sunken;
