@@ -6269,6 +6269,19 @@ class Session:
         # rather than an exact reconstruction of older rows.
         if self._spend_recorded or self._spend_live_calls:
             return
+        # NEVER DECREASE. A reconstruction can come out BELOW the figure already
+        # on the band, because the two priced different things: the seed prices
+        # ONE restored reading through this session's own effective model, while
+        # the reconstruction needs every ROW to carry a serving identity of its
+        # own (a row written before that field, or by a provider reporting
+        # neither, is unpriceable at full-resolver grade -- `_usage_cost` covers
+        # the 30.1% of rows that carry the provider's own receipt). Replacing
+        # $2.10 with $0.00 because the richer number came from the cheaper
+        # resolver would be a silent downgrade wearing the ledger's authority.
+        # The richer figure wins, no record is written for it, and the rebuild
+        # fires again on a later resume rather than persisting a smaller number.
+        if rebuilt.micro < self.spend.micro:
+            return
         self.spend = rebuilt
         self._spend_seeded = False
         self._spend_recorded = True
