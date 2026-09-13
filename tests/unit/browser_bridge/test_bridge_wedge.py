@@ -1103,7 +1103,7 @@ async def test_an_old_send_deadline_cannot_sever_its_replacement(
     monkeypatch.setattr(daemon_module, "LINK_SEND_TIMEOUT_S", 0.05)
     service = BridgeService(root=tmp_path)
     old = _StallingSendSocket()
-    service.link.attach(old)  # type: ignore[arg-type]
+    service.link.attach(old, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
     service.link.last_frame_at = time.monotonic()
 
@@ -1117,7 +1117,7 @@ async def test_an_old_send_deadline_cannot_sever_its_replacement(
     # A later, healthy connection arrives while the old write is still in flight.
     new = _RecordingSocket()
     service.link.forget_link_state()
-    service.link.attach(new)  # type: ignore[arg-type]
+    service.link.attach(new, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
     service.link.last_frame_at = time.monotonic()
 
@@ -1153,7 +1153,7 @@ async def test_an_old_ping_deadline_cannot_sever_its_replacement(
     monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 0.01)
     service = BridgeService(root=tmp_path)
     old = _StallingSendSocket()
-    service.link.attach(old)  # type: ignore[arg-type]
+    service.link.attach(old, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
     service.link.last_frame_at = time.monotonic()
 
@@ -1162,7 +1162,7 @@ async def test_an_old_ping_deadline_cannot_sever_its_replacement(
 
     new = _RecordingSocket()
     service.link.forget_link_state()
-    service.link.attach(new)  # type: ignore[arg-type]
+    service.link.attach(new, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
     service.link.last_frame_at = time.monotonic()
 
@@ -1250,7 +1250,7 @@ async def test_a_stalled_teardown_close_is_bounded(
     monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 0.05)
     service = BridgeService(root=tmp_path)
     socket = _StallingCloseSocket()
-    service.link.attach(socket)  # type: ignore[arg-type]
+    service.link.attach(socket, service.next_generation())  # type: ignore[arg-type]
     service.link.last_frame_at = time.monotonic()
     service.link.paired = True
 
@@ -1331,21 +1331,26 @@ async def test_a_revocation_tick_leaves_a_live_pairing_alone(
 async def test_a_stalled_revoke_close_is_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A2's sibling: `revoke()` closes with 4003 and must not park either.
+    """A2's sibling: the revoke close (4003) must not park either.
 
     The same hole one function over, and this one is reached from the RPC gate
     and from the revocation watcher — so an unresponsive peer could park the
     revocation itself (audit A2 asks for the sibling closes explicitly, so that
     the fix is not merely relocated).
+
+    Driven through `_sever_identity`, the per-identity form a revoke takes now
+    that an allow-list can hold several installs.
     """
 
     monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 0.05)
     service = BridgeService(root=tmp_path)
     socket = _StallingCloseSocket()
-    service.link.attach(socket)  # type: ignore[arg-type]
+    service.link.attach(socket, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
 
-    await asyncio.wait_for(service.revoke(), timeout=2.0)
+    await asyncio.wait_for(
+        service._sever_identity(service.link.extension_id, link=service.link), timeout=2.0
+    )
 
     assert socket.closed == [4003], "the 4003 revoke close was never attempted"
     assert service.link.websocket is None
@@ -1545,16 +1550,20 @@ async def test_a_revoke_does_not_clear_a_replacement_that_arrived_mid_close(
 ) -> None:
     """A1's revoke half: a scoped revoke must not tear down a later handshake.
 
-    `revoke()` captures the socket, awaits its bounded close, and then cleared
-    the link UNCONDITIONALLY. Installing a replacement during that await
+    The revoke path captures the socket, awaits its bounded close, and then
+    cleared the link UNCONDITIONALLY. Installing a replacement during that await
     therefore had its socket nulled and its state forgotten by a revoke that had
     already closed the connection it was aimed at — the auditor's
     `replacementStillAuthoritative: false`.
 
     The control that makes this a fix and not a hole: preserving the connection
     is NOT authorization. The replacement computed its own `paired` from the
-    pairing file `reset_pairing` had already removed, so it is refused by the
-    same `not_paired` gate as any other unpaired peer.
+    pairing file the revoke had already rewritten, so it is refused by the same
+    `not_paired` gate as any other unpaired peer.
+
+    Driven through `_sever_identity` — the per-identity form `revoke()` split
+    into, so that revoking ONE install leaves every other identity's link
+    alone.
     """
 
     monkeypatch.setattr(daemon_module, "LINK_CLOSE_TIMEOUT_S", 5.0)
@@ -1567,7 +1576,9 @@ async def test_a_revoke_does_not_clear_a_replacement_that_arrived_mid_close(
     assert await _settles(lambda: service.link.paired)
     generation = service.link.generation
 
-    revoke_task = asyncio.create_task(service.revoke())
+    revoke_task = asyncio.create_task(
+        service._sever_identity(service.link.extension_id, link=service.link)
+    )
     await asyncio.wait_for(revoked.close_entered.wait(), timeout=2.0)
 
     # The replacement dials while the revoked socket's close is still parked.
@@ -1600,8 +1611,8 @@ async def test_a_lost_answer_on_a_replaced_wire_names_the_replacement(
 ) -> None:
     """Design D3-3, the response half: "replaced" is not "no browser is attached".
 
-    The reachable interleaving is a command registered in the gap between
-    `forget_link_state()` and `attach()` during a handshake: the replacement
+    The reachable interleaving is a command registered while the superseded
+    link's state was dropped and the replacement installed itself: the replacement
     does not fail that future (it was not in the map when the superseded link's
     state was dropped), so this command's answer never arrives on either wire.
     By the time its budget expires the promotion rule finds, on a mute
@@ -1644,7 +1655,7 @@ async def test_a_lost_answer_on_a_replaced_wire_names_the_replacement(
     # The replacement: attached WITHOUT the superseded link's state being
     # dropped, which is what leaves this command's future pending across it.
     replacement = _RecordingSocket()
-    service.link.attach(replacement)  # type: ignore[arg-type]
+    service.link.attach(replacement, service.next_generation())  # type: ignore[arg-type]
     service.link.paired = True
     service.link.last_frame_at = time.monotonic()
 

@@ -885,6 +885,61 @@ version, then calls `publish` and polls until `PUBLISHED`. It is the automated
 equivalent of the dashboard's Publish button, behind the same environment
 guards and main-only ancestry check as a stage upload.
 
+### Several extension installs paired at once, and the dev manifest key
+
+The store build and a locally loaded (`Load unpacked`) build are DIFFERENT
+identities, and the daemon accepts an allow-list of them rather than one pinned
+id (`browser/pairing.json`: the legacy `{extension_id, token_sha256, paired_at}`
+trio kept verbatim as the driver's record, plus an `identities` list with **one
+token per identity**). Two installs may therefore be connected at once, and only
+one of them DRIVES at a time — the other is a **standby** that receives no
+command, holds no tab, and is promoted if the driver goes away. Everything that
+changed here is described in `docs/design/browser-multi-identity-pairing.md`.
+
+What that means when you are working on the extension:
+
+- **`lop browser pair`** shows one line per WAITING install, named by the label
+the daemon derived from its `hello` (browser + extension version), because a
+user staring at two popups cannot otherwise tell which code is which.
+- **`lop browser pair --list`** shows the authorised installs and which one is
+driving; **`--revoke <id-or-label>`** removes exactly one and severs only its
+socket; **`lop browser drive <id-or-label>`** moves the wheel by hand (the
+incumbency rule is self-stable, so the install already driving keeps it).
+- **`unpair`** in the options page is per-identity for the same reason.
+- **`PROTO_VERSION` stays 1.** It must not be bumped for any of this: a bump
+closes the released store build with 4001, whose popup reads as an unfixable
+"update needed" card. Capability travels in ADDITIVE `HelloAck` fields (`role`,
+`authorized_count`) plus one new daemon→extension `role` event. **Never add a
+field to `Hello`** — it is validated with `extra="forbid"`, so every already
+released daemon would close a new extension that did. An absent `role` must
+always be read as "driver".
+
+**A dev-only manifest `key` gives local builds a stable id.** A Chromium
+unpacked extension's id is derived from its DIRECTORY PATH, so the same build is
+a different identity in every worktree and the operator re-pairs on every
+switch. `extension/manifest.dev.json` holds an RSA **public** key which
+`build.mjs` merges into the manifest of every NON-store build (`--zip` never
+gets it: the store assigns the published identity, and that file must stay
+exactly as submitted).
+
+Why committing it is fine, and precisely what it does not buy:
+
+- `key` is the base64 of a **public** key. It is an identity, not a credential.
+  The private half is not in this repository (it was generated once and
+deliberately discarded — it is only needed to sign a `.crx`, which this project
+  never distributes) and is not needed to Load unpacked.
+- Anyone can copy it and build an extension claiming the dev id. That buys them
+  nothing: pairing still requires the 6-digit code that only the operator's
+  terminal prints (`docs/design/browser-extension.md` §6.2), and the daemon
+  needs a code from the DEV INSTALL for that id.
+- Therefore **never auto-trust it**: a well-known id the daemon accepts without
+  pairing is exactly what would turn a public identity into a credential. The
+  dev key changes the ID a local build gets; it changes no authorisation rule.
+- The dev id currently derived from that key is
+  `ijokelchmpajpdekmanpbhnnccbpoopl`. Verify it before relying on it:
+  `node build.mjs`, load `extension/dist` unpacked, and read the id off
+  `chrome://extensions` — the derivation is Chrome's, not ours.
+
 ### What to record
 
 After every submission or promotion, post the outcome on the relevant PR:
