@@ -71,7 +71,19 @@ function installDomStub() {
       addEventListener: (event, handler) => {
         (node._handlers[event] ||= []).push(handler);
       },
-      focus: () => {},
+      // Records HOW focus was called. `preventScroll` is the whole D7/U8 fix:
+      // focusing inside a scroll container scrolls it, which put the title and
+      // the danger banner above the fold at zoom. A stub that ignores the
+      // options object cannot tell the fix from its absence.
+      focus: (options) => {
+        node._focusCalls.push(options ?? null);
+        globalThis.document.activeElement = node;
+        // The real container scrolls to reveal the focused element unless the
+        // caller opts out — modelled so the assertion is on the OUTCOME
+        // (where the card sits) rather than on the argument alone.
+        const body = nodes.get("__body");
+        if (body && !(options && options.preventScroll)) body.scrollTop = body._maxScroll ?? 0;
+      },
       replaceChildren: (...kids) => {
         node.children = kids;
         // A real <select> adopts the first option's value on replaceChildren;
@@ -82,6 +94,8 @@ function installDomStub() {
       },
       querySelectorAll: () => [],
       _handlers: {},
+      _focusCalls: [],
+      scrollTop: 0,
       click: () => (node._handlers.click || []).forEach((h) => h()),
     };
     // The scope select reports its options the way popup.ts reads them.
@@ -92,6 +106,12 @@ function installDomStub() {
     return node;
   };
   for (const id of IDS) nodes.set(id, make(id));
+  // The scroll container the bounded card introduced. `_maxScroll` stands in
+  // for a card taller than the viewport, which is the only condition under
+  // which focus-scrolling is observable at all.
+  const bodyNode = make("__body");
+  bodyNode._maxScroll = 139;
+  nodes.set("__body", bodyNode);
   // Button labels the real markup ships with. popup.ts restores a label it
   // swapped out (the "Checking…" in-flight state), so a stub whose buttons
   // start blank would make a correct restore look like a cleared button.
@@ -99,6 +119,7 @@ function installDomStub() {
 
   globalThis.document = {
     getElementById: (id) => nodes.get(id) ?? null,
+    querySelector: (selector) => (selector === ".body" ? nodes.get("__body") : null),
     createElement: () => make("option"),
     querySelectorAll: () => [],
     addEventListener: () => {},
@@ -949,6 +970,109 @@ test("Check again shows that it checked, and says so when nothing changed", asyn
       "an unchanged answer must still be stated",
     );
     assert.match(nodes.get("unresponsive-outcome").textContent, /still not answering/i);
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* --- Round 2: the banner must not over-claim, and the card must open at its top */
+
+test("the banner stays hidden while the decision is still deliverable (M1)", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  // The post-drop latch: the daemon severed the socket, so `link_attached` is
+  // false, but `extension_unresponsive` stays true for LINK_DROP_TTL_S = 60s
+  // while the worker is usually alive and re-dialling. A decision travels over
+  // chrome.runtime.sendMessage, which never touched that socket — so it is
+  // deliverable, and the banner claiming otherwise steers the user at a reload
+  // that would destroy the very decision they came to answer (review M1).
+  let health = {
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: false,
+    protocol_version: 1,
+  };
+  installHealth(() => health);
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(20);
+    assert.equal(nodes.get("origin").classList.contains("hidden"), false, "precondition: the prompt is up");
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      true,
+      "a severed-but-re-dialling link must not be reported as an undeliverable decision",
+    );
+
+    // And the decision really is deliverable in that state — which is what
+    // makes the banner a false claim rather than a cautious one.
+    nodes.get("origin-allow").click();
+    await tick(80);
+    assert.match(
+      nodes.get("origin-ack-title").textContent,
+      /allowed\./i,
+      "the decision must apply normally while the link is merely dropped",
+    );
+
+    // ATTACHED and mute is the case the banner is actually for: sendMessage
+    // genuinely has nowhere to land.
+    health = { ...health, link_attached: true };
+    areas.session.set("accessQueue", [pendingEntry("gen-2")]);
+    await chrome.storage.session.set({ connState: "connected" });
+    await tick(30);
+    assert.equal(
+      nodes.get("origin-wedge").classList.contains("hidden"),
+      false,
+      "an attached-but-mute worker must still raise the banner",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("a fresh prompt opens at the top of its card, not scrolled past its banner (D7/U8)", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: false,
+    extension_unresponsive: true,
+    link_attached: true,
+    protocol_version: 1,
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.session.set("accessQueue", [pendingEntry()]);
+    areas.session.set("accessQueueVersion", 1);
+    await bundle.import();
+    await tick(30);
+
+    const scope = nodes.get("origin-scope");
+    const body = globalThis.document.querySelector(".body");
+    assert.equal(nodes.get("origin-wedge").classList.contains("hidden"), false, "precondition: the banner is up");
+
+    // The keyboard landing point is unchanged — the fix must not cost it.
+    assert.ok(scope._focusCalls.length > 0, "the scope select is still focused for the keyboard");
+    assert.equal(globalThis.document.activeElement, scope, "and it really holds focus");
+
+    // THE DEFECT: focusing inside the scroll container scrolled the card to its
+    // maximum, putting the title and the whole danger banner above the fold at
+    // >=125% zoom — a zoomed user saw an ordinary consent prompt with live
+    // Allow/Deny and no sign their answer could not land.
+    assert.equal(
+      body.scrollTop,
+      0,
+      "the card must open at its top: the question and the banner qualifying it are the first things to read",
+    );
+    assert.ok(
+      scope._focusCalls.some((options) => options && options.preventScroll === true),
+      "focus must opt out of scrolling rather than rely on the card being short enough",
+    );
   } finally {
     await bundle.close();
   }

@@ -193,12 +193,6 @@
             <button id="reload-extension" class="btn primary block">Reload the extension</button>
             <button id="retry-unresponsive" class="btn block">Check again</button>
           </div>
-          <!-- The verdict of a "Check again" that changed nothing. Without it
-               an unchanged answer is invisible: the card is byte-identical, so
-               a probe that genuinely ran looks exactly like a dead click (U4).
-               role="status" so AT hears the result rather than only seeing it;
-               popup.ts writes it only when the card did not change. -->
-          <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
           <!-- The FALLBACK, and it is not a softer restatement of the button: a
                reload demonstrably did NOT clear the stale worker on 2026-09-11
                20:23 (the bridge log took no /extension dial for a whole session
@@ -214,6 +208,19 @@
             Still stuck? Toggle it OFF then ON in <code>chrome://extensions</code> — that clears
             a stale registration a reload can't, at the same cost.
           </p>
+          <!-- The verdict of a "Check again" that changed nothing. Without it
+               an unchanged answer is invisible: the card is byte-identical, so
+               a probe that genuinely ran looks exactly like a dead click (U4).
+               role="status" so AT hears the result rather than only seeing it;
+               popup.ts writes it only when the card did not change.
+
+               BELOW the manual fallback, deliberately. Above it, this 65.6px
+               line pushed the certain remedy off the bottom at 125% zoom — so
+               asking "did it recover?" cost the user the sentence telling them
+               what to do about the answer (UX U10). Ordered by what the user
+               needs next: the remedies first, then the status of the last
+               probe. -->
+          <p class="recheck hidden" id="unresponsive-outcome" role="status"></p>
         </section>
 
         <!-- Origin-decision acknowledgement, shown from the click alone
@@ -279,9 +286,25 @@
                repeated here: this is a banner on a consent card, not the
                recovery card, and #unresponsive carries the full remedy once the
                queue drains. -->
-          <p class="wedge hidden" id="origin-wedge" role="status">
-            The extension has stopped answering, so this can't be applied right now.
+          <!-- role="alert", not "status": this is the danger register, and an
+               already-open popup that transitions INTO the wedged state should
+               announce the banner ahead of the surrounding prose rather than
+               after it (design N1). "won't be applied" rather than "can't be
+               applied right now" states the certainty the danger tone is
+               already claiming (N3). -->
+          <p class="wedge hidden" id="origin-wedge" role="alert">
+            The extension has stopped answering, so this won't be applied.
             <button type="button" class="linkish" id="origin-wedge-reload">Reload the extension</button>
+            <!-- The manual remedy, named here too. The banner deliberately does
+                 not repeat the reload's LOSS LIST (that is the recovery card's
+                 job), but it must not leave the user without the certain cure:
+                 while a request is queued this card is the ONLY card they can
+                 see, and `ACCESS_REQUEST_TTL_MS` is 10 minutes — so a user whose
+                 reload failed had ten minutes of a card offering only the remedy
+                 that just failed (UX U11, QA Q6). One sentence, no second
+                 button: the reload stays the single primary action. -->
+            <span class="wedge-manual">Still stuck after that? Toggle it OFF then ON in
+            <code>chrome://extensions</code>.</span>
           </p>
           <p class="sub" id="origin-body">
             The agent wants to open a page on this site with your current login. It can only use

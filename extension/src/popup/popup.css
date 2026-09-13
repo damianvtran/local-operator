@@ -366,7 +366,8 @@ input:disabled {
  * hanging off the last one rather than as the card's next idea \u2014 16px in, 8px
  * out (design D5). Matching the two restores the rhythm the other cards use. */
 .actions + .sub,
-.actions + .recheck {
+.actions + .recheck,
+.sub + .recheck {
   margin-top: 16px;
 }
 /* The "Check again" verdict. Quiet on purpose: it reports that nothing changed,
@@ -419,15 +420,60 @@ input:disabled {
  * directly under the title — above the prose it qualifies — because it changes
  * what the whole card means, and 12px/13px so a banner cannot outweigh the
  * question it annotates. */
+/* Spacing is deliberately tighter than `.all-sites`' 12px/8px. The banner is
+ * the only element that grows the CONSENT card, which is already the tallest
+ * state, and at the default 300x600 its 74.53px pushed Allow/Deny 4.3px below
+ * the bounded body — the decision itself clipped, on the one card that carries
+ * the incident (design D8 / UX U9). 10px above (it follows a title that brings
+ * its own spacing) and 6px/9px of padding buy back exactly the overflow without
+ * touching any shared rule, so no other card's rhythm moves. */
 .wedge {
-  margin: 12px 0 0;
-  padding: 8px 10px;
+  margin: 10px 0 0;
+  padding: 6px 9px;
   border: 1px solid var(--danger);
   border-radius: 6px;
   background: color-mix(in srgb, var(--danger) 10%, var(--surface));
   color: var(--ink);
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.4;
+}
+/* SCOPED to a consent card that is carrying the banner, via :has() — the wedged
+ * prompt is the only card that does not fit (580px against the 600px bound),
+ * and it does not fit because the banner is on it. Reclaiming the difference
+ * from the card's own vertical rhythm keeps every OTHER card's spacing exactly
+ * as designed: the healthy prompt at 513.84px is untouched, which is what makes
+ * this a fix for D8/U9 rather than a global retune nobody asked for. The
+ * elements chosen are the ones whose spacing is least load-bearing — the
+ * queue head/nav and the scope label — never the trough that quarantines the
+ * host or the action row itself. */
+#origin:has(#origin-wedge:not(.hidden)) .queue-head {
+  margin-top: 8px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .queue-nav {
+  margin-top: 6px;
+}
+#origin:has(#origin-wedge:not(.hidden)) .label {
+  margin-top: 10px;
+}
+/* The generic consent prose is DROPPED on the wedged card, not merely tightened.
+ * "The agent wants to open a page on this site with your current login…" is
+ * orientation for a decision that is about to take effect; on this card the
+ * banner immediately above has just said the decision will not be applied, so
+ * the paragraph is both redundant and slightly contradictory — and it is the
+ * 43px that stops Allow/Deny fitting. The load-bearing content (the host in its
+ * trough, the scope picker and what it grants, the queue position) all stays. */
+#origin:has(#origin-wedge:not(.hidden)) #origin-body {
+  display: none;
+}
+
+/* The manual remedy inside the banner. A separate block, one step quieter than
+ * the sentence above it, because it is the SECOND thing to try — it must be
+ * findable without competing with the reload for the first read. */
+.wedge-manual {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--ink-muted);
 }
 .linkish {
   appearance: none;
