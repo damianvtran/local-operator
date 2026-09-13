@@ -736,6 +736,16 @@ async function renderOnce(): Promise<void> {
         ? `${label} is driving right now.`
         : "The other install is driving right now.";
     }
+    // Handoff complete IN THIS ROLE TOO. The latch exists only for the window
+    // between a successful pair and health confirming it, and being listed as
+    // a standby is that confirmation — the same fact the connected branch reads
+    // below. Clearing it only when this install DROVE left a second install
+    // latched for as long as it stood by, so a later revoke rendered the
+    // success view ("paired") instead of putting the code field back: exactly
+    // the dead end this round's Q1 fix exists to remove, one state later.
+    // Measured in a real Chrome: pair the second install -> standby card ->
+    // `--revoke` -> the form returns only with this line.
+    locallyPaired = false;
     show("standby");
     return;
   }
