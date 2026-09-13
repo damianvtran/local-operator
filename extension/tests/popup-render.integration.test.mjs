@@ -132,7 +132,15 @@ function installDomStub() {
   return nodes;
 }
 
-function installChromeStub({ sendMessage } = {}) {
+// The identity the loaded build is running under. `chrome.runtime.id` is the
+// install's OWN identity, and the popup compares it against /health's
+// authorised list — see the "WHICH INSTALL AM I?" gate. A test that sets an id
+// list must therefore say which install it is rendering; the default is the
+// store build, the one every pre-existing row implicitly modelled.
+const STORE_ID = "omibaecbjdhgbbcedbnnnmjpmopfheof";
+const DEV_ID = "jbadjeaodkoboanppmpjiifpconegdcj";
+
+function installChromeStub({ sendMessage, id = STORE_ID } = {}) {
   const areas = { session: new Map(), local: new Map() };
   const listeners = [];
   const sent = [];
@@ -174,6 +182,7 @@ function installChromeStub({ sendMessage } = {}) {
     // The worker resolves the decided entry and writes the queue back. Modelled
     // faithfully, because the ordering under test IS the storage ordering.
     runtime: {
+      id,
       reload: () => reloads.push(Date.now()),
       sendMessage: async (message) => {
         sent.push(message);
@@ -1120,7 +1129,7 @@ test("a fresh prompt opens at the top of its card, not scrolled past its banner 
 
 test("E4: a standby render shows the standby card, names the driver, and is pinned", async () => {
   const nodes = installDomStub();
-  const { areas } = installChromeStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
   const pins = installLocalStorageStub();
   installHealth(() => ({
     paired: true,
@@ -1226,6 +1235,202 @@ test("E4: a revoked pairing does not keep showing the standby card", async () =>
       !visibleState(nodes).includes("standby"),
       "a stale standby connState must not claim a pairing that is gone",
     );
+  } finally {
+    await bundle.close();
+  }
+});
+
+/* ---------------------------------------------------------------------------
+ * WHICH INSTALL AM I? (QA round 1, Q1 — blocker).
+ *
+ * /health's `paired`, `extension_connected` and the wedge latch all describe
+ * the DRIVER's link, because they answer "can the agent drive this browser
+ * right now?". They were also read as "is this install paired?", which is a
+ * different question now that two identities can be authorised at once: a
+ * never-paired second install rendered "Connected." with the pairing form
+ * hidden, so the operator's own flow — store build paired and driving, then
+ * load the dev build and pair it from its own popup — had no UI route to the
+ * code field at all.
+ *
+ * These rows pin the per-install answer: this popup's own `chrome.runtime.id`
+ * against /health's `authorized_extension_ids`, plus `driver_extension_id` to
+ * decide which card. Row "the driver's own popup" and "a predating daemon" are
+ * the negatives that keep it honest in the other direction: the fix must not
+ * turn a genuinely connected install into a pairing form.
+ * ------------------------------------------------------------------------- */
+
+test("Q1: a never-paired second install shows the FORM while another drives", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true, // the DRIVER is paired — not this install
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "");
+    areas.local.set("port", 4099);
+    // Exactly what QA measured on the real rig: the install's own state knows
+    // it is unpaired, and the daemon's driver-scoped `paired` is true.
+    areas.session.set("connState", "pairing");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a second install must get the code field, not the driver's 'Connected.' card",
+    );
+    assert.ok(
+      !nodes.get("pair-code")["classList"].contains("hidden") ||
+        visibleState(nodes).includes("pairing"),
+      "the pairing form must be the visible one",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: a never-paired install with a STALE connected connState still gets the form", async () => {
+  // `connState` is session storage and survives an uninstall/re-pair, so it can
+  // say "connected" for an install the daemon does not authorise. The id list is
+  // the live answer and must win — otherwise the stale value re-creates the
+  // blocker for anyone who re-installed.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    authorized_extension_ids: [STORE_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "stale-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["pairing"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: a REVOKED install gets the form, not the driver's card nor a stale standby", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true, // the OTHER install is still paired and driving
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID],
+    standby_extension_ids: [],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "revoked-token");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "standby"); // what the revoke left behind
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(
+      visibleState(nodes),
+      ["pairing"],
+      "a revoked install must be offered the code dance again, whatever the driver is doing",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1 negative: the DRIVER's own popup still shows the connected card", async () => {
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: STORE_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1: an authorised install is a standby from /health alone, before its worker writes", async () => {
+  // The `drivesThis` half of the gate, independent of session storage: a fresh
+  // popup on an authorised install that is not the driver belongs on the
+  // standby card even with no connState yet.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({
+    paired: true,
+    extension_connected: true,
+    protocol_version: 1,
+    driver_extension_id: STORE_ID,
+    driver_label: "Chrome 0.1.10",
+    authorized_extension_ids: [STORE_ID, DEV_ID],
+    standby_extension_ids: [DEV_ID],
+  }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["standby"]);
+    assert.match(nodes.get("standby-driver").textContent, /Chrome 0\.1\.10/);
+  } finally {
+    await bundle.close();
+  }
+});
+
+test("Q1 back-compat: a daemon predating the id lists keeps the old reading", async () => {
+  // No `authorized_extension_ids`, no `driver_extension_id`: one identity could
+  // be authorised, so the driver-scoped `paired` IS this install's answer. This
+  // is the pre-change behaviour, deliberately preserved in that direction.
+  const nodes = installDomStub();
+  const { areas } = installChromeStub({ id: DEV_ID });
+  installLocalStorageStub();
+  installHealth(() => ({ paired: true, extension_connected: true, protocol_version: 1 }));
+  const bundle = await loadPopup();
+  try {
+    areas.local.set("token", "t");
+    areas.local.set("port", 4099);
+    areas.session.set("connState", "connected");
+    await bundle.import();
+    await tick(20);
+
+    assert.deepEqual(visibleState(nodes), ["connected"]);
   } finally {
     await bundle.close();
   }
