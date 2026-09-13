@@ -428,6 +428,12 @@ def search_spend_section(
         if session.searches:
             word = "search" if session.searches == 1 else "searches"
             counted = f"{session.searches} {word}"
+            if session.reads:
+                # The share covers BOTH kinds' money, so a mixed session names
+                # both counts: `5 searches` beside a share that includes a
+                # read's dollars reads as if the read were not part of it.
+                read_word = "read" if session.reads == 1 else "reads"
+                counted = f"{counted} · {session.reads} {read_word}"
         else:
             word = "read" if session.reads == 1 else "reads"
             counted = f"{session.reads} {word}"

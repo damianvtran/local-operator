@@ -589,3 +589,35 @@ async def test_a_read_only_session_still_shows_its_share(tmp_path, monkeypatch) 
     # The share row's noun follows the kind: `0 searches · 100%` would be the
     # guard's fix producing a worse sentence than the bug it closed.
     assert "0 searches" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_sessions_share_row_names_both_kinds(tmp_path, monkeypatch) -> None:
+    """The share covers both kinds' money, so it names both counts.
+
+    `5 searches · 100% of search spend` beside a share whose dollars include a
+    read's reads as if the read were not part of the session's spend.
+    """
+    monkeypatch.setattr("local_operator.analytics.store.default_db_path", lambda: tmp_path / "l.db")
+    store = AnalyticsStore(tmp_path / "l.db")
+    store.record_batch([replace(_snap(session_id="sess"), request_id="req")])
+    store.close()
+    _record()
+    SEARCH_SPEND.record(
+        "sess",
+        "deepseek:read",
+        SearchCost(usd=0.0020, basis="token estimate", priced_from_usage=True),
+        kind="read",
+    )
+    SEARCH_SPEND.record("other", "brave", SearchCost(usd=0.0080, basis="rate"))
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await _submit(pilot, app, "/analytics")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        text = _panel_lines(app)
+
+    assert "This session" in text
+    assert "1 search · 1 read" in text
