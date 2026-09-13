@@ -5236,3 +5236,92 @@ def test_the_emptied_card_is_preferred_over_degrading_the_delta() -> None:
     assert fitted["data"]["tool_call_id"] == "call_text"
     # The settled card the emptied form gives the viewer.
     assert fitted["data"]["result"]["content"] == []
+
+
+def test_an_oversized_relay_frame_names_the_field_that_grew(caplog) -> None:
+    """The warning must answer "which field", not only "how big".
+
+    One machine accumulated 44,681 of these lines naming a cause zero times,
+    because the per-frame relay warning printed the op and the byte count while
+    the attribution helper — which existed all along for the connect-time
+    ``frontend_sync`` report — was never called from it. A size that says
+    "4,726,970 bytes" and nothing else cannot be acted on; the reduction it was
+    supposed to aim could not start.
+
+    Also pinned here: the ranking (biggest first) and the honest empty case. A
+    frame whose payload this code does not understand must NOT claim an
+    attribution it does not have, because a wrong field name is worse than none.
+    """
+    from local_operator.session.runtime.server import (
+        _MAX_LINE_BYTES,
+        relay_frame_or_degraded,
+    )
+
+    logger_name = "local_operator.session.runtime.server"
+    filler = "x" * (_MAX_LINE_BYTES + 1)
+
+    # A relayed update's payload is `changes`, not the sync's `snapshot`: reading
+    # only `snapshot` is precisely why this warning named nothing.
+    update = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e",
+            "sequence": 1,
+            "changes": {"cwd": filler, "attention": "small"},
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        replaced = relay_frame_or_degraded(update, _MAX_LINE_BYTES)
+    assert replaced is not update
+    # `%d`, not a thousands-separated figure: this message is grepped, and the
+    # existing lines in the operator's log read «1048576-byte».
+    assert "1048576-byte socket line limit" in caplog.text
+    assert "largest fields:" in caplog.text, "the warning must name a field"
+    assert "cwd=" in caplog.text
+    # Ranked by size, so the culprit leads the list rather than the alphabet.
+    assert caplog.text.index("cwd=") < caplog.text.index("attention=")
+
+    # The sync shape still attributes through its own map.
+    caplog.clear()
+    sync = {
+        "op": "frontend_sync",
+        "data": {"epoch": "e", "snapshot": {"transcript": filler, "cwd": "/tmp"}},
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(sync, _MAX_LINE_BYTES)
+    assert "transcript=" in caplog.text
+
+    # And an unrecognised payload still names its biggest key, rather than
+    # falling silent: `data` is the map, so every key of it is a candidate.
+    caplog.clear()
+    unknown = {"op": "frontend_update", "data": {"epoch": "e", "sequence": 2, "blob": filler}}
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(unknown, _MAX_LINE_BYTES)
+    assert "blob=" in caplog.text
+
+    # The shape the log actually showed: the bulk is a SIBLING of `changes`, and
+    # a helper that ranked only the wrapper's children named `jobs` — a 588 B
+    # bystander — for a 2.9 MB frame. A wrong field name is worse than none, so
+    # the sibling must outrank it here.
+    caplog.clear()
+    real = {
+        "op": "frontend_update",
+        "data": {
+            "epoch": "e",
+            "sequence": 3,
+            "changes": {"jobs": {"n": 1}},
+            "job_trajectory_appends": {"job-1": [{"text": filler}]},
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded(real, _MAX_LINE_BYTES)
+    assert "job_trajectory_appends=" in caplog.text
+    assert caplog.text.index("job_trajectory_appends=") < caplog.text.index("jobs=")
+
+    # Nothing to attribute: the warning says so by omission, not by inventing a
+    # field name.
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=logger_name):
+        relay_frame_or_degraded({"op": "event", "data": None, "padding": filler}, _MAX_LINE_BYTES)
+    assert "socket line limit" in caplog.text
+    assert "largest fields:" not in caplog.text

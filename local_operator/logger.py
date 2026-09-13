@@ -83,6 +83,15 @@ _current_log_file: Optional[Path] = None
 _file_logging_active = False
 
 
+#: Wire clients that emit one record per request at INFO. Every entry point that
+#: configures logging pins them, because a chatty HTTP client turns any log
+#: destination into a request trace: ``httpx2`` is listed alongside ``httpx``
+#: because the MCP client imports it under that distribution's own name, so
+#: pinning ``httpx`` alone left the actual emitter at the root level (measured:
+#: 6,928,291 ``INFO:httpx2`` request records in one log file).
+_CHATTY_WIRE_CLIENTS = ("requests", "urllib3", "httpx", "httpcore", "httpx2")
+
+
 def _get_log_level() -> int:
     """
     Get the log level from the LOG_LEVEL environment variable.
@@ -121,7 +130,7 @@ def configure_console_logging(
     root_logger.setLevel(resolved)
 
     # Quieten noisy HTTP client libraries used by the provider wire clients.
-    for lib_logger in ("requests", "urllib3", "httpx", "httpcore"):
+    for lib_logger in _CHATTY_WIRE_CLIENTS:
         logging.getLogger(lib_logger).setLevel(resolved)
 
 
@@ -134,6 +143,54 @@ def configure_cli_logging() -> None:
     who set ``LOG_LEVEL`` for the server.
     """
     configure_console_logging(level=logging.INFO, fmt=CLI_LOG_FORMAT)
+
+
+def configure_file_logging(
+    path: Path,
+    level: Optional[int] = None,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> Optional[Path]:
+    """Route the root logger to a BOUNDED rotating file, and quiet the wire clients.
+
+    For a process with no terminal whose log file is someone else's: the session
+    runtime appends to the mobile daemon's log, so that ``lop mobile logs``
+    covers the daemon and its children together (see
+    :mod:`local_operator.session.runtime.process`).
+
+    Two deliberate differences from :func:`configure_console_logging`, which this
+    otherwise mirrors:
+
+    * the file is BOUNDED at :data:`LOG_TOTAL_MAX_BYTES`. A process with no
+      terminal also has no one watching it fill a disk — the unbounded
+      ``logging.basicConfig(level=INFO, filename=...)`` this replaces left a
+      420 MB file on the operator's machine, because nothing rotated it and
+      nothing bounded it.
+    * the noisy wire clients are pinned to WARNING rather than to ``level``. At
+      INFO they emit one record per request, which was 96% of that file, and a
+      background child's per-request trace tells a reader nothing they are not
+      already looking for: why a turn failed.
+
+    Returns the file it installed when one was opened, or ``None`` when none
+    could be — no log file is a degraded runtime, a traceback on startup is a
+    broken one, the same rule :func:`_open_rotating_handler` follows.
+    """
+    resolved = _get_log_level() if level is None else level
+    handler, opened = _open_rotating_handler(max_bytes, backup_count, path)
+    if handler is None or opened is None:
+        return None
+
+    root_logger = logging.getLogger()
+    for existing in list(root_logger.handlers):
+        root_logger.removeHandler(existing)
+    root_logger.addHandler(handler)
+    root_logger.setLevel(resolved)
+
+    # ``max`` because a level is an integer where higher means less: pinning to
+    # WARNING must never make a client MORE verbose than the caller asked for.
+    for lib_logger in _CHATTY_WIRE_CLIENTS:
+        logging.getLogger(lib_logger).setLevel(max(resolved, logging.WARNING))
+    return opened
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
@@ -274,15 +331,22 @@ def _restore_console_handlers(state: _ConsoleSilence) -> None:
 def _open_rotating_handler(
     max_bytes: int,
     backup_count: int,
+    path: Optional[Path] = None,
 ) -> tuple[Optional[logging.Handler], Optional[Path]]:
-    """Open the bounded rotating handler, or ``(None, None)`` if impossible."""
+    """Open the bounded rotating handler, or ``(None, None)`` if impossible.
+
+    ``path`` defaults to this package's own console log. A caller with its own
+    file passes one: the session runtime appends to the mobile daemon's log so
+    that ``lop mobile logs`` covers both, and that file needs the same bound as
+    this one rather than the unbounded handler it used to get.
+    """
     directory = ensure_log_dir()
     if directory is None:
         return None, None
-    path = directory / LOG_FILE_NAME
+    target = path if path is not None else directory / LOG_FILE_NAME
     try:
         handler = logging.handlers.RotatingFileHandler(
-            path,
+            target,
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding="utf-8",
@@ -296,10 +360,10 @@ def _open_rotating_handler(
     # 0o600 to match the directory's 0o700 and `credentials.env`'s own mode:
     # the file carries prompt and error text from an interactive session.
     try:
-        os.chmod(path, 0o600)
+        os.chmod(target, 0o600)
     except OSError:  # Windows and exotic filesystems; the log still works
         pass
-    return handler, path
+    return handler, target
 
 
 def _redirect_fd_stderr(logfd: int) -> Optional[int]:

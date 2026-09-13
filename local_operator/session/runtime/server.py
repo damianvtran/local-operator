@@ -581,13 +581,24 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
     if encoded <= cap_bytes:
         return frame
     op = frame.get("op", "frame")
+    # NAME WHAT GREW, not just how big it got. The size alone cannot answer the
+    # only actionable question this line raises — which field needs bounding —
+    # and the cost is one extra serialization of a handful of fields on a path
+    # that is already the slow one: the frame is over the limit and cannot be
+    # sent at all. The attribution helper has existed for the connect-time
+    # ``frontend_sync`` path all along; this warning went without it, which is
+    # how one machine accumulated 44,681 of these lines naming no cause.
+    from local_operator.session.frontend_state import largest_frame_fields
+
+    fields = largest_frame_fields(frame)
     logger.error(
-        "session runtime: %s frame is %d bytes, over the %d-byte socket line limit; "
+        "session runtime: %s frame is %d bytes, over the %d-byte socket line limit%s; "
         "relaying a degraded placeholder instead of killing the connection "
         "(the viewer recovers this state through frontend_sync + durable history)",
         op,
         encoded,
         cap_bytes,
+        f"; largest fields: {fields}" if fields else "",
     )
     text = (
         "A live update was too large to send and was dropped; "

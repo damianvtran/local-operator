@@ -305,3 +305,62 @@ class TestSpeculativeSessionCleanup:
         assert not hasattr(process, "_remove_unwritten_session_dir")
         source = inspect.getsource(process)
         assert "rmdir(" not in source and "rmtree(" not in source
+
+
+def test_the_runtime_child_logs_to_a_bounded_file_it_shares_with_the_daemon(
+    tmp_path, monkeypatch
+) -> None:
+    """The runtime's own log must be the daemon's file, bounded, and attributable.
+
+    Three properties, each from a measured failure on the operator's machine:
+
+    * it goes to the daemon's ``mobile.log`` because ``lop mobile logs`` is meant
+      to cover both (the child's own comment says so, and the e2e suite reads it);
+    * it is BOUNDED — the ``logging.basicConfig(level=INFO, filename=...)`` this
+      replaces wrote 420 MB with nothing rotating it;
+    * the wire clients are pinned, because at the root's INFO they emitted one
+      record per HTTP request (6,928,291 of them) while the records anyone wanted
+      numbered 44,681.
+
+    It also has to say who it is: the file is written by the daemon AND every
+    runtime, so a line with no pid is a line no one can attribute.
+    """
+    import logging
+    import logging.handlers
+    import os
+    from pathlib import Path
+
+    from local_operator.logger import LOG_BACKUP_COUNT, LOG_MAX_BYTES
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.session.runtime import process
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+
+    async def fake_amain() -> int:
+        return 0
+
+    monkeypatch.setattr(process, "amain", fake_amain)
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    client = logging.getLogger("httpx2")
+    saved_client_level = client.level
+    try:
+        assert process.main() == 0
+        assert len(root.handlers) == 1
+        handler = root.handlers[0]
+        assert isinstance(handler, logging.handlers.RotatingFileHandler)
+        assert Path(handler.baseFilename) == tmp_path / "logs" / "mobile.log"
+        assert handler.maxBytes == LOG_MAX_BYTES
+        assert handler.backupCount == LOG_BACKUP_COUNT
+        assert client.level >= logging.WARNING
+        assert f"pid {os.getpid()}" in (tmp_path / "logs" / "mobile.log").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        for open_handler in list(root.handlers):
+            open_handler.close()
+            root.removeHandler(open_handler)
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
+        client.setLevel(saved_client_level)

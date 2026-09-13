@@ -811,13 +811,24 @@ def main() -> int:
     # warnings (a failed prompt, a dead provider) vanish, which is how a
     # silently-dropped turn went undiagnosed. The daemon's own log file is
     # the natural place: `lop mobile logs` covers both.
+    #
+    # BOUNDED and quiet, unlike the `logging.basicConfig(level=INFO,
+    # filename=...)` this replaces. That call wrote an UNBOUNDED file and handed
+    # the root level to INFO, so the wire clients logged one record per request:
+    # measured on the operator's machine, 6,928,291 `INFO:httpx2` request lines
+    # against 44,681 records anyone wanted, in a 420 MB file that nothing
+    # rotated. `configure_file_logging` pins those clients to WARNING and bounds
+    # the file at LOG_TOTAL_MAX_BYTES, so a chatty or wedged runtime costs a
+    # fixed ceiling instead of the disk.
+    from local_operator.logger import configure_file_logging
     from local_operator.paths import log_dir
 
     log_dir().mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=str(log_dir() / "mobile.log"),
-    )
+    configure_file_logging(path=log_dir() / "mobile.log", level=logging.INFO)
+    # One record per runtime, naming its own process: this file is written by the
+    # daemon and by every runtime child, so a reader has to be able to attribute
+    # a line to the process that wrote it.
+    logger.info("session runtime started: pid %d", os.getpid())
     try:
         return asyncio.run(amain())
     except KeyboardInterrupt:
