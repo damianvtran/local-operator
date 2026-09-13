@@ -10,10 +10,10 @@ expanded at 100 columns, case=fail
   body_rows=5
     [ 0] cells= 93 ' \uf0ac web_search openai rate limits                   ⟨collapse⟩ Web search failed: Fet… ✗  0.4s'
     [ 1] cells= 27 '  query: openai rate limits'
-    [ 2] cells= 90 '  Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for keyed Sonar: the'
-    [ 3] cells= 93 "  anonymous tier refused this search (wall fraud_authwall_upsell/LOGIN) ('perplexity' was the"
-    [ 4] cells= 22 '  only provider tried)'
-  probe 'Fetch a page directly': rows=[(2, 21)] joined=yes
-  probe 'keyed Sonar': rows=[(2, 74)] joined=yes
-  probe 'refused this search': rows=[(3, 17)] joined=yes
-  probe 'only provider tried': rows=[(4, 2)] joined=yes
+    [ 2] cells= 92 '  ✗ Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for keyed Sonar: the'
+    [ 3] cells= 95 "    anonymous tier refused this search (wall fraud_authwall_upsell/LOGIN) ('perplexity' was the"
+    [ 4] cells= 24 '    only provider tried)'
+  probe 'Fetch a page directly': rows=[(2, 23)] joined=yes
+  probe 'keyed Sonar': rows=[(2, 76)] joined=yes
+  probe 'refused this search': rows=[(3, 19)] joined=yes
+  probe 'only provider tried': rows=[(4, 4)] joined=yes

@@ -5,17 +5,24 @@ Run from the worktree root:
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
         scripts/tool_card_wrap_shot.py OUT.svg [COLSxROWS] [CASE]
 
-``CASE`` selects which card's body is painted, because the wrap budget this
-script exists to justify has to be judged against both shapes at once:
+``CASE`` selects which card's body is painted, because the paint budget this
+script exists to justify has to be judged against several shapes at once:
 
     fail   (default)  a FAILED web_search — the card from the issue, whose
                       failure sentence is longer than the body at 80 and 100
-                      columns. The whole sentence is the card's OWN prose, so it
-                      is the shape a wrap budget must carry in full.
+                      columns. The sentence is composed from the shipped
+                      builders, so a wording change moves the frame.
+    long_reason       a FAILED bash call whose one-line reason is 879 cells:
+                      the pathological shape BOTH budgets exist for, and the
+                      one whose marker says what the cut dropped.
+    long_token        a FAILED bash call whose reason carries a token longer
+                      than the measure (a webhook URL), so the wrapper breaks a
+                      word — the convention the card's argument row already
+                      uses, recorded rather than fixed (design round 1, D3).
     stdout            a SUCCEEDING bash call whose captured output is long
                       LINES rather than many lines. This is the shape the crop
                       is load-bearing for: wrapping every block would let one
-                      400-cell stdout line spend five rows, and 40 of them a
+                      397-cell stdout line spend six rows, and 40 of them a
                       fifth of a screen. The same script proves the budget did
                       not move this case's row count.
 
@@ -69,21 +76,66 @@ from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, ToolCard  # noqa
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
-#: The phrases the geometry print locates in the body. The head is on the row
-#: either way; the cause is the half the collapsed status cap can never carry,
-#: and it is what the crop eats.
-PROBES = (
-    "Fetch a page directly",
-    "keyed Sonar",
-    "refused this search",
-    "only provider tried",
-)
+#: The phrases the geometry print locates in the body, per case. The head is on
+#: the row either way; the cause is the half the collapsed status cap can never
+#: carry, and it is what the crop eats — so each failure case probes the TAIL of
+#: its sentence as well as a phrase from the middle of it.
+PROBES: dict[str, tuple[str, ...]] = {
+    "fail": (
+        "Fetch a page directly",
+        "keyed Sonar",
+        "refused this search",
+        "only provider tried",
+    ),
+    "long_reason": (
+        "the provider's status page",
+        "idempotency key",
+    ),
+    "long_token": (
+        "the signature did not match",
+        "compare the digests",
+    ),
+    "stdout": (),
+}
 
-#: One stdout line, 400 cells: a minified payload / a long log line, the shape a
-#: blanket wrap would spend five rows on. Repeated to the expansion's line cap.
+#: One stdout line, **397 cells** (measured with `cell_len`, not `len`): a
+#: minified payload / a long log line, the shape a blanket wrap would spend SIX
+#: rows on at the canonical 80-column 72-cell measure. Repeated to the
+#: expansion's line cap. The `[:400]` slice is a CEILING only — the expression
+#: measures 397, so it never truncates.
 STDOUT_LINE = ("payload=" + '{"k":"v",' * 42 + '"end":true}')[:400]
 
 STDOUT_LINES = 40
+
+#: An 879-cell ONE-LINE reason (measured with `cell_len`): past the cell budget
+#: at the canonical width, past the row backstop on a narrow frame, and long
+#: enough that its tail is dropped — so the marker has to say how much went
+#: (design round 1, D2; QA Q1).
+LONG_REASON = (
+    "ModelProviderError: three attempts to reach the model host failed before the "
+    "first token arrived — the connection was reset by the peer while the request "
+    "was still opening, so nothing was streamed and nothing was billed; the "
+    "provider's status page reported degraded capacity for this region, and a "
+    "later retry may well succeed, which is judged rather than asserted here; "
+    "attempt 1 aborted after 2.4s with a reset, attempt 2 after 7.1s with a "
+    "timeout, and attempt 3 was refused outright by the edge with a 503 that "
+    "carried a Retry-After of 120 seconds, which the client reported rather than "
+    "obeyed; no partial output arrived on any of the three, so there is nothing "
+    "to salvage from the stream and nothing for the caller to reconcile against; "
+    "the request body had already gone out in full, so a retry would re-post it "
+    "rather than resume it, and this call carries no idempotency key"
+)
+
+#: A reason carrying a token longer than the body measure (a real-shaped webhook
+#: URL), so `wrap_cells` breaks the word mid-token: the house convention the
+#: card's argument row already uses for a long URL, recorded rather than fixed
+#: (design round 1, D3 — deferred on the PR).
+LONG_TOKEN_REASON = (
+    "ModelProviderError: the receipt for webhook wh_01H9Z4KQ2M7XPT5RB8YV3NDFJ6 was "
+    "rejected by the ledger because the signature did not match; fetch "
+    "https://api.example.com/v1/webhooks/wh_01H9Z4KQ2M7XPT5RB8YV3NDFJ6/receipts to "
+    "compare the digests"
+)
 
 
 def _answer(text: str) -> AssistantBlock:
@@ -124,7 +176,13 @@ def _pin_clock(card: ToolCard) -> None:
 
 def _seed(app: OperatorApp, case: str) -> ToolCard:
     """Put the card in a realistic turn so the body's indent is judged against
-    the ledger spine rather than floating alone on an empty screen."""
+    the ledger spine rather than floating alone on an empty screen.
+
+    Every case drives the APP's own settle call (``app.py``): the failure cases
+    use ``mark_failed(text.splitlines()[0], text, None)``, which is the shape of
+    the tool surfaces' ``mark_failed(_first_line(result.text), result.text,
+    details)``, so no fixture is a card the app never builds.
+    """
     if case == "stdout":
         app._append_block(UserBlock("dump the raw payload for that webhook"))
         app._append_block(_answer("Fetching it now."))
@@ -133,6 +191,17 @@ def _seed(app: OperatorApp, case: str) -> ToolCard:
         card.mark_done("\n".join([STDOUT_LINE] * STDOUT_LINES), None, measured_s=0.4)
         _pin_clock(card)
         app._append_block(_answer("That is the payload."))
+        return card
+
+    if case in ("long_reason", "long_token"):
+        text = LONG_REASON if case == "long_reason" else LONG_TOKEN_REASON
+        app._append_block(UserBlock("push the receipt to the ledger"))
+        app._append_block(_answer("Posting it."))
+        card = ToolCard("t1", "bash", {"command": "curl -sX POST https://api.example.com/ledger"})
+        app._append_block(card)
+        card.mark_failed(text.splitlines()[0], text, None, measured_s=0.4)
+        _pin_clock(card)
+        app._append_block(_answer("The ledger refused; here is why."))
         return card
 
     app._append_block(UserBlock("search the web for the current rate limit"))
@@ -150,7 +219,7 @@ def _seed(app: OperatorApp, case: str) -> ToolCard:
     return card
 
 
-def _body_probe(app: OperatorApp, card: ToolCard, width: int) -> None:
+def _body_probe(app: OperatorApp, card: ToolCard, width: int, probes: tuple[str, ...]) -> None:
     """The geometry behind the still: row count and where each probe lands.
 
     Read off the widget's PAINTED renderable rather than a fresh
@@ -166,7 +235,7 @@ def _body_probe(app: OperatorApp, card: ToolCard, width: int) -> None:
     print(f"  body_rows={len(body)}", file=sys.stderr)
     for index, line in enumerate(body):
         print(f"    [{index:>2}] cells={cell_len(line):>3} {line!r}", file=sys.stderr)
-    for probe in PROBES:
+    for probe in probes:
         found = [(index, line.index(probe)) for index, line in enumerate(body) if probe in line]
         # A probe that straddles a wrap boundary is PRESENT and on no single
         # row, so the joined reading is reported beside the per-row one: at 200
@@ -188,6 +257,7 @@ async def main() -> None:
         cols, rows = sys.argv[2].split("x")
         size = (int(cols), int(rows))
     case = sys.argv[3] if len(sys.argv) > 3 else "fail"
+    probes = PROBES[case]
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
@@ -200,7 +270,7 @@ async def main() -> None:
         await settle_status_line(pilot, app)
         await pilot.pause()
         print(f"collapsed at {size[0]} columns, case={case}", file=sys.stderr)
-        _body_probe(app, card, size[0])
+        _body_probe(app, card, size[0], probes)
         save_capture(app, str(Path(out).with_name(Path(out).stem + "-collapsed.svg")))
 
         card.toggle_expanded()
@@ -214,7 +284,7 @@ async def main() -> None:
             f"indent={OUTPUT_INDENT}",
             file=sys.stderr,
         )
-        _body_probe(app, card, size[0])
+        _body_probe(app, card, size[0], probes)
         save_capture(app, out)
 
 

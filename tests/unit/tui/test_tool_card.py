@@ -37,6 +37,7 @@ from textual.app import App, ComposeResult
 from local_operator.tui import bindings
 from local_operator.tui import glyphs as glyph_mod
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.app import _first_line
 from local_operator.tui.glyphs import (
     NERD_TOOL_ICONS,
     PLAIN_ICON_DEFAULT,
@@ -61,6 +62,7 @@ from local_operator.tui.widgets.tool_card import (
     LIVE_MAX_LINES,
     NO_OUTPUT_NOTICE,
     OUTPUT_INDENT,
+    REASON_MAX_CELLS,
     REASON_MAX_ROWS,
     ROW_INDENT,
     ROW_INDENT_MIN_WIDTH,
@@ -71,7 +73,11 @@ from local_operator.tui.widgets.tool_card import (
     _category_element,
     compact_path,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from local_operator.tui.widgets.transcript import (
+    NoticeBlock,
+    TranscriptView,
+    wrap_cells,
+)
 from local_operator.web_fetch.failure import FetchFailure, describe, retry_after_note
 from tests.unit.tui.conftest import TCSS_PATH, StyledTranscriptApp
 
@@ -2002,6 +2008,56 @@ def test_expanded_output_never_widens_the_card() -> None:
             assert cell_len(line) <= width, (width, len(line))
 
 
+#: The lead every row of a wrapped failure REASON carries after OUTPUT_INDENT:
+#: the card's own error glyph on the first row, two blanks on the continuations
+#: (design round 1, D1). It is a GLYPH rather than an ink step because the plain
+#: body paints its reason in `tool.output.error`, which IS the captured rows' ink
+#: on an error card (both resolve to `tint-danger`) — so ink separates nothing,
+#: and on a colourless terminal it would say nothing either.
+REASON_LEAD = f"{ICON_ERROR} "
+
+
+def _collapsed(text: str) -> str:
+    """The one-space form the collapsed row's status is stored in."""
+    return " ".join(text.split())
+
+
+def _reason_rows(body: list[str]) -> list[str]:
+    """The reason block's text: the body indent and the D1 lead removed.
+
+    Also asserts the lead SHAPE, because it is the one thing telling these rows
+    from the tool's captured bytes on a monochrome terminal.
+    """
+    rows: list[str] = []
+    for index, line in enumerate(body):
+        assert line.startswith(" " * OUTPUT_INDENT), (index, line)
+        text = line[OUTPUT_INDENT:]
+        lead = REASON_LEAD if index == 0 else " " * len(REASON_LEAD)
+        assert text.startswith(lead), (index, line)
+        rows.append(text[len(lead) :])
+    return rows
+
+
+def _reason_block(rows: list[str]) -> list[str]:
+    """The reason block's painted rows, located by its lead rather than by index.
+
+    The rows above it are the summary and the ARGUMENT block, and the argument
+    block's own row count moves with the width (it wraps the command, and drops
+    its label on a narrow frame), so the block is found by the lead it is the
+    only carrier of. The overflow marker carries the same two blanks, so it is
+    part of the block too.
+    """
+    start = next(
+        index
+        for index, line in enumerate(rows)
+        if line.startswith(" " * OUTPUT_INDENT + REASON_LEAD)
+    )
+    end = start + 1
+    while end < len(rows) and rows[end].startswith(" " * OUTPUT_INDENT + " " * len(REASON_LEAD)):
+        end += 1
+    return rows[start:end]
+
+
 def test_a_long_failure_reason_wraps_with_the_body_indent() -> None:
     """The expansion is the ONLY state that can carry a long failure's cause.
 
@@ -2022,14 +2078,14 @@ def test_a_long_failure_reason_wraps_with_the_body_indent() -> None:
     card.toggle_expanded()
 
     body = card._build_content(80).plain.splitlines()[2:]
-    assert len(body) == 3
     # Every continuation keeps the body indent, so a wrapped fragment does not
     # read as a stray transcript row — the defect `session_panel._Body.note`
-    # was fixed for.
-    assert all(line.startswith(" " * OUTPUT_INDENT) for line in body)
+    # was fixed for — and every row carries the block's lead.
+    rows = _reason_rows(body)
+    assert len(rows) == 3
     # The sentence is whole: only the wrap's own line breaks were added.
-    assert " ".join(line.strip() for line in body) == message
-    assert all(cell_len(line) <= 80 - 2 for line in body)
+    assert _collapsed(" ".join(rows)) == _collapsed(message)
+    assert all(cell_len(line) <= 80 for line in body)
 
 
 def test_the_body_wrap_is_budgeted_to_the_reason_not_captured_output() -> None:
@@ -2060,9 +2116,10 @@ def test_a_failure_wraps_its_reason_and_still_clips_its_captured_output() -> Non
     card.toggle_expanded()
 
     body = card._build_content(80).plain.splitlines()[2:]
-    assert sum(1 for line in body if "rate limited" in line) == 3
-    assert body[0].strip().startswith("ModelProviderError:")
     assert len(body) == 4
+    rows = _reason_rows(body[:-1])
+    assert sum(1 for row in rows if "rate limited" in row) == 3
+    assert rows[0].startswith("ModelProviderError:")
     # The captured line after the reason is still exactly one cropped row.
     assert body[-1].rstrip().endswith("…")
 
@@ -2083,15 +2140,195 @@ def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> No
     assert body == ["  Traceback:", "    boom"]
 
 
-def test_the_reason_wrap_run_is_bounded() -> None:
-    """A pathological one-line payload cannot open an unbounded body."""
+def test_a_tool_authored_head_line_is_claimed_when_the_status_leads_with_it() -> None:
+    """R2: the guard is a LEADS test, not a provenance test.
+
+    On the bash surfaces the reason IS the tool's own first output line
+    (``app.py`` settles a failed call with
+    ``mark_failed(_first_line(result.text), result.text, …)``), so an invariant
+    phrased around who composed the line would be false on the surface this card
+    most often shows. What the guard tests is whether the collapsed row's status
+    leads with the body's head line — and the other half of that same test: a
+    body whose head line is NOT the head of the status stays captured.
+    """
+    raw = "exit status 1: no such file or directory"
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(_first_line(raw), raw + "\nretry 1")
+    assert card._failure_reason() == _first_line(raw)
+
+    other = ToolCard("t", "bash", {"command": "false"})
+    other.mark_failed("exit status 2: oops", raw + "\nboom")
+    assert other._failure_reason() == ""
+
+
+#: The three shapes R1 reproduced, as the ``(error, result_text)`` pairs the app
+#: itself builds for them. The first two go through the bash surface's settle
+#: call (``app.py:22491``/``:38272``: ``mark_failed(_first_line(result.text),
+#: result.text, details)``) and are what the whitespace COLLAPSE hides — the body
+#: keeps the caller's spacing while ``_error`` is stored ``" ".join(error.split())``,
+#: so the raw head line is never equal to it. The third is the executor throw's
+#: ``mark_failed(str(error), str(error))`` (``app.py:22464``), whose collapsed
+#: status is the head line PLUS the traceback lines: equality can never match it.
+_WS_RUN = (
+    "ERROR  at 2026-09-13T00:00Z  could not connect to "
+    "https://api.example.com/v1/hook after 3 tries"
+)
+_TAB = "ERROR:\tcould not connect to https://api.example.com/v1/hook after 3 tries, giving up"
+_MULTILINE = (
+    "ERROR: could not connect to https://api.example.com/v1/hook after 3 "
+    'tries, giving up\n  File "/app/hook.py", line 12, in post\n'
+    "    raise TimeoutError"
+)
+APP_SHAPED_FAILURES = (
+    pytest.param(_first_line(_WS_RUN), _WS_RUN, id="whitespace-run-in-the-head-line"),
+    pytest.param(_first_line(_TAB), _TAB, id="tab-in-the-head-line"),
+    pytest.param(_MULTILINE, _MULTILINE, id="multi-line-error"),
+)
+
+
+@pytest.mark.parametrize(("error", "result_text"), APP_SHAPED_FAILURES)
+def test_an_app_shaped_failure_wraps_the_head_line_its_status_leads_with(
+    error: str, result_text: str
+) -> None:
+    """R1: the wrap must fire for the shapes the app actually builds.
+
+    On the pre-fix tree every shape below answered "" from ``_failure_reason()``
+    — the whitespace-exact comparison against the collapsed ``_error`` refused
+    them — so the cause stayed cropped, silently, with no test covering the
+    class.
+    """
+    head = _first_line(result_text)
+    assert cell_len(head) > 80 - 2 - OUTPUT_INDENT, head
+    card = ToolCard("t", "bash", {"command": "curl"})
+    card.mark_failed(error, result_text, None, measured_s=0.4)
+    card.toggle_expanded()
+
+    reason = card._failure_reason()
+    assert reason, "the collapsed row's status leads with this line"
+    assert _collapsed(reason) == _collapsed(head)
+
+    body = card._build_content(80).plain.splitlines()[2:]
+    raw_traceback = result_text.splitlines()[1:]
+    if raw_traceback:
+        # Only the HEAD line is claimed. The rest of a multi-line error stays in
+        # the body, cropped like every other captured line, and is never painted
+        # twice.
+        assert [line[OUTPUT_INDENT:] for line in body[-len(raw_traceback) :]] == raw_traceback
+        body = body[: -len(raw_traceback)]
+    rows = _reason_rows(body)
+    assert _collapsed(" ".join(rows)) == _collapsed(head)
+    assert not rows[-1].rstrip().endswith("…")
+
+
+def test_the_reason_block_is_bounded_by_cells_and_rows_at_every_width() -> None:
+    """Two budgets: CELLS bound the content, ROWS bound the shape.
+
+    A cell budget alone would let a 16-column frame (an 8-cell measure) turn 432
+    cells into 54 rows; a row budget alone could not carry the shipped 201-cell
+    sentence at 40 columns (8 rows at that frame's 32-cell measure). Measured
+    over every width the one-line guarantee is checked at, rather than trusted
+    from the comment.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed(" ".join(["boom"] * 2000))
+    card.toggle_expanded()
+
+    for width in WIDTHS:
+        all_rows = card._build_content(width).plain.splitlines()
+        body = _reason_block(all_rows)
+        marker = bool(body) and body[-1].strip().startswith("…")
+        rows = _reason_rows(body[:-1] if marker else body)
+        assert len(rows) <= REASON_MAX_ROWS, (width, len(rows))
+        # One row is exempt from the cell budget on purpose: a reason the reader
+        # cannot see at all is the bug this exists to fix.
+        if len(rows) > 1:
+            assert sum(cell_len(row) for row in rows) <= REASON_MAX_CELLS, width
+        assert all(cell_len(line) <= width for line in all_rows), width
+
+
+def test_the_reason_overflow_marker_names_the_rows_it_dropped() -> None:
+    """D2/Q1: the cut carries the surface's own ``… N more lines``.
+
+    A bare ``…`` reads as an in-sentence elision; the block says how many rows
+    went, the way the captured crop and the live body already do.
+    """
     card = ToolCard("t", "bash", {"command": "false"})
     card.mark_failed(" ".join(["boom"] * 2000))
     card.toggle_expanded()
 
     body = card._build_content(80).plain.splitlines()[2:]
-    assert len(body) == REASON_MAX_ROWS
-    assert body[-1].rstrip().endswith("…")
+    marker = body[-1].strip()
+    assert marker.startswith("… ")
+    assert marker.endswith(" more lines")
+    # And it counts exactly the rows this card dropped: the wrapped sentence
+    # minus the rows the body still holds (the marker is not one of them).
+    wrapped = wrap_cells(card._failure_reason(), 80 - 2 - OUTPUT_INDENT)
+    assert int(marker.split()[1]) == len(wrapped) - (len(body) - 1)
+    # No sentence row carries a bare ellipsis any more.
+    assert not any(line.rstrip().endswith("…") for line in body[:-1])
+
+
+def test_the_reason_survives_the_narrow_frame_the_flat_row_cap_cut() -> None:
+    """D2/Q1: the row bound is a SHAPE backstop, not a cut at the sentence's scale.
+
+    Measured: the shipped 201-cell sentence needs 7 rows at the 45-column frame's
+    37-cell measure and 8 at the 40-column frame's 32-cell one — so the flat
+    six-row cap dropped ``only provider tried`` off the frame at both widths: the
+    #1066 symptom returning below ~48 columns, where ``REASON_MAX_CELLS`` alone
+    could not bound the shape.
+    """
+    message = (
+        "Web search failed: Fetch a page directly, or set PERPLEXITY_API_KEY for "
+        "keyed Sonar: the anonymous tier refused this search (wall "
+        "fraud_authwall_upsell/LOGIN) ('perplexity' was the only provider tried)"
+    )
+    # The card's own lane at a 40- and a 45-column frame (the transcript hands
+    # the card 4 cells fewer than the terminal, as the evidence frames show).
+    for card_width in (36, 41):
+        card = ToolCard("t", "web_search", {"query": "openai rate limits"})
+        card.mark_failed(message)
+        card.toggle_expanded()
+
+        body = card._build_content(card_width).plain.splitlines()[2:]
+        joined = " ".join(line.strip() for line in body)
+        # The CAUSE is on the frame. This is the assertion the flat six-row cap
+        # failed at both widths — it stopped at ``… fraud_authwall_upsell/LO``
+        # (36) and ``… ('perplexity' was the on`` (41), so the tail clause the
+        # issue is about went missing again below ~48 columns.
+        assert "only provider tried" in joined, card_width
+        assert not any(line.strip().startswith("…") for line in body), card_width
+        # And it is still the leaded block the rest of this round pins.
+        rows = _reason_rows(body)
+        assert _collapsed(" ".join(row.strip() for row in rows)) == _collapsed(message), card_width
+
+
+def test_the_wrapped_reason_carries_a_monochrome_lead() -> None:
+    """D1: the block says “this is the card's own sentence” without ink.
+
+    The reason rides ``tool.output.error``, which is the captured rows' ink on an
+    error card (both resolve to ``tint-danger``), so before this round a 42-row
+    failure card had no visual answer to “which of these rows is our sentence?” —
+    the wrap is what made the question askable. The lead echoes the collapsed
+    row's own glyph: the card's one piece of monochrome-safe state vocabulary.
+    """
+    card = ToolCard("t", "bash", {"command": "false"})
+    card.mark_failed("ModelProviderError: " + "rate limited; " * 12)
+    card.toggle_expanded()
+
+    content = card._build_content(80)
+    body = content.plain.splitlines()[2:]
+    assert len(body) == 3
+    # Asserts the lead's SHAPE on every row: the glyph on the first, two blanks
+    # on the continuations, both after OUTPUT_INDENT.
+    rows = _reason_rows(body)
+    assert rows[0].startswith("ModelProviderError:")
+    assert all(cell_len(line) <= 80 for line in body)
+    # The glyph rides the outcome ink the collapsed row paints it in, and the
+    # needle is body-only because the summary row puts the reason BEFORE its
+    # glyph.
+    assert _triplet(_style_at(content, f"{REASON_LEAD}ModelProviderError").color) == _triplet(
+        Style(color=theme_mod.semantic_color("danger")).color
+    )
 
 
 def test_the_reason_is_painted_once_and_the_hidden_count_follows_it() -> None:
@@ -2108,7 +2345,7 @@ def test_the_reason_is_painted_once_and_the_hidden_count_follows_it() -> None:
     card.toggle_expanded()
 
     rows = card._build_content(80).plain.splitlines()
-    assert rows.count("  boom") == 1
+    assert rows.count(f"  {REASON_LEAD}boom") == 1
     assert rows[-1].strip() == f"… {total - EXPAND_MAX_LINES} more lines"
 
 
