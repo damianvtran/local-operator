@@ -569,11 +569,11 @@ async def test_cancelled_write_settles_before_successor_and_publishes_durable_ro
     release = threading.Event()
     original = transcript._write_entries
 
-    def write(rows):
+    def write(rows, *, preserve_mtime: bool = False):
         if rows[0].id == "first":
             started.set()
             assert release.wait(10), "test did not release the disk worker"
-        original(rows)
+        original(rows, preserve_mtime=preserve_mtime)
 
     monkeypatch.setattr(transcript, "_write_entries", write)
     first = asyncio.create_task(transcript.append_message(Message.user("one", id="first")))
