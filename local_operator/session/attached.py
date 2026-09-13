@@ -1030,7 +1030,46 @@ class AttachedSession:
         takeover_factory: Callable[[], Any],
         display_window: bool = False,
         surface: str = "terminal",
+        viewer: bool = False,
     ) -> "AttachedSession":
+        """Attach to a LIVE owner, under one of two owner-loss contracts.
+
+        ``viewer`` selects which, and it is the ONLY knob for it (there is
+        deliberately no new ``surface`` value: ``surface`` is written on the
+        wire to the runtime, while this is purely local — see ``_dial``).
+        False, the default, is the legacy attach contract: owner loss is
+        recovered by TAKING OVER the conversation, and a facade built this way
+        returns from ``_ensure_bound`` without dialling (``_can_go_cold`` is
+        False on it) unless recovery is releasing it. False does not BY ITSELF
+        imply the flag is unset, though: this keyword adds the capability, and
+        ``__init__`` sets it independently for ``surface="desktop"``. No caller
+        passes both today (no ``connect`` caller passes ``surface`` at all), so
+        the two are disjoint — but they are separate switches, and a future
+        ``connect(..., surface="desktop", viewer=False)`` would still be a
+        viewer, which is the asymmetry to keep in mind rather than a
+        contradiction to resolve here.
+
+        True builds the VIEWER contract instead — the same one ``cold`` and
+        ``saved_preview`` set, and the only one this keyword asks for: owner
+        loss may end with the facade UNBOUND (``_go_cold``), which it reports
+        as ``is_cold`` while keeping the transcript on screen, and the next
+        action rebinds it through ``_ensure_bound``. That is set by
+        ``_can_go_cold`` and it is what makes a cold facade actively
+        REBINDABLE: ``_ensure_bound``'s first guard returns immediately while
+        the flag is False, so a facade that lost its owner WITHOUT the flag can
+        never bind again — the silent no-op that turned a routine drop into a
+        permanent "Reconnect failed".
+
+        WHY THE CALLERS DIFFER, which is the whole point of this parameter.
+        ``/resume`` (and the startup attach, and ``lop --resume``) must keep the
+        legacy contract: those callers exist to put the user in FRONT of the
+        conversation, so recovering it into this process is the correct end. A
+        SIDEBAR lease is the opposite: a parked, delta-muted source nobody is
+        looking at (see ``_lease_sidebar_source``), whose takeover factory
+        raises by construction, so "recover" would mean owning a conversation
+        the user has not chosen — and whose loss is therefore an ordinary event
+        to be healed on the click, not a failure to report.
+        """
         refusal = frontend_attach_refusal(record)
         if refusal is not None:
             raise ConnectionError(refusal)
@@ -1040,6 +1079,12 @@ class AttachedSession:
             takeover_factory=takeover_factory,
             surface=surface,
         )
+        if viewer:
+            # The flag, not a second code path: everything downstream already
+            # reads this one capability (``_ensure_bound``, the recovery loop's
+            # cold arm, ``_give_up_recovery``). Setting it here is the same act
+            # ``saved_preview`` performs at construction time.
+            self._can_go_cold = True
         self._display_window_requested = display_window
         pending_sync = await self._dial(record)
         try:
@@ -4827,9 +4872,12 @@ class AttachedSession:
                         self._go_cold()
                         return
                     # The LEGACY attach surface does not go cold at the FIRST
-                    # branch above (``_can_go_cold`` is desktop-only) because its
-                    # contract is to keep chasing a successor — but it reaches a
-                    # cold state HERE, through ``_give_up_recovery``, at the same
+                    # branch above because the flag is not set for it — it is set
+                    # only where the caller asks for the viewer contract (the
+                    # desktop surface and ``connect(viewer=True)``, which is what
+                    # the sidebar's speculative lease builds) — and the legacy
+                    # contract is to keep chasing a successor. It reaches a cold
+                    # state HERE, through ``_give_up_recovery``, at the same
                     # bound. That comment used to say this surface had "no cold
                     # state to fall into" at all, which is how the forever-latch
                     # survived review.
@@ -4850,13 +4898,16 @@ class AttachedSession:
                     #
                     # THIS IS THE ARM THE OPERATOR'S REPORT LANDS ON, which is why
                     # it needs the verdict as much as ``_go_cold`` does. The
-                    # owner-death branch there carries it, but it is reachable only
-                    # when ``_can_go_cold`` holds — and that is False for every
-                    # viewer built through ``connect()``, which is what the TUI
-                    # builds. Measured on this head: a SIGKILLed runtime painted
-                    # ``interrupted ⊘`` with no notice, no reason and durable state
-                    # still ``kind=None`` at t≈98 s, byte-identical to the user's
-                    # own cancel (QA round 1, Q-1; UX U1).
+                    # owner-death branch there carries it, and it is reachable
+                    # only when the flag holds — set by the desktop surface and by
+                    # ``connect(viewer=True)``, the sidebar's speculative lease,
+                    # while every OTHER ``connect()`` caller (``/resume``, the
+                    # startup attach, ``session_factory``) leaves it unset and
+                    # therefore arrives here instead. Measured on this head: a
+                    # SIGKILLed runtime painted ``interrupted ⊘`` with no notice,
+                    # no reason and durable state still ``kind=None`` at t≈98 s,
+                    # byte-identical to the user's own cancel (QA round 1, Q-1; UX
+                    # U1).
                     if self._suspect_generation is not None:
                         logger.info(
                             "no runtime for %s after %.0fs; ending the in-flight turn",

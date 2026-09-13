@@ -31,19 +31,37 @@ asserted as a RELATIONSHIP between two constants and as a COUNT of attempts,
 never as an elapsed duration, and the gate-spin guard asserts the structural
 fact (the readiness gate is never armed for a bind that failed) rather than a
 rate of refusals.
+
+THE OTHER HALF OF THE SAME POSTCONDITION: A COLD FACADE MUST BE ABLE TO BIND.
+A connect that commits against a facade which cannot bind is one face of this
+defect; the other is a facade that can NEVER bind, where every round of the same
+budget is a silent no-op by construction. The sidebar leases sources through two
+branches and both must build the SAME contract, because the source cache hands
+either branch's facade to the user's later click: `saved_preview` is a viewer,
+and the speculative (prewarm) branch now asks `connect` for that contract with
+`viewer=True`. The tests under "the viewer contract" below pin the flag at the
+call site, its effect through the real `connect`, and what it is for — the cold
+prewarm row that heals on the click instead of latching.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from rich.text import Text
 
-from local_operator.session.attached import COLD_FALLBACK_S, AttachedSession
+from local_operator.session.attached import (
+    COLD_FALLBACK_S,
+    FRONTEND_ATTACH_MIN_PROTOCOL,
+    FRONTEND_CAPABILITY,
+    AttachedSession,
+)
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_interaction import SessionInteraction
@@ -1334,3 +1352,206 @@ async def test_a_refused_enter_does_not_survive_the_latch(monkeypatch):
         assert any("Select this session again to retry." in row for row in rows)
         # One row, not two: the restate replaces rather than stacks.
         assert sum(1 for row in rows if "Send unavailable" in row) == 1
+
+
+# --------------------------------------------------------------------------
+# The viewer contract: a cold prewarm source must be able to bind again
+# --------------------------------------------------------------------------
+
+
+def _viewer_record() -> Any:
+    """A discovery record ``connect`` will dial.
+
+    Only two fields are read before the dial — ``frontend_attach_refusal``
+    decides on ``protocol`` and ``capabilities`` — and the dial is what these
+    tests replace, so standing up a real runtime would buy nothing. That is
+    deliberately different from the e2e stage, which dials real sockets.
+    """
+    return SimpleNamespace(
+        protocol=FRONTEND_ATTACH_MIN_PROTOCOL,
+        capabilities=(FRONTEND_CAPABILITY,),
+    )
+
+
+async def _refuse_to_take_over() -> None:
+    raise AssertionError("a sidebar viewer must never take over a session")
+
+
+class _StopAtTheDial(Exception):
+    """Sentinel from the stub ``_dial``: the contract is set before the dial."""
+
+
+class PrewarmRemote(RecoveringRemote):
+    """A prewarm-created facade that has LOST its owner, guard and all.
+
+    ``_ensure_bound``'s first guard is ``if not self._can_go_cold or
+    self._disposed: return``, so a cold facade returns without dialling while
+    that capability is unset — and no retry count can change it. Mirroring the
+    guard here is what makes the two cases below differ by the capability alone,
+    rather than by which double happened to be constructed.
+    """
+
+    def __init__(self, session_id: str, *, can_go_cold: bool) -> None:
+        super().__init__(session_id)
+        self._can_go_cold = can_go_cold
+        # The real guard and the latch diagnostics both read `_disposed`;
+        # `RecoveringRemote` carries a public `disposed`, so both are kept here
+        # rather than letting the latch line print None for the field it exists
+        # to print.
+        self._disposed = False
+        self.dials = 0
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.bind_calls += 1
+        if not self._can_go_cold or self._disposed:
+            return
+        self.dials += 1
+        self._cold = False
+
+
+@pytest.mark.asyncio
+async def test_connect_keeps_the_legacy_contract_unless_it_is_asked_for_a_viewer(
+    tmp_path, monkeypatch
+) -> None:
+    """``viewer=True`` is the only way in, and False is every other caller today.
+
+    The two contracts are what a facade does when it loses its owner: take the
+    conversation over, or go cold and let the next action rebind. ``/resume``,
+    the startup attach and ``lop --resume`` are the first kind — the user asked
+    to be put in front of that conversation — so this keyword must not change
+    them by accident, which is only testable where the flag is set.
+    """
+    built: list[AttachedSession] = []
+
+    async def stop_at_the_dial(self: AttachedSession, record: Any) -> Any:
+        built.append(self)
+        raise _StopAtTheDial
+
+    monkeypatch.setattr(AttachedSession, "_dial", stop_at_the_dial)
+    for viewer in (False, True):
+        with pytest.raises(_StopAtTheDial):
+            await AttachedSession.connect(
+                _viewer_record(),
+                "prewarm",
+                config_dir=tmp_path,
+                takeover_factory=_refuse_to_take_over,
+                viewer=viewer,
+            )
+        assert built[-1]._can_go_cold is viewer
+
+
+@pytest.mark.asyncio
+async def test_the_speculative_sidebar_lease_asks_for_the_viewer_contract(monkeypatch) -> None:
+    """THE WIRING, at the one call site that decides it.
+
+    The prewarm branch used to call ``connect`` with no contract asked for,
+    which left ``_can_go_cold`` False on a facade the source cache then handed
+    to the user's click — so a cold state on it was permanent. The flag is read
+    off a facade built by the REAL ``connect`` (the dial is the only stub), so
+    this fails if either the call site drops the keyword or the keyword stops
+    setting the capability.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(60):
+            await pilot.pause()
+        with monkeypatch.context() as patched:
+            built: list[AttachedSession] = []
+
+            async def stop_at_the_dial(self: AttachedSession, record: Any) -> Any:
+                built.append(self)
+                raise _StopAtTheDial
+
+            patched.setattr(AttachedSession, "_dial", stop_at_the_dial)
+            patched.setattr(
+                "local_operator.mobile.attach_client.find_runtime_record",
+                lambda *_args, **_probe: (_viewer_record(), 4242),
+            )
+            with pytest.raises(_StopAtTheDial):
+                await app._lease_sidebar_source("prewarm", speculative=True)
+            assert (
+                built[-1]._can_go_cold is True
+            ), "the speculative lease built a facade that cannot rebind once cold"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_prewarm_facade_heals_instead_of_latching(monkeypatch) -> None:
+    """THE POLICY: the click's facade can bind, so a cold prewarm row heals.
+
+    The facade is cold WITH the capability — the state the speculative lease now
+    always builds — and the connect commits on its first dial, so the user sees
+    the live transcript rather than being told to select again.
+    """
+    session = PrewarmRemote("prewarm", can_go_cold=True)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        _instant_backoff(monkeypatch)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert session.dials == 1, "the cold prewarm facade never dialled"
+        assert session.is_cold is False
+        assert source.display_only is False, "the connect did not commit"
+        assert source.connection_error == ""
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert "Reconnect failed" not in status
+        assert "Select again to retry" not in status
+
+
+@pytest.mark.asyncio
+async def test_a_cold_prewarm_facade_without_the_contract_spends_the_budget_on_no_ops(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mechanism, pinned so the case above cannot pass vacuously.
+
+    The same cold state WITHOUT the capability returns from ``_ensure_bound``'s
+    first guard on every round, so the budget expires over rounds that could
+    never dial — the operator's latch, and the reason the contract has to be
+    built by the lease rather than assumed by the caller. Reselecting hands back
+    this same source, so the latch repeats; nothing here is a wall-clock claim,
+    only a count of rounds that did nothing.
+    """
+    session = PrewarmRemote("prewarm", can_go_cold=False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    # Explicit rather than relying on the root level happening to be WARNING:
+    # the latch line is the artefact under test below.
+    caplog.set_level(logging.WARNING, logger="local_operator.tui.app")
+    async with app.run_test(size=(100, 30)) as pilot:
+        source = await _current_source(app, pilot, session)
+        prepared: Any = (source, object())
+        monkeypatch.setattr(app, "_prepare_sidebar_session", _always(prepared))
+        monkeypatch.setattr(app, "_commit_sidebar_session", Mock(return_value=None))
+        _instant_backoff(monkeypatch, attempts=3)
+
+        app._start_sidebar_connection(source)
+        await _drain_retries(app, source)
+
+        assert session.dials == 0, "a facade without the capability dialled anyway"
+        assert (
+            session.bind_calls == app_module.SIDEBAR_CONNECT_ATTEMPTS + 1
+        ), "every round must reach the guard that returns without dialling"
+        assert source.display_only is True
+        assert app._status is not None
+        status = app._status.render_text(160).plain
+        assert "Reconnect failed" in status
+        assert "Select again to retry" in status
+
+        # AND THE LATCH LINE NAMES THE GUARD. `can_go_cold` is the field this
+        # whole investigation did not have: without it a latch logged the
+        # symptom (`attempts=8 elapsed=0.00s`) and left the guard that ran to be
+        # found by a reproduction. Both arms log through the same helper, so
+        # this is the assertion that the one missing field stays there.
+        latch_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "sidebar connect latched" in record.getMessage()
+        ]
+        assert latch_lines, "the latch was not logged at all"
+        assert "can_go_cold=False" in latch_lines[0]
+        assert "disposed=False" in latch_lines[0]
