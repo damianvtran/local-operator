@@ -171,7 +171,11 @@ def estimate_search_cost(
             # below is the free one -- keyed traffic was reaching it by accident,
             # because the keyed response reported no usage at all.
             fee = 0.005
-            tokens = (usage.input_tokens or 0) + (usage.output_tokens or 0)
+            # Clamped at zero: a negative token count cannot make a request cost
+            # less than its own fee, and an unclamped sum priced ``(-100, -100)``
+            # at $0.0048 -- BELOW the fee -- while claiming ``priced_from_usage``
+            # (round-2 review NIT-1).
+            tokens = max(0, usage.input_tokens or 0) + max(0, usage.output_tokens or 0)
             if not tokens:
                 # The API answered without a usage block: the request fee is
                 # still real, and the tokens are unknown rather than zero, so
@@ -185,6 +189,17 @@ def estimate_search_cost(
                 usd=round(fee + tokens * 1e-6, 6),
                 basis="Sonar list price: $5/1,000 requests + $1/1M tokens",
                 priced_from_usage=True,
+            )
+        if usage is None:
+            # No usage AND no tier flag: the estimator cannot tell the free
+            # anonymous tier from a keyed call whose usage was lost, and guessing
+            # "free" is the claim round-1 MAJOR-1 was about. Unpriced is the
+            # honest third answer, and it is the module's stated default for a
+            # provider with nothing to price from (round-2 review R2-MINOR-1).
+            return SearchCost(
+                usd=None,
+                basis="no usage reported; tier unknown",
+                priced_from_usage=False,
             )
         return SearchCost(usd=0.0, basis=f"{BASIS_FREE} (anonymous)", priced_from_usage=False)
 
