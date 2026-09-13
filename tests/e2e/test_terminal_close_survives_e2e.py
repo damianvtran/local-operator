@@ -34,6 +34,15 @@ viewer's death starts cascading into the runtime, or a stop-ladder rung is
 reached for an interface going away — which is precisely the invariant the
 report was about.
 
+THE DEATH PRECONDITION HAS TWO WITNESSES, AND NEEDS BOTH. Each arm first has to
+establish that the interface really died, or "the runtime survived" is
+consistent with "nothing died at all". That was single-witnessed at first
+(the child being reaped) and the macOS leg of this repo's CI failed ~30% of
+runs with "the interface never died" — a message that cannot distinguish the
+thing under test (an interface that outlived the kill) from a harness that
+cannot see the death. See `_await_interface_death` for what was measured and
+the two defects that were closed.
+
 Isolation: ``headless_tui_env`` redirects the config dir and the root conftest
 redirects ``HOME``; the child's environment is rebuilt here with EVERY
 ``CMUX_*``/``LOP_*``/``HERDR_*`` variable stripped, because a runtime or TUI that
@@ -52,6 +61,7 @@ import os
 import pty
 import select
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -88,6 +98,17 @@ COLD_FALLBACK_WINDOWS = 2
 #: ``pytest-timeout``; ``bounded`` is what turns a hang into a stack dump).
 BOOT_S = 90.0
 LANDING_S = 90.0
+
+#: How long the death shapes are given to become observable. A healthy kernel
+#: reaps a SIGKILLed pty child almost immediately — measured on this repo's
+#: macOS host: a plain child, a *stopped* child, and a child parked in
+#: ``flock``/``lockf`` all reaped in **0.05-0.07 s**, and a child parked in a
+#: full pty write in **0.60-0.65 s**. This is therefore a backstop by more than
+#: two orders of magnitude rather than a performance assertion, with the same
+#: role as ``BOOT_S``/``LANDING_S`` — and it is NOT the number to reach for when
+#: this fails. A miss here means the kernel did not deliver or did not finish
+#: the kill, so the failure message is built to say which.
+DEATH_S = 30.0
 
 #: How long the ``ctrl-d`` arm keeps asking the interface to quit. MEASURED, and
 #: the reason this is a retry rather than a single keystroke: a Ctrl-D written
@@ -166,6 +187,7 @@ class _Pty:
     def __init__(self, fd: int) -> None:
         self._fd: int | None = fd
         self.output = bytearray()
+        self._eof = False
 
     def drain(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -183,8 +205,14 @@ class _Pty:
                 chunk = os.read(self._fd, 65536)
             except OSError:
                 self._fd = None
+                self._eof = True
                 return
             if not chunk:
+                # EOF on the master: every descriptor on the slave side is
+                # closed. Recorded rather than just returned, because it is a
+                # witness to the interface's death that does not depend on the
+                # parent being scheduled to reap it — see `at_eof`.
+                self._eof = True
                 return
             self.output.extend(chunk)
 
@@ -208,6 +236,27 @@ class _Pty:
     @property
     def is_open(self) -> bool:
         return self._fd is not None
+
+    @property
+    def at_eof(self) -> bool:
+        """Whether the master has read EOF — read as a fact about the interface.
+
+        This is only a witness to the interface's death because the interface is
+        the **only** holder of the slave side of this pty. That is a property of
+        the product, not an assumption: every helper the TUI starts is detached
+        with its stdio redirected (`proc.spawn_detached`: DEVNULL; the session
+        runtime: a log file, ``runtime.launch._spawn_runtime``), and the console
+        script this pty execs is a Python entry point, so it never leaves a
+        shell holding the descriptor. Nothing else can keep the slave open past
+        the interface's death, which is why an EOF here proves the interface is
+        gone.
+
+        The ``pty-close`` arm closes the master itself, so EOF is unavailable to
+        it by construction and stays ``False``: that arm's witness is the reap
+        alone. (Deliberately not set by ``close()`` — a witness derived from the
+        test's own teardown would make that arm's precondition vacuous.)
+        """
+        return self._eof
 
     def tail(self, limit: int = 1200) -> str:
         return bytes(self.output[-limit:]).decode("utf-8", errors="replace")
@@ -318,24 +367,115 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def _interface_is_gone(pid: int, *, timeout: float) -> bool:
+def _reaped(pid: int) -> bool:
+    """One non-blocking poll of the primary death witness: the child is reaped.
+
+    A child already reaped by anything else raises ``ChildProcessError``, which
+    is the same fact reported from the other side.
+    """
+    try:
+        done, _status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    return bool(done)
+
+
+def _interface_state(pid: int) -> str:
+    """What the kernel says about ``pid`` right now, for a failure message.
+
+    ``ps`` and not a ``/proc`` read: macOS has no ``/proc``, and macOS is the
+    leg this exists for. The fields are chosen to decide between the two
+    readings a bare "it never died" cannot separate: `ppid`/`pgid`/`sid` say
+    whether the pid is still the leader of the group the kill was addressed to,
+    and `state`/`wchan` say whether it is merely un-reaped or parked in a wait
+    no signal can cut short. `etime` is included because "how long has this
+    process existed" is what turns a pid that is still our child into a pid that
+    cannot be (a reused pid at the same address would show a young etime).
+    """
+    exists = "yes" if _alive(pid) else "no"
+    try:
+        result = subprocess.run(
+            [
+                "ps",
+                "-o",
+                "pid=,ppid=,pgid=,sid=,state=,wchan=,etime=,command=",
+                "-p",
+                str(pid),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
+        return f"kill(pid, 0) => {exists}; ps unavailable ({exc})"
+    line = result.stdout.strip()
+    if not line:
+        return f"kill(pid, 0) => {exists}; ps has no such process"
+    return f"kill(pid, 0) => {exists}; ps: {line}"
+
+
+def _kill_interface(pid: int) -> None:
+    """SIGKILL the interface, by process group **and** by pid.
+
+    The group kill is the shape under test — a terminal tearing down the whole
+    process group — and the pid kill is the same signal addressed the other way,
+    so an interface that is somehow not in the group it leads cannot be reported
+    as a survivor that a plain ``kill`` would have taken. Both are suppressed:
+    a group with no members left (``ESRCH``) is a kill that has nothing left to
+    do, which the caller's death loop then confirms rather than an exception
+    ending the arm early.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGKILL)
+
+
+def _await_interface_death(terminal: _Pty, pid: int, *, timeout: float) -> bool:
     """Whether the pty child has actually died — the death shape's precondition.
 
     Without this, "the runtime survived" would be consistent with "nothing died
-    at all", which is the vacuous pass this assertion exists to prevent. A child
-    already reaped by the runner raises ``ChildProcessError``, which is also a
-    death; the pty's own EOF is the other half of the same fact and is read by
-    the caller's drain.
+    at all", which is the vacuous pass this exists to prevent. Two independent
+    witnesses are accepted for that one fact:
+
+    * the child is **reaped** (``_reaped``);
+    * the pty master reads **EOF** (``_Pty.at_eof``, which carries the argument
+      for why only the interface's death can produce it).
+
+    WHY TWO, AND WHY THE KILL IS RE-ARMED. The macOS leg of this repo's CI
+    (``tui-e2e``) failed this arm in 7 of 8 recent failing runs across `main`
+    and two open branches, always as "the interface (sigkill-group) never died"
+    and always only on macOS (ubuntu passed the same commit). The single
+    witness and the single kill attempt were both defects a harness can own,
+    and neither could be ruled out from the log:
+
+    * the loop **did not drain the master**, so the painter could be parked in a
+      full pty buffer while the loop waited — and the old helper's own docstring
+      claimed the drain happened on this path, which it did not. It also made
+      the EOF witness unobservable, since only a read can see it.
+    * a ``SIGKILL`` cannot be lost on a healthy kernel, but a single attempt
+      addressed only to the group is one delivery mechanism where two are free,
+      and every shape measured for ``DEATH_S`` on macOS reaps in well under a
+      second.
+
+    So the kill is re-armed and re-addressed here rather than assumed, and a
+    timeout reports `_interface_state` — the child's own kernel state — instead
+    of leaving the next reader to re-derive whether an interface survived the
+    kill or the harness could not observe that it did.
     """
     deadline = time.monotonic() + timeout
+    attempts = 0
     while time.monotonic() < deadline:
-        try:
-            done, _status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
+        # Drain first, every pass: the interface paints until it dies, and a
+        # master nobody reads fills its buffer and parks the painter in write().
+        # This loop must not manufacture the state it then reports, and this is
+        # also what makes the EOF witness above reachable at all.
+        terminal.drain(0.2)
+        if terminal.at_eof or _reaped(pid):
             return True
-        if done:
-            return True
-        time.sleep(0.2)
+        attempts += 1
+        if attempts % 25 == 0:  # ~5 s at the 0.2 s drain above
+            _kill_interface(pid)
     return False
 
 
@@ -352,7 +492,7 @@ def _quit_via_key(terminal: _Pty, pid: int) -> None:
     while time.monotonic() < deadline:
         terminal.write(b"\x04")
         terminal.drain(0.5)
-        if _interface_is_gone(pid, timeout=0.1):
+        if _reaped(pid):
             return
     # Not gone: the caller's own death assertion reports it with the pty tail.
 
@@ -438,10 +578,12 @@ def test_a_closed_terminal_does_not_cancel_the_turn(headless_tui_env: Path, deat
             elif death == "pty-close":
                 terminal.close()
             else:
-                os.killpg(interface_pid, signal.SIGKILL)
-            assert _interface_is_gone(interface_pid, timeout=30.0), (
+                _kill_interface(interface_pid)
+            assert _await_interface_death(terminal, interface_pid, timeout=DEATH_S), (
                 f"the interface ({death}) never died, so the runtime surviving proves "
-                f"nothing; pty tail:\n{terminal.tail()}"
+                f"nothing; {DEATH_S:.0f}s after the kill: "
+                f"{_interface_state(interface_pid)}; pty eof={terminal.at_eof}; "
+                f"pty tail:\n{terminal.tail()}"
             )
 
             # (1) Still alive when the interface died...
