@@ -1159,20 +1159,37 @@ def _draw_recorded_usage(
                 "this session",
             ),
         )
-        # RECONCILIATION, as a row rather than a prose apology. The record and
-        # the ledger count different events: the ledger sees naming calls,
-        # asides and failed attempts the turn rows never carry, and it is the
-        # only observer that can see a call whose persist was lost. Naming the
-        # difference is the honest move -- quietly switching either figure for
+        # RECONCILIATION, as a row rather than a prose apology, and as a row the
+        # GRID owns (design round 1, D2): the first version drew it with
+        # ``body.note``, so its money landed at column 21 where every other value
+        # sits at 24 and the reader's eye had no column to follow. The record and
+        # the ledger count different events -- the ledger sees naming calls,
+        # asides and failed attempts the turn rows never carry, and it is the only
+        # observer that can see a call whose persist was lost -- so naming the
+        # difference is the honest move, while quietly switching either figure for
         # the other would hide the one signal that says a write was dropped.
         ledger = report.aggregate
-        if ledger is not None and ledger.cost_is_known:
-            delta = runtime.spend_micro / 1_000_000.0 - float(ledger.cost_usd)
-            body.note(
-                f"Ledger (all calls) {format_cost(ledger)} · "
-                f"record {format_usd_exact(runtime.spend_micro)} · "
-                f"Δ {delta:+.4f}"
+        ledger_micro = getattr(ledger, "cost_micro", None) if ledger is not None else None
+        if ledger is not None and ledger.cost_is_known and isinstance(ledger_micro, int):
+            # BOTH figures are printed from their exact integer micro-USD, and the
+            # Δ is their exact difference, so the arithmetic on screen checks out
+            # (D3). The first version printed the ledger at 2dp and the Δ from the
+            # unrounded value, so 1.897843 - 1.20 could not produce +0.6984.
+            delta_micro = runtime.spend_micro - ledger_micro
+            delta_text = f"{delta_micro / 1_000_000:+.6f}"
+            body.kv(
+                # ONE name for one figure (D2): "all calls" is the SCOPE and lives
+                # in the notes, where the ledger's own vocabulary names the sum.
+                "Ledger total",
+                format_usd_exact(ledger_micro),
+                notes=(
+                    f"Δ {delta_text} vs the record · all calls",
+                    f"Δ {delta_text} vs record",
+                    "all calls",
+                ),
             )
+        elif ledger is not None and ledger.cost_is_known:
+            body.kv("Ledger total", format_cost(ledger), notes=("all calls",))
     if runtime.spend_is_floor:
         # Reconcile the band's ≥ against this screen's figure instead of copying
         # the mark over. They measure different deficits (see

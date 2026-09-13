@@ -718,6 +718,18 @@ actually short), never to a table cell or a headline. *(Implemented as: the
 abbreviation is DROPPED, because this repo has no money chart axis to move it
 to — see §12.1 note 3.)*
 
+**Landed as two layers, not one formatter (reconciliation with `main`, §12.1
+note 13).** By the time this branch rebased, `main` had grown its own money
+model in the same module: `SpendSummary`, `MoneyFigure`, `combined_spend`,
+`search_spend_is_floor`, `cost_label`, `cost_note_rungs` — a COMPOSITION layer
+that decides *which* money a surface shows (model + search), whether the total is
+unknown rather than zero, and whether it is a lower bound, and that says of
+itself "deliberately not a money FORMATTER". That is compatible with §8.4 rather
+than a violation of it, because the rule is about DIGITS: one ladder spells every
+figure, and `MoneyFigure` reaches it through `format_cost`. So the set of money
+cells is unchanged; what changed is that the composition is upstream's and the
+spelling is this module's.
+
 ## 9. Perf budget
 
 Measured on this machine. **Every assertion in the PR must be structural, not a
@@ -1105,6 +1117,38 @@ every write) and stays a warning for an unexplained one.
 still hold a float print what the accounting holds (`$nan`) rather than letting
 `int(round(nan))` take a frame down — `tui/costs.py`'s own contract. R1-3's
 corrected width claim (9 cells, not 8) is in §8.2.
+
+13. **Reconciled with `main`'s money model rather than beside it** (rebases onto
+`8fd981f05`, 97 commits). `tui/costs.py` on `main` already defined
+`SpendSummary`/`MoneyFigure`/`combined_spend`/`search_spend_is_floor`/
+`cost_label`/`cost_note_rungs` — composition, and by its own docstring not a
+formatter. This branch keeps its `format_usd`/`format_usd_exact` as the ONLY
+digit ladder and the panels call it for their digits; the panel's own
+`$1.2k`/`$0.0000` branch is gone, so §8.4's two-ladders defect is not re-created
+in the other direction. The conflicting files were the two panels' import blocks
+and their `format_cost` bodies; no behaviour of `main`'s was dropped, and the
+composition tests in `test_analytics_panel.py` state the contract: a genuine
+lower bound wears its mark, a complete figure does not, and no nonzero figure
+renders as free.
+14. **`/session`'s two money rows are grid rows with reconcilable arithmetic**
+(design round 1, D2/D3). Both print six-decimal exact figures and the Δ is their
+exact difference, so `1.897843 - 1.200000 = +0.697843` is checkable on screen;
+the scope ("all calls") rides the note rather than becoming a second name for the
+same money; and the reconciliation row is drawn with `kv` so its money sits in the
+value column every other row uses. D4 is kept: `≥<$0.0001` stays.
+15. **The rows are exercised from a REAL session, not a hand-built diagnostics
+object** (design round 1, D1c). `SessionDiagnostics.capture` over a session that
+holds a record is what the new test drives, because the design round found the
+shipped `/session` frames identical before and after: the double they were built
+from exposed no `restored_spend`, so the rows were omitted and the surface this
+change adds was never rendered.
+16. **The floor must survive an unpriceable history** (design round 1, D1b).
+Measured on the store: 97.5% of usage rows carry serving identity, so a
+pre-ledger resume normally rebuilds to the accumulated figure (the frame
+`test_a_pre_ledger_resume_moves_from_its_floor_to_the_accumulated_figure`
+captures: `≥$2.10` → `$4.20`). The remaining 2.5% cannot be priced by any
+resolver, the rebuild correctly refuses to publish, and the mark must STAY — a
+test asserts it, so nobody later "fixes" the lower bound into a false exact.
 
 ## 13. What I could not settle from the code, and what would settle it
 

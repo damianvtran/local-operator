@@ -93,6 +93,47 @@ def test_format_percent():
     assert format_percent(None) == "—"
 
 
+def test_the_composed_figure_keeps_its_marks_and_never_reads_as_free():
+    """The two money models COMPOSE: upstream decides WHICH money, one ladder
+    decides the DIGITS.
+
+    This is the test the reconciliation exists to make possible, and it asserts
+    the three things a single money vocabulary has to get right at once:
+
+    * a genuine lower bound still wears its mark — `SpendSummary.is_floor` (set
+      by `combined_spend` when the model half is partial, or any search half is)
+      reaches `format_cost` through `MoneyFigure.of`, so a figure that is a bound
+      cannot lose the `+` on its way through the combiner;
+    * a complete figure does NOT — a mark on a whole figure is the same lie in
+      the other direction;
+    * no nonzero cost can render as free, which is the spelling that started
+      this work: `$0.0000` for money that was spent.
+    """
+    from local_operator.tui.costs import MoneyFigure, combined_spend, format_usd
+
+    partial = combined_spend(1.20, None, model_is_partial=True)
+    assert format_cost(MoneyFigure.of(partial)) == "$1.20+"
+    complete = combined_spend(1.20, None)
+    assert format_cost(MoneyFigure.of(complete)) == "$1.20"
+    # An unpriceable model beside real search money is a bound too, and the mark
+    # must survive the combination rather than only the input.
+    # ($0.420: the ladder's 3dp rung below a dollar, plus the bound's mark.)
+    assert format_cost(MoneyFigure.of(combined_spend(None, _search(0.42)))) == "$0.420+"
+
+    # No nonzero figure is spelled as free, whatever it came through.
+    for micro in (1, 49, 50, 4_200, 213_000, 1_897_843):
+        figure = MoneyFigure(cost_usd=micro / 1_000_000.0)
+        assert format_cost(figure) != "$0.0000", micro
+    assert format_usd(1) == "<$0.0001"
+
+
+def _search(usd: float):
+    """A search snapshot carrying ``usd``, all of it priced."""
+    from local_operator.tui.costs import SearchSpendSnapshot
+
+    return SearchSpendSnapshot(searches=1, usd=usd, paid_operations=1, paid_usd=usd)
+
+
 def test_a_non_finite_cost_renders_instead_of_raising():
     """R1-7: a figure the ladder cannot take must not take the frame down.
 
