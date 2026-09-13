@@ -7607,6 +7607,12 @@ class Session:
             # label for the life of the tab. The callable re-reads the holder at
             # tool-call time. Display-only, like ``session_name`` itself.
             session_name_provider=self._display_session_name,
+            # Display-only, and a SNAPSHOT for the same reason ``session_name``
+            # is: the ``task`` tool names the model a child will run on, and
+            # "this child owns no model and inherits" is only sayable if the
+            # caller can see what inheriting means. Re-read per turn, so a
+            # ``/model`` switch is reflected on the next call.
+            session_model_label=self.effective_model_label,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s

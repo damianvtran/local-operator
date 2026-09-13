@@ -250,15 +250,21 @@ def read_effort_tier_selectors() -> dict[str, Any]:
 #: Why this key exists, since the default is the behaviour the harness already
 #: had: the ``task`` schema advertised an ``effort`` enum whose members are
 #: provider/model SWAPS while its name is this harness's REASONING-effort
-#: vocabulary, so a delegating model read "pick your child's effort" and bought
-#: itself an ``anthropic/claude-opus-5`` child. Measured over the last 500
-#: session transcripts of this machine: a ``deepseek/deepseek-v4.1-flash``
-#: parent pinned ``hi`` 157 times and ``med`` 46 times against 365 inherits.
-#: One ``~/.local-operator/sessions/61f378649fbc`` run spent $0.083 on parent
-#: calls against $13.05 across its three opus children. The key is therefore
-#: the OPERATOR's switch: with the default in place no delegating model may
-#: spend on a different model at all, and an operator who WANTS the delegation
-#: keeps it by choosing ``model``.
+#: vocabulary, so a delegating model read "pick your child's effort" and took a
+#: provider/model swap instead. Measured over the last 500 session transcripts
+#: of this machine: a ``deepseek/deepseek-v4.1-flash`` parent pinned ``hi`` 157
+#: times and ``med`` 46 times against 365 inherits, and one
+#: ``~/.local-operator/sessions/61f378649fbc`` run spent $0.083 on parent calls
+#: against $13.05 across its three opus children.
+#:
+#: The tiers themselves are the operator's own legitimate configuration, and
+#: this key does not take them away: every route an operator has into a tier
+#: keeps working — its own ``/settings`` row, a role's pin, an explicit launcher
+#: argument — and flipping this key to ``model`` hands the reflex back. What the
+#: default changes is only WHO may take one without asking, because a choice
+#: made reflexively by each delegating model is not a decision the operator made
+#: and, until this shipped, nothing in the loop said a child had moved onto a
+#: different model until the bill arrived.
 MODEL_CHOICE_OPERATOR = "operator"
 MODEL_CHOICE_MODEL = "model"
 
@@ -679,6 +685,20 @@ def run_subagent(
         # never starts still shows both in the page title and the status band.
         job.agent_role = agent
         job.effort = effort
+        # The MODEL too, on the same registration-time rule and for the same
+        # reason (a queued job that never starts must still be able to name what
+        # it is): ``model_spec`` is the tier or role pin this launch resolved,
+        # and ``None`` means the child owns no model and runs on the PARENT's —
+        # which is what the label says in that case, so the ``task`` result can
+        # say "inherits this session's model" as a fact rather than as an
+        # absence. The runner still overwrites this once the child is built, and
+        # that write must win: a restored provider fallback is the model the
+        # child actually calls, and pricing reads this field.
+        job.model_label = (
+            f"{model_spec.provider}/{model_spec.model_id}"
+            if model_spec is not None
+            else (getattr(parent_session, "effective_model_label", "") or None)
+        )
         jobs_manager._notify_roster_change()
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the

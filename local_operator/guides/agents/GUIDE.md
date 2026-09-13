@@ -43,7 +43,10 @@ Use the `task` tool when the current job contains an independent, well-bounded s
 
 - inherits the parent model and reasoning effort, working directory, approval gate, and compaction budget. `effort` buys a different MODEL for the child, not a deeper reasoning level, and whose choice it is belongs to the operator: with `values.subagents.model_choice=operator` (the default) no tier is advertised to you and asking for one is refused — omit the field. Only where the operator has set `model_choice: model` may `effort` name a tier they configured under `subagents.models`, and the `task` schema then lists exactly those.
 - receives only the prompt passed to `task`; include every requirement and expected output
-- reports through the parent session's jobs/events
+- reports through the parent session's jobs/events — the launch RESULT names the
+  model each child will run on (`on <provider/model>`, or `on this session's model
+  (<provider/model>)` when it inherits), and `wait`/`jobs` repeat it, so a
+  delegated slice's model never has to be inferred
 - is one level deep and cannot spawn grandchildren
 - is ephemeral; it does not become a registered profile or keep durable specialist state
 
