@@ -44,6 +44,7 @@ from local_operator.evaluation.runner.provider_client import (
     build_system_prompt,
     parse_decision,
 )
+from local_operator.evaluation.runner.public_reply import decode_public_reply
 from local_operator.harness.reply_channel import REPLY_CHANNEL_TOOL_NAME
 from local_operator.harness.types import (
     ImageContent,
@@ -441,6 +442,97 @@ def test_parse_decision_rejects_a_wrong_discriminator_key() -> None:
 
     with pytest.raises(DecisionParseError):
         parse_decision(payload, current, route=ROUTE)
+
+
+def _framed(current: Observation, framing: str) -> str:
+    """One accepted framing of one valid decision, as raw reply text.
+
+    Every string this returns carries the SAME decision, built from
+    ``type_payload(current)``: the framing is the only variable, which is what
+    makes the client-level test below a statement about framing rather than
+    about a particular action.
+    """
+
+    envelope_text = json.dumps(
+        {
+            "reply_version": "1.0",
+            "action_batch": {"actions": json.loads(type_payload(current))["actions"]},
+            "public_observations": "visible fact",
+        }
+    )
+    value = json.loads(envelope_text)
+    if framing == "full-envelope":
+        return envelope_text
+    if framing == "missing-version":
+        value.pop("reply_version")
+    elif framing == "other-version":
+        value["reply_version"] = "2.0"
+    elif framing == "version-inside-batch":
+        value["action_batch"]["reply_version"] = "1.0"
+    elif framing == "notes-inside-batch":
+        value["action_batch"]["public_observations"] = value.pop("public_observations")
+    elif framing == "bare-batch":
+        return json.dumps(
+            {"actions": value["action_batch"]["actions"], "public_observations": "visible fact"}
+        )
+    elif framing == "tool-name-parameters":
+        return json.dumps({"tool_name": "lop_structured_reply", "parameters": value})
+    elif framing == "tool-call-input-string":
+        return json.dumps({"tool_call": "lop_structured_reply", "input": envelope_text})
+    elif framing == "input-object":
+        return json.dumps({"input": value})
+    elif framing == "arguments-wrapper":
+        # A call wrapped by NAME and ARGUMENTS rather than by a tool-specific
+        # key: the same generic serialization, one more spelling of it.
+        return json.dumps({"name": "computer", "arguments": value})
+    elif framing == "trailing-text":
+        return envelope_text + "\nHope that helps!"
+    elif framing == "extra-top-level-key":
+        value["thinking"] = "ignored"
+    else:
+        raise AssertionError(framing)
+    return json.dumps(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "framing",
+    [
+        "full-envelope",
+        "missing-version",
+        "other-version",
+        "version-inside-batch",
+        "notes-inside-batch",
+        "bare-batch",
+        "tool-name-parameters",
+        "tool-call-input-string",
+        "input-object",
+        "arguments-wrapper",
+        "trailing-text",
+        "extra-top-level-key",
+    ],
+)
+async def test_every_tolerated_framing_reaches_the_client_as_one_decision(
+    framing: str,
+) -> None:
+    """The tolerance exercised through the real client, once per framing.
+
+    ``parse_decision`` is not the entry point a live episode uses: the client
+    assembles the model's reply and hands it over, so the end-to-end claim is
+    made here. Each framing carries the same decision, and the model's own note
+    survives -- it is the only cross-turn memory a screenshot-only episode has.
+    """
+
+    current = observation()
+    baseline = await _client(ScriptedStream(type_payload(current))).decide(current, _turns(current))
+    decision = await _client(ScriptedStream(_framed(current, framing))).decide(
+        current, _turns(current)
+    )
+
+    assert decision.action_batch.to_canonical_json() == baseline.action_batch.to_canonical_json()
+    decision.action_batch.validate_for(current)
+    assert decision.public_reply is not None
+    assert decode_public_reply(decision.public_reply)["public_observations"] == "visible fact"
 
 
 # ---------------------------------------------------------------------------
@@ -2476,36 +2568,21 @@ def _defective_reply(case: str, current: Observation) -> str:
         return '{"actions": [{"kind": "type", "text": "hello"'
     if case == "fenced-json":
         return '```json\n{"actions": [{"kind": "finish"}]}\n```'
-    if case == "unsupported-reply-version":
-        return json.dumps(
-            {
-                "reply_version": "2.0",
-                "action_batch": {"actions": []},
-                "public_observations": "",
-            }
-        )
-    if case == "envelope-shape":
+    if case == "empty-actions":
+        # The one batch-shape refusal left: an ``action_batch`` that carries no
+        # usable actions array, so there is no decision in it. The version key
+        # beside it is no longer part of the defect -- the reply is refused for
+        # having nothing to execute.
         return json.dumps({"reply_version": "1.0", "action_batch": {"actions": []}})
-    if case == "misplaced-reply-version":
-        # Verbatim the shape of the two sealed DeepSeek episodes that repeated
-        # this defect identically and sealed: the full envelope, with the
-        # version key written inside ``action_batch`` as well as at the top.
+    if case == "stale-envelope-binding":
+        # A full envelope whose ACTIONS name another observation. The framing is
+        # untouched by the tolerance -- it was never the defect -- and the
+        # version is a literal this build does not serve, which is now ignored
+        # rather than refused.
         return json.dumps(
             {
-                "reply_version": "1.0",
-                "action_batch": {"actions": [], "reply_version": "1.0"},
-                "public_observations": "",
-            }
-        )
-    if case == "unquotable-batch-key":
-        # Every stray key in the batch is unquotable, so the diagnostic can name
-        # only their count -- the branch that must fall back to stating the
-        # accepted shape. A lone U+E0001 repeated: short enough to pass the
-        # length bound, refused by the ``repr`` bound because it expands.
-        return json.dumps(
-            {
-                "reply_version": "1.0",
-                "action_batch": {"actions": [], "\U000e0001" * 40: 1},
+                "reply_version": "9.9",
+                "action_batch": {"actions": json.loads(finish_payload(observation(1)))["actions"]},
                 "public_observations": "",
             }
         )
@@ -2589,35 +2666,18 @@ _REJECTION_HINT_CASES = [
     (
         "leading-delimiter",
         "leading-delimiter",
-        ["did not begin with the JSON object", "beginning with '{'", '"reply_version": "1.0"'],
+        ["did not begin with the JSON object", "beginning with '{'", '"actions"'],
     ),
     (
         "incomplete-json",
         "incomplete-json",
-        ['"reply_version": "1.0"', '"action_batch"', "incomplete"],
+        ['"actions"', '"public_observations"', "incomplete"],
     ),
     ("fenced-json", "leading-delimiter", ["did not begin with the JSON object", "code fence"]),
     (
-        "unsupported-reply-version",
-        "unsupported-reply-version",
-        ['The only accepted value is "1.0"'],
-    ),
-    ("envelope-shape", "envelope-shape", ["omitted 'public_observations'"]),
-    (
-        "misplaced-reply-version",
-        "env-version-misplaced",
-        [
-            "unexpected key(s): 'reply_version'",
-            "'reply_version' belongs at the top level of the envelope",
-            '"reply_version": "1.0"',
-            '"action_batch"',
-            '"public_observations"',
-        ],
-    ),
-    (
-        "unquotable-batch-key",
+        "empty-actions",
         "envelope-shape",
-        ["1 unexpected key(s): 1 not shown", 'the batch is exactly {"actions": [...]}'],
+        ["action_batch requires exactly", '{"actions": [...]}'],
     ),
     ("extra-action-key", "extra-action-key", ['"frame_id"', '"wait"', '"duration_ms"']),
     ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
@@ -2629,6 +2689,11 @@ _REJECTION_HINT_CASES = [
     ("second-batch", "second-batch", ["second action batch"]),
     (
         "observation-binding",
+        "observation-binding",
+        ['"observation_id" of the observation being answered'],
+    ),
+    (
+        "stale-envelope-binding",
         "observation-binding",
         ['"observation_id" of the observation being answered'],
     ),
@@ -2840,7 +2905,7 @@ async def test_a_rejected_envelope_is_published_but_not_replayed(tmp_path: Path)
     from local_operator.evaluation.runner.public_reply import REJECTED_PUBLIC_REPLY
 
     current = _screen_observation(tmp_path, 0)
-    reply = _defective_reply("unsupported-reply-version", current)
+    reply = _defective_reply("stale-envelope-binding", current)
     # The second reply is what makes the placeholder observable: the corrective
     # history is what the NEXT request carries, so the client has to be asked
     # again before anything can be read off the wire.
@@ -2862,7 +2927,7 @@ async def test_a_rejected_envelope_is_published_but_not_replayed(tmp_path: Path)
     # for it and the shape of the stream that carried it.
     artifact = _rejection_detail(rejected, RedactionSet.from_resolved_values([]))
     assert reply in artifact
-    assert "class: unsupported-reply-version" in artifact
+    assert "class: observation-binding" in artifact
     assert "stream: content_deltas=" in artifact
 
 

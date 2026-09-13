@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic.fields import FieldInfo
@@ -24,6 +25,7 @@ from pydantic.fields import FieldInfo
 from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
 from local_operator.evaluation.protocol import KeyAction
 from local_operator.evaluation.runner.provider_client import (
+    _MISPLACED_REPLY_VERSION_MARKER,
     REJECTION_CLASS_UNKNOWN,
     DecisionParseError,
     _action_schema_lines,
@@ -34,7 +36,7 @@ from local_operator.evaluation.runner.provider_client import (
 )
 from local_operator.evaluation.runner.public_reply import (
     decode_public_reply,
-    is_public_reply,
+    normalise_public_reply,
 )
 from tests.unit.evaluation.runner.test_provider_client import observation
 
@@ -201,176 +203,137 @@ def test_a_measured_message_is_preserved_rather_than_paraphrased(reason: str) ->
     )
 
 
-#: The two shapes the misplaced-version class exists for, as the models wrote
-#: them: the full envelope with the version key duplicated inside
-#: ``action_batch`` (the shape both sealed DeepSeek episodes repeated), and the
-#: key nested inside ``action_batch`` with no top-level copy.
-_DUPLICATED_VERSION_BODY = json.dumps(
-    {
-        "reply_version": "1.0",
-        "action_batch": {"actions": [], "reply_version": "1.0"},
-        "public_observations": "",
-    }
-)
-_NESTED_VERSION_BODY = json.dumps(
-    {
-        "action_batch": {"actions": [], "reply_version": "1.0"},
-        "public_observations": "",
-    }
-)
-_OMITTED_VERSION_BODY = json.dumps({"action_batch": {"actions": []}, "public_observations": ""})
-#: A reserved key nested in ``action_batch`` that is NOT the version key, with
-#: the version key simply absent. Reachable in the paid corpora
-#: (``batch-minimax-m3-canary5/task_087`` and ``task_106``), and the reason the
-#: version-specific sentence may only fire for ``reply_version``: telling the
-#: model that ``reply_version`` is in the wrong place here names a key it never
-#: wrote, and takes the class key's measurement with it.
-_NESTED_NOTES_BODY = json.dumps({"action_batch": {"actions": [], "public_observations": "a note"}})
-
 #: The measured half of the envelope diagnostic, byte for byte. Measured on
 #: ``minimax/minimax-m3`` at 9/10 recovered against 4/10 for the bare rule, so it
 #: is never paraphrased -- the misplaced-version sentence reuses it verbatim as
 #: its prefix. Pinned literally because a reword here would silently discard the
-#: only measured correction in the class.
+#: only measured correction the class ever had.
 _MEASURED_CARRIED_OMITTED = (
     "model reply used the reserved envelope but carried 'action_batch', "
     "'public_observations'; omitted 'reply_version'"
 )
 
 
-def _envelope_reason(body: str) -> str:
-    """The decoder's own refusal sentence for one envelope body."""
+#: The envelope diagnostics this contract no longer EMITS, as the sealed corpora
+#: carry them, with the class each must keep. Pinned literally because
+#: ``classify_rejection`` reads text and not an exception object: a reword moves
+#: every artifact carrying one into ``unknown``, and those corpora are the only
+#: measurement these classes will ever have. ``env-version-misplaced`` is the
+#: discriminator INSIDE a sentence that otherwise says both things at once, which
+#: is why the classifier checks its marker before the envelope sentence.
+_RETIRED_REASONS = [
+    (_MEASURED_CARRIED_OMITTED, "envelope-shape"),
+    (f"{_MEASURED_CARRIED_OMITTED}. {_MISPLACED_REPLY_VERSION_MARKER}", "env-version-misplaced"),
+    ("model reply action_batch requires exactly an actions array", "envelope-shape"),
+    (
+        "model reply action_batch requires exactly an actions array; it carried 1 "
+        "unexpected key(s): 'observation_id'",
+        "envelope-shape",
+    ),
+    ("unsupported model reply version", "unsupported-reply-version"),
+]
 
-    with pytest.raises(ValueError) as info:
-        decode_public_reply(body)
-    return str(info.value)
 
+def test_the_retired_envelope_diagnostics_still_classify() -> None:
+    """A class that survives only in old bundles is still a countable class.
 
-def test_the_two_carried_omitted_shapes_share_one_measured_sentence() -> None:
-    """The omitted-version wording is the measured one, and it is not reworded.
-
-    Both branches of the diagnostic build ``<carried>; <omitted>`` out of the
-    same helper, so the sentences are asserted to be one wording in two
-    spellings rather than two wordings that happen to look alike. The omitted
-    reply keeps it whole -- including the EITHER clause that offers the legacy
-    plain batch, which is the cheaper of the two legal shapes for a reply that
-    never committed to the envelope.
+    Four sentences are retired by the single-shape contract: the carried/omitted
+    envelope diagnostic, the misplaced-version sentence it shares a prefix with,
+    the batch rule with the keys that landed in it named, and the
+    ``unsupported model reply version`` refusal. Every one of them is on disk in
+    a bundle a paid campaign produced, so ``classify_rejection`` must keep
+    reading them -- and every hint must still state an accepted shape, because a
+    hint describing a layout the decoder no longer requires would send a model
+    chasing a key this harness has stopped asking for.
     """
 
-    reason = _envelope_reason(_OMITTED_VERSION_BODY)
-    assert reason.startswith(_MEASURED_CARRIED_OMITTED)
-    assert '{"actions": [...]}' in reason
-    assert classify_rejection(reason) == "envelope-shape"
-
-
-def test_a_misplaced_reply_version_is_its_own_class() -> None:
-    """The defect the class split exists for: the key is in the wrong PLACE.
-
-    ``omitted 'reply_version'`` is true of the top level and was the whole
-    repair turn for replies that had actually nested the key, which is a rule
-    the model cannot act on -- it can see the key in what it sent. Both shapes
-    are one class, so the next arm's bundles can count the sub-rate apart from
-    the omissions it used to share ``envelope-shape`` with, and the hint states
-    the accepted layout rather than only the rule it already half-followed.
-
-    The version-less plain batch is deliberately NOT offered here: a reply
-    already inside the envelope would lose its notes by taking that route to
-    fix what is one key's position.
-    """
-
-    for body in (_DUPLICATED_VERSION_BODY, _NESTED_VERSION_BODY):
-        reason = _envelope_reason(body)
+    for reason, expected in _RETIRED_REASONS:
         key = classify_rejection(reason)
+        assert key == expected, reason
         hint = rejection_hint(
             key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE
         )
-
-        assert key == "env-version-misplaced", body
-        # (i) the key that landed in the wrong place is NAMED ...
-        assert "'reply_version'" in hint
-        # ... and so is the accepted LAYOUT it belongs in.
-        assert "belongs at the top level of the envelope" in hint
-        # (ii) the hint ends with the schema-derived canonical envelope.
-        assert '"reply_version": "1.0"' in hint
-        assert '"action_batch"' in hint and '"public_observations"' in hint
-        assert '{"actions": [...]}' not in hint
+        assert "input_value=" not in hint and "[type=" not in hint
+        # A preserved hint IS the harness's own sentence, which the model already
+        # has to act on (that is what preservation means); every other class
+        # appends the accepted shape, so it must name the actions array.
+        assert hint == reason or '"actions"' in hint, reason
 
 
-def test_an_unnamed_but_nested_reserved_key_stays_in_envelope_shape() -> None:
-    """Only ``reply_version`` gets the dedicated class, and only when IT moved.
+#: One valid action for the test observation, as the wire carries it: the bodies
+#: below differ ONLY in where the envelope keys sit, so the action cannot vary
+#: with them.
+_WAIT_ACTION: dict[str, Any] = {
+    "kind": "wait",
+    "observation_id": observation().observation_id,
+    "duration_ms": 10,
+}
+_ACTIONS = [_WAIT_ACTION]
 
-    A nested reserved key is named, because the model cannot otherwise see which
-    key was in the wrong place -- but the reply's defect is still the envelope's
-    shape, so it stays ``envelope-shape`` and keeps the measured EITHER clause.
-    The class key is a MEASUREMENT as well as a hint: firing it for a key the
-    model never wrote both misdirects the repair and inflates the sub-rate the
-    next arm is meant to read.
+#: The four shapes the misplaced-version class was split out for, as the models
+#: wrote them -- now carrying an action, so the placement of the keys is the only
+#: variable under test. The first is the shape both sealed DeepSeek episodes
+#: repeated; the last is the minimax shape that put its NOTES inside the batch
+#: (``batch-minimax-m3-canary5/task_087`` and ``task_106``).
+_OMITTED_VERSION_BODY = json.dumps(
+    {"action_batch": {"actions": _ACTIONS}, "public_observations": "a note"}
+)
+_NESTED_VERSION_BODY = json.dumps(
+    {
+        "action_batch": {"actions": _ACTIONS, "reply_version": "1.0"},
+        "public_observations": "a note",
+    }
+)
+_DUPLICATED_VERSION_BODY = json.dumps(
+    {
+        "reply_version": "1.0",
+        "action_batch": {"actions": _ACTIONS, "reply_version": "1.0"},
+        "public_observations": "a note",
+    }
+)
+_NESTED_NOTES_BODY = json.dumps(
+    {"action_batch": {"actions": _ACTIONS, "public_observations": "a note"}}
+)
+
+
+def test_where_a_key_sits_no_longer_decides_whether_a_reply_decodes() -> None:
+    """The same bodies as before, with the one thing that matters: the actions.
+
+    ``reply_version`` absent, at the top level, nested one level down, or written
+    at both levels; the notes key above the batch or inside it; a key the
+    contract has no use for beside them. None of that changes the decision the
+    model made, and none of it may cost the turn -- which is exactly the price
+    the retired diagnostics above used to charge.
     """
 
-    reason = _envelope_reason(_NESTED_NOTES_BODY)
-    key = classify_rejection(reason)
-    hint = rejection_hint(
-        key, reason=reason, observation=observation(), surface=LEGACY_ACTION_SURFACE
-    )
+    bodies = {
+        "omitted-version": _OMITTED_VERSION_BODY,
+        "nested-version": _NESTED_VERSION_BODY,
+        "duplicated-version": _DUPLICATED_VERSION_BODY,
+        "nested-notes": _NESTED_NOTES_BODY,
+        "other-version": json.dumps(
+            {
+                "reply_version": "2.0",
+                "action_batch": {"actions": _ACTIONS},
+                "public_observations": "a note",
+            }
+        ),
+        "bare-actions": json.dumps({"actions": _ACTIONS, "public_observations": "a note"}),
+        "extra-key": json.dumps(
+            {
+                "action_batch": {"actions": _ACTIONS},
+                "public_observations": "a note",
+                "notes": "x",
+            }
+        ),
+    }
 
-    assert key == "envelope-shape"
-    assert "'public_observations'" in hint and "inside 'action_batch'" in hint
-    assert "'reply_version' belongs at the top level" not in hint
-    assert '{"actions": [...]}' in hint
-
-
-def test_the_misplaced_repair_keeps_the_measured_sentence_as_its_prefix() -> None:
-    """Extend the measured wording, never replace it.
-
-    The nested shape is the one that used to be answered with the carried/
-    omitted sentence, so the split must leave that sentence in place and add to
-    it. Its EITHER clause is the only part dropped, and only here: offering the
-    legacy plain batch to a reply that already used the envelope costs the
-    model its notes.
-    """
-
-    nested = _envelope_reason(_NESTED_VERSION_BODY)
-
-    assert nested.startswith(_MEASURED_CARRIED_OMITTED)
-    assert nested != _envelope_reason(_OMITTED_VERSION_BODY)
-    assert '{"actions": [...]}' not in nested
-
-
-def test_a_misplaced_version_hint_carries_no_model_supplied_value() -> None:
-    """Only key NAMES travel: never a Pydantic rendering, never a value.
-
-    The rejected reply is withheld from the repair turn (see
-    ``test_a_misplaced_version_envelope_is_still_placeholdered_in_history``),
-    and the hint must not smuggle it back in: an ``input_value=`` rendering or a
-    model-supplied scalar would re-open the replay channel that placeholder
-    closes -- and on this path a value can be a resolved secret.
-    """
-
-    body = json.dumps(
-        {
-            "reply_version": "1.0",
-            "action_batch": {
-                "actions": [
-                    {"kind": "type", "observation_id": "0" * 64, "text": "MODEL-SUPPLIED-TEXT"}
-                ],
-                "reply_version": "MODEL-SUPPLIED-VERSION",
-            },
-            "public_observations": "MODEL-SUPPLIED-NOTE",
-        }
-    )
-    reason = _envelope_reason(body)
-    hint = rejection_hint(
-        classify_rejection(reason),
-        reason=reason,
-        observation=observation(),
-        surface=LEGACY_ACTION_SURFACE,
-    )
-
-    for value in ("MODEL-SUPPLIED-TEXT", "MODEL-SUPPLIED-VERSION", "MODEL-SUPPLIED-NOTE"):
-        assert value not in hint
-    assert "input_value=" not in hint
-    assert "errors.pydantic.dev" not in hint
-    assert "[type=" not in hint
+    for label, body in bodies.items():
+        decoded = decode_public_reply(body)
+        assert decoded["actions"] == _ACTIONS, label
+        # The notes survive wherever the model put them: they are the one part
+        # of a reply the next turn's context carries verbatim.
+        assert decoded["public_observations"] == "a note", label
 
 
 def test_an_unrecognised_message_is_still_recordable_and_still_answered() -> None:
@@ -392,8 +355,7 @@ def test_an_unrecognised_message_is_still_recordable_and_still_answered() -> Non
         surface=LEGACY_ACTION_SURFACE,
     )
 
-    assert '"reply_version": "1.0"' in hint
-    assert '"action_batch"' in hint
+    assert '"actions"' in hint
     assert "input_value=" not in hint
 
 
@@ -579,25 +541,26 @@ def _declared_markers(episode: str) -> tuple[str, ...]:
 
 
 def _replay_verdict(reply: str) -> str:
-    """The class a reply's own bytes earn it, at the two decode boundaries."""
+    """The verdict a reply's own bytes earn it, through the runtime's decoder.
+
+    Mirrors ``parse_decision``'s FRAMING layer and nothing else: the corpus
+    replay is about what the decoder can read, so adapter-level validation is
+    out of scope here exactly as it is inside ``_decode_leading_json``. The two
+    calls are the real ones -- the leading-JSON tolerance and the normaliser --
+    so the class printed for an artifact is the class the run would have given
+    it, rather than a second opinion about the same bytes.
+    """
 
     payload = reply.strip()
     try:
         decoded, _trailing = _decode_leading_json(payload)
-    except DecisionParseError as error:
+        if not isinstance(decoded, dict):
+            return "batch-shape"
+        normalise_public_reply(decoded)
+    except (DecisionParseError, ValueError) as error:
         # The same reason string ``parse_decision`` would hand the classifier,
         # so the replayed class is derived by the SAME function the run used.
         return classify_rejection(str(error))
-    if not isinstance(decoded, dict):
-        return "batch-shape"
-    if is_public_reply(decoded):
-        try:
-            decoded = decode_public_reply(payload)["action_batch"]
-        except (ValueError, KeyError) as error:
-            return classify_rejection(str(error))
-    actions = decoded.get("actions") if isinstance(decoded, dict) else None
-    if not isinstance(actions, list) or not actions:
-        return "batch-shape"
     return _ACCEPTED_SHAPE
 
 
