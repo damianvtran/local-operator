@@ -4407,6 +4407,39 @@ async def spawn_owned_session(
         agent_registry,
         has_ui=False,
         cwd=cwd,
+        # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
+        # session does before ``RecordPublisher`` runs (``process.amain``:
+        # spawn_owned_session -> _drain_inbox_into -> async_init ->
+        # start_in_process) is invisible to the viewer, which is sitting on
+        # the status band's `starting…` with nothing to bind to. Eager wiring
+        # put MCP discovery, every configured server's connect and the 250 ms
+        # startup gate — plus whatever a hanging or 401-answering server costs
+        # before the gate defers it — inside that window, for a capability MCP
+        # deliberately does not gate the session on (``wire_mcp_into_session``
+        # exposes schemas only after an explicit ``read mcp://``). Deferring it
+        # means no integration configuration can sit between the user and a
+        # bound session.
+        #
+        # The deferral is the mechanism the TUI already opted into when it
+        # built its own in-process Session; after the viewer/runtime split the
+        # process whose boot the first frame waits on is THIS one, and it was
+        # the only caller left not opting in — which made the deferred branch
+        # dead code in production.
+        #
+        # Two properties this deliberately keeps. (1) The failure REPORT still
+        # reaches the screen: the deferred path fires ``_fire_mcp_sink`` at the
+        # gate snapshot and keeps the ``has_ui=False`` stderr prints, so the
+        # capture is unchanged — but the record now exists by then, so the
+        # frontend-state push that carries ``mcp_startup`` has a viewer to
+        # receive it. Before this, a failed mount left the child recording MCP
+        # failures that no transport could deliver. (2) The first seconds of a
+        # session carry the non-MCP surface plus the deferred-cache catalogue;
+        # a late merge arrives through ``manager.on_tools_changed`` ->
+        # ``refresh_frontend_state`` exactly as a late ``list_changed`` does
+        # today, and a turn started before wiring settles reaches MCP tools
+        # through the same deferred-cache path (cached schemas advertised, the
+        # deferred execute awaiting the connect future).
+        defer_mcp_wiring=True,
     )
     # NOT pinned: this value came from config, so it must keep following
     # config. ``create_session`` has already started the process watcher for
