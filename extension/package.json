@@ -1,6 +1,7 @@
 {
   "name": "local-operator-browser-extension",
-  "version": "0.1.13",  "private": true,
+  "version": "0.1.13",
+  "private": true,
   "packageManager": "pnpm@11.22.0",
   "scripts": {
     "build": "node build.mjs",
