@@ -1030,7 +1030,39 @@ class AttachedSession:
         takeover_factory: Callable[[], Any],
         display_window: bool = False,
         surface: str = "terminal",
+        viewer: bool = False,
     ) -> "AttachedSession":
+        """Attach to a LIVE owner, under one of two owner-loss contracts.
+
+        ``viewer`` selects which, and it is the ONLY knob for it (there is
+        deliberately no new ``surface`` value: ``surface`` is written on the
+        wire to the runtime, while this is purely local — see ``_dial``).
+        False, the default, is the legacy attach contract: owner loss is
+        recovered by TAKING OVER the conversation, and a facade built this way
+        returns from ``_ensure_bound`` without dialling (``_can_go_cold`` is
+        False on it) unless recovery is releasing it.
+
+        True builds the VIEWER contract instead — the same one ``cold`` and
+        ``saved_preview`` set, and the only one this keyword asks for: owner
+        loss may end with the facade UNBOUND (``_go_cold``), which it reports
+        as ``is_cold`` while keeping the transcript on screen, and the next
+        action rebinds it through ``_ensure_bound``. That is set by
+        ``_can_go_cold`` and it is what makes a cold facade actively
+        REBINDABLE: ``_ensure_bound``'s first guard returns immediately while
+        the flag is False, so a facade that lost its owner WITHOUT the flag can
+        never bind again — the silent no-op that turned a routine drop into a
+        permanent "Reconnect failed".
+
+        WHY THE CALLERS DIFFER, which is the whole point of this parameter.
+        ``/resume`` (and the startup attach, and ``lop --resume``) must keep the
+        legacy contract: those callers exist to put the user in FRONT of the
+        conversation, so recovering it into this process is the correct end. A
+        SIDEBAR lease is the opposite: a parked, delta-muted source nobody is
+        looking at (see ``_lease_sidebar_source``), whose takeover factory
+        raises by construction, so "recover" would mean owning a conversation
+        the user has not chosen — and whose loss is therefore an ordinary event
+        to be healed on the click, not a failure to report.
+        """
         refusal = frontend_attach_refusal(record)
         if refusal is not None:
             raise ConnectionError(refusal)
@@ -1040,6 +1072,12 @@ class AttachedSession:
             takeover_factory=takeover_factory,
             surface=surface,
         )
+        if viewer:
+            # The flag, not a second code path: everything downstream already
+            # reads this one capability (``_ensure_bound``, the recovery loop's
+            # cold arm, ``_give_up_recovery``). Setting it here is the same act
+            # ``saved_preview`` performs at construction time.
+            self._can_go_cold = True
         self._display_window_requested = display_window
         pending_sync = await self._dial(record)
         try:

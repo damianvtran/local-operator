@@ -1766,10 +1766,13 @@ def _sidebar_connect_attempts() -> int:
 #: reach its owner is released at that bound whichever arm it is stuck in — no
 #: record, an unusable record, a record that never answers, or a takeover that
 #: cannot run (see `_give_up_recovery` in `session/attached.py`). Both of the
-#: sidebar's lease branches therefore land on the same window, which the old
-#: comment could not say: the CLICK path (`_can_go_cold=True`) went cold at
-#: `COLD_FALLBACK_S` and the PREWARM/`connect` path
-#: (`_can_go_cold=False`) waited out a 90 s second bound.
+#: sidebar's lease branches land on that window because both build a VIEWER
+#: facade — `saved_preview` is one by construction and the speculative branch
+#: asks for the same contract with `viewer=True` — which is what lets a click
+#: heal a row the prewarm lease created. Before that flag, only the CLICK path
+#: (`_can_go_cold=True`) went cold at `COLD_FALLBACK_S`; the PREWARM/`connect`
+#: path (`_can_go_cold=False`) waited out a 90 s second bound and was
+#: un-bindable by construction once it did.
 #:
 #: The CLICK path is what this budget is for, and measurement matches the
 #: derivation: `_recovering` cleared at t=8.3 s against a `COLD_FALLBACK_S` of
@@ -1777,14 +1780,14 @@ def _sidebar_connect_attempts() -> int:
 #: whole of it on the common path, which is worse than the honest failure it
 #: replaced.
 #:
-#: On a source the PREWARM branch created, the budget can still expire around
-#: the bound and the user gets the terminal message. That is a smaller, honest
-#: failure rather than a regression: `_ensure_bound`'s first guard is
-#: `if not self._can_go_cold ... return`, so until the give-up flips that flag
-#: it is a NO-OP on that facade, and a measured such facade did not self-heal
-#: within 20 s either. The fix still converts that case from 15 s of
-#: false-connected transcript into a prompt failure. Widening the budget buys
-#: nothing and costs every click path a longer wait.
+#: A PREWARM-CREATED SOURCE IS NOT A SEPARATE CASE IN THIS BUDGET ANY MORE, and
+#: it used to be the case that broke it. The prewarm lease built a facade with
+#: `_can_go_cold=False`, so `_ensure_bound`'s first guard returned on EVERY
+#: attempt and the budget expired over a sequence of no-ops — no retry count can
+#: bind a facade that refuses to dial — latched as "Select again to retry",
+#: where selecting again reused the very same un-bindable source. Both branches
+#: now ask for the viewer contract, so a source this budget is retrying is cold
+#: AND rebindable, and the first attempt after a release dials it.
 SIDEBAR_CONNECT_ATTEMPTS = _sidebar_connect_attempts()
 
 
@@ -5218,12 +5221,39 @@ class OperatorApp(App[None]):
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
                 raise RuntimeError("The prepared runtime is no longer active")
+            # VIEWER CONTRACT, and this is the one call site that asks for it
+            # through ``connect`` (``saved_preview`` above is the other lease
+            # branch, and it is one by construction). The two branches must
+            # build the SAME contract, because ``_lease_sidebar_source`` can hand
+            # either branch's facade to the user's later click: the cache above
+            # returns a non-retired source unchanged, so a prewarm-created
+            # facade IS the facade the click connects through. Without this the
+            # prewarm facade carried ``_can_go_cold=False``, and
+            # ``_ensure_bound``'s first guard (``if not self._can_go_cold or
+            # self._disposed: return``) then made every cold state PERMANENT on
+            # it: no retry count and no budget could bind it, so a drop that
+            # healed on the click branch latched ``Saved · Reconnect failed ·
+            # Select again to retry`` on this one, and selecting again reused
+            # the same un-bindable source.
+            #
+            # TWO CONSEQUENCES, both wanted. (1) The cold condition now really
+            # does END: at ``COLD_FALLBACK_S`` the facade is released COLD AND
+            # REBINDABLE, which is the premise 4b1c09ff7's budget is derived
+            # from and which was false for this facade alone. (2) A parked
+            # source that loses its owner stops chasing it instead of redialing
+            # a runtime forever in a futile chase — redials that compete for
+            # that runtime's ``ATTACH_MAX_CLIENTS`` slots, which are evicted by
+            # silent LRU, so a row nobody is looking at could evict the viewer
+            # the user IS looking at. The click then pays one dial (~ms against
+            # a live socket) on a row whose owner had already died, which can
+            # never be fast anyway.
             remote = await AttachedSession.connect(
                 record,
                 session_id,
                 config_dir=directory,
                 takeover_factory=no_takeover,
                 display_window=True,
+                viewer=True,
             )
         if not _is_viewer(remote):
             raise RuntimeError("Sidebar navigation requires a runtime-backed session")
@@ -6113,13 +6143,20 @@ class OperatorApp(App[None]):
         age. Worse, both actions a runtime could take on such a conclusion are
         wrong. Announcing `retiring` reaches `_on_runtime_refreshed`, which
         re-engages eagerly and unconditionally — an exit→spawn→idle→exit
-        treadmill strictly worse than the leak it fixes. A bare EOF is worse
-        still: a sidebar source connects without a `surface`, so it cannot go
-        cold, and owner-death recovery redials forever against a takeover that
-        raises by construction. The viewer closing its OWN socket is the only
-        initiator with no such failure mode — it needs no frame, no wire op and
-        no protocol change, and the runtime keeps full authority over its exit
-        through the existing residency drain.
+        treadmill strictly worse than the leak it fixes. A bare EOF used to be
+        worse still: a sidebar source was built with the legacy attach contract,
+        so it could not go cold, and owner-death recovery redialled forever
+        against a takeover that raises by construction. Both lease branches now
+        build a VIEWER facade (the speculative branch asks for it with
+        `viewer=True`), so a parked source released at `COLD_FALLBACK_S` goes
+        cold and STOPS redialling — that hazard is gone, and it is not an
+        argument for moving the clock: the runtime still cannot tell a parked
+        source from one the user is about to click, and a socket dropped on its
+        own authority turns the click that follows into a rebind. The viewer
+        closing its OWN socket is the initiator that knows the source is parked
+        and unlooked-at, and it needs no frame, no wire op and no protocol
+        change, with the runtime keeping full authority over its exit through
+        the existing residency drain.
 
         Never raises: a Textual interval that throws stops repeating, which
         would silently disable reaping for the life of the process. Every probe
@@ -6972,12 +7009,23 @@ class OperatorApp(App[None]):
         Every field answers a question the investigation had to ask by hand:
         WHICH arm (named by the caller), WHICH session, how long THIS ROUND
         waited, how much budget was spent, whether the app still believed it was
-        showing a saved excerpt, and the three pieces of facade state the three
-        falsifiable causes map onto — ``is_cold`` (the owner is gone), ``_recovering``
-        (it is on its way back), ``display_history_current`` (the app can still
-        paint what it holds). ``getattr`` with a default because the source's
-        session is the general viewer protocol and only some facades declare
-        these.
+        showing a saved excerpt, and the facade state the falsifiable causes map
+        onto — ``is_cold`` (the owner is gone), ``_recovering`` (it is on its way
+        back), ``display_history_current`` (the app can still paint what it
+        holds), and ``can_go_cold``/``disposed`` (whether the facade COULD bind
+        at all). ``getattr`` with a default because the source's session is the
+        general viewer protocol and only some facades declare these.
+
+        ``can_go_cold`` IS THE FIELD THIS INVESTIGATION DID NOT HAVE, and the
+        absence is why the cause had to be found with a reproduction instead of
+        by reading a log: ``_ensure_bound``'s FIRST guard is
+        ``if not self._can_go_cold or self._disposed: return``, so a cold facade
+        carrying False spends the whole retry budget on rounds that cannot dial
+        — logged, before this field existed, as a sequence of identical
+        ``attempts=N elapsed=0.00s`` lines that named the symptom and not the
+        guard. ``disposed`` is read beside it because it is the other half of
+        that same condition, so one line now separates "it could not bind" from
+        "it was on its way back" and from "it bound nothing because it is gone".
 
         No secret content: ids, counters, booleans and an exception message.
         """
@@ -6987,6 +7035,8 @@ class OperatorApp(App[None]):
             f"session={session_id} elapsed={elapsed:.2f}s "
             f"attempts={source.connect_attempts} display_only={source.display_only} "
             f"is_cold={bool(getattr(session, 'is_cold', False))!r} "
+            f"can_go_cold={getattr(session, '_can_go_cold', None)!r} "
+            f"disposed={getattr(session, '_disposed', None)!r} "
             f"recovering={getattr(session, '_recovering', None)!r} "
             f"display_history_current={getattr(session, 'display_history_current', None)!r} "
             f"error={type(error).__name__}: {error}"
