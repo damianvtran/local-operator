@@ -145,6 +145,12 @@ interface Health {
   driver_label?: string;
   /** Identities the daemon has ACCEPTED but is not routing commands to. */
   standby_extension_ids?: string[];
+  /** Every identity the daemon currently authorises. The popup compares this
+   * against `chrome.runtime.id` to answer a question the driver-scoped fields
+   * above cannot: "is THIS install paired?" — see the card gate below. Optional
+   * because a daemon predating multi-identity sends no such list, and the
+   * fallback then is exactly the old single-identity reading. */
+  authorized_extension_ids?: string[];
   current_url?: string;
   current_title?: string;
   pending_origin?: string;
@@ -321,7 +327,8 @@ const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
   connected: PIN_CONNECTED,
   pairing: PIN_PAIRING,
-  standby: PIN_STANDBY,};
+  standby: PIN_STANDBY,
+};
 
 /** The pinned height this browser last settled on, or null for "no hint". */
 function readPinHint(): string | null {
@@ -677,6 +684,37 @@ async function renderOnce(): Promise<void> {
     show("unresponsive");
     return;
   }
+  // -------- WHICH INSTALL AM I? (QA round 1, Q1) --------------------------
+  //
+  // Every driver-scoped field above (`paired`, `extension_connected`,
+  // `extension_unresponsive`, the url/title) is the daemon's statement about
+  // the link it is ROUTING TO — `daemon.py` builds them from `self.link`. That
+  // is the right answer to "can the agent drive this browser right now?" and
+  // the wrong answer to "is this install paired?". The two questions were the
+  // same while one identity could be authorised at all; they are not any more.
+  //
+  // Reading the driver's `paired` as this install's own made a never-paired
+  // second install render "Connected. Local Operator can use this browser."
+  // with the pairing form HIDDEN — in exactly the state this feature exists for
+  // (store build paired and driving, dev build just loaded), so the user could
+  // not reach the code field the daemon was holding for them, even though the
+  // install's own worker already knew the truth (`connState: "pairing"`).
+  //
+  // So ask about this id. `chrome.runtime.id` is the install's own identity and
+  // /health lists the authorised set, which is the file-backed authority
+  // (`authorized_extension_ids`), not the link's copy of it. A daemon predating
+  // the list sends none, and then the driver-scoped `paired` IS this install's
+  // answer — one identity could be authorised — which is exactly what the
+  // pre-multi-identity code assumed, so that direction is unchanged.
+  const selfId = chrome.runtime.id;
+  const listedIds = health.authorized_extension_ids;
+  const selfAuthorized = Array.isArray(listedIds) ? listedIds.includes(selfId) : null;
+  const selfPaired = selfAuthorized === null ? health.paired : selfAuthorized;
+  // "Is the wheel in THIS install?" The daemon names the driver explicitly
+  // (additive field); a daemon that does not is a single-identity daemon, where
+  // the only install there is is the driver.
+  const drivesThis = health.driver_extension_id ? health.driver_extension_id === selfId : true;
+
   // ------------------ standby -----
   //
   // A STANDBY install is paired, connected and healthy, and is deliberately
@@ -686,10 +724,11 @@ async function renderOnce(): Promise<void> {
   // is it driving?" - is answerable only from this card, so it names the other
   // install whenever the daemon reported a label for it.
   //
-  // Read from `connState`, which the worker writes from the daemon's own `role`
-  // statement, and gated on /health's `paired` so a stale session-storage value
-  // cannot claim a pairing that has since been revoked.
-  if (connState === "standby" && health.paired) {
+  // This install's own pairing, plus "not the wheel" — rather than the driver's
+  // `paired` AND a stale session value: a revoked install can still hold
+  // `connState: "standby"` in session storage, and the driver still being paired
+  // says nothing about it.
+  if (selfPaired && !drivesThis) {
     const other = document.getElementById("standby-driver");
     if (other) {
       const label = health.driver_label;
@@ -700,7 +739,7 @@ async function renderOnce(): Promise<void> {
     show("standby");
     return;
   }
-  if (health.paired) {
+  if (selfPaired && drivesThis) {
     // Handoff complete: the worker holds the new token and health confirms it,
     // so the pairing latch has done its job. Clearing it here means a LATER
     // unpair (daemon revoke → close 4003) renders the form again instead of a
@@ -737,8 +776,11 @@ async function renderOnce(): Promise<void> {
     show("connected");
     return;
   }
-  // Health has not confirmed the new token yet: keep the success view if this
-  // popup already paired (the race above), otherwise offer the form.
+  // This install is not paired (or is, but /health does not say so yet: the
+  // window between a successful pair and its confirmation — `viewForHealth`'s
+  // latch case, which is why the fall-through still passes `locallyPaired`).
+  // Either way the CODE FIELD is what this install needs, and it is now reached
+  // whenever THIS install is unpaired, whatever the driver is doing.
   show(viewForHealth(false, locallyPaired));
 }
 
