@@ -30,12 +30,10 @@ from local_operator.tui.widgets.session_picker import (
     _EXEC_LEGEND,
     _MARKER_LEGEND,
     BODY_MATCH_MARKER,
-    CARD_MAX_HEIGHT_FRACTION,
     CARD_PADDING_ROWS,
     EXEC_MARKER,
     GUTTER_CELLS,
     NAME_MIN_CELLS,
-    PAGE_ROWS_MAX,
     PICKER_MIN_WIDTH,
     SessionPickerScreen,
     _footer_hints,
@@ -43,6 +41,7 @@ from local_operator.tui.widgets.session_picker import (
     filter_rows,
     matched_in_body,
     plan_columns,
+    plan_layout,
     rank_rows,
     render_rows,
 )
@@ -433,7 +432,7 @@ def test_the_footer_explains_the_exec_tag_where_the_picker_can_show_it() -> None
     # unreachable because the tests asserted it at `_footer_hints(100, ...)` —
     # a width `_card_width()` caps at PICKER_MAX_WIDTH = 74 and can never
     # produce — and because `scrolls` defaulted to False while a real store
-    # (PAGE_ROWS_MAX = 10 against hundreds of sessions) always scrolls. A check
+    # (a list of hundreds against one screen) always scrolls. A check
     # that cannot observe the case it exists for certifies nothing.
     for counter_cells in (0, len("showing 1–10 of 501")):
         legends = _meta_legends(74, has_marked=False, has_exec=True, counter_cells=counter_cells)
@@ -475,10 +474,7 @@ def test_the_exec_legend_paints_on_a_scrolling_list_which_is_the_ordinary_case()
     Driven through the REAL card rather than the shed helper, because that is
     exactly the gap the finding exploited: `_footer_hints` was correct about its
     own inputs while the card could never supply the width those tests used.
-    `_card_width()` caps at PICKER_MAX_WIDTH, so the assertion below fails on
-    the pre-fix tree at every terminal size, including 200 columns.
-
-    The legend is read off the META row specifically. A grep over the whole
+    The legend is read off the FILTER ROW specifically. A grep over the whole
     frame would match the `[exec]` tag in the LIST and pass without the legend
     existing at all — a false pass this PR's QA round hit with that instrument.
     """
@@ -495,23 +491,29 @@ def test_the_exec_legend_paints_on_a_scrolling_list_which_is_the_ordinary_case()
             wakes_dormant=False,
             kind="exec" if index == 1 else "",
         )
-        for index in range(PAGE_ROWS_MAX * 3)
+        for index in range(30)
     ]
     screen = SessionPickerScreen(rows, NOW)
-    screen._screen_size = lambda: (100, 30)  # type: ignore[method-assign]
+    # 120 rather than 100: the counter, the legend and the keys together need
+    # 97 cells and a 100-column terminal leaves 96 after the screen's padding,
+    # so at 100 the legend is correctly shed and the frame proves nothing about
+    # whether it can paint at all. The finding this test pins is that the
+    # legend was unreachable at EVERY width, which 120 exercises.
+    screen._layout = lambda: plan_layout(120, 30)  # type: ignore[method-assign]
 
     assert len(rows) > screen._page_rows(), "this list must scroll or it tests the wrong shape"
-    lines = screen.render_lines_for_test()
-    meta = lines[-2]
+    meta = screen.render_footer_for_test()
 
     assert EXEC_MARKER.strip() in meta, f"legend absent from the meta row: {meta!r}"
     assert "one-shot" in meta
-    # The keys kept their whole row: the legend no longer buys its place by
-    # evicting a hint, which is what made it unreachable when it did.
-    assert "pgup/pgdn" in lines[-1]
+    # The keys kept their place: the legend no longer buys it by evicting a
+    # hint, which is what made it unreachable when it did.
+    assert "esc" in meta
     # CANARY: the list really is drawing the tag, so the legend has something to
     # explain and this is not a frame that would pass with no exec row at all.
-    assert any(EXEC_MARKER.strip() in line for line in lines[:-2])
+    # And the tag itself is still in the LIST, which is the thing the legend
+    # explains — the two must both be present, never one without the other.
+    assert any(EXEC_MARKER.strip() in line for line in screen.render_lines_for_test())
 
 
 def test_a_cold_row_carries_no_kind_so_a_reaped_exec_run_stops_claiming_to_be_one() -> None:
@@ -657,7 +659,7 @@ async def test_a_filter_that_empties_the_list_says_so_and_answers_nothing() -> N
 
 @pytest.mark.asyncio
 async def test_a_long_list_pages_and_reports_its_position() -> None:
-    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(PAGE_ROWS_MAX * 3)]
+    rows = [_row(f"id{index:04d}", f"session {index}") for index in range(30)]
     app = _PickerHost(rows)
     async with app.run_test(size=(100, 40)) as pilot:
         screen = await app.open_picker()
@@ -666,9 +668,10 @@ async def test_a_long_list_pages_and_reports_its_position() -> None:
         await pilot.pause()
         assert screen.selected_index == len(rows) - 1
         text = "\n".join(screen.render_lines_for_test())
-        # The last row is on screen, and the position is stated.
+        # The last row is on screen, and the position is stated — in the filter
+        # row, which is where the counter lives now.
         assert f"session {len(rows) - 1}" in text
-        assert f"of {len(rows)}" in text
+        assert f"of {len(rows)}" in screen.render_footer_for_test()
 
 
 @pytest.mark.asyncio
@@ -681,7 +684,8 @@ async def test_the_picker_names_every_session_it_offers() -> None:
         await pilot.pause()
         text = "\n".join(screen.render_lines_for_test())
     assert "review the usage endpoint" in text
-    assert "type to filter" in text  # the keys are advertised on the card
+    # The keys are advertised on the FILTER ROW now, not inside the card.
+    assert "type to filter" in screen.render_footer_for_test()
 
 
 def _wheel(widget, *, down: bool):
@@ -796,9 +800,12 @@ async def test_a_short_terminal_loses_list_rows_not_the_way_out() -> None:
             screen = await app.open_picker()
             await pilot.pause()
             lines = screen.render_lines_for_test()
-            assert "esc cancel" in lines[-1], (height, lines[-1])
-            # And the whole card fits the share of the screen it may occupy.
-            budget = int(height * CARD_MAX_HEIGHT_FRACTION) - CARD_PADDING_ROWS
+            # The way out is stated in the FILTER ROW now, which is reserved
+            # unconditionally and so cannot be clipped by a short terminal.
+            assert "esc" in screen.render_footer_for_test(), height
+            # And the list fits the rows the layout gave it: the picker is
+            # full-screen, so the budget is the pane's, not 80% of the screen.
+            budget = plan_layout(100, height).list_rows
             assert len(lines) <= budget, (height, len(lines), budget)
 
 
@@ -895,9 +902,10 @@ async def test_clicking_a_row_resumes_it() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        body = screen.query_one("#session-picker-body")
-        # Row 1 (the second session) sits under the header and the rule.
-        await pilot.click(body, offset=(4, 3))
+        body = screen.query_one("#session-picker-results")
+        # The results pane holds rows and nothing else — the title and the
+        # tally moved to the filter row — so row 1 is the pane's second line.
+        await pilot.click(body, offset=(4, 1))
         await pilot.pause()
     assert app.chosen == ["second"]
 
@@ -925,36 +933,6 @@ async def test_narrowing_the_filter_selects_the_first_match() -> None:
         await pilot.press("enter")
         await pilot.pause()
     assert app.chosen == ["aaa111"]
-
-
-@pytest.mark.asyncio
-async def test_the_card_ends_on_quiet_ground_then_its_meta_in_both_states() -> None:
-    """The position and the key hints are the same kind of row — statements
-    ABOUT the list, not entries in it — so they travel together at the bottom
-    with one quiet row above the pair. Same grammar as the usage card; the two
-    differ only by whether the position row exists. Emitting an EMPTY counter
-    row left two blank rows and pushed the keys off the block."""
-    many = [_row(f"id{index:04d}", f"session {index}") for index in range(40)]
-    few = [_row("only01", "the only session")]
-
-    app = _PickerHost(many)
-    async with app.run_test(size=(100, 30)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
-        scrolled = screen.render_lines_for_test()
-    assert scrolled[-1].startswith("↑↓")  # keys last
-    assert scrolled[-2].startswith("showing ")  # position above them
-    assert scrolled[-3] == ""  # one quiet row above the pair
-    assert scrolled[-4] != ""  # and the report right above that
-
-    app = _PickerHost(few)
-    async with app.run_test(size=(100, 30)) as pilot:
-        screen = await app.open_picker()
-        await pilot.pause()
-        fits = screen.render_lines_for_test()
-    assert fits[-1].startswith("↑↓")
-    assert fits[-2] == ""  # no position row, and NOT a second blank
-    assert fits[-3] != ""
 
 
 def test_a_single_entry_with_no_trailing_newline_still_names_the_session(
@@ -1041,25 +1019,52 @@ async def test_clicking_the_chrome_or_the_backdrop_resumes_nothing() -> None:
         app.push_screen(screen, chosen.append)
         await pilot.pause()
         await pilot.pause()
-        body = screen.query_one("#session-picker-body")
+        body = screen.query_one("#session-picker-results")
         region = body.region
-        lines = screen.render_lines_for_test()
-        footer_row = len(lines) - 1
-        spacer_row = next(i for i, line in enumerate(lines) if line == "")
 
         class _At:
             def __init__(self, x: int, y: int) -> None:
                 self.screen_x = x
                 self.screen_y = y
 
-        # Header, rule, spacer, counter and footer are all chrome.
-        for row in (0, 1, spacer_row, footer_row):
-            assert screen._index_at(_At(region.x + 4, region.y + row)) is None, row
-        # The backdrop to the left of the card, on a row that IS a list row.
+        # The filter row and the preview are separate WIDGETS now, so chrome is
+        # no longer inside this pane's region — which is exactly why the
+        # hit-test can measure against it. What must still hold is that
+        # anything outside the drawn rows resolves to nothing: a false positive
+        # here DISPOSES THE LIVE SESSION and reboots onto another one.
+        drawn = len(screen.render_lines_for_test())
+        # Below the last drawn row, still inside the pane.
+        assert screen._index_at(_At(region.x + 4, region.y + drawn + 1)) is None
+        # The backdrop to the left of the pane, on a row that IS a list row.
         assert screen._index_at(_At(max(0, region.x - 12), region.y + 3)) is None
-        # And below the card entirely.
+        # And below the pane entirely.
         assert screen._index_at(_At(region.x + 4, region.y + region.height + 2)) is None
         assert chosen == []
+
+        # A ROW THAT DRAWS A CONTEXT LINE OCCUPIES TWO LINES. Without walking
+        # the per-row costs, every click below the first context line resolves
+        # to the wrong session — off by one more row for each context line
+        # above it.
+        screen._digests = {row.id: f"body text for {row.name}" for row in rows}
+        screen.set_query("body text")
+        await pilot.pause()
+        costs = screen._row_costs()
+        assert any(cost == 2 for cost in costs), "no context line drawn; the case is untested"
+        # Walk the rows the pane actually DREW, counting lines rather than
+        # rows: the two differ exactly by the number of context lines.
+        drawn_rows = 0
+        used = 0
+        for cost in costs[screen._offset :]:
+            if used + cost > len(screen.render_lines_for_test()):
+                break
+            used += cost
+            drawn_rows += 1
+        line = 0
+        for index, cost in enumerate(costs[:drawn_rows]):
+            for step in range(cost):
+                hit = screen._index_at(_At(region.x + 4, region.y + line))
+                assert hit == index, (line, hit, index, step)
+                line += 1
 
 
 @pytest.mark.asyncio
@@ -1079,26 +1084,41 @@ async def test_the_card_never_outgrows_a_narrow_terminal() -> None:
 
 @pytest.mark.asyncio
 async def test_typing_a_long_filter_does_not_grow_the_card() -> None:
-    """The body is `width: auto`, so an unbounded filter echo made the card
-    grow — and shift, since it is centred — with every character typed, moving
-    the list under the eye of the person searching it."""
+    """An unbounded filter echo made the card grow — and shift, since it was
+    centred — with every character typed, moving the list under the eye of the
+    person searching it.
+
+    The echo now lives in the FILTER ROW, so that is the pane this asserts
+    about; the assertion itself is unchanged. The row is fixed-width with
+    ellipsis overflow, so 60 characters of query cannot widen it.
+    """
     rows = [_row("abc123def456", "a session")]
     app = _PickerHost(rows)
     async with app.run_test(size=(80, 30)) as pilot:
         screen = await app.open_picker()
         await pilot.pause()
-        before = max(cell_len(line) for line in screen.render_lines_for_test())
+        row_width = screen.query_one("#session-picker-filter").size.width
         for char in "a" * 60:
             await pilot.press(char)
         await pilot.pause()
-        after = max(cell_len(line) for line in screen.render_lines_for_test())
-    assert after == before, (before, after)
+        after = cell_len(screen.render_footer_for_test())
+        assert screen.filter_query == "a" * 60
+    # The row is bounded by the terminal, not by the query: 60 characters of
+    # filter cannot widen it, which is what stops the list shifting under the
+    # eye of the person searching it.
+    assert after <= row_width, (row_width, after)
 
 
 @pytest.mark.asyncio
 async def test_a_narrow_painted_header_keeps_the_active_filter() -> None:
-    """At 50 columns the old header spent the row on its static title and
-    clipped ``filter asteroid`` — the only receipt that typing reached it."""
+    """At 50 columns the header spent the row on its static title and clipped
+    the query — the only receipt that typing reached the modal.
+
+    The shed ladder moved to the FILTER ROW, so the query is now echoed as
+    ``/ asteroid`` rather than ``filter asteroid``; the rule it pins is
+    unchanged, and this still reads the text off the REAL COMPOSITOR rather
+    than off an accessor, which is what makes it evidence about what is drawn.
+    """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -1115,7 +1135,7 @@ async def test_a_narrow_painted_header_keeps_the_active_filter() -> None:
         painted = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
 
     assert screen.filter_query == "asteroid"
-    assert "filter asteroid" in painted, painted
+    assert "asteroid" in painted, painted
 
 
 def test_a_right_click_never_resumes_a_session() -> None:
@@ -1154,16 +1174,14 @@ def test_the_empty_card_says_whose_sessions_are_missing() -> None:
 def test_one_session_is_not_announced_as_1_sessions() -> None:
     """Filtering makes a one-row list the common case rather than the rare
     one, so the header's plural now shows up routinely."""
-    single = "\n".join(
-        SessionPickerScreen([_row("aabbcc", "the only one")], NOW).render_lines_for_test()
-    )
+    single = SessionPickerScreen([_row("aabbcc", "the only one")], NOW).render_footer_for_test()
     assert "1 session" in single
     assert "1 sessions" not in single
 
-    plural = "\n".join(
+    plural = "".join(
         SessionPickerScreen(
             [_row("aabbcc", "one"), _row("ddeeff", "two")], NOW
-        ).render_lines_for_test()
+        ).render_footer_for_test()
     )
     assert "2 sessions" in plural
 
@@ -1545,14 +1563,21 @@ async def test_the_header_tally_reports_the_stores_true_total() -> None:
         await pilot.pause()
         # Grouped: the separator is part of the fix for reading a 4-digit
         # total at a glance (design round 1, D4).
-        assert "2,700 sessions" in "\n".join(screen.render_lines_for_test())
+        # The tally and the position counter both live in the filter row now.
+        # Unfiltered, a list this long scrolls, so the row states the store's
+        # true total as the counter's denominator — grouped, because a 4-digit
+        # total is read at a glance and parsed as a digit string otherwise
+        # (design round 1, D4).
+        assert f"of {len(rows):,}" in screen.render_footer_for_test()
 
         screen.set_query("session 1")
         await pilot.pause()
-        lines = "\n".join(screen.render_lines_for_test())
+        footer = screen.render_footer_for_test()
         shown = len(screen.visible_rows)
-        assert f"of {len(rows):,}" in lines  # header tally: the store total
-        assert f"of {shown:,}" in lines  # position counter: the filtered count
+        # The position counter reports the FILTERED count: the two answer
+        # different questions and must not converge.
+        assert f"of {shown:,}" in footer
+        assert shown != len(rows)
 
 
 @pytest.mark.asyncio
@@ -1936,7 +1961,7 @@ def test_the_painted_cursor_and_enter_agree_after_a_reorder() -> None:
             lines = text.split("\n")  # type: ignore[attr-defined]
             painted["lines"] = [line.plain for line in lines]
 
-    screen._body = _Body()  # type: ignore[assignment]
+    screen._results = _Body()  # type: ignore[assignment]
     screen._repaint()
     assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
 
@@ -1979,7 +2004,7 @@ def test_a_marker_change_with_nothing_busy_still_repaints() -> None:
         def update(self, text: object) -> None:
             repaints["n"] += 1
 
-    screen._body = _Body()  # type: ignore[assignment]
+    screen._results = _Body()  # type: ignore[assignment]
 
     screen._tick()
     assert repaints["n"] == 0, "an unchanged settled store must stay cheap"
@@ -2125,7 +2150,7 @@ def test_a_pure_reorder_with_identical_content_still_repaints() -> None:
             lines = text.split("\n")  # type: ignore[attr-defined]
             painted["lines"] = [line.plain for line in lines]
 
-    screen._body = _Body()  # type: ignore[assignment]
+    screen._results = _Body()  # type: ignore[assignment]
     screen._repaint()
     assert "alpha" in next(ln for ln in painted["lines"] if ln.strip().startswith("❯"))
 
@@ -2244,3 +2269,279 @@ def test_urgency_still_outranks_an_armed_wake() -> None:
 
     busy = _row("urg000000003", "working")._replace(live_state="busy", **base)
     assert row_state_mark(busy, 0)[0] in set(SPINNER_FRAMES)
+
+
+# --- the two-pane telescope layout ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_picker_draws_more_than_ten_rows_on_a_tall_terminal() -> None:
+    """``PAGE_ROWS_MAX`` drew 10 rows out of 140 at EVERY terminal height — 7%,
+    while a 60-row terminal has room for 41. Fails on ``origin/main``.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(60)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        drawn = screen.render_lines_for_test()
+    assert len(drawn) > 10, f"only {len(drawn)} rows drawn on a 50-row terminal"
+
+
+@pytest.mark.asyncio
+async def test_the_layout_flips_at_the_breakpoint_and_back(tmp_path: Path) -> None:
+    """THE LIVE-RESIZE CRITERION. A mode-only restyle guard fails this: the
+    preview's scroll offset and the cursor must survive the round trip, which
+    means the widget tree is restyled in place and never rebuilt.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(40)]
+    # A real transcript on the row the cursor lands on, so the preview has
+    # something to SCROLL — without it `ctrl+d` is a no-op and the round trip
+    # would prove nothing.
+    _write_transcript(
+        tmp_path,
+        f"{3:012x}",
+        [_message("user", f"turn {index} " + "body text " * 12) for index in range(40)],
+    )
+    app = _PickerHost(rows)
+    async with app.run_test(size=(180, 50)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        assert screen.layout_mode_for_test() == "side-by-side"
+
+        await pilot.press("down", "down", "down")
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        cursor = screen.selected_index
+        offset = screen.preview_offset_for_test()
+        assert offset > 0, "ctrl+d did not scroll the preview, so the round trip proves nothing"
+
+        await pilot.resize_terminal(120, 35)
+        await pilot.pause()
+        assert screen.layout_mode_for_test() == "stacked"
+
+        await pilot.resize_terminal(180, 50)
+        await pilot.pause()
+        assert screen.layout_mode_for_test() == "side-by-side"
+        assert screen.selected_index == cursor
+        assert screen.preview_offset_for_test() == offset
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_toggles_verbose_and_the_mode_is_sticky_across_rows() -> None:
+    """A mode that resets as the cursor moves is a mode the user re-sets on every row."""
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(10)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(160, 45)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.preview_mode_for_test() == "condensed", "condensed is the DEFAULT"
+
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert screen.preview_mode_for_test() == "verbose"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert screen.preview_mode_for_test() == "verbose", "the toggle is not sticky"
+
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert screen.preview_mode_for_test() == "condensed"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_u_and_ctrl_d_scroll_the_preview_without_moving_the_cursor(
+    tmp_path: Path,
+) -> None:
+    """The preview scrolls under a stationary cursor, or paging it costs the row."""
+    session_id = "aa11bb22cc33"
+    _write_transcript(
+        tmp_path,
+        session_id,
+        [_message("user", f"turn {index} " + "body text " * 12) for index in range(40)],
+    )
+    rows = [_row(session_id, "long conversation")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(160, 45)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        before_index = screen.selected_index
+        before = screen.render_preview_for_test()
+
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert screen.selected_index == before_index
+        after = screen.render_preview_for_test()
+        assert after != before, "ctrl+d did not scroll the preview"
+
+        await pilot.press("ctrl+u")
+        await pilot.pause()
+        assert screen.selected_index == before_index
+        assert screen.render_preview_for_test() == before
+
+
+@pytest.mark.asyncio
+async def test_ctrl_g_jumps_the_preview_to_the_newest_turn(tmp_path: Path) -> None:
+    session_id = "bb22cc33dd44"
+    _write_transcript(
+        tmp_path,
+        session_id,
+        [_message("user", f"turn {index} " + "body text " * 12) for index in range(40)],
+    )
+    app = _PickerHost([_row(session_id, "long conversation")])
+    async with app.run_test(size=(160, 45)) as pilot:
+        screen = await app.open_picker()
+        screen.use_previews_for_test(tmp_path / "sessions")
+        await pilot.pause()
+        assert screen.preview_offset_for_test() == 0
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        jumped = screen.preview_offset_for_test()
+        assert jumped > 0, "ctrl+g did not move to the newest turn"
+        # Clamped to the last full screen, never past the end.
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert screen.preview_offset_for_test() == jumped
+
+
+@pytest.mark.asyncio
+async def test_typing_still_filters_and_a_chord_never_types_into_the_filter() -> None:
+    """Every new affordance is a CHORD: printable keys belong to the filter,
+    and that stays true.
+    """
+    rows = [_row("aaa111aaa111", "asteroids game"), _row("bbb222bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(160, 45)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for char in "parser":
+            await pilot.press(char)
+        await pilot.pause()
+        assert screen.filter_query == "parser"
+        assert [row.id for row in screen.visible_rows] == ["bbb222bbb222"]
+
+        for chord in ("ctrl+e", "ctrl+u", "ctrl+d", "ctrl+g"):
+            await pilot.press(chord)
+            await pilot.pause()
+            assert screen.filter_query == "parser", f"{chord} typed into the filter"
+
+
+@pytest.mark.asyncio
+async def test_the_filter_row_carries_the_query_the_counters_and_the_chords() -> None:
+    """Replaces ``test_the_card_ends_on_quiet_ground_then_its_meta_in_both_states``.
+
+    The card's ``lines[-1]/[-2]/[-3]`` grammar was a property of the single
+    ``Static``. The filter row now carries the same FACTS in one line: the
+    position is stated, the keys are stated, and they do not collide.
+    """
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(80)]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(160, 45)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        footer = screen.render_footer_for_test()
+        assert f"{len(rows):,}" in footer
+        assert "enter" in footer and "esc" in footer
+        assert "ctrl+e" in footer
+
+        for char in "session 1":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "session 1" in screen.render_footer_for_test()
+
+
+@pytest.mark.asyncio
+async def test_the_panes_fit_the_terminal_at_every_height_on_the_real_stylesheet() -> None:
+    """Replaces ``test_the_footer_survives_at_every_height_on_the_real_stylesheet``.
+
+    The hazard it guarded is NOT gone — Textual still clips silently — so this
+    mounts the REAL ``OperatorApp`` (``_PickerHost`` declares no ``CSS_PATH``
+    and so agreed with the original bug) and asserts the filter row is drawn
+    and every pane's composed line count is within its region height.
+    """
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    rows = [_row(f"{index:012x}", f"session {index}") for index in range(60)]
+    for height in (14, 16, 18, 20, 23, 30, 48):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=(100, height)) as pilot:
+            screen = SessionPickerScreen(rows, NOW)
+            app.push_screen(screen)
+            await pilot.pause()
+            await pilot.pause()
+
+            footer = screen.render_footer_for_test()
+            assert footer.strip(), f"filter row empty at height {height}"
+
+            results = screen.query_one("#session-picker-results")
+            preview = screen.query_one("#session-picker-preview")
+            assert len(screen.render_lines_for_test()) <= results.size.height, height
+            assert len(screen.render_preview_for_test()) <= preview.size.height, height
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_filter_row_keeps_the_active_query() -> None:
+    """Replaces ``test_a_narrow_painted_header_keeps_the_active_filter``.
+
+    Same rule, new home: the query is the user's only receipt that typing
+    reached the modal, so it is shed LAST.
+    """
+    rows = [_row("aaa111aaa111", "asteroids game"), _row("bbb222bbb222", "parser crash")]
+    app = _PickerHost(rows)
+    async with app.run_test(size=(50, 24)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        for char in "asteroid":
+            await pilot.press(char)
+        await pilot.pause()
+        assert "asteroid" in screen.render_footer_for_test()
+
+
+@pytest.mark.asyncio
+async def test_the_way_out_is_stated_at_every_width_the_picker_supports() -> None:
+    """The footer is the only place the picker says how to get out.
+
+    The module docstring has said so since the card era, and the shed ladder is
+    what has to honour it: counters, legends and chord GLOSSES all go before
+    the keys, and ``esc`` goes last of all. A review found the row shedding
+    ``esc`` entirely at 30 and 24 columns — a silent no-exit state, on a modal
+    whose only other exit is the mouse.
+    """
+    rows = [_row(f"{index:012d}", f"session {index}") for index in range(60)]
+    for width in (24, PICKER_MIN_WIDTH, 40, 50, 74, 100):
+        screen = SessionPickerScreen(rows, NOW)
+        screen._layout = lambda width=width: plan_layout(width, 30)  # type: ignore[method-assign]
+        footer = screen.render_footer_for_test()
+        assert "esc" in footer, f"no way out stated at {width} cols: {footer!r}"
+        assert cell_len(footer) <= plan_layout(width, 30).screen_width, (width, footer)
+
+
+@pytest.mark.asyncio
+async def test_a_filter_that_fits_one_page_reports_the_match_count() -> None:
+    """D35: the footer reported the whole store's size over a filtered list.
+
+    The position counter only appears when the list scrolls, and the branch it
+    falls through to was answering "how many sessions are there" — true of an
+    unfiltered picker, and plainly wrong beside eleven rows the user filtered
+    down to.
+    """
+    rows = [_row(f"{index:012d}", f"session {index}") for index in range(63)]
+    screen = SessionPickerScreen(rows, NOW)
+    screen._layout = lambda: plan_layout(120, 30)  # type: ignore[method-assign]
+
+    # Unfiltered, 63 rows scroll at this height, so the POSITION counter is
+    # what shows — and its denominator is the store total, correctly.
+    assert f"of {len(rows):,}" in screen.render_footer_for_test()
+
+    screen.set_query("session 1")
+    matches = len(screen.visible_rows)
+    assert 0 < matches <= plan_layout(120, 30).list_rows, "fixture must fit one page"
+
+    footer = screen.render_footer_for_test()
+    assert f"{matches:,} session" in footer, footer
+    assert f"{len(rows):,} sessions" not in footer, footer

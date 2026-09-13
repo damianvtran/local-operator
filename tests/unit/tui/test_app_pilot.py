@@ -8202,8 +8202,9 @@ async def test_the_picker_lists_a_store_far_larger_than_any_default_limit(
         assert (
             len(picker.visible_rows) == total
         ), f"picker holds {len(picker.visible_rows)} of {total} sessions"
-        # And the header says so, rather than reporting a truncated total.
-        assert f"{total:,} sessions" in "\n".join(picker.render_lines_for_test())
+        # And the filter row says so, rather than reporting a truncated total.
+        # The tally lives there now, not in the card header.
+        assert f"{total:,}" in picker.render_footer_for_test()
 
         # The oldest session — the one furthest past every cap — is reachable by
         # filtering, which is the user-visible failure being fixed ("a session I
@@ -12521,6 +12522,107 @@ async def test_the_follower_band_agrees_with_the_owner_band_on_auth_required() -
         # The projection's own placeholder still counts when no manager exists.
         assert band_for(("github", "failed")).failed is True
         assert band_for(("github", "connected")).failed is False
+
+
+# --- QA probe: picker enter -> real resume boot (UNCOMMITTED, for the coder) --
+
+
+def _stamp(tmp_path: Path, session_id: str, mtime: float) -> None:
+    """Pin a seeded session's mtime so rank order is deterministic.
+
+    ``recent_session_rows`` sorts by ``(-mtime, id)`` (``resume.py:1616``), so
+    without an explicit stamp two sessions written in the same millisecond rank
+    by id and the "second row" this test asserts on would depend on filesystem
+    timestamp granularity rather than on the picker.
+    """
+    target = tmp_path / "sessions" / session_id / "transcript.jsonl"
+    os.utime(target, (mtime, mtime))
+    os.utime(target.parent, (mtime, mtime))
+
+
+@pytest.mark.asyncio
+async def test_picker_enter_boots_the_row_under_the_cursor(tmp_path, monkeypatch) -> None:
+    """``enter`` on the picker resumes the CURSOR's session, not rank 0.
+
+    The gap this closes: every existing picker test asserts on rendered rows or
+    on ``selected_id()``, and the only tests that touch ``boots`` assert it is
+    EMPTY (a bare ``/resume`` must not boot). Nothing drove the full path
+    ``/resume`` -> picker -> move -> ``enter`` -> resume factory, so a picker
+    that dismissed with the right id while the app booted the wrong one — or
+    booted nothing — would pass the whole suite.
+
+    Moving the cursor first is the point. Asserting on rank 0 would pass even
+    if ``action_choose`` ignored ``self._selected`` entirely and returned the
+    first row.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aaaa11", prompt="First session about asteroids")
+    _seed_session(tmp_path, "bbbb22", prompt="Second session about submarines")
+    # Newest first: aaaa11 is rank 0, bbbb22 is rank 1 (the row under the
+    # cursor after one ``down``).
+    _stamp(tmp_path, "aaaa11", 2_000.0)
+    _stamp(tmp_path, "bbbb22", 1_000.0)
+
+    session = FakeSession()
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        picker = app.screen
+        assert isinstance(picker, SessionPickerScreen), f"no picker: {picker!r}"
+        assert [row.id for row in picker.visible_rows][:2] == ["aaaa11", "bbbb22"]
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert picker.selected_id() == "bbbb22", "cursor did not move to rank 1"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+    assert boots == ["bbbb22"], f"enter booted {boots!r}, expected ['bbbb22']"
+
+
+@pytest.mark.asyncio
+async def test_picker_escape_boots_nothing(tmp_path, monkeypatch) -> None:
+    """``escape`` closes the picker without resuming anything.
+
+    The other half of the contract: ``action_cancel`` dismisses with ``None``,
+    and ``None`` is a REAL value to the resume factory (it is what ``/new``
+    sends, meaning "start fresh"). So a cancel that leaked its ``None`` into
+    the resume path would silently start a new session instead of returning
+    the user to the one they were already in. ``boots == []`` is the assertion
+    that distinguishes those two outcomes; ``boots == [None]`` would be the bug.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session(tmp_path, "aaaa11", prompt="First session about asteroids")
+    _seed_session(tmp_path, "bbbb22", prompt="Second session about submarines")
+    _stamp(tmp_path, "aaaa11", 2_000.0)
+    _stamp(tmp_path, "bbbb22", 1_000.0)
+
+    session = FakeSession()
+    boots: list[str | None] = []
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert isinstance(app.screen, SessionPickerScreen)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not isinstance(app.screen, SessionPickerScreen), "escape left the picker up"
+
+    assert boots == [], f"escape booted {boots!r}, expected []"
 
 
 @pytest.mark.asyncio

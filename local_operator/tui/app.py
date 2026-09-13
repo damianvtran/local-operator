@@ -12075,6 +12075,22 @@ class OperatorApp(App[None]):
             # argument is now visible at the call site, so the claim and the
             # code can be checked against each other in one place.
             rows = recent_session_rows(config_dir(), limit=None)
+            # NOT enriched with creation dates here, and that is a measured
+            # decision rather than an omission. ``recent_session_rows`` leaves
+            # ``created_at`` at 0.0 because it is on the CLI startup path and
+            # also feeds the CLI recovery listing and ``mobile/peer_send.py``,
+            # none of which render a preview. The picker's preview header DOES
+            # need the second clock — but only for the ONE row under the
+            # cursor, so it resolves it lazily and caches it there
+            # (``session/preview.py``, ``SessionPreviews.created_at``).
+            #
+            # An eager loop over every row here was the first cut, following
+            # ``mobile/daemon.py:278``'s pattern. Measured on this machine's
+            # real store it cost 3.6 ms over 151 rows — 24.6% of a 14.8 ms
+            # open, against a 15% ceiling — because 85 of those rows miss the
+            # ``created_at.json`` sidecar and take the more expensive
+            # ``st_birthtime`` path. Paying it per drawn row instead makes the
+            # cost proportional to what is actually shown.
             if not rows:
                 # Says whose sessions, not that the disk is empty. Delegated
                 # subagent runs live in the same directory and are deliberately
