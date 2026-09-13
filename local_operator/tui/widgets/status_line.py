@@ -1640,8 +1640,27 @@ class StatusLine:
                 style=muted if connecting else Style(color=theme_mod.semantic_color("danger")),
             )
             left.truncate(max(0, width), overflow="ellipsis")
+            # The gap this row reserves for the name must be the one ``_compose``
+            # will actually insert. It pads with ``max(_MIN_GROUP_GAP, …)``, so a
+            # literal 3 — the width of the ` · ` separator used INSIDE a group,
+            # not the deliberately wider seam BETWEEN the groups — composed the
+            # row one cell past its own box. Textual then word-wrapped the
+            # name's last word onto a row the 1-row band cannot show, and the
+            # name painted short with no ellipsis: at 100x30 with the sidebar
+            # docked the failed row asked 63 against a 62-cell box, painted 55,
+            # and the name read `Fix` (D1 on #1040, pre-existing there). The
+            # bar is unchanged: the name still spends only the cells it inks,
+            # so a short title leaves the seam wide instead of a blank run.
+            spare = width - left.cell_len - _MIN_GROUP_GAP
+            if spare <= 0:
+                # No room for even the seam, so the name is not part of this
+                # row. ``Text.truncate(0)`` is a NO-OP in Rich rather than an
+                # empty string, so this branch has to be explicit: without it
+                # a band narrower than its own connection text would compose
+                # the whole name past its edge.
+                return self._compose(left, Text(), width, dim)
             right = Text(self._conversation_name, style=dim)
-            right.truncate(max(0, width - left.cell_len - 3), overflow="ellipsis")
+            right.truncate(spare, overflow="ellipsis")
             return self._compose(left, right, width, dim)
         fitted = self._fit(width, dim, muted, seam, accent)
         if fitted is not None:
